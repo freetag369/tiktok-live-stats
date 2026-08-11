@@ -30,21 +30,28 @@ function pickDisplay(displayId: number | null): { display: Display; fullscreen: 
 export function openMonitorWindow(
   preload: string,
   displayId: number | null,
+  windowed: boolean,
   onClosed: () => void
 ): BrowserWindow {
   if (monitor && !monitor.isDestroyed()) {
     monitor.focus();
     return monitor;
   }
-  const { display, fullscreen } = pickDisplay(displayId);
-  const { x, y, width, height } = display.bounds;
+  const picked = pickDisplay(displayId);
+  // ウィンドウ表示設定なら常に全画面にしない(移動・リサイズできる普通の窓)。
+  const fullscreen = picked.fullscreen && !windowed;
+  const { x, y, width, height } = picked.display.bounds;
 
   monitor = new BrowserWindow({
     x: x + 50,
     y: y + 50,
     width: fullscreen ? width : 506,
     height: fullscreen ? height : 900,
-    frame: false, // 配信画面に OS のウィンドウ枠を映さない
+    minWidth: 270,
+    minHeight: 360,
+    // 全画面時は配信画面に OS のウィンドウ枠を映さない。ウィンドウ表示時は
+    // 枠を付ける — 枠が無いと掴んで動かせず、閉じることもできないため。
+    frame: windowed,
     fullscreen,
     backgroundColor: '#000000', // カメラ映り優先の純黒(起動フラッシュ防止も兼ねる)
     show: false,
@@ -84,15 +91,16 @@ export function getMonitorWindow(): BrowserWindow | null {
 }
 
 /** 配信中の HDMI 抜け対策 — ディスプレイ構成が変わったら置き直す。 */
-export function repositionMonitor(displayId: number | null): void {
+export function repositionMonitor(displayId: number | null, windowed: boolean): void {
   const win = getMonitorWindow();
   if (!win) return;
-  const { display, fullscreen } = pickDisplay(displayId);
+  const picked = pickDisplay(displayId);
+  const fullscreen = picked.fullscreen && !windowed;
   win.setFullScreen(false);
   win.setBounds(
     fullscreen
-      ? display.bounds
-      : { x: display.bounds.x + 50, y: display.bounds.y + 50, width: 506, height: 900 }
+      ? picked.display.bounds
+      : { x: picked.display.bounds.x + 50, y: picked.display.bounds.y + 50, width: 506, height: 900 }
   );
   if (fullscreen) win.setFullScreen(true);
 }

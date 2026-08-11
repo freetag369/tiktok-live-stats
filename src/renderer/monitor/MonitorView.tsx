@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AppSettings, ChallengeEffect } from '@shared/dto';
-import { tierForDiamonds } from '@shared/challenge';
+import { matchGiftClip, tierForDiamonds } from '@shared/challenge';
 import { num } from '@shared/format';
 import { rpc, useQuery } from '../ipc/client';
 import { liveRows, setChallenge, useLive } from '../state/liveStore';
 import { Avatar } from '../components/common';
+import { useChallengeSe } from '../lib/useChallengeSe';
+import { ACHIEVED_CLIP_URL, fxClipUrl } from '../lib/fx';
 import { SevenSeg } from './SevenSeg';
+import { LikeGauge } from './LikeGauge';
+import { FxCanvas } from './fx/FxCanvas';
+import type { FxEngine } from './fx/engine';
 
 /**
  * 背面モニター画面(縦型フルスクリーン想定)。
@@ -20,16 +25,18 @@ import { SevenSeg } from './SevenSeg';
 
 interface FloatItem {
   key: number;
-  text: string;
+  /** 表示内容。ギフトカード等のリッチな中身も入るので文字列に限定しない。 */
+  node: React.ReactNode;
   cls: string;
 }
 interface FlashItem {
   key: number;
   cls: string;
 }
-interface ConfettiPiece {
+/** 再生中の演出クリップ。同時に1本だけ — 後から来たギフトが前を打ち切る。 */
+interface ClipItem {
   key: number;
-  style: React.CSSProperties;
+  url: string;
 }
 
 let fxKey = 0;
@@ -85,12 +92,18 @@ export function MonitorView(): React.JSX.Element {
   const lastPlayed = useRef<number | null>(null);
   const [floats, setFloats] = useState<FloatItem[]>([]);
   const [flashes, setFlashes] = useState<FlashItem[]>([]);
+  const [clip, setClip] = useState<ClipItem | null>(null);
   const [shake, setShake] = useState<{ key: number; cls: string } | null>(null);
-  const [confetti, setConfetti] = useState<ConfettiPiece[]>([]);
+  // 粒子演出(紙吹雪・火花・光線)は canvas エンジンに任せる。
+  const fxRef = useRef<FxEngine | null>(null);
+  const countdownRef = useRef<HTMLDivElement | null>(null);
+  const gaugeTrackRef = useRef<HTMLDivElement | null>(null);
 
   // 数字パンチ: 値が変わるたびに key を進めてアニメーションを再生する。
+  // 方向(減=進捗/増=妨害)でグローの色と動きを変える。
   const prevValue = useRef<number | null>(null);
   const [punchKey, setPunchKey] = useState(0);
+  const [punchDir, setPunchDir] = useState<'down' | 'up'>('down');
 
   useEffect(() => {
     void rpc('cfg.get', undefined).then(setCfg);
@@ -108,10 +121,21 @@ export function MonitorView(): React.JSX.Element {
     if (!challenge) return;
     document.title = challenge.title || 'チャレンジモニター';
     if (prevValue.current !== null && prevValue.current !== challenge.value) {
+      setPunchDir(challenge.value < prevValue.current ? 'down' : 'up');
       setPunchKey((k) => k + 1);
     }
     prevValue.current = challenge.value;
   }, [challenge?.value, challenge?.title]);
+
+  // 効果音(視覚とは独立の watermark)。モニターが開いている間はここが鳴らし、
+  // ダッシュボード側は monitorOpen ゲートで黙る。設定は 30 秒ポーリング(上の
+  // cfg 再取得)経由なので、音量変更の反映は最大 30 秒遅れる。
+  useChallengeSe(challenge, {
+    active: true,
+    enabled: cfg?.challenge.seEnabled ?? true,
+    volume: cfg?.challenge.seVolume ?? 70,
+    sounds: cfg?.challenge.seSounds,
+  });
 
   // ── 演出再生(冪等) ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -138,8 +162,8 @@ export function MonitorView(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [challenge?.recentEffects]);
 
-  function pushFloat(text: string, cls: string): void {
-    setFloats((f) => [...f.slice(-7), { key: ++fxKey, text, cls }]);
+  function pushFloat(node: React.ReactNode, cls: string): void {
+    setFloats((f) => [...f.slice(-7), { key: ++fxKey, node, cls }]);
   }
   function pushFlash(cls: string): void {
     setFlashes((f) => [...f.slice(-3), { key: ++fxKey, cls }]);
@@ -147,46 +171,142 @@ export function MonitorView(): React.JSX.Element {
   function pushShake(cls: string): void {
     setShake({ key: ++fxKey, cls });
   }
-  function pushConfetti(count: number): void {
-    const pieces: ConfettiPiece[] = Array.from({ length: count }, () => ({
-      key: ++fxKey,
-      style: {
-        left: `${Math.random() * 100}%`,
-        background: `hsl(${Math.floor(Math.random() * 360)} 90% 60%)`,
-        width: 6 + Math.random() * 8,
-        height: 8 + Math.random() * 10,
-        animationDuration: `${1.8 + Math.random() * 1.7}s`,
-        animationDelay: `${Math.random() * 0.6}s`,
-      },
-    }));
-    setConfetti((c) => [...c.slice(-250), ...pieces]);
+  /** 演出クリップを差し替えて頭から再生。null(未割り当て/無効)なら何もしない。 */
+  function playClip(url: string | null): void {
+    if (!url) return;
+    setClip({ key: ++fxKey, url });
+  }
+
+  /** フロート帯(上部 26%)付近のステージ座標 — 粒子演出の既定の発生点。 */
+  function fxOrigin(): { x: number; y: number } {
+    return {
+      x: (landscape ? STAGE_LW : STAGE_W) / 2,
+      y: (landscape ? STAGE_LH : STAGE_H) * 0.3,
+    };
+  }
+
+  /** いいね着弾でゲージを明滅させる(remove→reflow→add で毎回再生)。 */
+  function tickGauge(): void {
+    const el = gaugeTrackRef.current;
+    if (!el) return;
+    el.classList.remove('tick');
+    void el.offsetWidth;
+    el.classList.add('tick');
   }
 
   function playEffect(e: ChallengeEffect): void {
+    const fx = fxRef.current;
     switch (e.kind) {
-      case 'press':
-        return; // パンチは値の変化側で再生済み。連打でフラッシュは鬱陶しいので無し。
-      case 'follow':
+      case 'press': {
+        // フラッシュは連打で鬱陶しいので出さない(パンチは値の変化側で再生済み)。
+        // 代わりに 7 セグ中心からのリング波紋で「押した手応え」だけ足す。
+        const r = fx?.pointFor(countdownRef.current);
+        if (fx && r) {
+          fx.ringWave(r.x, r.y, { hue: 200, radius: Math.min(r.w, r.h) * 0.5 });
+          fx.sparkBurst(r.x, r.y, 6, { hue: 200, speed: 380 });
+        }
+        return;
+      }
+      case 'follow': {
         pushFlash('follow');
         pushShake('shake');
-        pushFloat(`+${num(e.amount)} ${e.nickname ?? ''}がフォロー!`, 'bad');
+        pushFloat(
+          <>
+            <span className="f-amt">+{num(e.amount)}</span>
+            <span className="f-txt">
+              <b>{e.nickname ?? ''}</b> がフォロー!
+            </span>
+          </>,
+          'bad banner-follow'
+        );
+        const o = fxOrigin();
+        fx?.sparkBurst(o.x, o.y, 24, { hue: 0, speed: 560 });
+        fx?.heartBurst(o.x, o.y, 10, { hue: 0 });
         return;
+      }
+      case 'like': {
+        // 高頻度なのでフラッシュ/シェイクは付けない — 合算済みの +N だけ流す。
+        pushFloat(
+          <>
+            <span className="f-heart">♥</span>
+            <span className="f-amt">+{num(e.amount)}</span>
+            <span className="f-txt">いいね妨害!</span>
+          </>,
+          'bad like-float'
+        );
+        // ハートがゲージへ吸い込まれて着弾ごとに明滅 — 「いいねが注がれて
+        // ゲージが貯まる」の視覚連結。ゲージ非表示時は弾け上がりへ退避。
+        const lg = challenge?.likeGauge;
+        const o = fxOrigin();
+        const anchor = fx?.pointFor(gaugeTrackRef.current);
+        if (fx && anchor && lg) {
+          const units = Math.max(1, Math.round(e.amount / Math.max(1, lg.step)));
+          fx.heartStream(o, { x: anchor.x, y: anchor.y }, Math.min(12, 3 + units * 2), tickGauge);
+        } else {
+          fx?.heartBurst(o.x, o.y, 8, { hue: 338 });
+        }
+        return;
+      }
       case 'gift': {
         const tier = tierForDiamonds(e.diamonds ?? 0);
-        // 「照明」= 画面フラッシュ。flash 指定または tier に応じて点灯する。
-        pushFlash(e.flash || tier >= 3 ? `gift-t${Math.max(tier, 3)}` : `gift-t${tier}`);
+        // 映像クリップ。canonical 一致の専用クリップ → 無ければ tier の汎用クリップ。
+        // 割り当ては設定画面で変更でき、cfg は 30 秒ポーリングで届く。
+        if (cfg) {
+          playClip(fxClipUrl(matchGiftClip(cfg.challenge, { canonical: e.canonical, diamonds: e.diamonds ?? 0 })));
+        }
+        // 「照明」= 画面フラッシュ。flash 指定は「確実に見える t2 相当」を保証
+        // するだけで tier を偽らない(旧実装は小額 flash ギフトが t3 に化けた)。
+        pushFlash(`gift-t${Math.max(tier, e.flash ? 2 : 1)}`);
         if (tier >= 2) pushShake(tier >= 4 ? 'shake-strong' : 'shake');
-        if (tier >= 3) pushConfetti(tier >= 4 ? 200 : 80);
-        const who = e.nickname ? `${e.nickname}: ` : '';
         const gift = e.giftName ?? 'ギフト';
-        const sign = e.amount > 0 ? `+${num(e.amount)}` : e.amount < 0 ? `${num(e.amount)}` : '';
-        pushFloat(`${sign} ${who}${gift}`, e.amount > 0 ? 'bad' : 'good');
+        const sign = e.amount > 0 ? `+${num(e.amount)}` : e.amount < 0 ? `${num(e.amount)}` : '±0';
+        pushFloat(
+          <>
+            <span className="gc-icon">
+              <span className="gc-emoji">🎁</span>
+              {e.giftIconUrl ? (
+                <img
+                  src={e.giftIconUrl}
+                  alt=""
+                  onError={(ev) => {
+                    ev.currentTarget.style.display = 'none'; // 絵文字へフォールバック
+                  }}
+                />
+              ) : null}
+            </span>
+            <span className="gc-main">
+              <span className="gc-name">{gift}</span>
+              <span className="gc-who">{e.nickname ?? ''}</span>
+            </span>
+            <span className="gc-amt">{sign}</span>
+            {e.diamonds ? <span className="gc-dia">💎{num(e.diamonds)}</span> : null}
+          </>,
+          `gift-card t${tier} ${e.amount > 0 ? 'bad' : 'good'}`
+        );
+        if (fx) {
+          const o = fxOrigin();
+          if (tier >= 4) {
+            fx.rays(o.x, o.y, { count: 12, hue: 45 });
+            fx.fireworkVolley(o.x, o.y, { count: 3, hue: 45 });
+            fx.confettiRain(240, { gold: true });
+          } else if (tier === 3) {
+            fx.rays(o.x, o.y, { count: 10, hue: 45 });
+            fx.sparkBurst(o.x, o.y, 40, { hue: 45, speed: 640 });
+            fx.confettiRain(120);
+          } else if (tier === 2) {
+            fx.sparkBurst(o.x, o.y, 26, { hue: 45, speed: 540 });
+            fx.confettiRain(40);
+          } else {
+            fx.sparkBurst(o.x, o.y, 12, { hue: 45, speed: 420 });
+          }
+        }
         return;
       }
       case 'achieved':
         pushFlash('clear');
         pushShake('shake-strong');
-        pushConfetti(220);
+        if (cfg?.challenge.fxClipsEnabled) playClip(ACHIEVED_CLIP_URL);
+        fx?.celebrate();
         return;
     }
   }
@@ -241,6 +361,7 @@ export function MonitorView(): React.JSX.Element {
   const showAvatars = cfg?.loadAvatars ?? true;
   const segCls = [
     'countdown',
+    `punch-${punchDir}`,
     achieved ? 'clear' : '',
     running && challenge.value <= lowThreshold ? 'low' : '',
   ].join(' ');
@@ -274,7 +395,7 @@ export function MonitorView(): React.JSX.Element {
 
       <div className={`title-banner${achieved ? ' clear' : ''}`}>{challenge.title}</div>
 
-      <div className={segCls} key={punchKey}>
+      <div className={segCls} key={punchKey} ref={countdownRef}>
         <SevenSeg value={challenge.value} digits={digits} />
         {achieved ? <div className="clear-banner">CLEAR!</div> : null}
         {!running && !achieved ? (
@@ -285,6 +406,9 @@ export function MonitorView(): React.JSX.Element {
       </div>
 
       <div className="bars">
+        {challenge.likeGauge && running ? (
+          <LikeGauge gauge={challenge.likeGauge} fxRef={fxRef} trackRef={gaugeTrackRef} />
+        ) : null}
         <div className="mbar pink">
           <i style={{ width: `${remainRatio * 100}%` }} />
           <span className="mbar-label">残り {num(challenge.value)}</span>
@@ -302,6 +426,7 @@ export function MonitorView(): React.JSX.Element {
         <span className="stats-inline">
           {' '}
           ボタン{num(challenge.stats.presses)} / 妨害{num(challenge.stats.follows)}
+          {challenge.stats.likeUp > 0 ? ` / いいね+${num(challenge.stats.likeUp)}` : ''}
         </span>
       </div>
 
@@ -313,7 +438,7 @@ export function MonitorView(): React.JSX.Element {
               <div className="rank-place">{i + 1}位</div>
               {g ? (
                 <>
-                  <Avatar url={g.avatarUrl} name={g.nickname} size={56} enabled={showAvatars} />
+                  <Avatar url={g.avatarUrl} name={g.nickname} size={80} enabled={showAvatars} />
                   <div className="rank-name">{g.nickname}</div>
                   <div className="rank-dia">{num(g.diamonds)}💎</div>
                 </>
@@ -325,7 +450,35 @@ export function MonitorView(): React.JSX.Element {
         })}
       </div>
 
-      {/* 演出レイヤ(クリックを拾わない) */}
+      {/*
+        演出クリップ。fx-layer の「中」には置けない — fx-layer は z-index:50 で
+        スタッキングコンテキストを作るので、その内側の mix-blend-mode は
+        fx-layer 内でしか合成されず、黒が抜けずに UI を覆ってしまう。
+        monitor-root 直下(z-index:auto のまま)に置くことで、合成の相手が
+        stage-scale(transform でコンテキストを作る)配下の UI 全体になる。
+      */}
+      {clip ? (
+        <video
+          key={clip.key}
+          className="fx-clip"
+          src={clip.url}
+          autoPlay
+          muted
+          playsInline
+          preload="auto"
+          onTimeUpdate={(ev) => {
+            // 末尾まで完全に減衰しないクリップがあるので、終端手前で自分から
+            // フェードさせて唐突に切れないようにする(assets/fx/CREDITS.md の既知の癖)。
+            const v = ev.currentTarget;
+            if (v.duration > 0 && v.duration - v.currentTime < 0.4) v.classList.add('out');
+          }}
+          onEnded={() => setClip((c) => (c?.key === clip.key ? null : c))}
+          // デコード失敗でも演出は canvas 側が主役なので黙って畳む。
+          onError={() => setClip((c) => (c?.key === clip.key ? null : c))}
+        />
+      ) : null}
+
+      {/* 演出レイヤ(クリックを拾わない)。重なりは 映像 < flash < 粒子 canvas < テキスト */}
       <div className="fx-layer">
         {flashes.map((f) => (
           <div
@@ -334,25 +487,28 @@ export function MonitorView(): React.JSX.Element {
             onAnimationEnd={() => setFlashes((s) => s.filter((x) => x.key !== f.key))}
           />
         ))}
+        <FxCanvas
+          engineRef={fxRef}
+          stageW={landscape ? STAGE_LW : STAGE_W}
+          stageH={landscape ? STAGE_LH : STAGE_H}
+          scale={scale}
+        />
         <div className="floats">
           {floats.map((f) => (
             <div
               key={f.key}
               className={`float ${f.cls}`}
-              onAnimationEnd={() => setFloats((s) => s.filter((x) => x.key !== f.key))}
+              onAnimationEnd={(ev) => {
+                // ギフトカード内の子アニメーション(シマー等)のバブリングで
+                // 早死にしないよう、自分自身の浮上アニメ終了だけを拾う。
+                if (ev.target !== ev.currentTarget) return;
+                setFloats((s) => s.filter((x) => x.key !== f.key));
+              }}
             >
-              {f.text}
+              {f.node}
             </div>
           ))}
         </div>
-        {confetti.map((c) => (
-          <i
-            key={c.key}
-            className="confetti"
-            style={c.style}
-            onAnimationEnd={() => setConfetti((s) => s.filter((x) => x.key !== c.key))}
-          />
-        ))}
       </div>
     </div>
     </div>

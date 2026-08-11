@@ -9,6 +9,7 @@ import { openViewer, setSort, useUi } from '../state/uiStore';
 import { Avatar, Bar, Observed, TierBadge, useStickyTop } from '../components/common';
 import { MemoButton } from '../components/Memo';
 import { ObservedLegend, ViewerTable } from '../components/ViewerTable';
+import { useChallengeSe } from '../lib/useChallengeSe';
 
 const FILTERS: Array<{ k: ViewerFilter; label: string }> = [
   { k: 'all', label: 'すべて' },
@@ -282,12 +283,27 @@ function ChallengeCard(): React.JSX.Element | null {
     return window.api.onMonitorState((s) => setMonitorOpen(s.open));
   }, [enabled]);
 
+  // 効果音: モニターが開いている間はモニター側が鳴らす — こちらは active=false で
+  // watermark だけ進め、閉じた瞬間に過去演出が一斉に鳴るのを防ぐ(early return より
+  // 前に置く: hooks ルール)。
+  useChallengeSe(challenge, {
+    active: enabled && !monitorOpen,
+    enabled: settings?.challenge.seEnabled ?? true,
+    volume: settings?.challenge.seVolume ?? 70,
+    sounds: settings?.challenge.seSounds,
+  });
+
   if (!enabled || !settings) return null;
 
   const st = challenge?.status ?? 'idle';
   const value = challenge?.value ?? settings.challenge.initialValue;
   const call = (m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press') =>
     void rpc(m, undefined).then(setChallenge);
+
+  // 直近の変動ログ。press は連打で洪水になる(数字とパンチで見えている)ので除外。
+  const fxLog = (challenge?.recentEffects ?? [])
+    .filter((e) => e.kind === 'follow' || e.kind === 'like' || e.kind === 'gift')
+    .slice(0, 4);
 
   return (
     <div className="card challenge-card" style={{ marginBottom: 10 }}>
@@ -302,6 +318,23 @@ function ChallengeCard(): React.JSX.Element | null {
         )}
       </h3>
       <div className={`challenge-value${st === 'achieved' ? ' done' : ''}`}>{num(value)}</div>
+      {fxLog.length > 0 ? (
+        <div className="challenge-log">
+          {fxLog.map((e) => (
+            // id は単調増加 — 新規行だけ新規マウントされ、登場アニメが1回走る。
+            <div key={e.id} className={`challenge-log-item ${e.amount > 0 ? 'up' : 'down'}`}>
+              <span className="amt">{e.amount > 0 ? `+${num(e.amount)}` : num(e.amount)}</span>
+              <span className="lbl">
+                {e.kind === 'follow'
+                  ? `フォロー ${e.nickname ?? ''}`
+                  : e.kind === 'like'
+                    ? 'いいね'
+                    : `${e.giftName ?? 'ギフト'} ${e.nickname ?? ''}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <button
         className="challenge-btn"
         disabled={st !== 'running'}
@@ -331,10 +364,27 @@ function ChallengeCard(): React.JSX.Element | null {
           {monitorOpen ? 'モニターを閉じる' : 'モニターを開く'}
         </button>
       </div>
+      {challenge?.likeGauge && st === 'running' ? (
+        <div className="challenge-like-mini" title="いいね進捗(満タンで加算)">
+          <i
+            style={{
+              width: `${Math.min(100, (challenge.likeGauge.counter / Math.max(1, challenge.likeGauge.every)) * 100)}%`,
+            }}
+          />
+          <span>
+            ♥ {num(challenge.likeGauge.counter)}/{num(challenge.likeGauge.every)} → +
+            {num(challenge.likeGauge.step)}
+          </span>
+        </div>
+      ) : null}
       <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
         フォローで +{num(settings.challenge.followStep)}(妨害)
+        {settings.challenge.likeEvery > 0
+          ? ` ・ いいね${num(settings.challenge.likeEvery)}件で +${num(settings.challenge.likeStep)}`
+          : ''}
         {settings.challenge.hotkey ? ` ・ ホットキー ${settings.challenge.hotkey}` : ''}
         {challenge ? ` ・ 押下 ${num(challenge.stats.presses)} / 妨害 ${num(challenge.stats.follows)}` : ''}
+        {challenge && challenge.stats.likeUp > 0 ? ` / いいね+${num(challenge.stats.likeUp)}` : ''}
       </div>
     </div>
   );

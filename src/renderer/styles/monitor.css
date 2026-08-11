@@ -55,6 +55,14 @@ body {
   transform-origin: center;
 }
 
+/*
+ * 【重要】ここに z-index / opacity / filter / isolation / transform を足さないこと。
+ * どれか1つでも付けると .monitor-root がスタッキングコンテキストになり、
+ * 直下の .fx-clip(mix-blend-mode: screen)の合成相手が UI ではなく
+ * .monitor-root の中身だけに閉じてしまい、演出クリップの黒が抜けずに
+ * UI を黒い矩形で覆う。現状は position:relative + z-index:auto なので
+ * コンテキストを作らず、合成は .stage-scale(transform 持ち)の中で行われる。
+ */
 .monitor-root {
   position: relative;
   width: 100%;
@@ -73,19 +81,19 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--fg-faint);
-  font-size: 22px;
+  font-size: 32px;
 }
 
 /* ── 時計 ─────────────────────────────────────────────────────────────── */
 
+/* 大きくした結果 540px に収まらない行は nowrap を外して折り返す(clip より可読) */
 .clock-row {
   text-align: center;
   color: var(--mon-blue);
   font-family: var(--mono);
-  font-size: 28px;
+  font-size: 42px;
   font-variant-numeric: tabular-nums;
   text-shadow: 0 0 12px rgba(55, 182, 255, 0.5);
-  white-space: nowrap;
 }
 
 /* ── タイトル ─────────────────────────────────────────────────────────── */
@@ -128,18 +136,75 @@ body {
   justify-content: center;
   min-height: 0;
   overflow: hidden;
-  animation: punch 180ms ease-out;
 }
 
-@keyframes punch {
+/*
+ * 数字パンチ(key 再マウントで毎回再生)。方向でキャラクターを変える:
+ * 減(down)= 進捗 — 弾む青白グロー / 増(up)= 妨害 — 打撃ジッタ + 赤グロー。
+ */
+.countdown.punch-down {
+  animation: punchdown 220ms cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+
+.countdown.punch-up {
+  animation: punchup 260ms ease-out;
+}
+
+@keyframes punchdown {
   0% {
     transform: scale(1);
   }
   40% {
-    transform: scale(1.06);
+    transform: scale(1.07);
   }
   100% {
     transform: scale(1);
+  }
+}
+
+@keyframes punchup {
+  0% {
+    transform: scale(1) translateX(0);
+  }
+  25% {
+    transform: scale(1.05) translateX(-5px);
+  }
+  50% {
+    transform: scale(1.04) translateX(4px);
+  }
+  75% {
+    transform: scale(1.02) translateX(-2px);
+  }
+  100% {
+    transform: scale(1) translateX(0);
+  }
+}
+
+/* 数字背面の残光。再マウント時に一瞬灯って消える。 */
+.countdown::after {
+  content: '';
+  position: absolute;
+  inset: 14% 4%;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: punchglow 420ms ease-out;
+}
+
+.countdown.punch-down::after {
+  background: radial-gradient(ellipse at center, rgba(159, 216, 255, 0.3), transparent 68%);
+}
+
+.countdown.punch-up::after {
+  background: radial-gradient(ellipse at center, rgba(255, 59, 59, 0.34), transparent 68%);
+}
+
+@keyframes punchglow {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
   }
 }
 
@@ -201,13 +266,20 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 84px;
+  font-size: 92px;
   font-weight: 900;
+  letter-spacing: 0.06em;
   color: var(--gold);
+  -webkit-text-stroke: 2px rgba(255, 244, 210, 0.85);
   text-shadow:
-    0 0 24px rgba(255, 197, 66, 0.9),
-    0 0 80px rgba(255, 197, 66, 0.5);
-  animation: clearpop 700ms cubic-bezier(0.2, 1.6, 0.4, 1);
+    0 0 10px rgba(255, 244, 210, 0.9),
+    0 0 30px rgba(255, 197, 66, 0.9),
+    0 0 90px rgba(255, 197, 66, 0.55),
+    0 6px 20px rgba(0, 0, 0, 0.6);
+  /* 弾んで登場 → しばらくゆったり浮遊(有限回 — アイドル CPU ゼロを守る) */
+  animation:
+    clearpop 700ms cubic-bezier(0.2, 1.6, 0.4, 1),
+    clearfloat 2.4s ease-in-out 700ms 8;
   pointer-events: none;
 }
 
@@ -225,13 +297,23 @@ body {
   }
 }
 
+@keyframes clearfloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
 .idle-note {
   position: absolute;
   bottom: 10px;
   width: 100%;
   text-align: center;
   color: var(--fg-faint);
-  font-size: 14px;
+  font-size: 24px;
 }
 
 /* ── バー ─────────────────────────────────────────────────────────────── */
@@ -243,7 +325,7 @@ body {
 
 .mbar {
   position: relative;
-  height: 38px;
+  height: 56px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.07);
   overflow: hidden;
@@ -272,12 +354,203 @@ body {
   inset: 0;
   display: flex;
   align-items: center;
-  padding-left: 16px;
-  font-size: 21px;
+  padding-left: 20px;
+  font-size: 32px;
   font-weight: 700;
   color: #fff;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── いいね進捗ゲージ(◯いいねで +N) ─────────────────────────────────── */
+
+.lg-track {
+  position: relative;
+  height: 64px;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 79, 160, 0.08), rgba(255, 79, 160, 0.02)),
+    rgba(255, 255, 255, 0.06);
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 79, 160, 0.35),
+    inset 0 4px 14px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  transition: box-shadow 0.3s ease;
+}
+
+/* 満タン間近の期待感 — 枠と中身のグローを一段上げる */
+.like-gauge[data-hot='true'] .lg-track {
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 122, 184, 0.85),
+    inset 0 4px 14px rgba(0, 0, 0, 0.55),
+    0 0 26px rgba(255, 79, 160, 0.55);
+}
+
+.lg-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #ff2d78, #ff7ab8 70%, #ffc0dc);
+  box-shadow: 0 0 18px rgba(255, 79, 160, 0.75);
+  /* mbar と同じ MoveTowards 相当カーブ — 2Hz のデータでも連続して見える */
+  transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+}
+
+.like-gauge[data-hot='true'] .lg-fill {
+  box-shadow: 0 0 30px rgba(255, 79, 160, 1);
+}
+
+/* フィル内を流れるハイライト(ゲージ表示中のみ DOM に居るので常時再生でよい) */
+.lg-shimmer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 36%;
+  left: 0;
+  transform: translateX(-140%) skewX(-18deg);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+  animation: lgshimmer 2.4s ease-in-out infinite;
+}
+
+@keyframes lgshimmer {
+  0% {
+    transform: translateX(-140%) skewX(-18deg);
+  }
+  60%,
+  100% {
+    transform: translateX(420%) skewX(-18deg);
+  }
+}
+
+/* フィル先端の光点 */
+.lg-spark {
+  position: absolute;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, #fff 0%, rgba(255, 160, 205, 0.9) 40%, transparent 72%);
+  transition: left 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: lgpulse 1.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes lgpulse {
+  0%,
+  100% {
+    opacity: 0.65;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.45);
+  }
+}
+
+/* 満タン瞬間の白閃(hold 相のみ) */
+.lg-flash {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.like-gauge[data-phase='hold'] .lg-flash {
+  animation: lgflash 300ms ease-out;
+}
+
+@keyframes lgflash {
+  0% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.like-gauge[data-phase='hold'] .lg-track {
+  animation: lgburst 300ms ease-out;
+}
+
+@keyframes lgburst {
+  0% {
+    transform: scaleY(1);
+  }
+  35% {
+    transform: scaleY(1.16);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
+
+/* いいね吸い込みの着弾パルス(MonitorView が remove→reflow→add で再生) */
+.lg-track.tick {
+  animation: lgtick 200ms ease-out;
+}
+
+@keyframes lgtick {
+  0% {
+    filter: brightness(1.8);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+
+.lg-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 22px;
+  font-size: 30px;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lg-heart {
+  color: #ff8fbf;
+  text-shadow: 0 0 12px rgba(255, 79, 160, 0.9);
+  animation: lgheart 1s ease-in-out infinite;
+}
+
+@keyframes lgheart {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(1.25);
+  }
+  45% {
+    transform: scale(1.05);
+  }
+  60% {
+    transform: scale(1.2);
+  }
+}
+
+.lg-reward {
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--gold);
+  text-shadow:
+    0 0 12px rgba(255, 197, 66, 0.6),
+    0 1px 3px rgba(0, 0, 0, 0.8);
   white-space: nowrap;
 }
 
@@ -287,14 +560,13 @@ body {
   text-align: center;
   color: var(--fg-dim);
   font-family: var(--mono);
-  font-size: 24px;
+  font-size: 36px;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
 .stats-inline {
   color: var(--fg-faint);
-  font-size: 16px;
+  font-size: 26px;
   margin-left: 10px;
 }
 
@@ -320,7 +592,7 @@ body {
 
 .rank-place {
   font-weight: 900;
-  font-size: 21px;
+  font-size: 32px;
 }
 
 .rank-1 .rank-place {
@@ -340,7 +612,7 @@ body {
 }
 
 .rank-name {
-  font-size: 17px;
+  font-size: 26px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -348,14 +620,14 @@ body {
 }
 
 .rank-dia {
-  font-size: 16px;
+  font-size: 24px;
   color: var(--gold);
   font-variant-numeric: tabular-nums;
 }
 
 .rank-empty {
   color: var(--fg-faint);
-  font-size: 22px;
+  font-size: 32px;
   padding: 12px 0;
 }
 
@@ -383,6 +655,49 @@ body {
   pointer-events: none;
   overflow: hidden;
   z-index: 50;
+}
+
+/* 粒子エンジンの描画面。裏解像度は FxCanvas が scale×DPR で追従させる。 */
+.fx-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * ギフト/達成の演出クリップ(assets/fx/*.mp4)。
+ *
+ * 素材はアルファを持たない不透明 mp4 だが、全て「純黒背景に発光体だけ」で
+ * 作られている。mix-blend-mode: screen で黒が抜け、下の 7 セグや企画タイトルが
+ * 透けたまま演出だけが乗る — canvas エンジンの加算合成('lighter')と同じ理屈。
+ * screen を外すと黒い矩形が UI を丸ごと覆うので絶対に消さないこと。
+ *
+ * 【配置の制約】必ず .monitor-root の直下に置き、z-index は付けない。
+ * mix-blend-mode は「最も近い祖先のスタッキングコンテキスト」の中でしか
+ * 合成されないため、z-index:50 を持つ .fx-layer の内側に入れると UI と
+ * 合成されず黒い矩形になる。ここは z-index:auto のまま置くことで、
+ * 合成の相手が .stage-scale(transform でコンテキストを作る)配下の
+ * UI 全体になる。重なり順は DOM 順で UI の後・.fx-layer の前。
+ *
+ * 素材は 1280×720(横ステージと等倍)。縦ステージでは object-fit: cover の
+ * 中央クロップで流用する — 被写体は中央に寄せて生成してある。
+ */
+.fx-clip {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  mix-blend-mode: screen;
+  opacity: 1;
+  transition: opacity 400ms linear;
+  pointer-events: none;
+}
+
+/* 終端に残光が残るクリップ用。MonitorView が終端 0.4 秒前に付ける。 */
+.fx-clip.out {
+  opacity: 0;
 }
 
 /*
@@ -456,58 +771,203 @@ body {
 }
 
 .float {
-  font-size: 32px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 36px;
   font-weight: 900;
-  padding: 3px 16px;
+  padding: 8px 26px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.55);
-  animation: floatup 1.4s ease-out forwards;
+  background: linear-gradient(180deg, rgba(38, 32, 52, 0.92), rgba(12, 10, 20, 0.88));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 12px 20px -14px rgba(255, 255, 255, 0.35),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+  animation: floatup 1.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
   max-width: 86%;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.float.bad {
-  color: #ff6b6b;
-  text-shadow: 0 0 12px rgba(255, 59, 59, 0.7);
+.float .f-amt {
+  font-family: var(--mono);
+  font-size: 48px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
-.float.good {
+.float .f-txt {
+  font-size: 32px;
+  font-weight: 800;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.float .f-txt b {
+  color: #ffd7e8;
+}
+
+.float.bad .f-amt {
+  color: #ff6b6b;
+  text-shadow: 0 0 14px rgba(255, 59, 59, 0.8);
+}
+
+.float.good .f-amt {
   color: var(--green);
-  text-shadow: 0 0 12px rgba(74, 217, 145, 0.7);
+  text-shadow: 0 0 14px rgba(74, 217, 145, 0.8);
+}
+
+/* いいね: ハート付き */
+.float .f-heart {
+  color: #ff8fbf;
+  font-size: 40px;
+  text-shadow: 0 0 14px rgba(255, 79, 160, 0.9);
+  line-height: 1;
+}
+
+/* フォロー: 赤リングのバナー */
+.float.banner-follow {
+  background: linear-gradient(180deg, rgba(84, 18, 30, 0.94), rgba(30, 6, 12, 0.9));
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 82, 82, 0.75),
+    0 0 26px rgba(255, 59, 59, 0.45),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* ギフトカード(アイコン + 名前 + 誰から + ±N + 💎) */
+.float.gift-card {
+  padding: 10px 28px 10px 14px;
+  animation-duration: 2.2s;
+}
+
+.gc-icon {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  flex: none;
+}
+
+.gc-icon img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.6));
+}
+
+.gc-icon .gc-emoji {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 44px;
+}
+
+.gc-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.1;
+  min-width: 0;
+}
+
+.gc-name {
+  font-size: 30px;
+  font-weight: 900;
+  color: #fff;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gc-who {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--fg-dim, #aab);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gc-amt {
+  font-family: var(--mono);
+  font-size: 46px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.float.bad .gc-amt {
+  color: #ff6b6b;
+  text-shadow: 0 0 14px rgba(255, 59, 59, 0.8);
+}
+
+.float.good .gc-amt {
+  color: var(--green);
+  text-shadow: 0 0 14px rgba(74, 217, 145, 0.8);
+}
+
+.gc-dia {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--gold);
+  background: rgba(255, 197, 66, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 197, 66, 0.4);
+  border-radius: 999px;
+  padding: 4px 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* tier 別の格(枠と光)。t3+ は金、t4 は白金 + 一段大きく */
+.float.gift-card.t2 {
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 197, 66, 0.55),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+.float.gift-card.t3 {
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 197, 66, 0.85),
+    0 0 30px rgba(255, 197, 66, 0.45),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+.float.gift-card.t4 {
+  transform-origin: center;
+  scale: 1.12;
+  background: linear-gradient(180deg, rgba(64, 52, 18, 0.95), rgba(26, 20, 6, 0.92));
+  box-shadow:
+    inset 0 0 0 3px rgba(255, 224, 130, 0.95),
+    0 0 44px rgba(255, 197, 66, 0.65),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+.float.gift-card.t4 .gc-name {
+  color: #ffe9b0;
 }
 
 @keyframes floatup {
   0% {
-    transform: translateY(12px);
+    transform: translateY(18px) scale(0.9);
     opacity: 0;
   }
-  15% {
-    transform: translateY(0);
+  12% {
+    transform: translateY(-4px) scale(1.04);
     opacity: 1;
   }
-  70% {
+  22% {
+    transform: translateY(0) scale(1);
+  }
+  75% {
     opacity: 1;
+    transform: translateY(-12px) scale(1);
   }
   100% {
-    transform: translateY(-48px);
+    transform: translateY(-64px) scale(0.97);
     opacity: 0;
-  }
-}
-
-/* 紙吹雪 */
-.confetti {
-  position: absolute;
-  top: -24px;
-  display: block;
-  border-radius: 2px;
-  animation: fall linear forwards;
-}
-
-@keyframes fall {
-  to {
-    transform: translateY(1040px) rotate(720deg);
   }
 }
 
@@ -530,7 +990,7 @@ body {
 
 .stage-scale.landscape .clock-row {
   grid-area: clock;
-  font-size: 26px;
+  font-size: 40px;
 }
 
 .stage-scale.landscape .title-banner {

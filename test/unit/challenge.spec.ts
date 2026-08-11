@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, DEFAULT_CHALLENGE, matchGiftRule, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { CHALLENGE_EFFECTS_MAX, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS, DEFAULT_SE_SOUNDS, matchGiftRule, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type { ChallengeConfig } from '@shared/dto';
-import type { GiftEvent, SocialEvent } from '@shared/events';
+import type { GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
 
 const NOW = Date.UTC(2026, 7, 1, 12, 0, 0);
@@ -43,6 +43,19 @@ function gift(over: Partial<GiftEvent> = {}): GiftEvent {
   };
 }
 
+function like(count: number, over: Partial<LikeEvent> = {}): LikeEvent {
+  return {
+    kind: 'like',
+    msgId: `m${++seq}`,
+    tsMs: NOW,
+    tsSource: 'server',
+    seq,
+    viewer: { userId: 'l1', nickname: 'liker' },
+    count,
+    ...over,
+  };
+}
+
 function engine(c: ChallengeConfig = cfg(), now: () => number = () => NOW): ChallengeEngine {
   return new ChallengeEngine(() => c, now);
 }
@@ -76,6 +89,77 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
 
   it('giftDefault null(無視)を保持する', () => {
     expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, giftDefault: null }).giftDefault).toBeNull();
+  });
+
+  it('seEnabled / seVolume: 欠損は既定(ON/70)、false は保持、範囲外は clamp', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.seEnabled;
+    delete legacy.seVolume;
+    const v = validateChallengeConfig(legacy);
+    expect(v.seEnabled).toBe(true);
+    expect(v.seVolume).toBe(70);
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, seEnabled: false }).seEnabled).toBe(false);
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, seVolume: 250 }).seVolume).toBe(100);
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, seVolume: -5 }).seVolume).toBe(0);
+  });
+
+  it('seSounds: 欠損は既定割り当て、未知の id は既定に戻し、off と既知 id は保持', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.seSounds;
+    expect(validateChallengeConfig(legacy).seSounds).toEqual(DEFAULT_SE_SOUNDS);
+    const v = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      seSounds: { ...DEFAULT_SE_SOUNDS, press: 'off', like: 'jingle-sax', follow: 'no-such-sound' },
+    });
+    expect(v.seSounds.press).toBe('off');
+    expect(v.seSounds.like).toBe('jingle-sax');
+    expect(v.seSounds.follow).toBe(DEFAULT_SE_SOUNDS.follow); // 未知は既定へ
+    expect(v.seSounds['gift-t4']).toBe(DEFAULT_SE_SOUNDS['gift-t4']);
+  });
+
+  it('likeEvery / likeStep 欠損は既定(無効)へ、負値・過大は clamp する(後方互換)', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.likeEvery;
+    delete legacy.likeStep;
+    const v = validateChallengeConfig(legacy);
+    expect(v.likeEvery).toBe(0);
+    expect(v.likeStep).toBe(1);
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, likeEvery: -5 }).likeEvery).toBe(0);
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, likeStep: 1e12 }).likeStep).toBe(999_999);
+  });
+
+  it('fxClipsEnabled: 欠損は既定(ON)、false は保持', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.fxClipsEnabled;
+    expect(validateChallengeConfig(legacy).fxClipsEnabled).toBe(true);
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, fxClipsEnabled: false }).fxClipsEnabled).toBe(false);
+  });
+
+  it('giftClips: 欠損は既定割り当て、明示的な空配列は空のまま保持する', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.giftClips;
+    expect(validateChallengeConfig(legacy).giftClips).toEqual(DEFAULT_GIFT_CLIPS);
+    // 「全部の割り当てを消した」ユーザーの意思を既定で踏み潰さない。
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, giftClips: [] }).giftClips).toEqual([]);
+  });
+
+  it('giftClips: 未知のクリップ id は off へ、canonical は小文字化、壊れた行は捨てる', () => {
+    const v = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      giftClips: [
+        { id: 'a', canonical: 'DRAGON', clip: 'dragon' },
+        { id: 'b', canonical: 'palace', clip: 'no-such-clip' },
+        { id: 'c', canonical: 'lion', clip: 'off' },
+        { id: 'd', canonical: '', clip: 'dragon' }, // canonical 空 → 捨てる
+        { canonical: 'pegasus', clip: 'pegasus' }, // id 無し → 捨てる
+        null,
+      ],
+    });
+    expect(v.giftClips).toEqual([
+      { id: 'a', canonical: 'dragon', clip: 'dragon' },
+      { id: 'b', canonical: 'palace', clip: 'off' },
+      { id: 'c', canonical: 'lion', clip: 'off' },
+    ]);
   });
 });
 
@@ -250,6 +334,20 @@ describe('ChallengeEngine — 状態機械', () => {
     expect(e.get().recentEffects[0]).toMatchObject({ kind: 'gift', amount: 150, flash: true, giftName: 'Galaxy' });
   });
 
+  it('ギフト演出に canonical が載る(モニターの演出クリップ選択に使う)', () => {
+    const e = engine(cfg({ initialValue: 100_000 }));
+    e.start();
+    e.handleEvent(gift({ diamonds: 26999, giftName: 'ドラゴン', canonical: 'dragon' }));
+    expect(e.get().recentEffects[0]).toMatchObject({ kind: 'gift', canonical: 'dragon' });
+  });
+
+  it('canonical 未解決のギフトは canonical を持たない(tier クリップに落ちる)', () => {
+    const e = engine(cfg({ initialValue: 100_000 }));
+    e.start();
+    e.handleEvent(gift({ diamonds: 500, giftName: '謎のギフト' }));
+    expect(e.get().recentEffects[0]).not.toHaveProperty('canonical');
+  });
+
   it('リングバッファは上限で最古を落とし、id は単調増加', () => {
     const e = engine(cfg({ initialValue: 10_000 }));
     e.start();
@@ -292,7 +390,7 @@ describe('ChallengeEngine — 状態機械', () => {
     expect(stopped.value).toBe(109); // 凍結表示
     const rs = e.reset();
     expect(rs.value).toBe(100);
-    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0 });
+    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 });
     // reset 後は同じユーザーのフォローがまた妨害になる
     e.start();
     expect(e.handleEvent(follow('a'))).toBe(true);
@@ -308,6 +406,146 @@ describe('ChallengeEngine — 状態機械', () => {
     const drained = e.drainIfChanged();
     expect(drained?.title).toBe('新タイトル');
     expect(drained?.value).toBe(100); // running 中は値は差し替えない
+  });
+
+  it('いいね: likeEvery=1, likeStep=1 でバッチ件数ぶん増える(1いいねで1個)', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 1, likeStep: 1 }));
+    e.start();
+    expect(e.handleEvent(like(3))).toBe(true);
+    const s = e.get();
+    expect(s.value).toBe(103);
+    expect(s.stats.likeUp).toBe(3);
+    expect(s.recentEffects[0]).toMatchObject({ kind: 'like', amount: 3 });
+  });
+
+  it('いいね: 端数は繰り越し、しきい値到達で加算される', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }));
+    e.start();
+    expect(e.handleEvent(like(4))).toBe(false); // 端数のみ — 不変
+    expect(e.get().value).toBe(100);
+    expect(e.handleEvent(like(7))).toBe(true); // 累計11 → 1ユニット、余り1
+    expect(e.get().value).toBe(105);
+    expect(e.handleEvent(like(9))).toBe(true); // 余り1+9=10 → もう1ユニット
+    expect(e.get().value).toBe(110);
+  });
+
+  it('いいね: 1バッチで複数ユニットまとめて加算される', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }));
+    e.start();
+    e.handleEvent(like(35));
+    const s = e.get();
+    expect(s.value).toBe(115); // 3ユニット、余り5
+    expect(s.stats.likeUp).toBe(15);
+  });
+
+  it('いいね: likeEvery=0(無効)/ likeStep=0 では何もしない', () => {
+    const e1 = engine(cfg({ initialValue: 100, likeEvery: 0, likeStep: 1 }));
+    e1.start();
+    expect(e1.handleEvent(like(100))).toBe(false);
+    expect(e1.get().value).toBe(100);
+    const e2 = engine(cfg({ initialValue: 100, likeEvery: 1, likeStep: 0 }));
+    e2.start();
+    expect(e2.handleEvent(like(100))).toBe(false);
+    expect(e2.get().value).toBe(100);
+  });
+
+  it('いいね: 同一 msgId は二重適用しない(再接続バックログ)', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 1, likeStep: 1 }));
+    e.start();
+    const l = like(5);
+    expect(e.handleEvent(l)).toBe(true);
+    expect(e.handleEvent(l)).toBe(false);
+    expect(e.get().value).toBe(105);
+  });
+
+  it('いいね: 演出は1秒窓で合算される(値は即時、effect は窓ごとに1件)', () => {
+    let t = NOW;
+    const e = engine(cfg({ initialValue: 100, likeEvery: 1, likeStep: 1 }), () => t);
+    e.start();
+    expect(e.handleEvent(like(2))).toBe(true); // 窓明け → effect + 即時 delta
+    t += 300;
+    expect(e.handleEvent(like(3))).toBe(true); // 窓内 → 値は即時増、effect は保留
+    expect(e.get().value).toBe(105);
+    expect(e.get().recentEffects.filter((x) => x.kind === 'like')).toHaveLength(1);
+    t += 1000; // 窓明け — 2Hz tick(drainIfChanged)が保留分をまとめて出す
+    const drained = e.drainIfChanged();
+    expect(drained).not.toBeNull();
+    const likes = drained!.recentEffects.filter((x) => x.kind === 'like');
+    expect(likes).toHaveLength(2);
+    expect(likes[0]).toMatchObject({ amount: 3 }); // 合算された保留分
+  });
+
+  it('いいね: start / reset で端数と保留演出がクリアされる', () => {
+    let t = NOW;
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }), () => t);
+    e.start();
+    e.handleEvent(like(9)); // 端数9
+    e.reset();
+    e.start();
+    expect(e.handleEvent(like(9))).toBe(false); // 繰り越されていれば加算されてしまう
+    expect(e.get().value).toBe(100);
+    expect(e.get().stats.likeUp).toBe(0);
+  });
+
+  it('いいね: running 以外では無視される', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 1, likeStep: 1 }));
+    expect(e.handleEvent(like(10))).toBe(false); // idle
+    e.start();
+    e.stop();
+    expect(e.handleEvent(like(10))).toBe(false);
+    expect(e.get().value).toBe(100);
+  });
+
+  it('likeGauge: 無効時(likeEvery=0 / likeStep=0)は null', () => {
+    expect(engine(cfg({ likeEvery: 0, likeStep: 1 })).get().likeGauge).toBeNull();
+    expect(engine(cfg({ likeEvery: 1, likeStep: 0 })).get().likeGauge).toBeNull();
+    expect(engine(cfg({ likeEvery: 10, likeStep: 5 })).get().likeGauge).not.toBeNull();
+  });
+
+  it('likeGauge: 端数のみの like でも dirty が立ち、次の drainIfChanged に counter が乗る', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }));
+    e.start();
+    e.drainIfChanged(); // start 分を排出
+    expect(e.handleEvent(like(4))).toBe(false); // 端数のみ — 即時 push はしない
+    const drained = e.drainIfChanged(); // 2Hz 定期 tick 相当
+    expect(drained).not.toBeNull();
+    expect(drained!.likeGauge).toMatchObject({ counter: 4, every: 10, step: 5, fills: 0 });
+    expect(drained!.value).toBe(100);
+    expect(e.drainIfChanged()).toBeNull();
+  });
+
+  it('likeGauge: count=0 の like は dirty を立てない', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }));
+    e.start();
+    e.drainIfChanged();
+    expect(e.handleEvent(like(0))).toBe(false);
+    expect(e.drainIfChanged()).toBeNull();
+  });
+
+  it('likeGauge: 複数ユニット一括で fills が回数ぶん進み、端数が残る', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }));
+    e.start();
+    e.handleEvent(like(35)); // 3ユニット + 端数5
+    expect(e.get().likeGauge).toMatchObject({ counter: 5, every: 10, step: 5, fills: 3 });
+  });
+
+  it('likeGauge: reset で counter は 0 に戻るが fills は巻き戻らない', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }));
+    e.start();
+    e.handleEvent(like(35)); // fills=3
+    e.reset();
+    expect(e.get().likeGauge).toMatchObject({ counter: 0, fills: 3 });
+    e.start();
+    e.handleEvent(like(12)); // fills=4, 端数2
+    expect(e.get().likeGauge).toMatchObject({ counter: 2, fills: 4 });
+  });
+
+  it('likeGauge: stop は端数を保持する(一時停止→再開で継続)', () => {
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 5 }));
+    e.start();
+    e.handleEvent(like(4));
+    e.stop();
+    expect(e.get().likeGauge).toMatchObject({ counter: 4, fills: 0 });
   });
 
   it('onConfigChanged は未開始のときだけ initialValue を差し替える', () => {

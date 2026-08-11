@@ -862,6 +862,34 @@ pre.doc {
   overflow: auto;
 }
 
+/*
+ * 演出クリップの試写(設定画面)。素材はアルファを持たない不透明 mp4 なので、
+ * モニター(monitor.css の .fx-clip)と同じく黒地 + screen 合成で見せないと
+ * 本番と違う見え方になる。
+ */
+.fx-preview {
+  position: relative;
+  margin-top: 10px;
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.fx-preview video {
+  display: block;
+  width: 100%;
+  max-width: 480px;
+  aspect-ratio: 16 / 9;
+  margin: 0 auto;
+  object-fit: cover;
+  mix-blend-mode: screen;
+}
+.fx-preview .btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
 /* ── カウントダウンチャレンジ(操作カード) ──────────────────────────── */
 .challenge-card {
   text-align: center;
@@ -879,6 +907,50 @@ pre.doc {
 .challenge-value.done {
   color: var(--gold);
   text-shadow: 0 0 14px rgba(255, 197, 66, 0.55);
+}
+/* 直近の加点・減点ログ。新規行はマウント時に1回だけハイライトが走る。 */
+.challenge-log {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: -4px 0 8px;
+  font-size: 12px;
+}
+.challenge-log-item {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  align-items: baseline;
+  border-radius: var(--radius-sm);
+  animation: challenge-log-in 0.9s ease-out;
+}
+.challenge-log-item .amt {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+.challenge-log-item.up .amt {
+  color: var(--red);
+}
+.challenge-log-item.down .amt {
+  color: var(--green);
+}
+.challenge-log-item .lbl {
+  opacity: 0.75;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes challenge-log-in {
+  0% {
+    background: rgba(255, 107, 107, 0.28);
+    transform: translateY(-2px);
+  }
+  100% {
+    background: transparent;
+    transform: none;
+  }
 }
 .challenge-btn {
   width: 100%;
@@ -921,4 +993,34 @@ pre.doc {
   align-items: center;
   padding: 6px 0;
   border-bottom: 1px solid var(--line-soft);
+}
+/* いいね進捗のミニバー(モニターの LikeGauge の縮小版・演出なし) */
+.challenge-like-mini {
+  position: relative;
+  height: 18px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: rgba(255, 79, 160, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(255, 79, 160, 0.35);
+  overflow: hidden;
+}
+.challenge-like-mini > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #ff2d78, #ff7ab8);
+  transition: width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.challenge-like-mini > span {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }

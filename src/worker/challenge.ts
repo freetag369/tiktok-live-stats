@@ -1,6 +1,6 @@
 import type { NormalizedEvent, UserId } from '@shared/events';
 import type { ChallengeConfig, ChallengeEffect, ChallengeState, ChallengeStats, ChallengeStatus } from '@shared/dto';
-import { CHALLENGE_EFFECTS_MAX, matchGiftRule } from '@shared/challenge';
+import { CHALLENGE_EFFECTS_MAX, LIKE_FX_WINDOW_MS, matchGiftRule } from '@shared/challenge';
 
 /**
  * カウントダウンチャレンジの状態機械。
@@ -15,7 +15,7 @@ export class ChallengeEngine {
   private value: number;
   private startedMs: number | null = null;
   private achievedMs: number | null = null;
-  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0 };
+  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 };
   private recentEffects: ChallengeEffect[] = [];
   /** reset でも巻き戻さない — モニターの冪等再生(既再生 id 比較)が壊れるため。 */
   private nextEffectId = 1;
@@ -29,6 +29,20 @@ export class ChallengeEngine {
    */
   private seenGiftMsgIds = new Set<string>();
   private seenGiftMsgIdOrder: string[] = [];
+  /** like の msgId 重複排除(gift と同じ再接続バックログ対策。高頻度なので容量大きめ)。 */
+  private seenLikeMsgIds = new Set<string>();
+  private seenLikeMsgIdOrder: string[] = [];
+  /** いいねの端数繰り越し(likeEvery 未満の余り)。 */
+  private likeCounter = 0;
+  /**
+   * 満タン(likeEvery 到達)の累計回数。nextEffectId と同じく reset でも
+   * 巻き戻さない — モニターのゲージが前回値との比較だけで満タン演出を発火でき、
+   * counter の見かけの増減(閾値跨ぎ・reset)と区別できるようにするため。
+   */
+  private likeFills = 0;
+  /** effect 未表示のいいね加算分(LIKE_FX_WINDOW_MS 窓の合算)。 */
+  private likeFxPending = 0;
+  private likeFxLastMs = 0;
   /** 生成直後は true — 起動後の最初の delta で初期状態をモニターへ配るため。 */
   private dirty = true;
 
@@ -47,9 +61,10 @@ export class ChallengeEngine {
     this.value = cfg.initialValue;
     this.startedMs = this.now();
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 };
     this.recentEffects = [];
     this.seenFollowers.clear();
+    this.resetLikeAccumulators();
     this.dirty = true;
     return this.get();
   }
@@ -57,6 +72,8 @@ export class ChallengeEngine {
   /** 値は凍結表示のため残す。startedMs も統計表示用に残す。 */
   stop(): ChallengeState {
     this.status = 'idle';
+    // 停止後に合算待ちの演出が漏れないように捨てる(値には適用済み)。
+    this.likeFxPending = 0;
     this.dirty = true;
     return this.get();
   }
@@ -66,9 +83,10 @@ export class ChallengeEngine {
     this.value = this.getConfig().initialValue;
     this.startedMs = null;
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 };
     this.recentEffects = [];
     this.seenFollowers.clear();
+    this.resetLikeAccumulators();
     this.dirty = true;
     return this.get();
   }
@@ -112,6 +130,45 @@ export class ChallengeEngine {
       return true;
     }
 
+    // いいね = 妨害。likeEvery 件ごとに likeStep 増える(余りは繰り越し)。
+    if (e.kind === 'like') {
+      if (cfg.likeEvery <= 0 || cfg.likeStep <= 0) return false;
+      // 再接続バックログの二重適用ガード(gift と同じ)。like は高頻度なので容量 1024。
+      if (this.seenLikeMsgIds.has(e.msgId)) return false;
+      this.seenLikeMsgIds.add(e.msgId);
+      this.seenLikeMsgIdOrder.push(e.msgId);
+      while (this.seenLikeMsgIdOrder.length > 1024) {
+        this.seenLikeMsgIds.delete(this.seenLikeMsgIdOrder.shift()!);
+      }
+      // e.count は「このバッチのいいね数」(累計ではない — events.ts の契約)。
+      const add = Math.max(0, e.count);
+      if (add === 0) return false; // 件数ゼロのイベントで delta を出さない
+      this.likeCounter += add;
+      const units = Math.floor(this.likeCounter / cfg.likeEvery);
+      if (units === 0) {
+        // 端数のみ — カウント値は不変だがゲージ(likeGauge.counter)は動く。
+        // like は高頻度(全メッセージの約9割)なので即時 push はせず、
+        // dirty だけ立てて 2Hz の定期 tick(drainIfChanged)に相乗りさせる。
+        this.dirty = true;
+        return false;
+      }
+      this.likeCounter -= units * cfg.likeEvery;
+      this.likeFills += units;
+      const amount = units * cfg.likeStep;
+      this.value += amount; // 加算方向のみなので maybeAchieve もクランプも不要
+      this.stats.likeUp += amount;
+      this.likeFxPending += amount;
+      // 演出は合算窓ごとに1件だけ(窓内の分は flushLikeFx がまとめて出す)。
+      const nowMs = this.now();
+      if (nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
+        this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
+        this.likeFxPending = 0;
+        this.likeFxLastMs = nowMs;
+      }
+      this.dirty = true;
+      return true;
+    }
+
     if (e.kind === 'gift') {
       // 再接続バックログの二重適用ガード(DB の INSERT OR IGNORE と同じ役割)。
       if (this.seenGiftMsgIds.has(e.msgId)) return false;
@@ -134,6 +191,8 @@ export class ChallengeEngine {
         nickname: e.viewer.nickname ?? e.viewer.displayId,
         ...(e.giftName ? { giftName: e.giftName } : {}),
         ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+        // モニターが演出クリップを選ぶのに使う(増減量の判定とは別経路)。
+        ...(e.canonical ? { canonical: e.canonical } : {}),
         diamonds: e.diamonds,
         atMs: this.now(),
       });
@@ -161,20 +220,27 @@ export class ChallengeEngine {
 
   /** dirty を落とさないスナップショット。 */
   get(): ChallengeState {
+    const cfg = this.getConfig();
     return {
       status: this.status,
       value: this.value,
-      initialValue: this.getConfig().initialValue,
-      title: this.getConfig().title,
+      initialValue: cfg.initialValue,
+      title: cfg.title,
       startedMs: this.startedMs,
       achievedMs: this.achievedMs,
       stats: { ...this.stats },
       recentEffects: this.recentEffects.map((e) => ({ ...e })),
+      // 設定から生で読むので likeEvery/likeStep の変更も次の delta で同期する。
+      likeGauge:
+        cfg.likeEvery > 0 && cfg.likeStep > 0
+          ? { counter: this.likeCounter, every: cfg.likeEvery, step: cfg.likeStep, fills: this.likeFills }
+          : null,
     };
   }
 
   /** 変化していたら1回だけ状態を返す(pushDelta の相乗り用)。 */
   drainIfChanged(): ChallengeState | null {
+    this.flushLikeFx();
     if (!this.dirty) return null;
     this.dirty = false;
     return this.get();
@@ -188,6 +254,28 @@ export class ChallengeEngine {
     this.status = 'achieved';
     this.achievedMs = atMs;
     this.pushEffect({ kind: 'achieved', amount: 0, atMs });
+  }
+
+  private resetLikeAccumulators(): void {
+    // seenLikeMsgIds は gift 同様クリアしない — 再開直後に再配信された古い
+    // いいねを新しいランに数えないため。
+    this.likeCounter = 0;
+    this.likeFxPending = 0;
+    this.likeFxLastMs = 0;
+  }
+
+  /**
+   * 合算窓が明けていたら、窓内に積んだいいね演出を1件にまとめて出す。
+   * いいねが止まった後の残りも 2Hz tick 側から最大約1.5秒で表示される。
+   */
+  private flushLikeFx(): void {
+    if (this.likeFxPending <= 0 || this.status !== 'running') return;
+    const nowMs = this.now();
+    if (nowMs - this.likeFxLastMs < LIKE_FX_WINDOW_MS) return;
+    this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
+    this.likeFxPending = 0;
+    this.likeFxLastMs = nowMs;
+    this.dirty = true;
   }
 
   private pushEffect(e: Omit<ChallengeEffect, 'id'>): void {

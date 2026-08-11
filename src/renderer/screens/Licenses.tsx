@@ -62,6 +62,9 @@ export function Licenses(): React.JSX.Element {
           ) : (
             <div className="empty">THIRD-PARTY-NOTICES.md が同梱されていません。</div>
           )}
+          <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>
+            効果音: Kenney (kenney.nl) — CC0 1.0 (パブリックドメイン)。詳細は src/renderer/assets/se/CREDITS.md。
+          </div>
         </div>
 
         <div className="card">

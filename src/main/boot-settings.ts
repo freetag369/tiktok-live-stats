@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AppSettings } from '@shared/dto';
+import { DEFAULT_ZOOM_FACTOR, type AppSettings } from '@shared/dto';
 import { DEFAULT_CHALLENGE, validateChallengeConfig } from '@shared/challenge';
 import { DEFAULT_SCORING, validateScoringConfig } from '@shared/scoring';
 import { configDirIn, dbPathIn } from './paths';
@@ -24,7 +24,7 @@ export function defaultSettings(dataDir: string): AppSettings {
     minimizeToTray: false,
     alertMinTier: 1,
     giftAlertDiamonds: 100,
-    zoomFactor: 1,
+    zoomFactor: DEFAULT_ZOOM_FACTOR,
     challenge: structuredClone(DEFAULT_CHALLENGE),
   };
 }

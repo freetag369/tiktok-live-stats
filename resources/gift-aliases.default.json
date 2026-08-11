@@ -4,19 +4,37 @@
   "idAliases": {
     "7934": "heart_me"
   },
+  "_ordering": "nameRules は上から順に『小文字化して完全一致 or 部分一致』で評価し、最初に当たった規則で確定します（worker/store/apply.ts の resolveCanonical）。したがって具体的な名前ほど上に置くこと。例: 「ホワイトペガサス」は「ペガサス」を含むので white_pegasus を先に、「TikTok Universe」は「tiktok」を含むので汎用 tiktok より先に置く必要があります。",
+  "_topGifts": "最上位ギフト16種は canonical ごとに専用の演出クリップ（src/renderer/assets/fx/gift/<canonical>.mp4）を持ちます。どのギフトでどのクリップを出すかは設定画面『ギフトごとの演出クリップ』で変更できます。英語名・他言語名は実イベントの gift_catalog で確認してから match に足してください（推測で足さないこと）。",
   "nameRules": [
     { "canonical": "heart_me", "match": ["heart me", "ハートミー", "heartme"] },
+
+    { "canonical": "universe_plus", "match": ["tiktok universe+", "universe+", "ユニバース+"] },
+    { "canonical": "universe", "match": ["tiktok universe", "universe", "ユニバース"] },
+    { "canonical": "tiktok_stars", "match": ["tiktok stars", "スターズ"] },
+    { "canonical": "white_pegasus", "match": ["white pegasus", "ホワイトペガサス"] },
+    { "canonical": "pegasus", "match": ["pegasus", "ペガサス"] },
+    { "canonical": "fire_phoenix", "match": ["fire phoenix", "ファイアフェニックス", "ファイアーフェニックス"] },
+    { "canonical": "thunder_falcon", "match": ["thunder falcon", "サンダーファルコン"] },
+    { "canonical": "whale_mirage", "match": ["鯨と蜃気楼", "蜃気楼"] },
+    { "canonical": "seal_whale", "match": ["アザラシとクジラ", "アザラシ"] },
+    { "canonical": "whale_sam", "match": ["クジラのサム", "サム"] },
+    { "canonical": "adams_dream", "match": ["adam's dream", "adams dream", "アダムの夢"] },
+    { "canonical": "lion_charge", "match": ["獅子奮迅", "獅子"] },
+    { "canonical": "leon_lion", "match": ["レオンとライオン", "leon and lion"] },
+    { "canonical": "lion", "match": ["lion", "ライオン"] },
+    { "canonical": "palace", "match": ["palace", "宮殿"] },
+    { "canonical": "dragon", "match": ["dragon", "ドラゴン"] },
+
     { "canonical": "rose", "match": ["rose", "バラ", "ローズ"] },
-    { "canonical": "tiktok", "match": ["tiktok"] },
-    { "canonical": "heart", "match": ["heart"] },
     { "canonical": "finger_heart", "match": ["finger heart", "フィンガーハート"] },
-    { "canonical": "gg", "match": ["gg"] },
+    { "canonical": "hand_hearts", "match": ["hand hearts"] },
     { "canonical": "ice_cream", "match": ["ice cream cone", "アイスクリーム"] },
     { "canonical": "perfume", "match": ["perfume", "香水"] },
     { "canonical": "doughnut", "match": ["doughnut", "donut", "ドーナツ"] },
-    { "canonical": "hand_hearts", "match": ["hand hearts"] },
     { "canonical": "sunglasses", "match": ["sunglasses"] },
-    { "canonical": "lion", "match": ["lion", "ライオン"] },
-    { "canonical": "universe", "match": ["universe", "ユニバース"] }
+    { "canonical": "gg", "match": ["gg"] },
+    { "canonical": "tiktok", "match": ["tiktok"] },
+    { "canonical": "heart", "match": ["heart"] }
   ]
 }

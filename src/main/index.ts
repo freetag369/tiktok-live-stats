@@ -87,6 +87,7 @@ function openMonitor(): void {
   const mon = openMonitorWindow(
     join(__dirname, '../preload/index.js'),
     settings.challenge.monitorDisplayId,
+    settings.challenge.monitorWindowed,
     () => {
       notifyMonitorState();
       syncVisibility();
@@ -175,8 +176,12 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
         }
         // チャレンジ関連の main 側リソースを追随させる。
         syncChallengeHotkey();
-        if (prev.challenge.monitorDisplayId !== settings.challenge.monitorDisplayId) {
-          repositionMonitor(settings.challenge.monitorDisplayId);
+        if (prev.challenge.monitorWindowed !== settings.challenge.monitorWindowed && getMonitorWindow()) {
+          // 枠(frame)は生成時にしか変えられないため、開いていれば作り直す。
+          closeMonitorWindow();
+          setTimeout(() => openMonitor(), 350);
+        } else if (prev.challenge.monitorDisplayId !== settings.challenge.monitorDisplayId) {
+          repositionMonitor(settings.challenge.monitorDisplayId, settings.challenge.monitorWindowed);
         }
         return { id, ok: true, result: { workerRestarted: restart } } as RpcResponse;
       }
@@ -364,8 +369,12 @@ async function boot(): Promise<void> {
   win.on('restore', syncVisibility);
 
   // 配信中の HDMI 抜き差しでモニターを置き去りにしない。
-  screen.on('display-added', () => repositionMonitor(settings.challenge.monitorDisplayId));
-  screen.on('display-removed', () => repositionMonitor(settings.challenge.monitorDisplayId));
+  screen.on('display-added', () =>
+    repositionMonitor(settings.challenge.monitorDisplayId, settings.challenge.monitorWindowed)
+  );
+  screen.on('display-removed', () =>
+    repositionMonitor(settings.challenge.monitorDisplayId, settings.challenge.monitorWindowed)
+  );
 
   ipcMain.handle('rpc', async (_e, req: RpcRequest): Promise<RpcResponse> => {
     if (MAIN_HANDLED.has(req.method)) return handleMainRpc(req);

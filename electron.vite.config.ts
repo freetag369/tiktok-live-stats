@@ -52,6 +52,10 @@ export default defineConfig({
     resolve: { alias },
     plugins: [react()],
     build: {
+      // 効果音(assets/se/*.ogg)を data: URL にインライン化させない — CSP に
+      // media-src が無く default-src 'self' フォールバックで data: 音声が
+      // ブロックされる(packaged ビルドのみ発症)。
+      assetsInlineLimit: 0,
       // monitor.html はチャレンジモニター窓(第2ウィンドウ)。ここに追加を忘れる
       // と dev では動くのに packaged ビルドだけ真っ白になる。
       rollupOptions: {

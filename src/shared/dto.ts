@@ -437,6 +437,18 @@ export interface ChallengeGiftRule {
   flash?: boolean;
 }
 
+/**
+ * ギフト → 演出クリップの割り当て。上から順に評価し、最初に canonical が
+ * 一致した1件を使う。一致が無ければダイヤ数の tier クリップに落ちる。
+ */
+export interface ChallengeGiftClip {
+  id: string;
+  /** normalize 済みの canonical('dragon' 等、gift-aliases 由来)。 */
+  canonical: string;
+  /** クリップ id(renderer/lib/fx.ts の FX_CLIPS)または 'off'(この規則では出さない)。 */
+  clip: string;
+}
+
 export interface ChallengeConfig {
   enabled: boolean;
   /** モニターの見出し。例「0まで寝ない」。 */
@@ -447,6 +459,10 @@ export interface ChallengeConfig {
   pressStep: number;
   /** フォロー1件で増える量(妨害)。 */
   followStep: number;
+  /** いいね◯件ごとに加算(妨害)。0 で無効。 */
+  likeEvery: number;
+  /** likeEvery 件ごとに増える量。 */
+  likeStep: number;
   giftRules: ChallengeGiftRule[];
   /** どの規則にも一致しないギフトの既定動作。null なら無視。 */
   giftDefault: { mode: 'fixed' | 'perDiamond'; amount: number } | null;
@@ -456,9 +472,35 @@ export interface ChallengeConfig {
   hotkey: string;
   /** モニターを出すディスプレイ。null = 自動(最後の非プライマリ)。 */
   monitorDisplayId: number | null;
+  /** true = 全画面にせず通常のウィンドウ(枠付き・移動/リサイズ可)で出す。 */
+  monitorWindowed: boolean;
   /** 残数がこの値以下になるとモニターの数字が点滅する。 */
   lowThreshold: number;
+  /** 演出(press/follow/like/gift/achieved)の効果音を鳴らす。 */
+  seEnabled: boolean;
+  /** 効果音の音量 0-100。 */
+  seVolume: number;
+  /**
+   * 演出スロットごとの効果音の割り当て。値は同梱音の id
+   * (shared/challenge.ts の CHALLENGE_SE_SOUND_IDS)または 'off'(鳴らさない)。
+   */
+  seSounds: Record<ChallengeSeSlot, string>;
+  /** ギフト/達成の演出クリップ(映像)をモニターに重ねる。 */
+  fxClipsEnabled: boolean;
+  /** ギフト → クリップの割り当て。空なら全ギフトが tier クリップになる。 */
+  giftClips: ChallengeGiftClip[];
 }
+
+/** 効果音を割り当てられる演出スロット。gift は演出 tier(ダイヤ数)で分かれる。 */
+export type ChallengeSeSlot =
+  | 'press'
+  | 'follow'
+  | 'like'
+  | 'gift-t1'
+  | 'gift-t2'
+  | 'gift-t3'
+  | 'gift-t4'
+  | 'achieved';
 
 export type ChallengeStatus = 'idle' | 'running' | 'achieved';
 
@@ -469,7 +511,8 @@ export type ChallengeStatus = 'idle' | 'running' | 'achieved';
  */
 export interface ChallengeEffect {
   id: number;
-  kind: 'press' | 'follow' | 'gift' | 'achieved';
+  /** 'like' は1秒窓で合算して1件にまとめるため nickname を持たない。 */
+  kind: 'press' | 'follow' | 'like' | 'gift' | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
   /** kind='gift' で照明フラッシュ演出を伴うとき true。 */
@@ -477,6 +520,8 @@ export interface ChallengeEffect {
   nickname?: string;
   giftName?: string;
   giftIconUrl?: string;
+  /** kind='gift' の名寄せ済み canonical。演出クリップの選択に使う。 */
+  canonical?: string;
   diamonds?: number;
   atMs: Ms;
 }
@@ -489,6 +534,27 @@ export interface ChallengeStats {
   giftDown: number;
   /** ギフトによる加算量の合計。 */
   giftUp: number;
+  /** いいねによる加算量の合計。 */
+  likeUp: number;
+}
+
+/**
+ * いいね進捗ゲージ。分母(every)と加算量(step)を同梱するのは、renderer の
+ * 設定取得(30秒ポーリング)とのスキューで分子と分母が食い違うのを防ぐため。
+ */
+export interface ChallengeLikeGauge {
+  /** 端数(0 <= counter < every)。reset で 0 に戻る。 */
+  counter: number;
+  /** cfg.likeEvery のスナップショット(ゲージの分母)。 */
+  every: number;
+  /** 満タン1回あたりの加算量(cfg.likeStep)。 */
+  step: number;
+  /**
+   * 満タン到達の累計回数。effect id と同じくエンジン生存期間を通して単調増加で
+   * reset でも巻き戻さない — モニターは前回値との比較だけで「満タン到達」を検出
+   * でき、counter の増減(閾値跨ぎで増えて見える・reset で減る)と混同しない。
+   */
+  fills: number;
 }
 
 export interface ChallengeState {
@@ -503,9 +569,18 @@ export interface ChallengeState {
   stats: ChallengeStats;
   /** 新しい順・最大 CHALLENGE_EFFECTS_MAX 件のリングバッファ。 */
   recentEffects: ChallengeEffect[];
+  /** null = いいね妨害が無効(likeEvery <= 0 または likeStep <= 0)。 */
+  likeGauge: ChallengeLikeGauge | null;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────
+
+/**
+ * 表示倍率の既定値。ダッシュボードは 13px 基準の高密度デザインなので、
+ * 「文字が小さい」への恒久対応として既定を 200% に置く。
+ * Ctrl+0 / ％クリックのリセット先もこの値(main と renderer で共有)。
+ */
+export const DEFAULT_ZOOM_FACTOR = 2;
 
 export interface AppSettings {
   eulerApiKey: string;

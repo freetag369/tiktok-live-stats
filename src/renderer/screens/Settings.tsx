@@ -1,11 +1,31 @@
 import { useEffect, useState } from 'react';
-import type { AppSettings, ChallengeConfig, ChallengeGiftRule, ScoringConfig } from '@shared/dto';
+import type {
+  AppSettings,
+  ChallengeConfig,
+  ChallengeGiftClip,
+  ChallengeGiftRule,
+  ScoringConfig,
+} from '@shared/dto';
 import { bytes, num } from '@shared/format';
 import { formatDateJa } from '@shared/time';
-import { DEFAULT_CHALLENGE } from '@shared/challenge';
+import { CHALLENGE_SE_SLOTS, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS } from '@shared/challenge';
 import { DEFAULT_SCORING } from '@shared/scoring';
 import { rpc, useQuery } from '../ipc/client';
 import { go, setSettings, toast, useUi } from '../state/uiStore';
+import { playSe, SE_SOUNDS } from '../lib/se';
+import { FX_CLIPS } from '../lib/fx';
+
+/** 効果音スロットの表示名(設定画面の行ラベル)。 */
+const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
+  press: 'ボタン押下',
+  follow: 'フォロー妨害',
+  like: 'いいね妨害',
+  'gift-t1': 'ギフト(小)',
+  'gift-t2': 'ギフト(中)',
+  'gift-t3': 'ギフト(大)',
+  'gift-t4': 'ギフト(特大)',
+  achieved: '達成',
+};
 
 /** キー入力を Electron accelerator 文字列へ。Esc でクリア、修飾キー単独は無視。 */
 function hotkeyFromEvent(e: React.KeyboardEvent): string | null {
@@ -379,6 +399,156 @@ function W({ label, v, on }: { label: string; v: number; on: (n: number) => void
 }
 
 let ruleSeq = 0;
+let clipSeq = 0;
+
+/**
+ * 同梱の演出クリップが用意されているギフトの表示名。ここに無い canonical も
+ * 自由に追加できる(入力欄に直接書く)ので、あくまで既定行のラベル用。
+ */
+const GIFT_CANONICAL_LABELS: Record<string, string> = {
+  universe: 'TikTok Universe',
+  universe_plus: 'TikTok Universe+',
+  tiktok_stars: 'TikTok Stars',
+  white_pegasus: 'ホワイトペガサス',
+  pegasus: 'ペガサス',
+  fire_phoenix: 'ファイアフェニックス',
+  thunder_falcon: 'サンダーファルコン',
+  dragon: 'ドラゴン',
+  lion: 'ライオン',
+  lion_charge: '獅子奮迅',
+  leon_lion: 'レオンとライオン',
+  palace: '宮殿',
+  whale_mirage: '鯨と蜃気楼',
+  whale_sam: 'クジラのサム',
+  seal_whale: 'アザラシとクジラ',
+  adams_dream: "Adam's Dream",
+};
+
+/**
+ * ギフトごとの演出クリップ割り当て。上から順に canonical 一致を探し、
+ * どれにも当たらないギフトはダイヤ数の tier クリップ(汎用: 小〜特大)になる。
+ */
+function GiftClipsSection({
+  cfg,
+  onPatch,
+}: {
+  cfg: ChallengeConfig;
+  onPatch: (p: Partial<ChallengeConfig>) => void;
+}) {
+  // プレビューはモニターと同じ黒地 + screen 合成で見せる(素材はアルファ無し)。
+  const [preview, setPreview] = useState<{ key: number; url: string } | null>(null);
+
+  const patchClip = (i: number, p: Partial<ChallengeGiftClip>): void => {
+    onPatch({ giftClips: cfg.giftClips.map((c, j) => (j === i ? { ...c, ...p } : c)) });
+  };
+
+  return (
+    <>
+      <h3 style={{ marginTop: 14 }}>ギフトごとの演出クリップ</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={cfg.fxClipsEnabled}
+          onChange={(e) => onPatch({ fxClipsEnabled: e.target.checked })}
+        />
+        <span>ギフト・達成でモニターに映像を重ねる</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        上から順にギフト名(canonical)の一致を探し、最初に当たった1件のクリップを再生します。
+        どれにも当たらないギフトはダイヤ数に応じた「汎用」クリップになります。
+        変更がモニターに反映されるまで最大30秒かかります。
+      </div>
+
+      {cfg.fxClipsEnabled ? (
+        <>
+          {cfg.giftClips.map((c, i) => (
+            <div className="challenge-rule" key={c.id}>
+              <label className="field">
+                ギフト名(canonical)
+                <input
+                  type="text"
+                  placeholder="例: dragon"
+                  value={c.canonical}
+                  title={GIFT_CANONICAL_LABELS[c.canonical] ?? ''}
+                  onChange={(e) => patchClip(i, { canonical: e.target.value.trim().toLowerCase() })}
+                />
+              </label>
+              <div className="row" style={{ gap: 6, flex: 1 }}>
+                <label className="field" style={{ flex: 1 }}>
+                  {GIFT_CANONICAL_LABELS[c.canonical] ?? '流す映像'}
+                  <select value={c.clip} onChange={(e) => patchClip(i, { clip: e.target.value })}>
+                    <option value="off">出さない</option>
+                    {FX_CLIPS.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="btn small"
+                  disabled={c.clip === 'off'}
+                  title="このクリップを試写"
+                  style={{ alignSelf: 'flex-end' }}
+                  onClick={() => {
+                    const url = FX_CLIPS.find((f) => f.id === c.clip)?.url;
+                    if (url) setPreview({ key: clipSeq++, url });
+                  }}
+                >
+                  ▶
+                </button>
+              </div>
+              <button
+                className="btn small danger"
+                onClick={() => onPatch({ giftClips: cfg.giftClips.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+          <div className="row" style={{ marginTop: 8 }}>
+            <button
+              className="btn small"
+              onClick={() =>
+                onPatch({
+                  giftClips: [
+                    ...cfg.giftClips,
+                    { id: `clip-${Date.now().toString(36)}-${clipSeq++}`, canonical: '', clip: 'off' },
+                  ],
+                })
+              }
+            >
+              割り当てを追加
+            </button>
+            <button
+              className="btn small"
+              onClick={() => onPatch({ giftClips: DEFAULT_GIFT_CLIPS.map((c) => ({ ...c })) })}
+            >
+              割り当てを既定に戻す
+            </button>
+          </div>
+
+          {preview ? (
+            <div className="fx-preview">
+              <video
+                key={preview.key}
+                src={preview.url}
+                autoPlay
+                muted
+                playsInline
+                onEnded={() => setPreview(null)}
+                onError={() => setPreview(null)}
+              />
+              <button className="btn small" onClick={() => setPreview(null)}>
+                閉じる
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </>
+  );
+}
 
 /**
  * カウントダウンチャレンジの設定カード。
@@ -407,7 +577,7 @@ function ChallengeSettingsCard({
         <span>有効にする(ライブ画面に操作カードが出ます)</span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
-        「0まで寝ない」型の企画: ボタンで数字が減り、フォローで増え(妨害)、ギフトで増減します。
+        「0まで寝ない」型の企画: ボタンで数字が減り、フォロー・いいねで増え(妨害)、ギフトで増減します。
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
@@ -440,6 +610,24 @@ function ChallengeSettingsCard({
             min="0"
             value={cfg.followStep}
             onChange={(e) => onPatch({ followStep: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field">
+          いいね◯件ごとに加算(妨害・0で無効)
+          <input
+            type="number"
+            min="0"
+            value={cfg.likeEvery}
+            onChange={(e) => onPatch({ likeEvery: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field">
+          いいね妨害の加算量
+          <input
+            type="number"
+            min="0"
+            value={cfg.likeStep}
+            onChange={(e) => onPatch({ likeStep: Number(e.target.value) })}
           />
         </label>
         <label className="field">
@@ -498,10 +686,79 @@ function ChallengeSettingsCard({
           </select>
         </label>
       </div>
+      <label className="row" style={{ marginTop: 8, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={cfg.monitorWindowed}
+          onChange={(e) => onPatch({ monitorWindowed: e.target.checked })}
+        />
+        <span>モニターをウィンドウ表示にする(全画面にしない)</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22 }}>
+        枠付きの普通のウィンドウで開き、移動やサイズ変更ができます。OBSで一部だけ映したいときや、同じ画面で作業しながら使うときに。
+      </div>
       <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
         市販の「USB押しボタン」はキーボードとして認識されます。ボタンが送るキーを上の欄で押して登録してください。
         アプリにフォーカスが無くても反応します。
       </div>
+      <label className="row" style={{ marginTop: 8, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={cfg.seEnabled}
+          onChange={(e) => onPatch({ seEnabled: e.target.checked })}
+        />
+        <span>演出の効果音を鳴らす</span>
+      </label>
+      <div className="row" style={{ marginLeft: 22, gap: 8, alignItems: 'center' }}>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={cfg.seVolume}
+          disabled={!cfg.seEnabled}
+          onChange={(e) => onPatch({ seVolume: Number(e.target.value) })}
+        />
+        <span className="faint" style={{ fontSize: 11, minWidth: 48 }}>
+          音量 {cfg.seVolume}
+        </span>
+      </div>
+      {cfg.seEnabled ? (
+        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', marginLeft: 22, marginTop: 6 }}>
+          {CHALLENGE_SE_SLOTS.map((slot) => (
+            <div key={slot} className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <span className="faint" style={{ fontSize: 11, minWidth: 88 }}>
+                {SE_SLOT_LABELS[slot]}
+              </span>
+              <select
+                style={{ flex: 1 }}
+                value={cfg.seSounds[slot]}
+                onChange={(e) => onPatch({ seSounds: { ...cfg.seSounds, [slot]: e.target.value } })}
+              >
+                <option value="off">鳴らさない</option>
+                {SE_SOUNDS.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn small"
+                disabled={cfg.seSounds[slot] === 'off'}
+                title="この音を試聴"
+                onClick={() => playSe(cfg.seSounds[slot], cfg.seVolume)}
+              >
+                ♪
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
+        モニターを開いているときはモニター側で、閉じているときはライブ画面側で鳴ります。
+        変更がモニターに反映されるまで最大30秒かかります。
+      </div>
+
+      <GiftClipsSection cfg={cfg} onPatch={onPatch} />
 
       <h3 style={{ marginTop: 14 }}>ギフトの増減</h3>
       <div className="row" style={{ gap: 8 }}>

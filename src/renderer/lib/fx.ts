@@ -1,0 +1,78 @@
+import universeUrl from '../assets/fx/gift/universe.mp4';
+import universePlusUrl from '../assets/fx/gift/universe_plus.mp4';
+import whitePegasusUrl from '../assets/fx/gift/white_pegasus.mp4';
+import pegasusUrl from '../assets/fx/gift/pegasus.mp4';
+import firePhoenixUrl from '../assets/fx/gift/fire_phoenix.mp4';
+import thunderFalconUrl from '../assets/fx/gift/thunder_falcon.mp4';
+import dragonUrl from '../assets/fx/gift/dragon.mp4';
+import lionUrl from '../assets/fx/gift/lion.mp4';
+import lionChargeUrl from '../assets/fx/gift/lion_charge.mp4';
+import leonLionUrl from '../assets/fx/gift/leon_lion.mp4';
+import palaceUrl from '../assets/fx/gift/palace.mp4';
+import whaleMirageUrl from '../assets/fx/gift/whale_mirage.mp4';
+import whaleSamUrl from '../assets/fx/gift/whale_sam.mp4';
+import sealWhaleUrl from '../assets/fx/gift/seal_whale.mp4';
+import tiktokStarsUrl from '../assets/fx/gift/tiktok_stars.mp4';
+import adamsDreamUrl from '../assets/fx/gift/adams_dream.mp4';
+import giftT1Url from '../assets/fx/gift-t1.mp4';
+import giftT2Url from '../assets/fx/gift-t2.mp4';
+import giftT3Url from '../assets/fx/gift-t3.mp4';
+import giftT4Url from '../assets/fx/gift-t4.mp4';
+import achievedUrl from '../assets/fx/achieved.mp4';
+
+/**
+ * モニターに重ねる演出クリップのカタログ(素材の由来は assets/fx/CREDITS.md)。
+ * id の一覧は shared/challenge.ts の CHALLENGE_FX_CLIP_IDS と一致させること
+ * (validate がそのリストで設定値を検証する)。achieved は割り当て対象では
+ * ないので CHALLENGE_FX_CLIP_IDS には入れず、ここだけに置く。
+ *
+ * 全クリップは「純黒背景に発光体だけ」で作られており、必ず
+ * mix-blend-mode: screen で重ねる前提(monitor.css の .fx-clip)。
+ * se.ts と同じくステートレス — 有効/割り当ての状態は持たない。
+ */
+
+export interface FxClip {
+  id: string;
+  /** 設定画面のドロップダウンに出す表示名。 */
+  label: string;
+  url: string;
+}
+
+export const FX_CLIPS: readonly FxClip[] = [
+  { id: 'universe', label: 'ユニバース(銀河)', url: universeUrl },
+  { id: 'universe_plus', label: 'ユニバース+(二重銀河)', url: universePlusUrl },
+  { id: 'tiktok_stars', label: 'スターズ(星の渦)', url: tiktokStarsUrl },
+  { id: 'white_pegasus', label: 'ホワイトペガサス(銀の天馬)', url: whitePegasusUrl },
+  { id: 'pegasus', label: 'ペガサス(金の天馬)', url: pegasusUrl },
+  { id: 'fire_phoenix', label: 'ファイアフェニックス(炎の鳳凰)', url: firePhoenixUrl },
+  { id: 'thunder_falcon', label: 'サンダーファルコン(雷の隼)', url: thunderFalconUrl },
+  { id: 'dragon', label: 'ドラゴン(翡翠の龍)', url: dragonUrl },
+  { id: 'lion', label: 'ライオン(金の獅子)', url: lionUrl },
+  { id: 'lion_charge', label: '獅子奮迅(炎の獅子頭)', url: lionChargeUrl },
+  { id: 'leon_lion', label: 'レオンとライオン(2頭の衝突)', url: leonLionUrl },
+  { id: 'palace', label: '宮殿(黄金の建築)', url: palaceUrl },
+  { id: 'whale_mirage', label: '鯨と蜃気楼', url: whaleMirageUrl },
+  { id: 'whale_sam', label: 'クジラのサム', url: whaleSamUrl },
+  { id: 'seal_whale', label: 'アザラシとクジラ', url: sealWhaleUrl },
+  { id: 'adams_dream', label: "Adam's Dream(光雲)", url: adamsDreamUrl },
+  { id: 'gift-t1', label: '汎用: 小(金の輝き)', url: giftT1Url },
+  { id: 'gift-t2', label: '汎用: 中(金のバースト)', url: giftT2Url },
+  { id: 'gift-t3', label: '汎用: 大(金の放射光)', url: giftT3Url },
+  { id: 'gift-t4', label: '汎用: 特大(花火3連発)', url: giftT4Url },
+];
+
+/** 達成(CLEAR)専用。ギフトには割り当てない固定クリップ。 */
+export const ACHIEVED_CLIP_URL = achievedUrl;
+
+const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
+
+/** クリップ id → URL。未知の id は null(設定が古い/壊れていても落とさない)。 */
+export function fxClipUrl(id: string | null | undefined): string | null {
+  if (!id) return null;
+  return BY_ID.get(id)?.url ?? null;
+}
+
+/** 設定画面のプレビュー用。表示名を引く。 */
+export function fxClipLabel(id: string): string {
+  return BY_ID.get(id)?.label ?? id;
+}

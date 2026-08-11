@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { DEFAULT_ZOOM_FACTOR } from '@shared/dto';
 import { rpc } from '../ipc/client';
 import { useUi } from '../state/uiStore';
 
@@ -19,7 +20,7 @@ const round = (n: number): number => Math.round(n * 10) / 10;
  */
 export function ZoomControls(): React.JSX.Element {
   const settings = useUi((s) => s.settings);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(DEFAULT_ZOOM_FACTOR);
   const applied = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -27,7 +28,7 @@ export function ZoomControls(): React.JSX.Element {
   useEffect(() => {
     if (!settings || applied.current) return;
     applied.current = true;
-    setZoom(window.api.setZoom(settings.zoomFactor ?? 1));
+    setZoom(window.api.setZoom(settings.zoomFactor ?? DEFAULT_ZOOM_FACTOR));
   }, [settings]);
 
   const apply = useCallback((next: number) => {
@@ -52,7 +53,7 @@ export function ZoomControls(): React.JSX.Element {
         apply(window.api.getZoom() - STEP);
       } else if (e.key === '0') {
         e.preventDefault();
-        apply(1);
+        apply(DEFAULT_ZOOM_FACTOR);
       }
     };
     const onWheel = (e: WheelEvent) => {
@@ -73,7 +74,7 @@ export function ZoomControls(): React.JSX.Element {
       <button className="btn small" onClick={() => apply(zoom - STEP)} disabled={zoom <= MIN} aria-label="小さく">
         −
       </button>
-      <button className="zoom-val" onClick={() => apply(1)} title="クリックで100%に戻す">
+      <button className="zoom-val" onClick={() => apply(DEFAULT_ZOOM_FACTOR)} title={`クリックで既定の${DEFAULT_ZOOM_FACTOR * 100}%に戻す`}>
         {Math.round(zoom * 100)}%
       </button>
       <button className="btn small" onClick={() => apply(zoom + STEP)} disabled={zoom >= MAX} aria-label="大きく">
