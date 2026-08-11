@@ -30,6 +30,11 @@ export class WorkerHost {
   private stopping = false;
   /** メイン窓とモニター窓 — firehose ポートはウィンドウごとに1本張る。 */
   private wcs = new Set<WebContents>();
+  /**
+   * クラッシュ自動再起動に使う boot ペイロード。設定変更のたびに refreshBoot で
+   * 差し替える — start() 時のクロージャのままだと、再起動で古い設定に巻き戻る。
+   */
+  private bootPayload: Parameters<WorkerHost['start']>[0] | null = null;
 
   caps: StoreCapabilities | null = null;
   missionError: string | null = null;
@@ -46,6 +51,7 @@ export class WorkerHost {
   }): void {
     this.stopping = false;
     this.ready = false;
+    this.bootPayload = boot;
     this.deps.onState('starting');
 
     const proc = utilityProcess.fork(workerEntry(), [], {
@@ -111,7 +117,7 @@ export class WorkerHost {
       if (this.restarts < 5) {
         this.restarts++;
         this.deps.onState('restarting', `exit ${code}`);
-        setTimeout(() => this.start(boot), 1000 * this.restarts);
+        setTimeout(() => this.start(this.bootPayload ?? boot), 1000 * this.restarts);
       } else {
         this.deps.onState('dead', `exit ${code}`);
       }
@@ -170,6 +176,11 @@ export class WorkerHost {
     const q = this.queue;
     this.queue = [];
     for (const item of q) void this.dispatch(item.req).then(item.resolve);
+  }
+
+  /** 設定変更を自動再起動用ペイロードにも反映する(worker には別途 settings を送る)。 */
+  refreshBoot(boot: Parameters<WorkerHost['start']>[0]): void {
+    this.bootPayload = boot;
   }
 
   async restart(boot: Parameters<WorkerHost['start']>[0]): Promise<void> {

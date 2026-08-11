@@ -64,6 +64,7 @@ export class SessionManager {
   private firstTimers = 0;
   private sessionStartMs = 0;
   private lastMissions = '';
+  private lastMissionsCheckMs = 0;
 
   sessionId: number | null = null;
   status: AdapterStatus = { state: 'idle' };
@@ -151,6 +152,8 @@ export class SessionManager {
       this.batcher.setSession(null);
       this.sessionId = null;
     }
+    // 終了後のチャレンジ nudge delta で elapsedMs が伸び続けないようにする。
+    this.sessionStartMs = 0;
     if (announce) this.setStatus({ state: 'ended', reason });
   }
 
@@ -364,6 +367,14 @@ export class SessionManager {
 
   /** Only sent when a threshold state actually changes — not on every tick. */
   private computeMissions(): MissionProgress[] | null {
+    // セッション外では計算しない(従来は delta 自体が出なかった状況)。チャレンジの
+    // nudge delta にゼロリセットされたミッションを相乗りさせないため。
+    if (this.sessionId == null) return null;
+    // チャレンジのボタン連打が pushDelta を高頻度で呼んでも、同期 SQL
+    // (getMissionInputs)の実行は tick 間隔に抑える。
+    const t = Date.now();
+    if (t - this.lastMissionsCheckMs < 400) return null;
+    this.lastMissionsCheckMs = t;
     try {
       const cfg = this.deps.getMissionConfig();
       const inputs = this.deps.store.getMissionInputs(cfg, this.sessionId);

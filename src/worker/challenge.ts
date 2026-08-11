@@ -21,6 +21,14 @@ export class ChallengeEngine {
   private nextEffectId = 1;
   /** フォロー妨害はチャレンジ1回につきユーザー1度だけ(付け外しスパム対策)。 */
   private seenFollowers = new Set<UserId>();
+  /**
+   * ギフトの msgId 重複排除。手動での停止→再接続は processInitialData: true で
+   * バックログを再配信するため(adapter.ts 参照)、これが無いと直前のギフトが
+   * 二重適用される。start/reset でも消さない — 再開直後に再配信された古い
+   * ギフトは新しいランにも数えてはいけない。
+   */
+  private seenGiftMsgIds = new Set<string>();
+  private seenGiftMsgIdOrder: string[] = [];
   /** 生成直後は true — 起動後の最初の delta で初期状態をモニターへ配るため。 */
   private dirty = true;
 
@@ -92,17 +100,26 @@ export class ChallengeEngine {
       if (cfg.followStep <= 0) return false;
       this.value += cfg.followStep;
       this.stats.follows++;
+      // atMs は e.tsMs(TikTokサーバ時刻)ではなくローカル時計。モニターの
+      // 「5秒より古い演出はスキップ」判定と同じ時計で比較させるため。
       this.pushEffect({
         kind: 'follow',
         amount: cfg.followStep,
         nickname: e.viewer.nickname ?? e.viewer.displayId,
-        atMs: e.tsMs,
+        atMs: this.now(),
       });
       this.dirty = true;
       return true;
     }
 
     if (e.kind === 'gift') {
+      // 再接続バックログの二重適用ガード(DB の INSERT OR IGNORE と同じ役割)。
+      if (this.seenGiftMsgIds.has(e.msgId)) return false;
+      this.seenGiftMsgIds.add(e.msgId);
+      this.seenGiftMsgIdOrder.push(e.msgId);
+      while (this.seenGiftMsgIdOrder.length > 512) {
+        this.seenGiftMsgIds.delete(this.seenGiftMsgIdOrder.shift()!);
+      }
       // e.diamonds は normalize.ts が diamondEach × repeatCount を一度だけ計算した
       // 確定値。ここでは絶対に再計算しない(全体規約)。
       const m = matchGiftRule(cfg, { canonical: e.canonical, giftId: e.giftId, diamonds: e.diamonds });
@@ -118,9 +135,9 @@ export class ChallengeEngine {
         ...(e.giftName ? { giftName: e.giftName } : {}),
         ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
         diamonds: e.diamonds,
-        atMs: e.tsMs,
+        atMs: this.now(),
       });
-      this.maybeAchieve(e.tsMs);
+      this.maybeAchieve(this.now());
       this.dirty = true;
       return true;
     }
@@ -128,15 +145,16 @@ export class ChallengeEngine {
     return false;
   }
 
-  /** 設定変更の反映。未開始(リセット直後)のときだけ初期値を差し替える。 */
+  /**
+   * 設定変更の反映。値の差し替えは未開始(リセット直後)のときだけだが、
+   * dirty は常に立てる — get() が設定から生で読む title/initialValue の変更を
+   * 次の delta でモニターへ届けるため(呼び出し元は実差分時のみ呼ぶ)。
+   */
   onConfigChanged(): void {
     if (this.startedMs === null && this.status === 'idle') {
-      const next = this.getConfig().initialValue;
-      if (next !== this.value) {
-        this.value = next;
-        this.dirty = true;
-      }
+      this.value = this.getConfig().initialValue;
     }
+    this.dirty = true;
   }
 
   // ── スナップショット ─────────────────────────────────────────────────────

@@ -213,6 +213,27 @@ describe('ChallengeEngine — 状態機械', () => {
     expect(s.stats.giftDown).toBe(60);
   });
 
+  it('同一 msgId のギフトは二重適用しない(手動再接続のバックログ再配信)', () => {
+    const e = engine(cfg({ initialValue: 1000 }));
+    e.start();
+    const g = gift({ diamonds: 50 });
+    expect(e.handleEvent(g)).toBe(true);
+    expect(e.handleEvent(g)).toBe(false);
+    expect(e.get().value).toBe(1050);
+    expect(e.get().stats.giftUp).toBe(50);
+  });
+
+  it('reset を跨いでも同一 msgId のギフトは数えない(古いバックログは新ランに入れない)', () => {
+    const e = engine(cfg({ initialValue: 1000 }));
+    e.start();
+    const g = gift({ diamonds: 50 });
+    e.handleEvent(g);
+    e.reset();
+    e.start();
+    expect(e.handleEvent(g)).toBe(false);
+    expect(e.get().value).toBe(1000);
+  });
+
   it('達成後は follow / gift も無効(凍結)', () => {
     const e = engine(cfg({ initialValue: 1 }));
     e.start();
@@ -275,6 +296,18 @@ describe('ChallengeEngine — 状態機械', () => {
     // reset 後は同じユーザーのフォローがまた妨害になる
     e.start();
     expect(e.handleEvent(follow('a'))).toBe(true);
+  });
+
+  it('onConfigChanged は running 中でも dirty を立てる(タイトル変更の即時反映)', () => {
+    const c = cfg({ initialValue: 100 });
+    const e = engine(c);
+    e.start();
+    e.drainIfChanged();
+    c.title = '新タイトル';
+    e.onConfigChanged();
+    const drained = e.drainIfChanged();
+    expect(drained?.title).toBe('新タイトル');
+    expect(drained?.value).toBe(100); // running 中は値は差し替えない
   });
 
   it('onConfigChanged は未開始のときだけ initialValue を差し替える', () => {

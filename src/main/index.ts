@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron';
 import type { AppSettings, CsvExportSpec } from '@shared/dto';
 import { CH_MONITOR_STATE, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
+import { validateChallengeConfig } from '@shared/challenge';
 import { loadSettings, needsWorkerRestart, saveSettings } from './boot-settings';
 import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
 import { closeMonitorWindow, getMonitorWindow, openMonitorWindow, repositionMonitor } from './monitor-window';
@@ -74,6 +75,15 @@ function syncVisibility(): void {
 }
 
 function openMonitor(): void {
+  // 冪等化: 開いている窓に対してリスナーを積み増さない(重複 open で
+  // did-finish-load ごとにポートが多重配線され、worker 側の番犬がメイン窓の
+  // ポートまで閉じ得る)。
+  const existing = getMonitorWindow();
+  if (existing) {
+    existing.focus();
+    notifyMonitorState();
+    return;
+  }
   const mon = openMonitorWindow(
     join(__dirname, '../preload/index.js'),
     settings.challenge.monitorDisplayId,
@@ -150,6 +160,9 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
       case 'cfg.set': {
         const prev = settings;
         const next: AppSettings = { ...settings, ...(req.params as Partial<AppSettings>) };
+        // 起動時(loadSettings)と同じ防御をこの経路にも — UI から来た値でも
+        // clamp してからエンジンに渡す(pressStep 負値などが素通りしないように)。
+        next.challenge = validateChallengeConfig(next.challenge);
         const restart = needsWorkerRestart(settings, next);
         settings = next;
         saveSettings(dataDir, settings);
@@ -157,6 +170,8 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
           await host?.restart(bootPayload());
         } else {
           host?.send({ t: 'settings', settings });
+          // クラッシュ自動再起動が古い設定に巻き戻らないようにペイロードも更新。
+          host?.refreshBoot(bootPayload());
         }
         // チャレンジ関連の main 側リソースを追随させる。
         syncChallengeHotkey();
@@ -334,7 +349,6 @@ async function boot(): Promise<void> {
 
   host.start(bootPayload());
   host.attachRenderer(win.webContents);
-  syncChallengeHotkey();
 
   win.on('closed', () => {
     win = null;
@@ -361,6 +375,8 @@ async function boot(): Promise<void> {
   // Re-handshake the firehose port after a renderer reload.
   win.webContents.on('did-finish-load', () => {
     if (win) host?.attachRenderer(win.webContents);
+    // ここで初回登録する — boot 直後だと登録失敗トーストが購読前に消えるため。
+    syncChallengeHotkey();
   });
 }
 

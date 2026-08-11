@@ -471,6 +471,9 @@ function ChallengeSettingsCard({
             value={cfg.hotkey}
             placeholder="ここでキーを押す(Escで解除)"
             onKeyDown={(e) => {
+              // Tab は捕獲しない — フォーカス移動を守り、保存すると OS 全域で
+              // Tab を奪うグローバルショートカットになる事故も防ぐ。
+              if (e.key === 'Tab') return;
               e.preventDefault();
               const acc = hotkeyFromEvent(e);
               if (acc !== null) onPatch({ hotkey: acc });

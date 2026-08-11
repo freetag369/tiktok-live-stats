@@ -70,7 +70,12 @@ export function MonitorView(): React.JSX.Element {
     void rpc('cfg.get', undefined).then(setCfg);
     void rpc('challenge.get', undefined).then(setChallenge);
     const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
+    // 設定(lowThreshold / loadAvatars 等)は delta に乗らないので定期再取得する。
+    const t2 = setInterval(() => void rpc('cfg.get', undefined).then(setCfg), 30_000);
+    return () => {
+      clearInterval(t);
+      clearInterval(t2);
+    };
   }, []);
 
   useEffect(() => {
@@ -86,10 +91,15 @@ export function MonitorView(): React.JSX.Element {
   useEffect(() => {
     if (!challenge) return;
     const effects = challenge.recentEffects;
+    const maxId = effects.reduce((m, e) => Math.max(m, e.id), 0);
     if (lastPlayed.current === null) {
-      lastPlayed.current = effects.reduce((m, e) => Math.max(m, e.id), 0);
+      lastPlayed.current = maxId;
       return;
     }
+    // worker 再起動で effect id が 1 から振り直されると watermark が天井に残り、
+    // 以後の演出が全て「再生済み」扱いで死ぬ。巻き戻りを検知したら追従させる
+    // (古すぎる演出は下の 5 秒ゲートが落とす)。
+    if (lastPlayed.current > maxId) lastPlayed.current = 0;
     const fresh = effects
       .filter((e) => e.id > lastPlayed.current!)
       .sort((a, b) => a.id - b.id);
