@@ -47,12 +47,11 @@ body {
   overflow: hidden;
 }
 
+/* 実寸(width/height)は MonitorView が縦横で切り替えてインライン指定する */
 .stage-scale {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 540px;
-  height: 960px;
   transform-origin: center;
 }
 
@@ -62,8 +61,8 @@ body {
   height: 100%;
   display: grid;
   grid-template-rows: auto auto 1fr auto auto auto;
-  gap: 12px;
-  padding: 22px 26px 26px;
+  gap: 8px;
+  padding: 8px 10px 10px;
   background:
     radial-gradient(ellipse at 50% 30%, rgba(40, 20, 60, 0.35), transparent 70%),
     #000;
@@ -83,7 +82,7 @@ body {
   text-align: center;
   color: var(--mon-blue);
   font-family: var(--mono);
-  font-size: 19px;
+  font-size: 28px;
   font-variant-numeric: tabular-nums;
   text-shadow: 0 0 12px rgba(55, 182, 255, 0.5);
   white-space: nowrap;
@@ -94,10 +93,10 @@ body {
 .title-banner {
   text-align: center;
   color: var(--mon-pink);
-  font-size: 50px;
+  font-size: 62px;
   font-weight: 900;
-  letter-spacing: 0.06em;
-  line-height: 1.1;
+  letter-spacing: 0.04em;
+  line-height: 1.05;
   text-shadow:
     0 0 18px rgba(255, 79, 160, 0.75),
     0 0 60px rgba(255, 79, 160, 0.35);
@@ -146,7 +145,7 @@ body {
 
 .seg-row {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   justify-content: center;
   align-items: center;
   width: 100%;
@@ -158,10 +157,10 @@ body {
  * 高さは viewBox の縦横比(100:180)から自動で決まる。
  */
 .seg-digit {
-  flex: 0 1 112px;
+  flex: 0 1 126px;
   min-width: 0;
   height: auto;
-  max-height: 320px;
+  max-height: 430px;
 }
 
 .seg {
@@ -244,7 +243,7 @@ body {
 
 .mbar {
   position: relative;
-  height: 26px;
+  height: 38px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.07);
   overflow: hidden;
@@ -273,8 +272,8 @@ body {
   inset: 0;
   display: flex;
   align-items: center;
-  padding-left: 12px;
-  font-size: 14px;
+  padding-left: 16px;
+  font-size: 21px;
   font-weight: 700;
   color: #fff;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
@@ -288,15 +287,15 @@ body {
   text-align: center;
   color: var(--fg-dim);
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: 24px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .stats-inline {
   color: var(--fg-faint);
-  font-size: 12px;
-  margin-left: 8px;
+  font-size: 16px;
+  margin-left: 10px;
 }
 
 /* ── ランキング ───────────────────────────────────────────────────────── */
@@ -321,7 +320,7 @@ body {
 
 .rank-place {
   font-weight: 900;
-  font-size: 16px;
+  font-size: 21px;
 }
 
 .rank-1 .rank-place {
@@ -341,7 +340,7 @@ body {
 }
 
 .rank-name {
-  font-size: 13px;
+  font-size: 17px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -349,14 +348,14 @@ body {
 }
 
 .rank-dia {
-  font-size: 12px;
+  font-size: 16px;
   color: var(--gold);
   font-variant-numeric: tabular-nums;
 }
 
 .rank-empty {
   color: var(--fg-faint);
-  font-size: 18px;
+  font-size: 22px;
   padding: 12px 0;
 }
 
@@ -457,7 +456,7 @@ body {
 }
 
 .float {
-  font-size: 24px;
+  font-size: 32px;
   font-weight: 900;
   padding: 3px 16px;
   border-radius: 999px;
@@ -510,6 +509,56 @@ body {
   to {
     transform: translateY(1040px) rotate(720deg);
   }
+}
+
+/* ── 横長ディスプレイ用レイアウト(1280×720 の 16:9 ステージ・2カラム) ──
+ * 縦カラムをそのまま縮小すると左右が黒帯(余白)になるため、
+ * 左=時計/タイトル/7セグ、右=バー/ランキング/経過時間 に組み替える。 */
+
+.stage-scale.landscape .monitor-root {
+  grid-template-columns: 1.3fr 1fr;
+  grid-template-rows: auto auto auto 1fr auto;
+  grid-template-areas:
+    'clock clock'
+    'title title'
+    'count bars'
+    'count ranking'
+    'count elapsed';
+  column-gap: 24px;
+  padding: 8px 14px 12px;
+}
+
+.stage-scale.landscape .clock-row {
+  grid-area: clock;
+  font-size: 26px;
+}
+
+.stage-scale.landscape .title-banner {
+  grid-area: title;
+  font-size: 58px;
+}
+
+.stage-scale.landscape .countdown {
+  grid-area: count;
+}
+
+.stage-scale.landscape .seg-digit {
+  flex: 0 1 168px;
+  max-height: 460px;
+}
+
+.stage-scale.landscape .bars {
+  grid-area: bars;
+  align-self: start;
+}
+
+.stage-scale.landscape .ranking {
+  grid-area: ranking;
+  align-self: center;
+}
+
+.stage-scale.landscape .elapsed-row {
+  grid-area: elapsed;
 }
 
 /* シェイク(妨害・大型ギフト) */

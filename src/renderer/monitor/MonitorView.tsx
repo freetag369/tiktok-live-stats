@@ -35,12 +35,15 @@ interface ConfettiPiece {
 let fxKey = 0;
 
 /**
- * 固定 9:16 ステージの設計解像度。レイアウトは全てこの座標系の px で組み、
+ * 固定ステージの設計解像度。レイアウトは全てこの座標系の px で組み、
  * ウィンドウには transform: scale() で丸ごと収める(OBS のキャンバスと同じ方式)。
  * ビューポート単位で組むと横長ディスプレイや小窓で 7 セグがはみ出すため。
+ * 縦画面は 9:16、横画面は 16:9 の別ステージ(2カラム)を使い、黒帯の余白を出さない。
  */
 const STAGE_W = 540;
 const STAGE_H = 960;
+const STAGE_LW = 1280;
+const STAGE_LH = 720;
 
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
 
@@ -63,9 +66,16 @@ export function MonitorView(): React.JSX.Element {
   const [cfg, setCfg] = useState<AppSettings | null>(null);
   const [now, setNow] = useState(() => new Date());
   const [scale, setScale] = useState(1);
+  const [landscape, setLandscape] = useState(false);
 
   useEffect(() => {
-    const fit = (): void => setScale(Math.min(window.innerWidth / STAGE_W, window.innerHeight / STAGE_H));
+    const fit = (): void => {
+      const land = window.innerWidth > window.innerHeight;
+      const w = land ? STAGE_LW : STAGE_W;
+      const h = land ? STAGE_LH : STAGE_H;
+      setLandscape(land);
+      setScale(Math.min(window.innerWidth / w, window.innerHeight / h));
+    };
     fit();
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
@@ -243,7 +253,14 @@ export function MonitorView(): React.JSX.Element {
       className="stage-viewport"
       onPointerDown={() => void rpc('challenge.press', undefined).then(setChallenge)}
     >
-    <div className="stage-scale" style={{ transform: `translate(-50%, -50%) scale(${scale})` }}>
+    <div
+      className={`stage-scale${landscape ? ' landscape' : ''}`}
+      style={{
+        width: landscape ? STAGE_LW : STAGE_W,
+        height: landscape ? STAGE_LH : STAGE_H,
+        transform: `translate(-50%, -50%) scale(${scale})`,
+      }}
+    >
     <div
       className={`monitor-root${shake ? ` ${shake.cls}` : ''}`}
       data-shake={shake?.key}
