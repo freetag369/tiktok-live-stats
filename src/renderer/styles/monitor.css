@@ -2,8 +2,11 @@
 
 /*
  * チャレンジモニター(背面ディスプレイ)専用スタイル。
- * app.css(863行のダッシュボードUI)は読み込まない — 必要なクラスだけ再定義する。
- * 背景は純黒: カメラ越しの黒浮きを抑え、部屋の「照明」フラッシュを際立たせる。
+ * app.css(ダッシュボードUI)は読み込まない — 必要なクラスだけ再定義する。
+ *
+ * レイアウトは 540×960 の固定ステージ(px)で組み、MonitorView が
+ * transform: scale() でウィンドウに丸ごと収める(OBS のキャンバス方式)。
+ * ビューポート単位(vmin/vw)で組むと横長ディスプレイや小窓で要素がはみ出す。
  */
 
 :root {
@@ -35,24 +38,35 @@ body {
   cursor: default;
 }
 
+/* ── ステージの外枠(ウィンドウ全面・黒)と縮尺 ─────────────────────── */
+
+.stage-viewport {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+.stage-scale {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 540px;
+  height: 960px;
+  transform-origin: center;
+}
+
 .monitor-root {
   position: relative;
-  height: 100dvh;
+  width: 100%;
+  height: 100%;
   display: grid;
   grid-template-rows: auto auto 1fr auto auto auto;
-  gap: 1.2vmin;
-  padding: 2.4vmin 3vmin 3vmin;
+  gap: 12px;
+  padding: 22px 26px 26px;
   background:
     radial-gradient(ellipse at 50% 30%, rgba(40, 20, 60, 0.35), transparent 70%),
     #000;
-}
-
-/* 横置きディスプレイでも破綻しないよう中央に縦長カラムを置く */
-@media (orientation: landscape) {
-  .monitor-root {
-    max-width: calc(100dvh * 9 / 16 + 12vmin);
-    margin: 0 auto;
-  }
 }
 
 .idle-hint {
@@ -60,7 +74,7 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--fg-faint);
-  font-size: 3vmin;
+  font-size: 22px;
 }
 
 /* ── 時計 ─────────────────────────────────────────────────────────────── */
@@ -69,9 +83,10 @@ body {
   text-align: center;
   color: var(--mon-blue);
   font-family: var(--mono);
-  font-size: 3.2vmin;
+  font-size: 19px;
   font-variant-numeric: tabular-nums;
   text-shadow: 0 0 12px rgba(55, 182, 255, 0.5);
+  white-space: nowrap;
 }
 
 /* ── タイトル ─────────────────────────────────────────────────────────── */
@@ -79,7 +94,7 @@ body {
 .title-banner {
   text-align: center;
   color: var(--mon-pink);
-  font-size: 8.5vmin;
+  font-size: 50px;
   font-weight: 900;
   letter-spacing: 0.06em;
   line-height: 1.1;
@@ -113,6 +128,7 @@ body {
   align-items: center;
   justify-content: center;
   min-height: 0;
+  overflow: hidden;
   animation: punch 180ms ease-out;
 }
 
@@ -130,16 +146,22 @@ body {
 
 .seg-row {
   display: flex;
-  gap: 1.6vmin;
+  gap: 10px;
   justify-content: center;
+  align-items: center;
   width: 100%;
   max-height: 100%;
 }
 
+/*
+ * 桁は縮められる(flex-shrink)ので、桁数が増えてもステージ幅に必ず収まる。
+ * 高さは viewBox の縦横比(100:180)から自動で決まる。
+ */
 .seg-digit {
-  width: min(19vw, 30vmin);
+  flex: 0 1 112px;
+  min-width: 0;
   height: auto;
-  flex: 0 1 auto;
+  max-height: 320px;
 }
 
 .seg {
@@ -148,7 +170,7 @@ body {
 
 .seg.on {
   fill: var(--seg-on);
-  filter: drop-shadow(0 0 1.4vmin var(--seg-glow));
+  filter: drop-shadow(0 0 10px var(--seg-glow));
 }
 
 /* 残数わずか: 明滅して緊張感を出す */
@@ -170,7 +192,7 @@ body {
 
 .countdown.clear .seg.on {
   fill: var(--gold);
-  filter: drop-shadow(0 0 2vmin rgba(255, 197, 66, 0.8));
+  filter: drop-shadow(0 0 14px rgba(255, 197, 66, 0.8));
   animation: lowblink 0.6s steps(2, jump-none) 8;
 }
 
@@ -180,7 +202,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14vmin;
+  font-size: 84px;
   font-weight: 900;
   color: var(--gold);
   text-shadow:
@@ -206,23 +228,23 @@ body {
 
 .idle-note {
   position: absolute;
-  bottom: 2vmin;
+  bottom: 10px;
   width: 100%;
   text-align: center;
   color: var(--fg-faint);
-  font-size: 2.4vmin;
+  font-size: 14px;
 }
 
 /* ── バー ─────────────────────────────────────────────────────────────── */
 
 .bars {
   display: grid;
-  gap: 1.4vmin;
+  gap: 12px;
 }
 
 .mbar {
   position: relative;
-  height: 4.6vmin;
+  height: 26px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.07);
   overflow: hidden;
@@ -251,12 +273,13 @@ body {
   inset: 0;
   display: flex;
   align-items: center;
-  padding-left: 2vmin;
-  font-size: 2.6vmin;
+  padding-left: 12px;
+  font-size: 14px;
   font-weight: 700;
   color: #fff;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* ── 配信時間 ─────────────────────────────────────────────────────────── */
@@ -265,14 +288,15 @@ body {
   text-align: center;
   color: var(--fg-dim);
   font-family: var(--mono);
-  font-size: 2.8vmin;
+  font-size: 16px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .stats-inline {
   color: var(--fg-faint);
-  font-size: 2.2vmin;
-  margin-left: 1.5vmin;
+  font-size: 12px;
+  margin-left: 8px;
 }
 
 /* ── ランキング ───────────────────────────────────────────────────────── */
@@ -280,7 +304,7 @@ body {
 .ranking {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 2vmin;
+  gap: 12px;
   align-items: start;
 }
 
@@ -288,8 +312,8 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.8vmin;
-  padding: 1.6vmin 1vmin;
+  gap: 5px;
+  padding: 10px 6px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.05);
   min-width: 0;
@@ -297,7 +321,7 @@ body {
 
 .rank-place {
   font-weight: 900;
-  font-size: 2.8vmin;
+  font-size: 16px;
 }
 
 .rank-1 .rank-place {
@@ -317,7 +341,7 @@ body {
 }
 
 .rank-name {
-  font-size: 2.2vmin;
+  font-size: 13px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -325,15 +349,15 @@ body {
 }
 
 .rank-dia {
-  font-size: 2.1vmin;
+  font-size: 12px;
   color: var(--gold);
   font-variant-numeric: tabular-nums;
 }
 
 .rank-empty {
   color: var(--fg-faint);
-  font-size: 3vmin;
-  padding: 2vmin 0;
+  font-size: 18px;
+  padding: 12px 0;
 }
 
 /* Avatar(common.tsx)が使う2クラスだけ再定義 */
@@ -352,10 +376,10 @@ body {
   font-weight: 700;
 }
 
-/* ── 演出レイヤ ───────────────────────────────────────────────────────── */
+/* ── 演出レイヤ(ステージ内に重ねる) ─────────────────────────────────── */
 
 .fx-layer {
-  position: fixed;
+  position: absolute;
   inset: 0;
   pointer-events: none;
   overflow: hidden;
@@ -429,13 +453,13 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.6vmin;
+  gap: 4px;
 }
 
 .float {
-  font-size: 4.2vmin;
+  font-size: 24px;
   font-weight: 900;
-  padding: 0.4vmin 2.4vmin;
+  padding: 3px 16px;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.55);
   animation: floatup 1.4s ease-out forwards;
@@ -457,7 +481,7 @@ body {
 
 @keyframes floatup {
   0% {
-    transform: translateY(2vmin);
+    transform: translateY(12px);
     opacity: 0;
   }
   15% {
@@ -468,7 +492,7 @@ body {
     opacity: 1;
   }
   100% {
-    transform: translateY(-8vmin);
+    transform: translateY(-48px);
     opacity: 0;
   }
 }
@@ -476,7 +500,7 @@ body {
 /* 紙吹雪 */
 .confetti {
   position: absolute;
-  top: -4vmin;
+  top: -24px;
   display: block;
   border-radius: 2px;
   animation: fall linear forwards;
@@ -484,7 +508,7 @@ body {
 
 @keyframes fall {
   to {
-    transform: translateY(115dvh) rotate(720deg);
+    transform: translateY(1040px) rotate(720deg);
   }
 }
 

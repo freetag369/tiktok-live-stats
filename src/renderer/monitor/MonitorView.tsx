@@ -34,6 +34,14 @@ interface ConfettiPiece {
 
 let fxKey = 0;
 
+/**
+ * 固定 9:16 ステージの設計解像度。レイアウトは全てこの座標系の px で組み、
+ * ウィンドウには transform: scale() で丸ごと収める(OBS のキャンバスと同じ方式)。
+ * ビューポート単位で組むと横長ディスプレイや小窓で 7 セグがはみ出すため。
+ */
+const STAGE_W = 540;
+const STAGE_H = 960;
+
 const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
 
 function clockText(d: Date): { time: string; date: string } {
@@ -54,6 +62,14 @@ export function MonitorView(): React.JSX.Element {
   const { challenge, totals, sessionId, version } = useLive();
   const [cfg, setCfg] = useState<AppSettings | null>(null);
   const [now, setNow] = useState(() => new Date());
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const fit = (): void => setScale(Math.min(window.innerWidth / STAGE_W, window.innerHeight / STAGE_H));
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
 
   // 演出レイヤの揮発状態(store は汚さない)。
   const lastPlayed = useRef<number | null>(null);
@@ -203,7 +219,7 @@ export function MonitorView(): React.JSX.Element {
   }, [baseRank, version]);
 
   if (!challenge) {
-    return <div className="monitor-root idle-hint">読み込み中…</div>;
+    return <div className="stage-viewport idle-hint">読み込み中…</div>;
   }
 
   const lowThreshold = cfg?.challenge.lowThreshold ?? 10;
@@ -220,10 +236,17 @@ export function MonitorView(): React.JSX.Element {
   ].join(' ');
 
   return (
+    // stage-viewport がウィンドウ全面、stage-scale が 540×960 の固定ステージを
+    // 中央に scale で収める。shake は内側の monitor-root に掛ける(外側に掛けると
+    // keyframes の transform が scale を上書きして一瞬拡大が外れる)。
+    <div
+      className="stage-viewport"
+      onPointerDown={() => void rpc('challenge.press', undefined).then(setChallenge)}
+    >
+    <div className="stage-scale" style={{ transform: `translate(-50%, -50%) scale(${scale})` }}>
     <div
       className={`monitor-root${shake ? ` ${shake.cls}` : ''}`}
       data-shake={shake?.key}
-      onPointerDown={() => void rpc('challenge.press', undefined).then(setChallenge)}
       onAnimationEnd={(e) => {
         if (e.target === e.currentTarget) setShake(null);
       }}
@@ -314,6 +337,8 @@ export function MonitorView(): React.JSX.Element {
           />
         ))}
       </div>
+    </div>
+    </div>
     </div>
   );
 }
