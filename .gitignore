@@ -1,0 +1,10 @@
+node_modules/
+out/
+release/
+release-next/
+captures/
+*.local
+.DS_Store
+Thumbs.db
+tsconfig*.tsbuildinfo
+THIRD-PARTY-NOTICES.md

@@ -1,0 +1,5 @@
+{"o":-1,"meta":{"note":"msgId欠落: 合成キーが決定論的で、再生しても増えないこと"}}
+{"o":100,"type":"WebcastChatMessage","data":{"common":{"createTime":"1785240000"},"user":{"id":"3","idStr":"3","displayId":"h_3","nickname":"user3","secUid":"MS4wLjABAAAA3","avatarThumb":{"urlList":["https://p16.tiktokcdn.com/3.webp"]},"badgeList":[]},"content":"msgIdなし"}}
+{"o":150,"type":"WebcastChatMessage","data":{"common":{"createTime":"1785240000"},"user":{"id":"3","idStr":"3","displayId":"h_3","nickname":"user3","secUid":"MS4wLjABAAAA3","avatarThumb":{"urlList":["https://p16.tiktokcdn.com/3.webp"]},"badgeList":[]},"content":"別の内容"}}
+{"o":100,"type":"WebcastChatMessage","data":{"common":{"createTime":"1785240000"},"user":{"id":"3","idStr":"3","displayId":"h_3","nickname":"user3","secUid":"MS4wLjABAAAA3","avatarThumb":{"urlList":["https://p16.tiktokcdn.com/3.webp"]},"badgeList":[]},"content":"msgIdなし"}}
+{"o":150,"type":"WebcastChatMessage","data":{"common":{"createTime":"1785240000"},"user":{"id":"3","idStr":"3","displayId":"h_3","nickname":"user3","secUid":"MS4wLjABAAAA3","avatarThumb":{"urlList":["https://p16.tiktokcdn.com/3.webp"]},"badgeList":[]},"content":"別の内容"}}

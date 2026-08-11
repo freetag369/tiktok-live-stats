@@ -1,0 +1,22 @@
+{
+  "_note": "ギフト名は言語設定で変わり、同じ名前で別 ID・別ダイヤ数のギフトも存在します（例: Finger Heart は 5 と 10 の 2 種類）。そのため giftId→ダイヤ数は絶対にハードコードせず、実イベントから gift_catalog に自己登録します。ここにあるのは『名寄せ』のためのヒントだけです。",
+  "_heartMe": "7934 は実配信で受領を確認済み（1ダイヤ / gift_type 4）。未知の ID が来ても nameRules で自動的に heart_me へ名寄せされます。",
+  "idAliases": {
+    "7934": "heart_me"
+  },
+  "nameRules": [
+    { "canonical": "heart_me", "match": ["heart me", "ハートミー", "heartme"] },
+    { "canonical": "rose", "match": ["rose", "バラ", "ローズ"] },
+    { "canonical": "tiktok", "match": ["tiktok"] },
+    { "canonical": "heart", "match": ["heart"] },
+    { "canonical": "finger_heart", "match": ["finger heart", "フィンガーハート"] },
+    { "canonical": "gg", "match": ["gg"] },
+    { "canonical": "ice_cream", "match": ["ice cream cone", "アイスクリーム"] },
+    { "canonical": "perfume", "match": ["perfume", "香水"] },
+    { "canonical": "doughnut", "match": ["doughnut", "donut", "ドーナツ"] },
+    { "canonical": "hand_hearts", "match": ["hand hearts"] },
+    { "canonical": "sunglasses", "match": ["sunglasses"] },
+    { "canonical": "lion", "match": ["lion", "ライオン"] },
+    { "canonical": "universe", "match": ["universe", "ユニバース"] }
+  ]
+}

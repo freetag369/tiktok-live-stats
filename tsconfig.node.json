@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["node", "electron-vite/node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["src/shared/*"],
+      "@main/*": ["src/main/*"],
+      "@worker/*": ["src/worker/*"]
+    },
+    "tsBuildInfoFile": "./tsconfig.node.tsbuildinfo"
+  },
+  "include": [
+    "src/main/**/*.ts",
+    "src/worker/**/*.ts",
+    "src/shared/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.mjs",
+    "electron.vite.config.ts",
+    "vite.worker.config.ts",
+    "vitest.config.ts"
+  ]
+}

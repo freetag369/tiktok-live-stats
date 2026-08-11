@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "sourceNote": "TikTok は報酬条件を改定します（直近の既知の変更: 2025-08-04）。数値は必ずご自身の LIVE センター／事務所の案内でご確認のうえ、このファイルを書き換えてください。",
+  "timezone": "Asia/Tokyo",
+  "dayResetHour": 0,
+  "weekStartsOn": "monday",
+  "missions": [
+    {
+      "id": "stream_25min",
+      "labelJa": "配信25分以上",
+      "scope": "session",
+      "metric": "durationMin",
+      "target": 25
+    },
+    {
+      "id": "followers_5",
+      "labelJa": "新規フォロワー5人",
+      "scope": "session",
+      "metric": "newFollowers",
+      "target": 5
+    },
+    {
+      "id": "valid_days_2",
+      "labelJa": "週間有効配信日数",
+      "scope": "week",
+      "metric": "validStreamDays",
+      "target": 2,
+      "validDay": { "minDurationMin": 25 }
+    },
+    {
+      "id": "active_fans",
+      "labelJa": "アクティブファン数",
+      "scope": "week",
+      "metric": "activeFans",
+      "target": 10,
+      "activeFan": { "windowDays": 7, "minComments": 1 }
+    },
+    {
+      "id": "daily_diamonds",
+      "labelJa": "日間ダイヤ",
+      "scope": "day",
+      "metric": "diamonds",
+      "target": 5000,
+      "pacer": true
+    }
+  ]
+}

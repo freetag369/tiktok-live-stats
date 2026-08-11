@@ -1,0 +1,81 @@
+================================================================================
+ソースコードの入手について / Written Offer for Corresponding Source
+================================================================================
+
+TikTokライブ分析 (tiktok-live-stats)
+バージョン: __VERSION__
+コミット:   __COMMIT__
+
+--------------------------------------------------------------------------------
+日本語
+--------------------------------------------------------------------------------
+
+このアプリは GNU Affero General Public License version 3 (AGPL-3.0) の条件で
+配布されています。TikTok LIVE への接続に AGPL-3.0 のライブラリ
+(tiktok-live-connector / tiktok-live-proto) を使用しており、それらをアプリ内部に
+組み込んでいるため、アプリ全体が同じライセンスになります。
+
+このアプリを受け取ったあなたには、次の権利があります。
+
+  ・自由に使用し、改変し、再配布する権利
+  ・このバイナリの元になった「対応するソースコード」を入手する権利
+
+■ ソースコードの入手方法（3つのいずれか）
+
+  1. アプリ内の「設定」→「ライセンス・ソースコード」→「ソースコードを保存」
+     を押すと、この実行ファイルと同じコミットのソース一式（ZIP）を保存できます。
+
+  2. インストーラと同じ場所に置かれている
+       tiktok-live-stats-source-__VERSION__.zip
+     を使ってください。
+
+  3. 上記が手元にない場合は、このアプリを渡してくれた方に請求してください。
+     配布者にはソースコードを提供する義務があります。
+
+■ このアプリを他の人に渡すとき
+
+  同じ AGPL-3.0 の条件で渡し、上のソースアーカイブ（またはその入手方法）も
+  一緒に渡してください。これは法的な義務です。
+
+■ ソースからビルドする手順
+
+  必要なもの: Node.js 22.12 以降（24.x 推奨）、Windows 10/11 x64
+  ビルドツール (Visual Studio / Python) は不要です。
+
+    npm ci
+    npm run build:win
+
+  release/__VERSION__/ にインストーラとポータブル実行ファイルが生成されます。
+
+--------------------------------------------------------------------------------
+English
+--------------------------------------------------------------------------------
+
+This program is distributed under the GNU Affero General Public License v3.0.
+It links (by bundling) the AGPL-3.0 libraries tiktok-live-connector and
+tiktok-live-proto, so the whole work is licensed under the AGPL-3.0.
+
+You are entitled to the Corresponding Source for the exact binary you received.
+Obtain it either from the in-app "Save source code" button, from the
+tiktok-live-stats-source-__VERSION__.zip shipped alongside the installer, or by
+requesting it from whoever gave you this program.
+
+Build from source:
+
+    npm ci
+    npm run build:win
+
+No native toolchain is required.
+
+--------------------------------------------------------------------------------
+免責 / Disclaimer
+--------------------------------------------------------------------------------
+
+これは非公式ツールです。TikTok および ByteDance とは一切関係がありません。
+TikTok の非公開プロトコルを解析して動作しているため、TikTok 側の変更により
+予告なく動作しなくなる可能性があります。利用規約に抵触する可能性もあります。
+自己責任でご利用ください。
+
+This is an UNOFFICIAL tool. It is not affiliated with, endorsed by, or connected
+to TikTok or ByteDance in any way. It relies on reverse-engineered protocols and
+may stop working at any time. Use at your own risk.

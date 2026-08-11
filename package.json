@@ -1,0 +1,50 @@
+{
+  "name": "tiktok-live-stats",
+  "version": "0.2.0",
+  "description": "TikTok LIVE 配信のリスナー履歴を PC 内に蓄積するライバー支援ツール",
+  "license": "AGPL-3.0-only",
+  "author": "tiktok-live-stats contributors",
+  "private": true,
+  "type": "commonjs",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -b --pretty",
+    "lint": "eslint .",
+    "build:worker": "vite build --config vite.worker.config.ts",
+    "watch:worker": "vite build --config vite.worker.config.ts --watch",
+    "dev": "npm run build:worker && concurrently -n worker,electron -c cyan,green \"npm:watch:worker\" \"electron-vite dev\"",
+    "build": "npm run typecheck && npm run build:worker && electron-vite build",
+    "build:win": "npm run build && electron-builder --win --x64",
+    "verify:package": "node scripts/verify-package.mjs",
+    "notices": "node scripts/gen-third-party-notices.mjs",
+    "source:zip": "node scripts/make-source-archive.mjs",
+    "release:win": "npm run build:win && npm run source:zip && npm run verify:package",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "vitest bench --run",
+    "dump:fields": "node scripts/dump-fields.mjs",
+    "replay": "node scripts/replay.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@tanstack/react-virtual": "^3.14.8",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "concurrently": "^10.0.4",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tiktok-live-connector": "2.4.3",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.7",
+    "zustand": "^5.0.14"
+  }
+}

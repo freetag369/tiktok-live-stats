@@ -1,0 +1,58 @@
+appId: com.tiktokivestats.app
+# ASCII ONLY. A multibyte productName breaks electron-builder's 7za step, and it
+# is the folder name under %APPDATA% — changing it later orphans the user's DB.
+productName: TikTokLiveStats
+copyright: Copyright (c) 2026 tiktok-live-stats contributors. Licensed under AGPL-3.0-only.
+
+directories:
+  buildResources: build
+  output: release/${version}
+
+files:
+  - out/**
+  - package.json
+  - '!**/*.{map,md,ts,tsbuildinfo}'
+
+extraResources:
+  - from: LICENSE
+    to: LICENSE
+  - from: SOURCE-OFFER.txt
+    to: SOURCE-OFFER.txt
+  - from: resources
+    to: app-resources
+
+# Nothing native to rebuild — node:sqlite is built into Electron's Node.
+npmRebuild: false
+
+asar: true
+# The worker is an ESM entry started via utilityProcess.fork. Node's ESM loader
+# resolving through Electron's asar fs patches is the single highest-risk unknown
+# in this stack, so the worker always lives outside the archive.
+asarUnpack:
+  - out/worker/**
+
+win:
+  icon: build/icon.ico
+  # Unsigned by design: Smart App Control is off on the target machine, and an OV
+  # certificate would still show SmartScreen until reputation accrues.
+  # (`sign: false` is NOT a valid option in electron-builder 26 — omitting the
+  # signing config is how you opt out.)
+  requestedExecutionLevel: asInvoker
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false # per-user install -> no UAC prompt
+  allowToChangeInstallationDirectory: true
+  shortcutName: TikTokライブ分析
+  # NEVER delete the history DB on uninstall.
+  deleteAppDataOnUninstall: false
+  license: build/license_ja.txt
+  artifactName: ${productName}-Setup-${version}.${ext}
+
+portable:
+  artifactName: ${productName}-Portable-${version}.${ext}

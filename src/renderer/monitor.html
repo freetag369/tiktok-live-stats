@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      チャレンジモニター(背面ディスプレイ用の第2ウィンドウ)。
+      CSP は index.html と同一 — 視聴者ニックネーム等の敵性テキストを描画するため。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.tiktokcdn.com https://*.tiktokcdn-us.com https://*.tiktokcdn-eu.com https://p16-sign-va.tiktokcdn.com; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>チャレンジモニター</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./monitor.tsx"></script>
+  </body>
+</html>

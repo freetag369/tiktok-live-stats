@@ -1,0 +1,35 @@
+:root {
+  --bg: #0f1116;
+  --bg-1: #151821;
+  --bg-2: #1b1f2a;
+  --bg-3: #232836;
+  --line: #2a3040;
+  --line-soft: #212636;
+
+  --fg: #e8eaf0;
+  --fg-dim: #a3aabd;
+  --fg-faint: #6f7891;
+
+  --accent: #29d6c4;
+  --accent-dim: #1a8d82;
+  --pink: #ff5c8a;
+  --gold: #ffc542;
+  --violet: #a980ff;
+  --blue: #5aa9ff;
+  --green: #4ad991;
+  --red: #ff6b6b;
+
+  --tier-0: transparent;
+  --tier-1: #5aa9ff;
+  --tier-2: #a980ff;
+  --tier-3: #ffc542;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+  --row-h: 40px;
+
+  --shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+
+  --font: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', system-ui, sans-serif;
+  --mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+}

@@ -1,0 +1,3 @@
+{"o":-1,"meta":{"note":"改名: viewer 1行 / viewer_identity_history 2行"}}
+{"o":100,"type":"WebcastChatMessage","data":{"common":{"msgId":"a","createTime":"1785240000"},"user":{"id":"1","idStr":"1","displayId":"h_1","nickname":"旧なまえ","secUid":"MS4wLjABAAAA1","avatarThumb":{"urlList":["https://p16.tiktokcdn.com/1.webp"]},"badgeList":[]},"content":"a"}}
+{"o":2000,"type":"WebcastChatMessage","data":{"common":{"msgId":"b","createTime":"1785240002"},"user":{"id":"1","idStr":"1","displayId":"new_handle","nickname":"新なまえ","secUid":"MS4wLjABAAAA1","avatarThumb":{"urlList":["https://p16.tiktokcdn.com/1.webp"]},"badgeList":[]},"content":"b"}}
