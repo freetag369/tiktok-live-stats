@@ -963,13 +963,15 @@ pre.doc {
 .challenge-value.low {
   animation: ch-low 1s ease-in-out infinite;
 }
-/* 値が動いた向きを一瞬で伝える。減=前進(緑)、増=妨害(赤)。
+/* 値が動いた向きを一瞬で伝える。減=前進(青白)、増=妨害(緑)。
+   モニターの7セグと同じ配色 — 緑はレアな妨害にだけ出るので目を引く。
    key の付け替えで再マウントさせて毎回頭から再生する。 */
 .challenge-value.down {
   animation: ch-punch-down 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
+/* 増は少し長く保持する。モニター(segup 720ms)と体感を揃える。 */
 .challenge-value.up {
-  animation: ch-punch-up 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: ch-punch-up 720ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes ch-low {
   50% {
@@ -979,8 +981,8 @@ pre.doc {
 @keyframes ch-punch-down {
   0% {
     transform: scale(1.12);
-    color: var(--green);
-    text-shadow: 0 0 22px rgba(74, 217, 145, 0.8);
+    color: var(--ch-down);
+    text-shadow: 0 0 22px rgba(124, 196, 255, 0.8);
   }
   100% {
     transform: scale(1);
@@ -989,8 +991,13 @@ pre.doc {
 @keyframes ch-punch-up {
   0% {
     transform: scale(0.9);
-    color: #fff;
-    text-shadow: 0 0 24px rgba(255, 107, 107, 0.9);
+    color: var(--ch-up);
+    text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);
+  }
+  35% {
+    transform: scale(1);
+    color: var(--ch-up);
+    text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);
   }
   100% {
     transform: scale(1);
@@ -1011,10 +1018,10 @@ pre.doc {
   animation: ch-delta-in 1.2s ease-out forwards;
 }
 .ch-delta.up {
-  color: var(--red);
+  color: var(--ch-up);
 }
 .ch-delta.down {
-  color: var(--green);
+  color: var(--ch-down);
 }
 @keyframes ch-delta-in {
   0% {
@@ -1105,10 +1112,10 @@ pre.doc {
   font-weight: 700;
 }
 .clog.up .clog-amt {
-  color: var(--red);
+  color: var(--ch-up);
 }
 .clog.down .clog-amt {
-  color: var(--green);
+  color: var(--ch-down);
 }
 .clog.clear {
   background: rgba(255, 197, 66, 0.16);

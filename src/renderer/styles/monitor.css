@@ -9,10 +9,38 @@
  * ビューポート単位(vmin/vw)で組むと横長ディスプレイや小窓で要素がはみ出す。
  */
 
+/*
+ * セグメント色は @property で登録しておく。妨害(増加)時に keyframes から
+ * これらを一時的に緑へ差し替えるため — 未登録の custom property は補間されず
+ * カクッと切り替わる。登録しておけば赤⇄緑がなめらかに渡る。
+ */
+@property --seg-on {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #ff2d2d;
+}
+@property --seg-off {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(255, 45, 45, 0.08);
+}
+@property --seg-glow {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(255, 45, 45, 0.55);
+}
+@property --seg-dim {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(255, 45, 45, 0.35);
+}
+
 :root {
   --seg-on: #ff2d2d;
   --seg-off: rgba(255, 45, 45, 0.08);
   --seg-glow: rgba(255, 45, 45, 0.55);
+  /* lowblink の減光側。色替え中も追従させるため変数に出してある。 */
+  --seg-dim: rgba(255, 45, 45, 0.35);
   --mon-pink: #ff4fa0;
   --mon-blue: #37b6ff;
 }
@@ -146,8 +174,32 @@ body {
   animation: punchdown 220ms cubic-bezier(0.2, 1.5, 0.4, 1);
 }
 
+/*
+ * 増(妨害)は数字の色そのものを一瞬グリーンに振る。7セグは常時赤なので、
+ * 赤い残光だけでは押し戻されたことが伝わらない。色替えはセグメントの変数を
+ * 差し替えるだけなので、残数わずかの lowblink も一緒に緑で明滅する。
+ */
 .countdown.punch-up {
-  animation: punchup 260ms ease-out;
+  animation:
+    punchup 260ms ease-out,
+    segup 720ms ease-out;
+}
+
+@keyframes segup {
+  0%,
+  55% {
+    /* var(--ch-up) の実値。登録済み custom property の keyframe なので直値で置く。 */
+    --seg-on: #4ad991;
+    --seg-off: rgba(74, 217, 145, 0.1);
+    --seg-glow: rgba(74, 217, 145, 0.6);
+    --seg-dim: rgba(74, 217, 145, 0.35);
+  }
+  100% {
+    --seg-on: #ff2d2d;
+    --seg-off: rgba(255, 45, 45, 0.08);
+    --seg-glow: rgba(255, 45, 45, 0.55);
+    --seg-dim: rgba(255, 45, 45, 0.35);
+  }
 }
 
 @keyframes punchdown {
@@ -196,7 +248,7 @@ body {
 }
 
 .countdown.punch-up::after {
-  background: radial-gradient(ellipse at center, rgba(255, 59, 59, 0.34), transparent 68%);
+  background: radial-gradient(ellipse at center, rgba(74, 217, 145, 0.34), transparent 68%);
 }
 
 @keyframes punchglow {
@@ -247,7 +299,7 @@ body {
     fill: var(--seg-on);
   }
   50% {
-    fill: rgba(255, 45, 45, 0.35);
+    fill: var(--seg-dim);
   }
   100% {
     fill: var(--seg-on);
