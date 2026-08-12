@@ -4,7 +4,13 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Store } from '../../src/worker/store/index';
 import { makeNormalizeCtx, normalize } from '../../src/worker/tiktok/normalize';
-import { matchGiftClip, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS } from '@shared/challenge';
+import {
+  matchGiftClip,
+  matchGiftMini,
+  miniForSlot,
+  DEFAULT_CHALLENGE,
+  DEFAULT_GIFT_CLIPS,
+} from '@shared/challenge';
 import type { ChallengeConfig } from '@shared/dto';
 import type { NormalizedEvent } from '@shared/events';
 
@@ -152,15 +158,15 @@ describe('matchGiftClip', () => {
   });
 
   it("clip:'off' の割り当ては tier に落ちず「出さない」", () => {
-    const c = cfg({ giftClips: [{ id: 'x', canonical: 'dragon', clip: 'off' }] });
+    const c = cfg({ giftClips: [{ id: 'x', canonical: 'dragon', clip: 'off', mini: 'off' }] });
     expect(matchGiftClip(c, { canonical: 'dragon', diamonds: 26999 })).toBeNull();
   });
 
   it('上から順に最初の一致を使う(重複した canonical は先勝ち)', () => {
     const c = cfg({
       giftClips: [
-        { id: 'a', canonical: 'dragon', clip: 'palace' },
-        { id: 'b', canonical: 'dragon', clip: 'dragon' },
+        { id: 'a', canonical: 'dragon', clip: 'palace', mini: 'off' },
+        { id: 'b', canonical: 'dragon', clip: 'dragon', mini: 'off' },
       ],
     });
     expect(matchGiftClip(c, { canonical: 'dragon', diamonds: 100 })).toBe('palace');
@@ -170,5 +176,53 @@ describe('matchGiftClip', () => {
     const c = cfg({ fxClipsEnabled: false });
     expect(matchGiftClip(c, { canonical: 'dragon', diamonds: 26999 })).toBeNull();
     expect(matchGiftClip(c, { diamonds: 7000 })).toBeNull();
+  });
+});
+
+describe('matchGiftMini / miniForSlot — 簡易演出の割り当て', () => {
+  const cfg = (over: Partial<ChallengeConfig> = {}): ChallengeConfig => ({
+    ...structuredClone(DEFAULT_CHALLENGE),
+    ...over,
+  });
+
+  it('ハートミーは既定でハンマー(要望の一点)', () => {
+    expect(matchGiftMini(cfg(), { canonical: 'heart_me', diamonds: 1 })).toBe('hammer');
+  });
+
+  it('最上位16種は既定で簡易演出を出さない(大型の映像があるため)', () => {
+    for (const c of ['dragon', 'palace', 'universe_plus', 'fire_phoenix']) {
+      expect(matchGiftMini(cfg(), { canonical: c, diamonds: 26999 })).toBeNull();
+    }
+  });
+
+  it('未割り当てのギフトは miniFx の tier スロットへ落ちる', () => {
+    expect(matchGiftMini(cfg(), { canonical: 'rose', diamonds: 1 })).toBe('stamp'); // gift-t1
+    expect(matchGiftMini(cfg(), { canonical: 'rose', diamonds: 100 })).toBeNull(); // gift-t2 は off
+    expect(matchGiftMini(cfg(), { diamonds: 5000 })).toBeNull(); // gift-t4 は off
+  });
+
+  it('tier スロットを変えると未割り当てギフト全体に効く', () => {
+    const c = cfg({ miniFx: { ...DEFAULT_CHALLENGE.miniFx, 'gift-t4': 'shock' } });
+    expect(matchGiftMini(c, { diamonds: 9999 })).toBe('shock');
+    // canonical 指定がある行は影響を受けない
+    expect(matchGiftMini(c, { canonical: 'dragon', diamonds: 9999 })).toBeNull();
+  });
+
+  it('フォローといいねはスロットから引く', () => {
+    expect(miniForSlot(cfg(), 'follow')).toBe('hammer');
+    expect(miniForSlot(cfg(), 'like')).toBe('shock');
+    expect(miniForSlot(cfg(), 'press')).toBeNull(); // 既定 off
+  });
+
+  it('miniFxEnabled=false なら常に null', () => {
+    const c = cfg({ miniFxEnabled: false });
+    expect(matchGiftMini(c, { canonical: 'heart_me', diamonds: 1 })).toBeNull();
+    expect(miniForSlot(c, 'follow')).toBeNull();
+  });
+
+  it('映像クリップと簡易演出は独立に決まる(ハートミーは両方出る)', () => {
+    const c = cfg();
+    expect(matchGiftClip(c, { canonical: 'heart_me', diamonds: 1 })).toBe('gift-t1');
+    expect(matchGiftMini(c, { canonical: 'heart_me', diamonds: 1 })).toBe('hammer');
   });
 });

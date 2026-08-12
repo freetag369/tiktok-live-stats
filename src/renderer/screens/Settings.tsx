@@ -8,7 +8,13 @@ import type {
 } from '@shared/dto';
 import { bytes, num } from '@shared/format';
 import { formatDateJa } from '@shared/time';
-import { CHALLENGE_SE_SLOTS, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS } from '@shared/challenge';
+import {
+  CHALLENGE_MINI_IDS,
+  CHALLENGE_SE_SLOTS,
+  DEFAULT_CHALLENGE,
+  DEFAULT_GIFT_CLIPS,
+  DEFAULT_MINI_FX,
+} from '@shared/challenge';
 import { DEFAULT_SCORING } from '@shared/scoring';
 import { rpc, useQuery } from '../ipc/client';
 import { go, setSettings, toast, useUi } from '../state/uiStore';
@@ -401,6 +407,13 @@ function W({ label, v, on }: { label: string; v: number; on: (n: number) => void
 let ruleSeq = 0;
 let clipSeq = 0;
 
+/** 簡易演出の表示名。id は shared/challenge.ts の CHALLENGE_MINI_IDS と一致させる。 */
+const MINI_LABELS: Record<string, string> = {
+  hammer: 'ピコピコハンマー(叩く)',
+  stamp: 'ハンコ(+N がドン)',
+  shock: '集中線(最軽量)',
+};
+
 /**
  * 同梱の演出クリップが用意されているギフトの表示名。ここに無い canonical も
  * 自由に追加できる(入力欄に直接書く)ので、あくまで既定行のラベル用。
@@ -497,6 +510,17 @@ function GiftClipsSection({
                 >
                   ▶
                 </button>
+                <label className="field" style={{ width: 168 }}>
+                  簡易演出
+                  <select value={c.mini} onChange={(e) => patchClip(i, { mini: e.target.value })}>
+                    <option value="off">出さない</option>
+                    {CHALLENGE_MINI_IDS.map((m) => (
+                      <option key={m} value={m}>
+                        {MINI_LABELS[m] ?? m}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
               <button
                 className="btn small danger"
@@ -513,7 +537,7 @@ function GiftClipsSection({
                 onPatch({
                   giftClips: [
                     ...cfg.giftClips,
-                    { id: `clip-${Date.now().toString(36)}-${clipSeq++}`, canonical: '', clip: 'off' },
+                    { id: `clip-${Date.now().toString(36)}-${clipSeq++}`, canonical: '', clip: 'off', mini: 'off' },
                   ],
                 })
               }
@@ -757,6 +781,54 @@ function ChallengeSettingsCard({
         モニターを開いているときはモニター側で、閉じているときはライブ画面側で鳴ります。
         変更がモニターに反映されるまで最大30秒かかります。
       </div>
+
+      <h3 style={{ marginTop: 14 }}>簡易演出(軽量アニメ)</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={cfg.miniFxEnabled}
+          onChange={(e) => onPatch({ miniFxEnabled: e.target.checked })}
+        />
+        <span>7セグの上に軽いアニメを重ねる</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        映像クリップ(4秒)と違い一瞬で終わるので、ハートミーやいいねのような連発されるものに向いています。
+        映像とは独立に動くので、両方出すことも片方だけにすることもできます。
+      </div>
+      {cfg.miniFxEnabled ? (
+        <>
+          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', marginLeft: 22 }}>
+            {CHALLENGE_SE_SLOTS.map((slot) => (
+              <div key={slot} className="row" style={{ gap: 6, alignItems: 'center' }}>
+                <span className="faint" style={{ fontSize: 11, minWidth: 88 }}>
+                  {SE_SLOT_LABELS[slot]}
+                </span>
+                <select
+                  style={{ flex: 1 }}
+                  value={cfg.miniFx[slot]}
+                  onChange={(e) => onPatch({ miniFx: { ...cfg.miniFx, [slot]: e.target.value } })}
+                >
+                  <option value="off">出さない</option>
+                  {CHALLENGE_MINI_IDS.map((m) => (
+                    <option key={m} value={m}>
+                      {MINI_LABELS[m] ?? m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <div className="row" style={{ marginTop: 8, marginLeft: 22 }}>
+            <button className="btn small" onClick={() => onPatch({ miniFx: { ...DEFAULT_MINI_FX } })}>
+              簡易演出を既定に戻す
+            </button>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
+            ギフトは下の「ギフトごとの演出クリップ」で個別に上書きできます(ハートミーは既定でハンマー)。
+            ここのギフト(小)〜(特大)は、個別指定の無いギフトに効きます。
+          </div>
+        </>
+      ) : null}
 
       <GiftClipsSection cfg={cfg} onPatch={onPatch} />
 

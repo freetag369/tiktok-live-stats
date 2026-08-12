@@ -190,6 +190,8 @@ export class ChallengeEngine {
         ...(m.flash ? { flash: true } : {}),
         nickname: e.viewer.nickname ?? e.viewer.displayId,
         ...(e.giftName ? { giftName: e.giftName } : {}),
+        // 連打数。diamonds と同じく normalize.ts の確定値をそのまま載せる。
+        ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
         ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
         // モニターが演出クリップを選ぶのに使う(増減量の判定とは別経路)。
         ...(e.canonical ? { canonical: e.canonical } : {}),
@@ -278,8 +280,14 @@ export class ChallengeEngine {
     this.dirty = true;
   }
 
-  private pushEffect(e: Omit<ChallengeEffect, 'id'>): void {
-    this.recentEffects.unshift({ id: this.nextEffectId++, ...e });
+  /**
+   * 演出を1件積む。valueAfter はここで一括してスタンプする — 呼び出し側5箇所は
+   * すべて this.value を更新し終えてから呼ぶ規約なので、この一点で正しくなる
+   * (flushLikeFx だけは演出が遅れて出るが、値はその時点で適用済みなので
+   * 「いま何になっているか」として正しい)。
+   */
+  private pushEffect(e: Omit<ChallengeEffect, 'id' | 'valueAfter'>): void {
+    this.recentEffects.unshift({ id: this.nextEffectId++, valueAfter: this.value, ...e });
     while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
   }
 }

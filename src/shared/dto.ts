@@ -447,6 +447,11 @@ export interface ChallengeGiftClip {
   canonical: string;
   /** クリップ id(renderer/lib/fx.ts の FX_CLIPS)または 'off'(この規則では出さない)。 */
   clip: string;
+  /**
+   * 簡易演出 id(shared/challenge.ts の CHALLENGE_MINI_IDS)または 'off'。
+   * 映像クリップとは独立 — 両方出す/片方だけ、を1行で決められる。
+   */
+  mini: string;
 }
 
 export interface ChallengeConfig {
@@ -489,6 +494,13 @@ export interface ChallengeConfig {
   fxClipsEnabled: boolean;
   /** ギフト → クリップの割り当て。空なら全ギフトが tier クリップになる。 */
   giftClips: ChallengeGiftClip[];
+  /** 簡易演出(素材を持たない SVG+CSS の軽量アニメ)をモニターに出す。 */
+  miniFxEnabled: boolean;
+  /**
+   * 演出スロットごとの簡易演出の割り当て。値は CHALLENGE_MINI_IDS の id
+   * または 'off'(出さない)。ギフトは giftClips 側の mini が優先される。
+   */
+  miniFx: Record<ChallengeSeSlot, string>;
 }
 
 /** 効果音を割り当てられる演出スロット。gift は演出 tier(ダイヤ数)で分かれる。 */
@@ -515,10 +527,19 @@ export interface ChallengeEffect {
   kind: 'press' | 'follow' | 'like' | 'gift' | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
+  /**
+   * この演出を積んだ直後のカウント値。ダッシュボードの履歴ログが「何をされて
+   * いくつになったか」を1行で言い切れるようにするため、worker 側で確定した値を
+   * そのまま載せる — renderer で amount から逆算すると 0 クランプと
+   * リングバッファの取りこぼしでズレる。
+   */
+  valueAfter: number;
   /** kind='gift' で照明フラッシュ演出を伴うとき true。 */
   flash?: boolean;
   nickname?: string;
   giftName?: string;
+  /** kind='gift' の連打数。GiftEvent.repeatCount をそのまま載せる(再計算しない)。 */
+  giftCount?: number;
   giftIconUrl?: string;
   /** kind='gift' の名寄せ済み canonical。演出クリップの選択に使う。 */
   canonical?: string;
@@ -571,6 +592,40 @@ export interface ChallengeState {
   recentEffects: ChallengeEffect[];
   /** null = いいね妨害が無効(likeEvery <= 0 または likeStep <= 0)。 */
   likeGauge: ChallengeLikeGauge | null;
+}
+
+/**
+ * ダッシュボードの履歴ログ1行。
+ *
+ * recentEffects は worker 側の12件リングバッファで、目を離すと押し出されて消える。
+ * renderer は effect を watermark で拾って**こちらに積み直す** — 「残数がなぜ動いたか」を
+ * 後から辿れるのはこの配列だけ(worker にも DB にも履歴は無い)。
+ *
+ * PUSH は連打で洪水になるので、連続する press は1行に畳んで count に回数を持つ。
+ */
+export interface ChallengeLogEntry {
+  /** 先頭 effect の id。React の key 兼、畳み込み済みかの判定に使う。 */
+  id: number;
+  kind: ChallengeEffect['kind'];
+  /** 畳み込み時は最新の effect の時刻。 */
+  atMs: Ms;
+  /** 畳み込み時は合計。符号の規約は ChallengeEffect.amount と同じ。 */
+  amount: number;
+  /** 畳み込み時は最新。worker が確定させた値なので renderer では計算しない。 */
+  valueAfter: number;
+  /** press を畳み込んだ回数。2 以上のときだけ入る。 */
+  count?: number;
+  nickname?: string;
+  giftName?: string;
+  giftCount?: number;
+  giftIconUrl?: string;
+  diamonds?: number;
+  /**
+   * 取り込み時点の likeGauge スナップショット。「いいね300件で+3」と書くために要る —
+   * 表示時に現在の設定を読むと、途中で設定を変えたとき過去の行まで書き換わる。
+   */
+  likeEvery?: number;
+  likeStep?: number;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────

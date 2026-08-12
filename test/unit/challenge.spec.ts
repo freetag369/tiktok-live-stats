@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS, DEFAULT_SE_SOUNDS, matchGiftRule, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { CHALLENGE_EFFECTS_MAX, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS, DEFAULT_MINI_FX, DEFAULT_SE_SOUNDS, LIKE_FX_WINDOW_MS, matchGiftRule, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type { ChallengeConfig } from '@shared/dto';
 import type { GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
@@ -143,22 +143,47 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
     expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, giftClips: [] }).giftClips).toEqual([]);
   });
 
+  it('miniFxEnabled / miniFx: 欠損は既定、未知 id は既定に戻す', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.miniFxEnabled;
+    delete legacy.miniFx;
+    const v = validateChallengeConfig(legacy);
+    expect(v.miniFxEnabled).toBe(true);
+    expect(v.miniFx).toEqual(DEFAULT_MINI_FX);
+    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, miniFxEnabled: false }).miniFxEnabled).toBe(false);
+    const w = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      miniFx: { ...DEFAULT_MINI_FX, press: 'hammer', follow: 'off', like: 'no-such-mini' },
+    });
+    expect(w.miniFx.press).toBe('hammer');
+    expect(w.miniFx.follow).toBe('off');
+    expect(w.miniFx.like).toBe(DEFAULT_MINI_FX.like); // 未知は既定へ
+  });
+
+  it('giftClips: mini 欠損は off(既存 settings.json との後方互換)', () => {
+    const v = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      giftClips: [{ id: 'a', canonical: 'dragon', clip: 'dragon' }],
+    });
+    expect(v.giftClips[0]).toEqual({ id: 'a', canonical: 'dragon', clip: 'dragon', mini: 'off' });
+  });
+
   it('giftClips: 未知のクリップ id は off へ、canonical は小文字化、壊れた行は捨てる', () => {
     const v = validateChallengeConfig({
       ...DEFAULT_CHALLENGE,
       giftClips: [
-        { id: 'a', canonical: 'DRAGON', clip: 'dragon' },
-        { id: 'b', canonical: 'palace', clip: 'no-such-clip' },
-        { id: 'c', canonical: 'lion', clip: 'off' },
-        { id: 'd', canonical: '', clip: 'dragon' }, // canonical 空 → 捨てる
+        { id: 'a', canonical: 'DRAGON', clip: 'dragon', mini: 'off' },
+        { id: 'b', canonical: 'palace', clip: 'no-such-clip', mini: 'off' },
+        { id: 'c', canonical: 'lion', clip: 'off', mini: 'off' },
+        { id: 'd', canonical: '', clip: 'dragon', mini: 'off' }, // canonical 空 → 捨てる
         { canonical: 'pegasus', clip: 'pegasus' }, // id 無し → 捨てる
         null,
       ],
     });
     expect(v.giftClips).toEqual([
-      { id: 'a', canonical: 'dragon', clip: 'dragon' },
-      { id: 'b', canonical: 'palace', clip: 'off' },
-      { id: 'c', canonical: 'lion', clip: 'off' },
+      { id: 'a', canonical: 'dragon', clip: 'dragon', mini: 'off' },
+      { id: 'b', canonical: 'palace', clip: 'off', mini: 'off' },
+      { id: 'c', canonical: 'lion', clip: 'off', mini: 'off' },
     ]);
   });
 });
@@ -559,5 +584,53 @@ describe('ChallengeEngine — 状態機械', () => {
     c.initialValue = 900;
     e.onConfigChanged();
     expect(e.get().value).toBe(499); // running 中は不変
+  });
+});
+
+describe('ChallengeEffect.valueAfter — ダッシュボードのログが「いくつになったか」を言える', () => {
+  it('press / follow / gift のいずれも適用後の値を持つ', () => {
+    const e = engine(cfg({ initialValue: 100, pressStep: 3, followStep: 10 }));
+    e.start();
+    e.press();
+    expect(e.get().recentEffects[0]).toMatchObject({ kind: 'press', amount: -3, valueAfter: 97 });
+    e.handleEvent(follow('u1'));
+    expect(e.get().recentEffects[0]).toMatchObject({ kind: 'follow', amount: 10, valueAfter: 107 });
+    e.handleEvent(gift({ diamonds: 5, diamondEach: 5 }));
+    expect(e.get().recentEffects[0]).toMatchObject({ kind: 'gift', amount: 5, valueAfter: 112 });
+  });
+
+  it('0 クランプされた達成時は valueAfter も 0', () => {
+    const e = engine(cfg({ initialValue: 2, pressStep: 5 }));
+    e.start();
+    e.press();
+    const fx = e.get().recentEffects;
+    expect(fx.find((x) => x.kind === 'press')).toMatchObject({ amount: -5, valueAfter: 0 });
+    expect(fx.find((x) => x.kind === 'achieved')).toMatchObject({ valueAfter: 0 });
+  });
+
+  it('いいねの合算演出は「演出が出た時点の値」を持つ', () => {
+    let now = NOW;
+    const e = engine(cfg({ initialValue: 100, likeEvery: 10, likeStep: 1 }), () => now);
+    e.start();
+    e.handleEvent(like(10)); // 即時 effect: 101
+    expect(e.get().recentEffects[0]).toMatchObject({ kind: 'like', amount: 1, valueAfter: 101 });
+    // 合算窓の中の分は effect にならず、値だけ先に動く。
+    e.handleEvent(like(10));
+    expect(e.get().value).toBe(102);
+    // 窓明けで合算ぶんが1件になる。値は既に 102 なのでそれを載せる。
+    now += LIKE_FX_WINDOW_MS;
+    const drained = e.drainIfChanged();
+    expect(drained!.recentEffects[0]).toMatchObject({ kind: 'like', amount: 1, valueAfter: 102 });
+  });
+});
+
+describe('ChallengeEffect.giftCount — 連打ギフトを1行で説明できる', () => {
+  it('repeatCount が 2 以上のときだけ載る', () => {
+    const e = engine(cfg({ initialValue: 100 }));
+    e.start();
+    e.handleEvent(gift({ repeatCount: 1, diamondEach: 1, diamonds: 1 }));
+    expect(e.get().recentEffects[0]).not.toHaveProperty('giftCount');
+    e.handleEvent(gift({ repeatCount: 7, diamondEach: 1, diamonds: 7 }));
+    expect(e.get().recentEffects[0]).toMatchObject({ kind: 'gift', giftCount: 7, diamonds: 7 });
   });
 });
