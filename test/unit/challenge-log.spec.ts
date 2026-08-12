@@ -23,7 +23,7 @@ function state(effects: ChallengeEffect[], over: Partial<ChallengeState> = {}): 
     title: 'テスト',
     startedMs: NOW,
     achievedMs: null,
-    stats: { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 },
+    stats: { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, rouletteSpins: 0 },
     recentEffects: effects,
     likeGauge: null,
     result: null,
@@ -41,6 +41,34 @@ describe('appendChallengeLog — watermark', () => {
     );
     expect(r.log.map((e) => e.id)).toEqual([2, 1]);
     expect(r.lastId).toBe(2);
+  });
+
+  it('stock-full は1行になり、press とは畳まれない', () => {
+    const r = appendChallengeLog(
+      [],
+      state([
+        fx({ id: 3 }), // press
+        fx({ id: 2, kind: 'stock-full', amount: 25, valueAfter: 140 }),
+        fx({ id: 1 }), // press
+      ]),
+      null
+    );
+    expect(r.log.map((e) => e.kind)).toEqual(['press', 'stock-full', 'press']);
+    expect(r.log[1]).toMatchObject({ amount: 25, valueAfter: 140 });
+  });
+
+  it('roulette はギフト情報ごと1行になり、press とは畳まれない', () => {
+    const r = appendChallengeLog(
+      [],
+      state([
+        fx({ id: 3 }), // press
+        fx({ id: 2, kind: 'roulette', amount: 100, giftName: 'Heart Me', nickname: 'HM', diamonds: 1 }),
+        fx({ id: 1 }), // press
+      ]),
+      null
+    );
+    expect(r.log.map((e) => e.kind)).toEqual(['press', 'roulette', 'press']);
+    expect(r.log[1]).toMatchObject({ amount: 100, giftName: 'Heart Me', nickname: 'HM' });
   });
 
   it('取り込み済みの id は二度入らない(同じ state を二度受けても冪等)', () => {
@@ -168,7 +196,7 @@ describe('appendChallengeLog — 行の中身', () => {
 
   it('いいねは取り込み時点の every/step を焼き付ける(あとで設定を変えても行が化けない)', () => {
     const s = state([fx({ id: 1, kind: 'like', amount: 3, valueAfter: 103 })], {
-      likeGauge: { counter: 5, every: 100, step: 3, fills: 1 },
+      likeGauge: { counter: 5, every: 100, step: 3, fills: 1, stock: null },
     });
     const r = appendChallengeLog([], s, null);
     expect(r.log[0]).toMatchObject({ kind: 'like', likeEvery: 100, likeStep: 3 });
@@ -176,7 +204,7 @@ describe('appendChallengeLog — 行の中身', () => {
 
   it('いいね以外に likeEvery は付かない', () => {
     const s = state([fx({ id: 1, kind: 'follow', amount: 10 })], {
-      likeGauge: { counter: 5, every: 100, step: 3, fills: 1 },
+      likeGauge: { counter: 5, every: 100, step: 3, fills: 1, stock: null },
     });
     expect(appendChallengeLog([], s, null).log[0]).not.toHaveProperty('likeEvery');
   });

@@ -41,6 +41,12 @@
 | `achieved.mp4` | `achieved` | 白閃光 → 金の大輪が多段で炸裂(CLEAR 用・6秒) | `#fff3d0` / `#ffc542` |
 | `gauge-full.mp4` | (いいねゲージ満タン) | マゼンタの衝撃波 + ハートの飛散 | `#ff4fa0` |
 | `gauge-strike.mp4` | (着弾) | 白熱コア + マゼンタ衝撃波 + 放射クラック + ハートの破片 | `#ff4fa0` |
+| `stock-full.mp4` | `stock-full`(いいねストック満杯) | エメラルドグリーンの衝撃波リング + 緑の火花の放射 | `#3dff9c` |
+
+> `stock-full.mp4` は後日追加(**2026-08-12 生成** / 1280×720 / 4.04 秒 / 音声なし / `seedance_2_5` t2v)。
+> ドットUI(`monitor.css` の `.lgs-dot`、`#3dff9c`)と canvas の2発目の弾(hue 140)に
+> 色を合わせた緑版。`lib/fx.ts` は 0 件許容の glob で拾うため、このファイルを
+> 削除してもビルドは壊れず `gauge-full.mp4` が代用される。
 
 色は `styles/tokens.css` / `styles/monitor.css` の実値と、`monitor/fx/engine.ts` が使う
 色相(press=200 / follow=0 / like=338 / gift=45 / gauge=330)に合わせてプロンプトで指定した。
@@ -109,6 +115,10 @@ Seedance 2.5 の出力は**アルファチャンネルを持たない**。その
 
 ### gauge-full.mp4
 > Abstract VFX element. A magenta-pink (#FF4FA0) energy burst detonates at the center of the frame: a bright pink shockwave ring snaps outward, about thirty hot-pink sparks fly radially with glowing trails, and ten glowing pink heart-shaped particles pop upward and arc back down. Punchy and sweet, a meter-full reward pop. Locked-off static camera, no camera movement, centered composition. Additive glow on a pure black (#000000) background, high contrast, nothing else in frame: no text, no letters, no numbers, no logos, no watermark, no people, no objects, no background scenery. The effect fires once near the start and fully decays — the frame returns to pure black and stays completely black.
+
+### stock-full.mp4
+
+> VFX overlay element on a pure black background: a bright emerald green (#3dff9c) energy shockwave ring bursts outward from the center of the frame, with glowing green sparks and small light particles scattering radially, subtle green lens flare streaks, luminous neon glow, high contrast, only glowing light elements on solid black background, no text, no objects, no people, designed for screen blend mode compositing, fast punchy burst that decays smoothly
 
 ### gauge-strike.mp4
 
@@ -255,3 +265,55 @@ the start, peaks, and fully decays — the frame returns to pure black and stays
 
 > `palace.mp4` は初回投入時に Higgsfield からプリセット「IN THE DARK」を推薦されて弾かれた。
 > `declined_preset_id` にそのプリセット id を渡して再投入すると通る。
+
+---
+
+# ダイヤ帯域カットイン(`band/` サブフォルダ)
+
+ダイヤ数の帯域(1〜50 / 51〜100 / 101〜600 / 601〜1000+)で発火する
+**パチンコ大当たり風の全画面カットイン**。再生中は worker がカウンタを凍結する
+(`ChallengeEngine` の fxFreeze)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | Higgsfield / `seedance_2_5`(mode `omni_reference`、参照画像あり) |
+| 生成日 | 2026-08-12 |
+| 出力 | 1280×720 (16:9) / 24fps / H.264 / **音声トラック無し** |
+| 参照画像 | `IMAGE/IMG1〜4.jpg`(TikTok ギフト一覧のアイコン部分のスクリーンショット) |
+
+| ファイル | 帯域 | モチーフ | 尺 |
+|---|---|---|---|
+| `gift-band1.mp4` | 1〜50💎 | びっくりした魚 | 6.04 秒 |
+| `gift-band2.mp4` | 51〜100💎 | ハートポーズ | 6.04 秒 |
+| `gift-band3.mp4` | 101〜600💎 | マネーガン | 8.04 秒 |
+| `gift-band4.mp4` | 601💎〜 | 銀河 | 10.04 秒 |
+
+加工内容: **無し**(返却された mp4 をそのままリネームして格納)。
+
+> ## ⚠️ 他の全クリップと合成方法が違う — screen 禁止・`.fx-clip-opaque` 必須
+>
+> このフォルダの4本だけは**不透明フルフレーム**(黒背景発光体ではない)。
+> 「画面全体に映す・パチンコのように派手」という要件のため、あえて画面を
+> 覆う映像として生成してある。`mix-blend-mode: screen` を掛けると中間調が
+> UI と混ざって濁るだけなので、`monitor.css` の `.fx-clip-opaque`
+> (`mix-blend-mode: normal`)で重ねること。配置の制約(`.monitor-root` 直下・
+> z-index なし)は `.fx-clip` と同じ。
+>
+> 尺の権威は素材ではなく設定(`giftBandFx.bands[].durationSec`)。`MonitorView` は
+> `loop` を付けてタイマー(`fxDurationMs`)で打ち切るので、素材尺と設定秒数が
+> 多少ズレても破綻しない。
+>
+> 著作権の注意は `gift/` と同じ — TikTok 本家のギフト演出の再現ではなく、
+> アイコンの題材(魚・ハート・マネーガン・銀河)を参照した完全オリジナル。
+> 生成物の利用条件は Higgsfield の利用規約に従う。CC0 ではない。
+
+## 生成プロンプト(全文)
+
+共通ガード: パチンコ大当たり風 / 冒頭は一瞬暗く立ち上げ / 終端は白金フラッシュ /
+被写体は中央縦 1/3 に維持(縦ステージの `object-fit: cover` クロップ対策)/
+文字・ロゴ禁止。各プロンプトは `omni_reference` でアイコン画像を参照している。
+
+- **gift-band1.mp4** — Pachinko jackpot cut-in animation, opaque full-frame. The cute cartoon startled fish character from the reference image bursts into the center of the screen. Golden radial light rays, spark showers, and blue water splash particles swirling around the fish, comic speed lines, gold and cyan strobe edges. Ends with a bright white-gold flash.
+- **gift-band2.mp4** — 同上のハートポーズ版(pink and gold radial rays, floating heart particles, confetti, rotating lens flares)。
+- **gift-band3.mp4** — 同上のマネーガン版(explosive storm of golden banknotes and coins toward the camera, fireworks, camera shake, gold and green strobe edges)。
+- **gift-band4.mp4** — 同上の銀河版・最高レア(swirling nebula arms, storms of golden shooting stars, massive firework volleys, lightning bolts, rotating god-rays, rainbow-and-gold strobe edges, multiple escalating explosion waves)。

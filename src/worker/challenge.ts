@@ -8,7 +8,18 @@ import type {
   ChallengeStats,
   ChallengeStatus,
 } from '@shared/dto';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_RESULT_TOP_N, LIKE_FX_WINDOW_MS, matchGiftRule } from '@shared/challenge';
+import {
+  CHALLENGE_EFFECTS_MAX,
+  CHALLENGE_RESULT_TOP_N,
+  GIFT_FX_FREEZE_MARGIN_MS,
+  GIFT_FX_FREEZE_MAX_MS,
+  GIFT_FX_PENDING_OPS_MAX,
+  LIKE_FX_WINDOW_MS,
+  drawRouletteIndex,
+  matchGiftBand,
+  matchGiftRule,
+  matchRouletteTrigger,
+} from '@shared/challenge';
 
 /** runViewers の値。DTO(ChallengeRankRow)と違い、表示名は未確定のまま持つ。 */
 interface RunParticipant {
@@ -41,7 +52,7 @@ export class ChallengeEngine {
   private value: number;
   private startedMs: number | null = null;
   private achievedMs: number | null = null;
-  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 };
+  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, rouletteSpins: 0 };
   private recentEffects: ChallengeEffect[] = [];
   /** reset でも巻き戻さない — モニターの冪等再生(既再生 id 比較)が壊れるため。 */
   private nextEffectId = 1;
@@ -74,15 +85,36 @@ export class ChallengeEngine {
    * counter の見かけの増減(閾値跨ぎ・reset)と区別できるようにするため。
    */
   private likeFills = 0;
+  /** 点灯中のいいねストック数(0 <= likeStocks < likeStockCount)。reset で 0。 */
+  private likeStocks = 0;
+  /** ストック満杯の累計回数。likeFills と同じく単調増加で reset でも巻き戻さない。 */
+  private stockFills = 0;
   /** effect 未表示のいいね加算分(LIKE_FX_WINDOW_MS 窓の合算)。 */
   private likeFxPending = 0;
   private likeFxLastMs = 0;
+  /**
+   * ダイヤ帯域カットイン再生中のカウンタ凍結の期限。null = 凍結なし。
+   * status は変えない — 'idle' は「停止」の意味で使われており(モニターの
+   * 「一時停止中」表示)、凍結中もイベントの受付・集計は続くため別概念。
+   * 専用タイマーは持たず、イベント入口と 2Hz tick(drainIfChanged)で lazy に
+   * 解除する — STRIKE_ABORT_MS と同じ「必ず収束する安全弁」の流儀。
+   */
+  private fxFreezeUntilMs: number | null = null;
+  /**
+   * 凍結中に届いたイベントの値適用+演出の保留キュー(dedup・ランキング集計は
+   * 凍結中も即時に回る — 取りこぼしゼロの肝)。解除時に到着順で実行し、途中で
+   * 新たなバンドギフトが出たら再凍結してドレインを中断する(連続ギフトが
+   * 1本ずつ順に演出される)。
+   */
+  private pendingOps: Array<() => void> = [];
   /** 生成直後は true — 起動後の最初の delta で初期状態をモニターへ配るため。 */
   private dirty = true;
 
   constructor(
     private readonly getConfig: () => ChallengeConfig,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /** ルーレット抽選の乱数源。テストで固定値を注入する(now と同じ流儀)。 */
+    private readonly rand: () => number = Math.random
   ) {
     this.value = this.getConfig().initialValue;
   }
@@ -95,12 +127,15 @@ export class ChallengeEngine {
     this.value = cfg.initialValue;
     this.startedMs = this.now();
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
     this.seenFollowers.clear();
     this.runViewers.clear();
     this.result = null;
     this.resetLikeAccumulators();
+    // 前ラン由来の保留分を新ランへ持ち込まない(値は initialValue で始める規約)。
+    this.pendingOps = [];
+    this.fxFreezeUntilMs = null;
     this.dirty = true;
     return this.get();
   }
@@ -111,6 +146,9 @@ export class ChallengeEngine {
    * idle になるので get() はリザルトを載せない(モニターは通常画面へ戻る)。
    */
   stop(): ChallengeState {
+    // 凍結中の保留分は捨てず強制適用する — stop は「値を残す」規約のため、
+    // 受け取り済みのギフト/いいねが闇に消えると集計と値が食い違う。
+    this.forceApplyPendingOps();
     this.status = 'idle';
     // 停止後に合算待ちの演出が漏れないように捨てる(値には適用済み)。
     this.likeFxPending = 0;
@@ -119,11 +157,14 @@ export class ChallengeEngine {
   }
 
   reset(): ChallengeState {
+    // 直後に initialValue で上書きするので保留分は適用せず捨てる。
+    this.pendingOps = [];
+    this.fxFreezeUntilMs = null;
     this.status = 'idle';
     this.value = this.getConfig().initialValue;
     this.startedMs = null;
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
     this.seenFollowers.clear();
     this.runViewers.clear();
@@ -136,12 +177,16 @@ export class ChallengeEngine {
   /** idle/achieved 中のホットキーはエラーにせず無視する(配信中の誤爆対策)。 */
   press(): ChallengeState {
     if (this.status !== 'running') return this.get();
-    const step = this.getConfig().pressStep;
-    this.value = Math.max(0, this.value - step);
-    this.stats.presses++;
-    this.pushEffect({ kind: 'press', amount: -step, atMs: this.now() });
-    this.maybeAchieve(this.now());
-    this.dirty = true;
+    this.flushFxFreeze(this.now());
+    // 凍結中はキューへ(カウンタ一時停止の一貫性 — 数字は演出後に動く)。
+    this.applyOrQueue(() => {
+      const step = this.getConfig().pressStep;
+      this.value = Math.max(0, this.value - step);
+      this.stats.presses++;
+      this.pushEffect({ kind: 'press', amount: -step, atMs: this.now() });
+      this.maybeAchieve(this.now());
+      this.dirty = true;
+    });
     return this.get();
   }
 
@@ -150,26 +195,31 @@ export class ChallengeEngine {
   /** 戻り値 true = 状態が変わった(呼び出し側が即時 delta を送る)。 */
   handleEvent(e: NormalizedEvent): boolean {
     if (this.status !== 'running') return false;
+    // 凍結期限が来ていればここで解除する(2Hz tick と並ぶ lazy 解除の入口)。
+    this.flushFxFreeze(this.now());
     const cfg = this.getConfig();
 
     // フォロー = 妨害。normalize.ts の契約どおり sub === 'follow' のみで判定する
     // (libType 'follow' は実配信では来ない — WebcastSocialMessage 経由)。
+    // dedup(seenFollowers)は凍結中も即時に回し、値適用+演出だけを保留する。
     if (e.kind === 'social' && e.sub === 'follow') {
       if (this.seenFollowers.has(e.viewer.userId)) return false;
       this.seenFollowers.add(e.viewer.userId);
       if (cfg.followStep <= 0) return false;
-      this.value += cfg.followStep;
-      this.stats.follows++;
-      // atMs は e.tsMs(TikTokサーバ時刻)ではなくローカル時計。モニターの
-      // 「5秒より古い演出はスキップ」判定と同じ時計で比較させるため。
-      this.pushEffect({
-        kind: 'follow',
-        amount: cfg.followStep,
-        nickname: e.viewer.nickname ?? e.viewer.displayId,
-        atMs: this.now(),
+      return this.applyOrQueue(() => {
+        this.value += cfg.followStep;
+        this.stats.follows++;
+        // atMs は e.tsMs(TikTokサーバ時刻)ではなくローカル時計。モニターの
+        // 「5秒より古い演出はスキップ」判定と同じ時計で比較させるため。
+        // 凍結明けの実行でも this.now() を読むので、このゲートで死なない。
+        this.pushEffect({
+          kind: 'follow',
+          amount: cfg.followStep,
+          nickname: e.viewer.nickname ?? e.viewer.displayId,
+          atMs: this.now(),
+        });
+        this.dirty = true;
       });
-      this.dirty = true;
-      return true;
     }
 
     // いいね = 妨害。likeEvery 件ごとに likeStep 増える(余りは繰り越し)。
@@ -187,34 +237,52 @@ export class ChallengeEngine {
       if (add === 0) return false; // 件数ゼロのイベントで delta を出さない
 
       // イイネランキングはゲージ設定と独立に集計する(妨害 OFF でも順位は出す)。
+      // dedup と同じく凍結中も即時 — 保留するのは値適用+演出だけ。
       this.touchParticipant(e.viewer).likes += add;
 
       // ここから下は「いいね妨害」= カウント加算。無効なら値には触らない。
       if (cfg.likeEvery <= 0 || cfg.likeStep <= 0) return false;
-      this.likeCounter += add;
-      const units = Math.floor(this.likeCounter / cfg.likeEvery);
-      if (units === 0) {
-        // 端数のみ — カウント値は不変だがゲージ(likeGauge.counter)は動く。
-        // like は高頻度(全メッセージの約9割)なので即時 push はせず、
-        // dirty だけ立てて 2Hz の定期 tick(drainIfChanged)に相乗りさせる。
+      return this.applyOrQueue(() => {
+        this.likeCounter += add;
+        const units = Math.floor(this.likeCounter / cfg.likeEvery);
+        if (units === 0) {
+          // 端数のみ — カウント値は不変だがゲージ(likeGauge.counter)は動く。
+          // like は高頻度(全メッセージの約9割)なので即時 push はせず、
+          // dirty だけ立てて 2Hz の定期 tick(drainIfChanged)に相乗りさせる。
+          this.dirty = true;
+          return false;
+        }
+        this.likeCounter -= units * cfg.likeEvery;
+        this.likeFills += units;
+        const amount = units * cfg.likeStep;
+        this.value += amount; // 加算方向のみなので maybeAchieve もクランプも不要
+        this.stats.likeUp += amount;
+        this.likeFxPending += amount;
+        // 演出は合算窓ごとに1件だけ(窓内の分は flushLikeFx がまとめて出す)。
+        const nowMs = this.now();
+        if (nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
+          this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
+          this.likeFxPending = 0;
+          this.likeFxLastMs = nowMs;
+        }
+        // いいねストック: ゲージ満タン units 回ぶん点灯し、規定数で追加ボーナス(妨害)。
+        // ゲージ有効(上の早期 return を抜けた)が前提の従属機能なので、ここに置く。
+        if (cfg.likeStockCount > 0 && cfg.likeStockStep > 0) {
+          this.likeStocks += units;
+          const stockUnits = Math.floor(this.likeStocks / cfg.likeStockCount);
+          if (stockUnits > 0) {
+            this.likeStocks -= stockUnits * cfg.likeStockCount;
+            this.stockFills += stockUnits;
+            const bonus = stockUnits * cfg.likeStockStep;
+            this.value += bonus; // 加算方向のみなので maybeAchieve もクランプも不要
+            this.stats.likeStockUp += bonus;
+            // 満杯はゲージ満タンより一桁稀なイベントなので合算窓は使わず即 push。
+            this.pushEffect({ kind: 'stock-full', amount: bonus, atMs: nowMs });
+          }
+        }
         this.dirty = true;
-        return false;
-      }
-      this.likeCounter -= units * cfg.likeEvery;
-      this.likeFills += units;
-      const amount = units * cfg.likeStep;
-      this.value += amount; // 加算方向のみなので maybeAchieve もクランプも不要
-      this.stats.likeUp += amount;
-      this.likeFxPending += amount;
-      // 演出は合算窓ごとに1件だけ(窓内の分は flushLikeFx がまとめて出す)。
-      const nowMs = this.now();
-      if (nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
-        this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
-        this.likeFxPending = 0;
-        this.likeFxLastMs = nowMs;
-      }
-      this.dirty = true;
-      return true;
+        return true;
+      });
     }
 
     if (e.kind === 'gift') {
@@ -230,30 +298,85 @@ export class ChallengeEngine {
       // 効かないギフトがランキングから消える)。dirty は立てない: リザルトは
       // 達成まで誰にも見えないので、ここで 2Hz の push を増やす理由がない。
       if (e.diamonds > 0) this.touchParticipant(e.viewer).diamonds += e.diamonds;
+
+      // ギフトルーレット。トリガー一致時は giftRules/giftDefault を評価しない —
+      // ルーレットが増減の写像を置き換える(既定の perDiamond +1 との二重適用防止)。
+      // 抽選も値適用もここで即時確定し、モニターは「確定済みの出目」を演出として
+      // 遅延再生するだけ(like 着弾の据え置きと同じ解法)。連打でも1イベント=1スピン
+      // (heart_me は giftType 4 で1メッセージずつ届く。type 1 連打は normalize.ts が
+      // repeatEnd で1件に畳み済み)。
+      const rl = cfg.roulette;
+      if (rl.enabled && matchRouletteTrigger(rl, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName })) {
+        return this.applyOrQueue(() => {
+          const idx = drawRouletteIndex(rl.segments, this.rand);
+          const seg = rl.segments[idx]!;
+          const amount = rl.direction === 'sub' ? -seg.amount : seg.amount;
+          if (amount < 0) this.stats.giftDown += -amount;
+          else this.stats.giftUp += amount;
+          this.stats.rouletteSpins++;
+          this.value = Math.max(0, this.value + amount);
+          this.pushEffect({
+            kind: 'roulette',
+            amount,
+            rouletteSegments: rl.segments.map((s) => s.amount),
+            rouletteIndex: idx,
+            nickname: e.viewer.nickname ?? e.viewer.displayId,
+            ...(e.giftName ? { giftName: e.giftName } : {}),
+            ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+            ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+            diamonds: e.diamonds,
+            atMs: this.now(),
+          });
+          this.maybeAchieve(this.now()); // direction:'sub' なら 0 到達しうる
+          this.dirty = true;
+        });
+      }
+
       // e.diamonds は normalize.ts が diamondEach × repeatCount を一度だけ計算した
       // 確定値。ここでは絶対に再計算しない(全体規約)。
+      // バンド(ダイヤ帯域カットイン)も到着時点の設定で確定する — 凍結明けの
+      // 実行時に設定を読み直すと、同じギフトの判定が設定変更のタイミングで
+      // 揺れるため。増減規則に一致しないギフトでもバンド一致なら演出は出す
+      // (overFlash の「規則が空でも照明だけは出す」と同じ精神)。
       const m = matchGiftRule(cfg, { canonical: e.canonical, giftId: e.giftId, diamonds: e.diamonds });
-      if (!m) return false;
-      if (m.amount < 0) this.stats.giftDown += -m.amount;
-      else if (m.amount > 0) this.stats.giftUp += m.amount;
-      this.value = Math.max(0, this.value + m.amount);
-      this.pushEffect({
-        kind: 'gift',
-        amount: m.amount,
-        ...(m.flash ? { flash: true } : {}),
-        nickname: e.viewer.nickname ?? e.viewer.displayId,
-        ...(e.giftName ? { giftName: e.giftName } : {}),
-        // 連打数。diamonds と同じく normalize.ts の確定値をそのまま載せる。
-        ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
-        ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
-        // モニターが演出クリップを選ぶのに使う(増減量の判定とは別経路)。
-        ...(e.canonical ? { canonical: e.canonical } : {}),
-        diamonds: e.diamonds,
-        atMs: this.now(),
-      });
-      this.maybeAchieve(this.now());
-      this.dirty = true;
-      return true;
+      const band = matchGiftBand(cfg, { canonical: e.canonical, giftId: e.giftId, diamonds: e.diamonds });
+      if (!m && !band) return false;
+      const giftOp = (allowBand: boolean): void => {
+        const amount = m?.amount ?? 0;
+        if (amount < 0) this.stats.giftDown += -amount;
+        else if (amount > 0) this.stats.giftUp += amount;
+        this.value = Math.max(0, this.value + amount);
+        const atMs = this.now();
+        const b = allowBand ? band : null;
+        // 動画長ではなく設定の秒数が権威(モニターは loop + タイマーで合わせる)。
+        const fxDurationMs = b ? Math.min(b.durationSec * 1000, GIFT_FX_FREEZE_MAX_MS) : 0;
+        this.pushEffect({
+          kind: 'gift',
+          amount,
+          ...(m?.flash ? { flash: true } : {}),
+          nickname: e.viewer.nickname ?? e.viewer.displayId,
+          ...(e.giftName ? { giftName: e.giftName } : {}),
+          // 連打数。diamonds と同じく normalize.ts の確定値をそのまま載せる。
+          ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+          ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+          // モニターが演出クリップを選ぶのに使う(増減量の判定とは別経路)。
+          ...(e.canonical ? { canonical: e.canonical } : {}),
+          // カットインは effect 1件で自己完結させる(rouletteSegments と同じ流儀)。
+          ...(b ? { fxBandClip: b.clip, fxDurationMs } : {}),
+          // BGM も同じ流儀で id を effect に載せる(音量だけは cfg から読む)。
+          // 判定は到着時点の cfg — fxBandClip と同じタイミングで確定させる。
+          ...(b && b.bgm !== 'off' && cfg.giftBandFx.bgmEnabled ? { fxBandBgm: b.bgm } : {}),
+          diamonds: e.diamonds,
+          atMs,
+        });
+        // 凍結はトリガーギフト自身の値適用+push の後に張る — valueAfter 規約を
+        // 守りつつ、以降のイベントを演出明けまで保留する。
+        if (b) this.fxFreezeUntilMs = atMs + fxDurationMs + GIFT_FX_FREEZE_MARGIN_MS;
+        this.maybeAchieve(atMs);
+        this.dirty = true;
+      };
+      // キュー溢れ時はカットイン(と再凍結)を捨てて値だけ適用する(値の正しさ優先)。
+      return this.applyOrQueue(() => giftOp(true), () => giftOp(false));
     }
 
     return false;
@@ -288,17 +411,29 @@ export class ChallengeEngine {
       // 設定から生で読むので likeEvery/likeStep の変更も次の delta で同期する。
       likeGauge:
         cfg.likeEvery > 0 && cfg.likeStep > 0
-          ? { counter: this.likeCounter, every: cfg.likeEvery, step: cfg.likeStep, fills: this.likeFills }
+          ? {
+              counter: this.likeCounter,
+              every: cfg.likeEvery,
+              step: cfg.likeStep,
+              fills: this.likeFills,
+              stock:
+                cfg.likeStockCount > 0 && cfg.likeStockStep > 0
+                  ? { count: cfg.likeStockCount, filled: this.likeStocks, step: cfg.likeStockStep, fills: this.stockFills }
+                  : null,
+            }
           : null,
       // 達成中だけ載せる — running 中に載せるとアバターURL 10 本が 2Hz の delta
       // 全部に乗る。生成後は書き換えないので、コピーせず同じ参照を返してよい
       // (worker→main は postMessage の structuredClone を通る)。
       result: this.status === 'achieved' ? this.result : null,
+      fxFreezeUntilMs: this.fxFreezeUntilMs,
     };
   }
 
   /** 変化していたら1回だけ状態を返す(pushDelta の相乗り用)。 */
   drainIfChanged(): ChallengeState | null {
+    // 2Hz tick が凍結解除の安全弁 — イベントが途絶えても最大 500ms 遅れで解除する。
+    this.flushFxFreeze(this.now());
     this.flushLikeFx();
     if (!this.dirty) return null;
     this.dirty = false;
@@ -306,6 +441,58 @@ export class ChallengeEngine {
   }
 
   // ── 内部 ─────────────────────────────────────────────────────────────────
+
+  // ── カットイン凍結(fxFreeze) ────────────────────────────────────────────
+
+  private isFxFrozen(): boolean {
+    return this.fxFreezeUntilMs !== null;
+  }
+
+  /**
+   * 凍結中なら保留キューへ、そうでなければ即時実行する。
+   * 戻り値は「状態が変わったか」(op が false を返したら変わっていない)。
+   * キュー溢れ時は overflowOp(無ければ op)を即時実行する — 値の正しさ優先で
+   * 演出だけを捨てる(ギフトの場合はカットイン抜きの op が渡ってくる)。
+   */
+  private applyOrQueue(op: () => boolean | void, overflowOp?: () => boolean | void): boolean {
+    if (!this.isFxFrozen()) return op() !== false;
+    if (this.pendingOps.length >= GIFT_FX_PENDING_OPS_MAX) {
+      return (overflowOp ?? op)() !== false;
+    }
+    this.pendingOps.push(() => void op());
+    return false;
+  }
+
+  /**
+   * 凍結の期限が来ていたら解除し、保留分を到着順に適用する。ドレイン中に新たな
+   * バンドギフトが凍結を張り直したら中断する(残りは次の解除で — 連続ギフトが
+   * 1本ずつ順に演出される)。ドレイン中に 0 到達で achieved になったら残りは
+   * 捨てる — 達成後のイベントは元のタイムラインでも無視されるため。
+   */
+  private flushFxFreeze(nowMs: number): void {
+    if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) return;
+    this.fxFreezeUntilMs = null;
+    this.dirty = true;
+    while (this.pendingOps.length > 0) {
+      if (this.status !== 'running') {
+        this.pendingOps = [];
+        break;
+      }
+      this.pendingOps.shift()!();
+      if (this.fxFreezeUntilMs !== null) break;
+    }
+  }
+
+  /** stop 用の強制適用。保留分を残さず適用する(ドレイン中の再凍結は無視)。 */
+  private forceApplyPendingOps(): void {
+    this.fxFreezeUntilMs = null;
+    while (this.pendingOps.length > 0) {
+      if (this.status !== 'running') break;
+      this.pendingOps.shift()!();
+      this.fxFreezeUntilMs = null;
+    }
+    this.pendingOps = [];
+  }
 
   /** 達成演出は1回だけ。達成後は press/follow/gift すべて無効(status ガード)。 */
   private maybeAchieve(atMs: number): void {
@@ -388,6 +575,8 @@ export class ChallengeEngine {
     // seenLikeMsgIds は gift 同様クリアしない — 再開直後に再配信された古い
     // いいねを新しいランに数えないため。
     this.likeCounter = 0;
+    // stockFills(満杯累計)は巻き戻さない — likeFills と同じ単調増加規約。
+    this.likeStocks = 0;
     this.likeFxPending = 0;
     this.likeFxLastMs = 0;
   }

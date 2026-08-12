@@ -437,6 +437,35 @@ export interface ChallengeGiftRule {
   flash?: boolean;
 }
 
+/** ルーレットの出目1件。amount は表示値(絶対値)、適用方向は direction が決める。 */
+export interface ChallengeRouletteSegment {
+  amount: number;
+  /** 抽選の重み(相対値)。0 でこの出目は出ない。確率 = weight / Σweight。 */
+  weight: number;
+}
+
+/**
+ * ギフトルーレット。トリガーギフトを受けると重み付き抽選で出目を決め、
+ * カウントへ即時適用する(モニターの回転演出は確定済みの出目の遅延再生)。
+ * トリガーに一致したギフトは giftRules/giftDefault を評価しない — ルーレットが
+ * 増減の写像を置き換える(二重適用防止)。
+ */
+export interface ChallengeRouletteConfig {
+  enabled: boolean;
+  /**
+   * トリガーギフトの giftId 直接一致。ライブ経路では NormalizedEvent.canonical が
+   * 未代入(normalize.ts は名寄せ結果をイベントに載せない)なので、これが本線。
+   */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  segments: ChallengeRouletteSegment[];
+  /** 'add' = カウント増(妨害・既定) / 'sub' = カウント減(応援)。 */
+  direction: 'add' | 'sub';
+}
+
 /**
  * ギフト → 演出クリップの割り当て。上から順に評価し、最初に canonical が
  * 一致した1件を使う。一致が無ければダイヤ数の tier クリップに落ちる。
@@ -454,6 +483,52 @@ export interface ChallengeGiftClip {
   mini: string;
 }
 
+/**
+ * ダイヤ帯域カットイン(バンド演出)の1帯域。min〜max(両端含む)のダイヤ数の
+ * ギフトで clip を全画面再生し、durationSec の間カウンタを凍結する。
+ */
+export interface GiftFxBand {
+  id: string;
+  /** ダイヤ下限(inclusive)。 */
+  min: number;
+  /** ダイヤ上限(inclusive)。 */
+  max: number;
+  /** クリップ id(CHALLENGE_FX_CLIP_IDS)または 'off'(この帯域では出さない)。 */
+  clip: string;
+  /** 演出とカウンタ凍結の秒数(1〜30)。動画が短ければループで持たせる。 */
+  durationSec: number;
+  enabled: boolean;
+  /**
+   * カットイン中に流すBGM id(CHALLENGE_BAND_BGM_IDS)または 'off'。
+   * 効果音(seSounds)とは別カタログ — 長尺曲をジングルの選択肢に混ぜない。
+   */
+  bgm: string;
+}
+
+/**
+ * ダイヤ帯域カットインの設定。バンド一致時は giftClips(canonical別)より優先して
+ * 全画面カットインを再生し、再生中はカウンタを凍結する(worker の fxFreeze)。
+ */
+export interface GiftBandFxConfig {
+  enabled: boolean;
+  bands: GiftFxBand[];
+  /**
+   * 除外する giftId。既定はハートミー('7934')— 1ダイヤの高頻度ギフトで
+   * カットインを出すと画面が埋まる。ライブ経路では canonical が乗らないため
+   * giftId ベースが本線(canonical 'heart_me' は保険で常に除外)。
+   */
+  excludeGiftIds: string[];
+  /** 最上位バンドの max を超えたギフト: 'top'=最上位バンドを適用 / 'off'=バンド演出なし。 */
+  overflow: 'top' | 'off';
+  /**
+   * カットイン中のBGM。有効時はギフトジングル(gift-tN の効果音)の代わりに
+   * バンドごとの bgm を再生する(useChallengeSe が fxBandClip 付き gift を黙る)。
+   */
+  bgmEnabled: boolean;
+  /** BGMの音量 0-100。効果音の seVolume とは独立(モニターのカットイン専用)。 */
+  bgmVolume: number;
+}
+
 export interface ChallengeConfig {
   enabled: boolean;
   /** モニターの見出し。例「0まで寝ない」。 */
@@ -468,9 +543,15 @@ export interface ChallengeConfig {
   likeEvery: number;
   /** likeEvery 件ごとに増える量。 */
   likeStep: number;
+  /** ゲージ満タン◯回でストック満杯 → likeStockStep を加算(妨害)。0 で無効。 */
+  likeStockCount: number;
+  /** ストック満杯1回あたりの加算量。 */
+  likeStockStep: number;
   giftRules: ChallengeGiftRule[];
   /** どの規則にも一致しないギフトの既定動作。null なら無視。 */
   giftDefault: { mode: 'fixed' | 'perDiamond'; amount: number } | null;
+  /** ギフトルーレット。トリガー一致時は giftRules/giftDefault より優先。 */
+  roulette: ChallengeRouletteConfig;
   /** diamonds がこの値以上のギフトは規則に関係なく照明フラッシュ。null で無効。 */
   flashMinDiamonds: number | null;
   /** グローバルホットキー(Electron accelerator)。'' で無効。 */
@@ -506,6 +587,8 @@ export interface ChallengeConfig {
    * または 'off'(出さない)。ギフトは giftClips 側の mini が優先される。
    */
   miniFx: Record<ChallengeSeSlot, string>;
+  /** ダイヤ帯域カットイン。一致時は giftClips より優先(matchGiftBand)。 */
+  giftBandFx: GiftBandFxConfig;
 }
 
 /** 効果音を割り当てられる演出スロット。gift は演出 tier(ダイヤ数)で分かれる。 */
@@ -514,10 +597,13 @@ export type ChallengeSeSlot =
   | 'follow'
   | 'like'
   | 'gauge-full'
+  | 'stock-full'
   | 'gift-t1'
   | 'gift-t2'
   | 'gift-t3'
   | 'gift-t4'
+  | 'roulette'
+  | 'roulette-hit'
   | 'achieved';
 
 export type ChallengeStatus = 'idle' | 'running' | 'achieved';
@@ -530,7 +616,7 @@ export type ChallengeStatus = 'idle' | 'running' | 'achieved';
 export interface ChallengeEffect {
   id: number;
   /** 'like' は1秒窓で合算して1件にまとめるため nickname を持たない。 */
-  kind: 'press' | 'follow' | 'like' | 'gift' | 'achieved';
+  kind: 'press' | 'follow' | 'like' | 'stock-full' | 'gift' | 'roulette' | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
   /**
@@ -550,6 +636,29 @@ export interface ChallengeEffect {
   /** kind='gift' の名寄せ済み canonical。演出クリップの選択に使う。 */
   canonical?: string;
   diamonds?: number;
+  /**
+   * kind='roulette': 盤面(表示順の出目の絶対値リスト)。モニターの設定取得は
+   * 30秒ポーリングで古くなりうるため、演出は cfg からではなくここから盤面を
+   * 読む — effect 1件で自己完結させる。
+   */
+  rouletteSegments?: number[];
+  /** kind='roulette': 当選 index(rouletteSegments 内)。amount は符号適用後の実増減量。 */
+  rouletteIndex?: number;
+  /**
+   * kind='gift' でダイヤ帯域カットインが一致したときのクリップ id。
+   * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニターの設定は
+   * 30秒ポーリングで古くなりうるため、演出パラメータは cfg からではなく
+   * ここから読む。
+   */
+  fxBandClip?: string;
+  /** kind='gift': カットインの再生時間(ms)。worker の凍結時間もこれと同期。 */
+  fxDurationMs?: number;
+  /**
+   * kind='gift': カットイン中に流すBGM id。fxBandClip と同じ「effect 1件で
+   * 自己完結」の流儀(bgm 無効・'off' のときは載らない)。音量だけは cfg の
+   * giftBandFx.bgmVolume から読む(roulette-hit 等の既存前例と同じ)。
+   */
+  fxBandBgm?: string;
   atMs: Ms;
 }
 
@@ -563,6 +672,10 @@ export interface ChallengeStats {
   giftUp: number;
   /** いいねによる加算量の合計。 */
   likeUp: number;
+  /** いいねストック満杯による加算量の合計(likeUp とは別枠 — likeUp = fills×step の検算を壊さない)。 */
+  likeStockUp: number;
+  /** ルーレットの回転回数。増減量の合計は giftDown/giftUp に合算する(ギフト起因のため)。 */
+  rouletteSpins: number;
 }
 
 /**
@@ -581,6 +694,24 @@ export interface ChallengeLikeGauge {
    * reset でも巻き戻さない — モニターは前回値との比較だけで「満タン到達」を検出
    * でき、counter の増減(閾値跨ぎで増えて見える・reset で減る)と混同しない。
    */
+  fills: number;
+  /** null = ストックが無効(likeStockCount <= 0 または likeStockStep <= 0)。 */
+  stock: ChallengeLikeStock | null;
+}
+
+/**
+ * いいねストック。ゲージ満タンごとに1個点灯し、count 個で満杯 → step を加算して
+ * 点灯数はリセット。count/step を同梱する理由は ChallengeLikeGauge と同じ
+ * (30秒設定ポーリングとのスキュー防止)。
+ */
+export interface ChallengeLikeStock {
+  /** 満杯に必要なストック数(cfg.likeStockCount)。 */
+  count: number;
+  /** 点灯中のストック数(0 <= filled < count)。reset で 0 に戻る。 */
+  filled: number;
+  /** 満杯1回あたりの加算量(cfg.likeStockStep)。 */
+  step: number;
+  /** 満杯到達の累計回数。likeGauge.fills と同じ単調増加規約(reset でも巻き戻さない)。 */
   fills: number;
 }
 
@@ -638,6 +769,11 @@ export interface ChallengeState {
   likeGauge: ChallengeLikeGauge | null;
   /** CLEAR 時のリザルト。status!=='achieved' のときは常に null。 */
   result: ChallengeResult | null;
+  /**
+   * カットイン再生中のカウンタ凍結の期限(ms)。null = 凍結なし。
+   * ダッシュボードの表示・テスト用 — モニターは自前でクリップ再生中を知っている。
+   */
+  fxFreezeUntilMs?: number | null;
 }
 
 /**

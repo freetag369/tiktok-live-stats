@@ -271,7 +271,9 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   press: '🔘',
   follow: '👤',
   like: '💗',
+  'stock-full': '💚',
   gift: '🎁',
+  roulette: '🎰',
   achieved: '🏁',
 };
 
@@ -304,11 +306,17 @@ function logWhat(e: ChallengeLogEntry): string {
       const units = e.likeStep && e.likeStep > 0 ? Math.max(1, Math.round(e.amount / e.likeStep)) : 1;
       return `いいね ${num(units * e.likeEvery)}件到達`;
     }
+    case 'stock-full':
+      return 'いいねストック満杯(妨害)';
     case 'gift': {
       const name = e.giftName ?? 'ギフト';
       const cnt = e.giftCount && e.giftCount > 1 ? ` ×${num(e.giftCount)}` : '';
       const dia = e.diamonds ? ` 💎${num(e.diamonds)}` : '';
       return `${name}${cnt}${dia}`;
+    }
+    case 'roulette': {
+      const name = e.giftName ? `(${e.giftName})` : '';
+      return `ルーレット 出目${e.amount > 0 ? '+' : ''}${num(e.amount)}${name}`;
     }
     case 'achieved':
       return 'カウント 0 に到達';
@@ -318,7 +326,7 @@ function logWhat(e: ChallengeLogEntry): string {
 /** ギフトはアイコン画像、それ以外は絵文字。読み込み失敗は絵文字へ落とす。 */
 function LogIcon({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
   const [failed, setFailed] = useState(false);
-  if (e.kind === 'gift' && e.giftIconUrl && !failed) {
+  if ((e.kind === 'gift' || e.kind === 'roulette') && e.giftIconUrl && !failed) {
     return (
       <img
         className="clog-ico img"
@@ -346,9 +354,11 @@ function ChallengeLogRow({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
       ? 'PUSH'
       : e.kind === 'like'
         ? 'いいね'
-        : e.kind === 'achieved'
-          ? '達成!'
-          : (e.nickname ?? '—');
+        : e.kind === 'stock-full'
+          ? 'ストック'
+          : e.kind === 'achieved'
+            ? '達成!'
+            : (e.nickname ?? '—');
   return (
     <div className={`clog ${dir}${e.kind === 'achieved' ? ' clear' : ''}`}>
       <div className="clog-top">
@@ -366,8 +376,6 @@ function ChallengeLogRow({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
     </div>
   );
 }
-
-let punchSeq = 0;
 
 /**
  * カウントダウンチャレンジの操作カード。
@@ -403,20 +411,6 @@ function ChallengeCard(): React.JSX.Element | null {
     sounds: settings?.challenge.seSounds,
     volumes: settings?.challenge.seVolumes,
   });
-
-  // 値が動いたら1回だけ跳ねさせる(モニターの punch と同型)。punch は**消さない** —
-  // null に戻すと key が変わって数字が再マウントされ、差分バブルが消えるたびに
-  // アニメが再生されてしまう。バブル側は最後に opacity:0 で止まる。
-  const prevValue = useRef<number | null>(null);
-  const [punch, setPunch] = useState<{ key: number; diff: number } | null>(null);
-  useEffect(() => {
-    const v = challenge?.value;
-    if (v == null) return;
-    const was = prevValue.current;
-    prevValue.current = v;
-    if (was === null || was === v) return;
-    setPunch({ key: ++punchSeq, diff: v - was });
-  }, [challenge?.value]);
 
   // ホットキー(F9)・物理USBボタン・モニター窓の Space から押されたときも
   // PUSH ボタンを光らせる。press effect ではなく stats.presses を見る —
@@ -478,21 +472,12 @@ function ChallengeCard(): React.JSX.Element | null {
         </button>
       ) : null}
 
-      <div className="ch-value-wrap">
-        <div
-          key={punch?.key ?? 0}
-          className={`challenge-value${achieved ? ' done' : ''}${low ? ' low' : ''}${
-            punch ? (punch.diff > 0 ? ' up' : ' down') : ''
-          }`}
-        >
-          {num(value)}
-        </div>
-        {punch ? (
-          <span key={punch.key} className={`ch-delta ${punch.diff > 0 ? 'up' : 'down'}`}>
-            {punch.diff > 0 ? `▲+${num(punch.diff)}` : `▼${num(punch.diff)}`}
-          </span>
-        ) : null}
-      </div>
+      {/* 残数はこの1要素だけ・key は固定。以前は値が動くたびに key を付け替えて
+          再マウントし拡大アニメを流していたが、transform で合成レイヤーに昇格した
+          古いノードの描画が sticky なカードの中に残り、数字が縦に積み上がって
+          見える不具合が出た。ここはその場で書き換えるだけにして、動き・色変化・
+          差分バブル(▲+1)は持たせない。何が起きたかはログ欄が受け持つ。 */}
+      <div className={`challenge-value${achieved ? ' done' : ''}${low ? ' low' : ''}`}>{num(value)}</div>
 
       {/* 初期値→0 の進捗。妨害で初期値を超えることがあるので必ず 0 で下限を切る。 */}
       <div className="ch-prog">
@@ -563,6 +548,9 @@ function ChallengeCard(): React.JSX.Element | null {
             ♥ {num(challenge.likeGauge.counter)}/{num(challenge.likeGauge.every)} → +
             {num(challenge.likeGauge.step)}
             {challenge.likeGauge.fills > 0 ? `（満タン ${num(challenge.likeGauge.fills)}回）` : ''}
+            {challenge.likeGauge.stock
+              ? ` ${'●'.repeat(challenge.likeGauge.stock.filled)}${'○'.repeat(Math.max(0, challenge.likeGauge.stock.count - challenge.likeGauge.stock.filled))} 満杯で+${num(challenge.likeGauge.stock.step)}`
+              : ''}
           </span>
         </div>
       ) : null}
@@ -578,6 +566,11 @@ function ChallengeCard(): React.JSX.Element | null {
           {challenge.stats.likeUp > 0 ? (
             <span className="cs up">
               💗 <b>+{num(challenge.stats.likeUp)}</b>
+            </span>
+          ) : null}
+          {challenge.stats.likeStockUp > 0 ? (
+            <span className="cs up">
+              💚 <b>+{num(challenge.stats.likeStockUp)}</b>
             </span>
           ) : null}
           {challenge.stats.giftUp > 0 ? (

@@ -942,9 +942,9 @@ pre.doc {
 .ch-warn:hover {
   background: rgba(255, 197, 66, 0.22);
 }
-.ch-value-wrap {
-  position: relative;
-}
+/* 残数の数字。**アニメーションを足さないこと** — transform / opacity で合成
+   レイヤーに昇格させると、sticky な .challenge-card の中で古い描画が消えず
+   数字が縦に積み上がって見える(実機で発生)。色は状態(done)だけで表す。 */
 .challenge-value {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -963,86 +963,9 @@ pre.doc {
 .challenge-value.low {
   animation: ch-low 1s ease-in-out infinite;
 }
-/* 値が動いた向きを一瞬で伝える。減=前進(青白)、増=妨害(緑)。
-   モニターの7セグと同じ配色 — 緑はレアな妨害にだけ出るので目を引く。
-   key の付け替えで再マウントさせて毎回頭から再生する。 */
-.challenge-value.down {
-  animation: ch-punch-down 420ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-/* 増は緑をしっかり保持してから赤へ戻す。モニター(segup)と体感を揃える。 */
-.challenge-value.up {
-  animation: ch-punch-up 980ms cubic-bezier(0.22, 1, 0.36, 1);
-}
 @keyframes ch-low {
   50% {
     opacity: 0.45;
-  }
-}
-@keyframes ch-punch-down {
-  0% {
-    transform: scale(1.12);
-    color: var(--ch-down);
-    text-shadow: 0 0 22px rgba(124, 196, 255, 0.8);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-@keyframes ch-punch-up {
-  0% {
-    transform: scale(0.9);
-    color: var(--ch-up);
-    text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);
-  }
-  26% {
-    transform: scale(1);
-    color: var(--ch-up);
-    text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);
-  }
-  52% {
-    transform: scale(1);
-    color: var(--ch-up);
-    text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-/* 差分バブル。消すのではなく opacity:0 で止める — state を null に戻すと
-   数字側の key が変わって punch アニメが二度目に走ってしまう。 */
-.ch-delta {
-  position: absolute;
-  top: 2px;
-  right: 4px;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 15px;
-  font-weight: 700;
-  pointer-events: none;
-  opacity: 0;
-  animation: ch-delta-in 1.2s ease-out forwards;
-}
-.ch-delta.up {
-  color: var(--ch-up);
-}
-.ch-delta.down {
-  color: var(--ch-down);
-}
-@keyframes ch-delta-in {
-  0% {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  15% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  75% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(-6px);
   }
 }
 /* 初期値 → 0 の進捗。Bar(common.tsx)をそのまま使う。 */
@@ -1288,14 +1211,8 @@ pre.doc {
    情報は文字にも出ている。動きが苦手な環境では止める。 */
 @media (prefers-reduced-motion: reduce) {
   .challenge-value.low,
-  .challenge-value.up,
-  .challenge-value.down,
   .clog,
   .challenge-btn .hit {
-    animation: none;
-  }
-  .ch-delta {
-    opacity: 1;
     animation: none;
   }
 }
