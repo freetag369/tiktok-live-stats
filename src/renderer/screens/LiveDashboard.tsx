@@ -377,8 +377,6 @@ function ChallengeLogRow({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
   );
 }
 
-let punchSeq = 0;
-
 /**
  * カウントダウンチャレンジの操作カード。
  *
@@ -414,20 +412,6 @@ function ChallengeCard(): React.JSX.Element | null {
     volumes: settings?.challenge.seVolumes,
   });
 
-  // 値が動いたら1回だけ跳ねさせる(モニターの punch と同型)。punch は**消さない** —
-  // null に戻すと key が変わって数字が再マウントされ、差分バブルが消えるたびに
-  // アニメが再生されてしまう。バブル側は最後に opacity:0 で止まる。
-  const prevValue = useRef<number | null>(null);
-  const [punch, setPunch] = useState<{ key: number; diff: number } | null>(null);
-  useEffect(() => {
-    const v = challenge?.value;
-    if (v == null) return;
-    const was = prevValue.current;
-    prevValue.current = v;
-    if (was === null || was === v) return;
-    setPunch({ key: ++punchSeq, diff: v - was });
-  }, [challenge?.value]);
-
   // ホットキー(F9)・物理USBボタン・モニター窓の Space から押されたときも
   // PUSH ボタンを光らせる。press effect ではなく stats.presses を見る —
   // 経路を問わず必ず増えるうえ、リングバッファから押し出されても取りこぼさない。
@@ -454,8 +438,6 @@ function ChallengeCard(): React.JSX.Element | null {
   const value = challenge?.value ?? settings.challenge.initialValue;
   const initial = challenge?.initialValue ?? settings.challenge.initialValue;
   const done = Math.max(0, initial - value);
-  const lowThreshold = settings.challenge.lowThreshold;
-  const low = running && lowThreshold > 0 && value <= lowThreshold;
   const elapsedMs =
     challenge?.startedMs != null ? (challenge.achievedMs ?? Date.now()) - challenge.startedMs : null;
   const call = (m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press') =>
@@ -488,21 +470,12 @@ function ChallengeCard(): React.JSX.Element | null {
         </button>
       ) : null}
 
-      <div className="ch-value-wrap">
-        <div
-          key={punch?.key ?? 0}
-          className={`challenge-value${achieved ? ' done' : ''}${low ? ' low' : ''}${
-            punch ? (punch.diff > 0 ? ' up' : ' down') : ''
-          }`}
-        >
-          {num(value)}
-        </div>
-        {punch ? (
-          <span key={punch.key} className={`ch-delta ${punch.diff > 0 ? 'up' : 'down'}`}>
-            {punch.diff > 0 ? `▲+${num(punch.diff)}` : `▼${num(punch.diff)}`}
-          </span>
-        ) : null}
-      </div>
+      {/* 残数はこの1要素だけ・key は固定。以前は値が動くたびに key を付け替えて
+          再マウントし拡大アニメを流していたが、transform で合成レイヤーに昇格した
+          古いノードの描画が sticky なカードの中に残り、数字が縦に積み上がって
+          見える不具合が出た。ここはその場で書き換えるだけにして、動き・色変化・
+          差分バブル(▲+1)は持たせない。何が起きたかはログ欄が受け持つ。 */}
+      <div className={`challenge-value${achieved ? ' done' : ''}`}>{num(value)}</div>
 
       {/* 初期値→0 の進捗。妨害で初期値を超えることがあるので必ず 0 で下限を切る。 */}
       <div className="ch-prog">
