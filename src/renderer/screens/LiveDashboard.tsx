@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { ViewerFilter, ViewerTableRow } from '@shared/dto';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ChallengeLogEntry, ViewerFilter, ViewerTableRow } from '@shared/dto';
 import type { FeedItem } from '@shared/ipc';
 import { compact, diamondsToJpy, num } from '@shared/format';
 import { formatDurationJa, relativeDayJa } from '@shared/time';
@@ -154,6 +154,10 @@ export function LiveDashboard(): React.JSX.Element {
           <strong>入室 &amp; サマリー</strong>
         </header>
         <div className="body" style={{ padding: 10 }}>
+          {/* 進行中は sticky でここに貼り付く(challenge-card.stuck)。入室アラートは
+              最大12枚積まれるので、下に置くと配信が盛り上がるほど見えなくなる。 */}
+          <ChallengeCard />
+
           {alerts.map((a) => (
             <div
               key={`${a.kind}-${a.userId}-${a.atMs}`}
@@ -218,8 +222,6 @@ export function LiveDashboard(): React.JSX.Element {
             </div>
           ))}
 
-          <ChallengeCard />
-
           {missions.length > 0 ? (
             <div className="card" style={{ marginBottom: 10 }}>
               <h3>報酬ミッション</h3>
@@ -264,14 +266,122 @@ export function LiveDashboard(): React.JSX.Element {
   );
 }
 
+/** 履歴ログの行頭アイコン。ギフトだけは実アイコン画像に差し替わる。 */
+const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
+  press: '🔘',
+  follow: '👤',
+  like: '💗',
+  gift: '🎁',
+  achieved: '🏁',
+};
+
+function hms(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** running の間だけ1秒ごとに再描画する(経過時間の表示用)。 */
+function useNowTick(active: boolean): void {
+  const [, set] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => set((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+}
+
+/** ログ行の「何をされたか」。名前と増減量は行の上段が持つので、ここは中身だけ。 */
+function logWhat(e: ChallengeLogEntry): string {
+  switch (e.kind) {
+    case 'press':
+      return `ボタン ${num(e.count ?? 1)}回`;
+    case 'follow':
+      return 'フォロー(妨害)';
+    case 'like': {
+      if (!e.likeEvery) return 'いいね(妨害)';
+      // amount は step の倍数。何回ぶん満タンになったかを件数に戻して見せる。
+      const units = e.likeStep && e.likeStep > 0 ? Math.max(1, Math.round(e.amount / e.likeStep)) : 1;
+      return `いいね ${num(units * e.likeEvery)}件到達`;
+    }
+    case 'gift': {
+      const name = e.giftName ?? 'ギフト';
+      const cnt = e.giftCount && e.giftCount > 1 ? ` ×${num(e.giftCount)}` : '';
+      const dia = e.diamonds ? ` 💎${num(e.diamonds)}` : '';
+      return `${name}${cnt}${dia}`;
+    }
+    case 'achieved':
+      return 'カウント 0 に到達';
+  }
+}
+
+/** ギフトはアイコン画像、それ以外は絵文字。読み込み失敗は絵文字へ落とす。 */
+function LogIcon({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
+  const [failed, setFailed] = useState(false);
+  if (e.kind === 'gift' && e.giftIconUrl && !failed) {
+    return (
+      <img
+        className="clog-ico img"
+        src={e.giftIconUrl}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <span className="clog-ico" aria-hidden>
+      {LOG_ICON[e.kind]}
+    </span>
+  );
+}
+
+function ChallengeLogRow({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
+  // 符号の規約は effect と同じ: 正=増える=妨害(赤) / 負=減る=前進(緑)。
+  const dir = e.amount > 0 ? 'up' : e.amount < 0 ? 'down' : 'flat';
+  const who =
+    e.kind === 'press'
+      ? 'PUSH'
+      : e.kind === 'like'
+        ? 'いいね'
+        : e.kind === 'achieved'
+          ? '達成!'
+          : (e.nickname ?? '—');
+  return (
+    <div className={`clog ${dir}${e.kind === 'achieved' ? ' clear' : ''}`}>
+      <div className="clog-top">
+        <span className="clog-time num">{hms(e.atMs)}</span>
+        <LogIcon e={e} />
+        <span className="clog-who">{who}</span>
+        <span className="clog-amt num">
+          {e.kind === 'achieved' ? '' : e.amount > 0 ? `+${num(e.amount)}` : num(e.amount)}
+        </span>
+      </div>
+      <div className="clog-sub">
+        <span className="clog-what">{logWhat(e)}</span>
+        <span className="clog-after num">→ {num(e.valueAfter)}</span>
+      </div>
+    </div>
+  );
+}
+
+let punchSeq = 0;
+
 /**
  * カウントダウンチャレンジの操作カード。
+ *
+ * 配信者が「いま何が起きて残数がどう動いたか」を追える唯一の窓。モニター窓は
+ * 視聴者向けに派手な演出を出すが、こちらは逆に**文字で残す**のが役目 —
+ * 演出は流れて消えるが、企画中に目を離した数十秒を埋められるのはログだけ。
  *
  * 数字の即時性が命: ボタンは rpc の戻り値で自分の画面を即更新し、worker の
  * nudge delta が同時にモニター窓を更新する。両方受けても状態全量なので冪等。
  */
 function ChallengeCard(): React.JSX.Element | null {
   const challenge = useLive((s) => s.challenge);
+  const log = useLive((s) => s.challengeLog);
   const settings = useUi((s) => s.settings);
   const [monitorOpen, setMonitorOpen] = useState(false);
   const enabled = settings?.challenge.enabled ?? false;
@@ -293,59 +403,135 @@ function ChallengeCard(): React.JSX.Element | null {
     sounds: settings?.challenge.seSounds,
   });
 
-  if (!enabled || !settings) return null;
+  // 値が動いたら1回だけ跳ねさせる(モニターの punch と同型)。punch は**消さない** —
+  // null に戻すと key が変わって数字が再マウントされ、差分バブルが消えるたびに
+  // アニメが再生されてしまう。バブル側は最後に opacity:0 で止まる。
+  const prevValue = useRef<number | null>(null);
+  const [punch, setPunch] = useState<{ key: number; diff: number } | null>(null);
+  useEffect(() => {
+    const v = challenge?.value;
+    if (v == null) return;
+    const was = prevValue.current;
+    prevValue.current = v;
+    if (was === null || was === v) return;
+    setPunch({ key: ++punchSeq, diff: v - was });
+  }, [challenge?.value]);
+
+  // ホットキー(F9)・物理USBボタン・モニター窓の Space から押されたときも
+  // PUSH ボタンを光らせる。press effect ではなく stats.presses を見る —
+  // 経路を問わず必ず増えるうえ、リングバッファから押し出されても取りこぼさない。
+  const prevPresses = useRef<number | null>(null);
+  const [hit, setHit] = useState(0);
+  useEffect(() => {
+    const p = challenge?.stats.presses;
+    if (p == null) return;
+    const was = prevPresses.current;
+    prevPresses.current = p;
+    if (was === null || p <= was) return;
+    setHit((k) => k + 1);
+  }, [challenge?.stats.presses]);
 
   const st = challenge?.status ?? 'idle';
+  const running = st === 'running';
+  const achieved = st === 'achieved';
+  useNowTick(running);
+  // 新着ログは上に積まれる。ユーザーが遡っている間は追従しない。
+  const logRef = useStickyTop(log[0]?.id);
+
+  if (!enabled || !settings) return null;
+
   const value = challenge?.value ?? settings.challenge.initialValue;
+  const initial = challenge?.initialValue ?? settings.challenge.initialValue;
+  const done = Math.max(0, initial - value);
+  const lowThreshold = settings.challenge.lowThreshold;
+  const low = running && lowThreshold > 0 && value <= lowThreshold;
+  const elapsedMs =
+    challenge?.startedMs != null ? (challenge.achievedMs ?? Date.now()) - challenge.startedMs : null;
   const call = (m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press') =>
     void rpc(m, undefined).then(setChallenge);
 
-  // 直近の変動ログ。press は連打で洪水になる(数字とパンチで見えている)ので除外。
-  const fxLog = (challenge?.recentEffects ?? [])
-    .filter((e) => e.kind === 'follow' || e.kind === 'like' || e.kind === 'gift')
-    .slice(0, 4);
-
   return (
-    <div className="card challenge-card" style={{ marginBottom: 10 }}>
-      <h3>
-        {challenge?.title ?? settings.challenge.title}{' '}
-        {st === 'running' ? (
+    <div className={`card challenge-card${running || achieved ? ' stuck' : ''}${achieved ? ' cleared' : ''}`}>
+      <div className="ch-head">
+        <strong>{challenge?.title ?? settings.challenge.title}</strong>
+        {running ? (
           <span className="badge t1">進行中</span>
-        ) : st === 'achieved' ? (
+        ) : achieved ? (
           <span className="badge t3">達成!</span>
         ) : (
-          <span className="badge">停止中</span>
+          <span className="badge">{challenge?.startedMs ? '一時停止中' : '停止中'}</span>
         )}
-      </h3>
-      <div className={`challenge-value${st === 'achieved' ? ' done' : ''}`}>{num(value)}</div>
-      {fxLog.length > 0 ? (
-        <div className="challenge-log">
-          {fxLog.map((e) => (
-            // id は単調増加 — 新規行だけ新規マウントされ、登場アニメが1回走る。
-            <div key={e.id} className={`challenge-log-item ${e.amount > 0 ? 'up' : 'down'}`}>
-              <span className="amt">{e.amount > 0 ? `+${num(e.amount)}` : num(e.amount)}</span>
-              <span className="lbl">
-                {e.kind === 'follow'
-                  ? `フォロー ${e.nickname ?? ''}`
-                  : e.kind === 'like'
-                    ? 'いいね'
-                    : `${e.giftName ?? 'ギフト'} ${e.nickname ?? ''}`}
-              </span>
-            </div>
+        <div className="spacer" />
+        {elapsedMs != null ? (
+          <span className="faint num" title={achieved ? '達成までにかかった時間' : '開始からの経過'}>
+            {formatDurationJa(elapsedMs)}
+          </span>
+        ) : null}
+      </div>
+
+      {/* 進行中なのにモニターが閉じている = 背面モニターに演出が何も出ていない。
+          気づかないまま企画が進むと配信事故になるので目立たせる。 */}
+      {running && !monitorOpen ? (
+        <button className="ch-warn" onClick={() => void rpc('monitor.open', undefined)}>
+          モニター未表示 — 演出が出ていません（クリックで開く）
+        </button>
+      ) : null}
+
+      <div className="ch-value-wrap">
+        <div
+          key={punch?.key ?? 0}
+          className={`challenge-value${achieved ? ' done' : ''}${low ? ' low' : ''}${
+            punch ? (punch.diff > 0 ? ' up' : ' down') : ''
+          }`}
+        >
+          {num(value)}
+        </div>
+        {punch ? (
+          <span key={punch.key} className={`ch-delta ${punch.diff > 0 ? 'up' : 'down'}`}>
+            {punch.diff > 0 ? `▲+${num(punch.diff)}` : `▼${num(punch.diff)}`}
+          </span>
+        ) : null}
+      </div>
+
+      {/* 初期値→0 の進捗。妨害で初期値を超えることがあるので必ず 0 で下限を切る。 */}
+      <div className="ch-prog">
+        <Bar value={done} target={initial} done={achieved} />
+        <div className="ch-prog-lbl">
+          <span>
+            進捗 {num(done)} / {num(initial)}
+          </span>
+          <span className="faint num">
+            {initial > 0 ? `${Math.min(100, Math.round((done / initial) * 100))}%` : ''}
+          </span>
+        </div>
+      </div>
+
+      {/* 履歴。worker のリングバッファは12件で消えるので、renderer 側に積み直した
+          challengeLog(最大50件)を出す。ここだけが「後から辿れる」唯一の場所。 */}
+      {log.length > 0 ? (
+        <div className="ch-log" ref={logRef}>
+          {log.map((e) => (
+            <ChallengeLogRow key={e.id} e={e} />
           ))}
         </div>
+      ) : running ? (
+        <div className="ch-log empty">まだ動きがありません</div>
       ) : null}
+
       <button
         className="challenge-btn"
-        disabled={st !== 'running'}
+        disabled={!running}
         onClick={() => call('challenge.press')}
         title={settings.challenge.hotkey ? `ホットキー: ${settings.challenge.hotkey}` : undefined}
       >
         PUSH
         <span className="sub">−{num(settings.challenge.pressStep)}</span>
+        {/* ホットキー等こちらのクリック以外で押されたときの手応え。key で毎回再生。 */}
+        {hit > 0 ? <i className="hit" key={hit} /> : null}
       </button>
+
       <div className="row wrap" style={{ marginTop: 8 }}>
-        {st === 'running' ? (
+        {running ? (
           <button className="btn small" onClick={() => call('challenge.stop')}>
             一時停止
           </button>
@@ -364,7 +550,8 @@ function ChallengeCard(): React.JSX.Element | null {
           {monitorOpen ? 'モニターを閉じる' : 'モニターを開く'}
         </button>
       </div>
-      {challenge?.likeGauge && st === 'running' ? (
+
+      {challenge?.likeGauge ? (
         <div className="challenge-like-mini" title="いいね進捗(満タンで加算)">
           <i
             style={{
@@ -374,17 +561,43 @@ function ChallengeCard(): React.JSX.Element | null {
           <span>
             ♥ {num(challenge.likeGauge.counter)}/{num(challenge.likeGauge.every)} → +
             {num(challenge.likeGauge.step)}
+            {challenge.likeGauge.fills > 0 ? `（満タン ${num(challenge.likeGauge.fills)}回）` : ''}
           </span>
         </div>
       ) : null}
+
+      {challenge ? (
+        <div className="ch-stats">
+          <span className="cs">
+            <b>{num(challenge.stats.presses)}</b> PUSH
+          </span>
+          <span className="cs up">
+            <b>{num(challenge.stats.follows)}</b> フォロー
+          </span>
+          {challenge.stats.likeUp > 0 ? (
+            <span className="cs up">
+              💗 <b>+{num(challenge.stats.likeUp)}</b>
+            </span>
+          ) : null}
+          {challenge.stats.giftUp > 0 ? (
+            <span className="cs up">
+              🎁 <b>+{num(challenge.stats.giftUp)}</b>
+            </span>
+          ) : null}
+          {challenge.stats.giftDown > 0 ? (
+            <span className="cs down">
+              🎁 <b>−{num(challenge.stats.giftDown)}</b>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
         フォローで +{num(settings.challenge.followStep)}(妨害)
         {settings.challenge.likeEvery > 0
           ? ` ・ いいね${num(settings.challenge.likeEvery)}件で +${num(settings.challenge.likeStep)}`
           : ''}
         {settings.challenge.hotkey ? ` ・ ホットキー ${settings.challenge.hotkey}` : ''}
-        {challenge ? ` ・ 押下 ${num(challenge.stats.presses)} / 妨害 ${num(challenge.stats.follows)}` : ''}
-        {challenge && challenge.stats.likeUp > 0 ? ` / いいね+${num(challenge.stats.likeUp)}` : ''}
       </div>
     </div>
   );

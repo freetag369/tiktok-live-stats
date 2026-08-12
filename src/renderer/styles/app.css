@@ -894,6 +894,57 @@ pre.doc {
 .challenge-card {
   text-align: center;
 }
+/* 進行中はペイン上部に貼り付ける。入室アラートは最大12枚積まれるので、
+   普通に並べると配信が盛り上がるほどカウントダウンが画面外へ流れていく。
+   .pane > .body(overflow:auto / padding:10px)がスクロールの親。
+   左右の padding を負マージンで打ち消して全幅にし、下に潜るカードが
+   10px のガターから覗かないようにする。 */
+.challenge-card.stuck {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: -10px -10px 10px;
+  border-radius: 0 0 var(--radius) var(--radius);
+  border-top: 0;
+  box-shadow: 0 10px 18px -8px rgba(0, 0, 0, 0.75);
+}
+.challenge-card.cleared {
+  border-color: var(--gold);
+  background: linear-gradient(180deg, rgba(255, 197, 66, 0.16), var(--bg-1) 60%);
+}
+.ch-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+}
+.ch-head > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* モニターを開き忘れたまま企画が進むのは配信事故。ボタン兼警告。 */
+.ch-warn {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 197, 66, 0.12);
+  color: var(--gold);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.ch-warn:hover {
+  background: rgba(255, 197, 66, 0.22);
+}
+.ch-value-wrap {
+  position: relative;
+}
 .challenge-value {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -902,45 +953,187 @@ pre.doc {
   color: var(--red);
   text-shadow: 0 0 14px rgba(255, 107, 107, 0.45);
   line-height: 1.1;
-  margin: 4px 0 10px;
+  margin: 4px 0 8px;
 }
 .challenge-value.done {
   color: var(--gold);
   text-shadow: 0 0 14px rgba(255, 197, 66, 0.55);
 }
-/* 直近の加点・減点ログ。新規行はマウント時に1回だけハイライトが走る。 */
-.challenge-log {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: -4px 0 8px;
-  font-size: 12px;
+/* 残りわずか。モニターの lowblink の控えめ版。 */
+.challenge-value.low {
+  animation: ch-low 1s ease-in-out infinite;
 }
-.challenge-log-item {
-  display: flex;
-  gap: 6px;
-  justify-content: center;
-  align-items: baseline;
-  border-radius: var(--radius-sm);
-  animation: challenge-log-in 0.9s ease-out;
+/* 値が動いた向きを一瞬で伝える。減=前進(緑)、増=妨害(赤)。
+   key の付け替えで再マウントさせて毎回頭から再生する。 */
+.challenge-value.down {
+  animation: ch-punch-down 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-.challenge-log-item .amt {
+.challenge-value.up {
+  animation: ch-punch-up 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes ch-low {
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes ch-punch-down {
+  0% {
+    transform: scale(1.12);
+    color: var(--green);
+    text-shadow: 0 0 22px rgba(74, 217, 145, 0.8);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes ch-punch-up {
+  0% {
+    transform: scale(0.9);
+    color: #fff;
+    text-shadow: 0 0 24px rgba(255, 107, 107, 0.9);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+/* 差分バブル。消すのではなく opacity:0 で止める — state を null に戻すと
+   数字側の key が変わって punch アニメが二度目に走ってしまう。 */
+.ch-delta {
+  position: absolute;
+  top: 2px;
+  right: 4px;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
+  font-size: 15px;
   font-weight: 700;
+  pointer-events: none;
+  opacity: 0;
+  animation: ch-delta-in 1.2s ease-out forwards;
 }
-.challenge-log-item.up .amt {
+.ch-delta.up {
   color: var(--red);
 }
-.challenge-log-item.down .amt {
+.ch-delta.down {
   color: var(--green);
 }
-.challenge-log-item .lbl {
-  opacity: 0.75;
-  max-width: 70%;
+@keyframes ch-delta-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+/* 初期値 → 0 の進捗。Bar(common.tsx)をそのまま使う。 */
+.ch-prog {
+  margin-bottom: 8px;
+}
+.ch-prog-lbl {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-top: 3px;
+}
+/* 履歴ログ。worker のリングバッファ(12件)から拾い直した最大50件。 */
+.ch-log {
+  max-height: 168px;
+  overflow-y: auto;
+  text-align: left;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 3px;
+  margin-bottom: 8px;
+}
+.ch-log.empty {
+  padding: 8px;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+  text-align: center;
+}
+.clog {
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  /* 新着行だけがマウントされるので、登場アニメは1回しか走らない。 */
+  animation: challenge-log-in 0.9s ease-out;
+}
+.clog + .clog {
+  border-top: 1px solid var(--line-soft);
+}
+.clog-top {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+}
+.clog-time {
+  width: 46px;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+}
+.clog-ico {
+  width: 14px;
+  font-size: 12px;
+  line-height: 1;
+  text-align: center;
+}
+.clog-ico.img {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+.clog-who {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
+}
+.clog-amt {
+  font-family: var(--mono);
+  font-weight: 700;
+}
+.clog.up .clog-amt {
+  color: var(--red);
+}
+.clog.down .clog-amt {
+  color: var(--green);
+}
+.clog.clear {
+  background: rgba(255, 197, 66, 0.16);
+}
+.clog.clear .clog-who {
+  color: var(--gold);
+}
+.clog-sub {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  /* 時刻(46)+ gap(5)+ アイコン(14)+ gap(5)。上段の名前と縦に揃う。 */
+  padding-left: 70px;
+}
+.clog-what {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clog-after {
+  color: var(--fg-faint);
+  white-space: nowrap;
+  font-family: var(--mono);
 }
 @keyframes challenge-log-in {
   0% {
@@ -953,6 +1146,8 @@ pre.doc {
   }
 }
 .challenge-btn {
+  position: relative;
+  overflow: hidden;
   width: 100%;
   padding: 14px 0 12px;
   border: none;
@@ -1023,4 +1218,72 @@ pre.doc {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* ホットキー(F9)・物理USBボタン・モニター窓の Space から押されたときの手応え。
+   こちらのクリックでは :active で沈むが、他経路ではボタンが無反応になり
+   「効いているのか」が分からなくなる。 */
+.challenge-btn .hit {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  animation: ch-hit 180ms ease-out forwards;
+}
+@keyframes ch-hit {
+  100% {
+    opacity: 0;
+  }
+}
+/* 増減の内訳。giftUp / giftDown はここが初出。 */
+.ch-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: center;
+  margin-top: 8px;
+}
+.ch-stats .cs {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.ch-stats .cs b {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.ch-stats .cs.up b {
+  color: var(--red);
+}
+.ch-stats .cs.down b {
+  color: var(--green);
+}
+
+/* 狭いときは3列目が下段の横長ブロック(max-height:42vh)になる。
+   ログが高さを食い切ると PUSH ボタンが押せなくなるので低くする。 */
+@media (max-width: 1200px) {
+  .ch-log {
+    max-height: 110px;
+  }
+}
+
+/* このカードのアニメーションは「何が起きたか」を伝えるためのもので、
+   情報は文字にも出ている。動きが苦手な環境では止める。 */
+@media (prefers-reduced-motion: reduce) {
+  .challenge-value.low,
+  .challenge-value.up,
+  .challenge-value.down,
+  .clog,
+  .challenge-btn .hit {
+    animation: none;
+  }
+  .ch-delta {
+    opacity: 1;
+    animation: none;
+  }
 }

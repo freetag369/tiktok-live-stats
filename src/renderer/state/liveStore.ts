@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import type { AdapterStatus, QuotaInfo, UserId } from '@shared/events';
 import type { DeltaViewer, FeedItem, JoinAlertCard, LiveMessage, LiveTotals, WorkerState } from '@shared/ipc';
-import type { ChallengeState, MissionProgress } from '@shared/dto';
+import type { ChallengeLogEntry, ChallengeState, MissionProgress } from '@shared/dto';
+import { appendChallengeLog } from '@shared/challenge';
 
 /**
  * The live table can hold 5,000 rows updating twice a second. Putting that Map in
@@ -43,6 +44,12 @@ interface LiveState {
   missions: MissionProgress[];
   /** カウントダウンチャレンジ。配信セッションとは独立の寿命(resetLive で消さない)。 */
   challenge: ChallengeState | null;
+  /**
+   * チャレンジの履歴ログ(新しい順)。worker の12件リングバッファから拾い直した
+   * もので、**ここが唯一の履歴**(worker にも DB にも残らない)。
+   * LiveDashboard は route 切替でアンマウントされるので、ログはストア側に置く。
+   */
+  challengeLog: ChallengeLogEntry[];
   status: AdapterStatus;
   quota: QuotaInfo | null;
   sessionId: number | null;
@@ -74,6 +81,7 @@ export const useLive = create<LiveState>(() => ({
   alerts: [],
   missions: [],
   challenge: null,
+  challengeLog: [],
   status: { state: 'idle' },
   quota: null,
   sessionId: null,
@@ -160,7 +168,7 @@ export function attachLive(): () => void {
           sessionId: m.sessionId,
           deferred: m.deferred,
           ...(m.missions ? { missions: m.missions } : {}),
-          ...(m.challenge ? { challenge: m.challenge } : {}),
+          ...(m.challenge ? ingestChallenge(m.challenge) : {}),
           ...(m.alerts.length ? { alerts: [...m.alerts, ...s.alerts].slice(0, ALERT_CAP) } : {}),
         });
         return;
@@ -194,7 +202,36 @@ export function dismissAlert(userId: UserId): void {
   useLive.setState((s) => ({ alerts: s.alerts.filter((a) => a.userId !== userId) }));
 }
 
+/**
+ * 履歴ログの積み上げ状態。React の外に置く — delta は rAF でコアレスされるので、
+ * ストアから読み戻すと同じ tick 内の2件目が1件目を無かったことにする。
+ */
+let logEntries: ChallengeLogEntry[] = [];
+let lastLoggedId: number | null = null;
+let lastStartedMs: number | null | undefined;
+
+/**
+ * ChallengeState を取り込み、履歴ログを更新して差分パッチを返す。
+ * delta 経路と RPC 経路の両方がここを通る(同じ状態を二度受けても冪等)。
+ */
+function ingestChallenge(state: ChallengeState): Partial<LiveState> {
+  // start / reset の検知。worker 側は recentEffects を空にするだけで「消せ」とは
+  // 言ってこないので、startedMs の変化(start=新しい時刻 / reset=null)で判断する。
+  // status 遷移だけを見ると stop→start の往復を取りこぼす。
+  if (lastStartedMs !== undefined && lastStartedMs !== state.startedMs) {
+    logEntries = [];
+    lastLoggedId = null;
+  }
+  lastStartedMs = state.startedMs;
+
+  const next = appendChallengeLog(logEntries, state, lastLoggedId);
+  lastLoggedId = next.lastId;
+  if (next.log === logEntries) return { challenge: state };
+  logEntries = next.log;
+  return { challenge: state, challengeLog: next.log };
+}
+
 /** RPC(challenge.*)の戻り値で即時反映する。delta からの上書きと冪等。 */
 export function setChallenge(state: ChallengeState): void {
-  useLive.setState({ challenge: state });
+  useLive.setState(ingestChallenge(state));
 }
