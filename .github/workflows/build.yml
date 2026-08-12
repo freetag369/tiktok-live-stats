@@ -1,3 +1,4 @@
+# Windows + macOS release builds. Trigger: tag push (v*) or manual dispatch.
 name: build
 
 on:
