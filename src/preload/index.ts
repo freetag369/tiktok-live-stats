@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
-import { CH_FEED_PORT, CH_MONITOR_STATE, CH_TOAST, CH_WORKER_STATE } from '@shared/ipc';
+import { CH_FEED_PORT, CH_MONITOR_STATE, CH_SETTINGS_PUSH, CH_TOAST, CH_WORKER_STATE } from '@shared/ipc';
 import type { LiveMessage, RpcMethod, RpcParams, RpcResponse, RpcResult, ToastMsg, WorkerState } from '@shared/ipc';
+import type { AppSettings } from '@shared/dto';
 
 /**
  * ~60 lines, zero logic. The renderer is sandboxed and holds no Node reference;
@@ -55,6 +56,13 @@ const api = {
     const h = (_e: unknown, s: { open: boolean }) => cb(s);
     ipcRenderer.on(CH_MONITOR_STATE, h);
     return () => ipcRenderer.off(CH_MONITOR_STATE, h);
+  },
+
+  /** 設定保存(cfg.set)の即時通知。モニターの30秒ポーリングを待たず反映する。 */
+  onSettings(cb: (s: AppSettings) => void): () => void {
+    const h = (_e: unknown, s: AppSettings) => cb(s);
+    ipcRenderer.on(CH_SETTINGS_PUSH, h);
+    return () => ipcRenderer.off(CH_SETTINGS_PUSH, h);
   },
 
   /**

@@ -3,7 +3,7 @@ import type * as D from './dto';
 
 // Channel names live in constants.ts but every consumer imports them from here,
 // alongside the payload types they carry.
-export { CH_FEED_PORT, CH_MONITOR_STATE, CH_RPC, CH_TOAST, CH_VISIBILITY, CH_WORKER_STATE } from './constants';
+export { CH_FEED_PORT, CH_MONITOR_STATE, CH_RPC, CH_SETTINGS_PUSH, CH_TOAST, CH_VISIBILITY, CH_WORKER_STATE } from './constants';
 
 /**
  * One RPC channel, one discriminated union. Keeps preload to ~60 lines and puts
@@ -27,6 +27,8 @@ export type RpcMap = {
   'challenge.stop': { p: void; r: D.ChallengeState };
   'challenge.reset': { p: void; r: D.ChallengeState };
   'challenge.press': { p: void; r: D.ChallengeState };
+  /** モニター演出のテスト再生(値・統計は変えない)。設定画面の「▶ モニター」用。 */
+  'challenge.testEffect': { p: D.ChallengeTestEffectSpec; r: void };
 
   // queries
   'q.viewerTable': { p: { sessionId: number | null } & D.ViewerTableQuery; r: D.Page<D.ViewerTableRow> };

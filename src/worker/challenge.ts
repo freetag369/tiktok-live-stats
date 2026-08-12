@@ -7,6 +7,7 @@ import type {
   ChallengeState,
   ChallengeStats,
   ChallengeStatus,
+  ChallengeTestEffectSpec,
 } from '@shared/dto';
 import {
   CHALLENGE_EFFECTS_MAX,
@@ -188,6 +189,84 @@ export class ChallengeEngine {
       this.dirty = true;
     });
     return this.get();
+  }
+
+  /**
+   * 演出のテスト再生(設定画面の「▶ モニター」)。value/stats/status/凍結/
+   * dedup には一切触れない — 演出だけを本物の経路(ring buffer → delta →
+   * playEffect)で流す。status ガードも無し: 停止中でも実演できるのが目的。
+   *
+   * pushEffect は使わない — あちらは valueAfter に this.value をスタンプする
+   * 規約で、amount ≠ 0 のテストだとモニターのラッチ表示(valueAfter - amount)
+   * が現在値からズレて、演出中に数字が飛んで見える。ここでは
+   * valueAfter = value + amount とし、ラッチ開始値 = 現在値に揃える(演出明けは
+   * worker の実値へ収束するので表示は動かない)。
+   */
+  testEffect(spec: ChallengeTestEffectSpec): void {
+    const cfg = this.getConfig();
+    const atMs = this.now();
+    let e: Omit<ChallengeEffect, 'id' | 'valueAfter' | 'test' | 'atMs'>;
+    switch (spec.kind) {
+      case 'press':
+        e = { kind: 'press', amount: -cfg.pressStep };
+        break;
+      case 'follow':
+        e = { kind: 'follow', amount: cfg.followStep, nickname: 'テスト' };
+        break;
+      case 'like':
+        e = { kind: 'like', amount: Math.max(1, cfg.likeStep) };
+        break;
+      case 'stock-full':
+        e = { kind: 'stock-full', amount: Math.max(1, cfg.likeStockStep) };
+        break;
+      case 'gift': {
+        const m = matchGiftRule(cfg, { canonical: spec.canonical, giftId: 'test', diamonds: spec.diamonds });
+        const band = spec.bandId ? (cfg.giftBandFx.bands.find((b) => b.id === spec.bandId) ?? null) : null;
+        const usableBand = band && band.clip !== 'off' ? band : null;
+        const fxDurationMs = usableBand ? Math.min(usableBand.durationSec * 1000, GIFT_FX_FREEZE_MAX_MS) : 0;
+        e = {
+          kind: 'gift',
+          amount: m?.amount ?? 0,
+          ...(m?.flash ? { flash: true } : {}),
+          nickname: 'テスト',
+          giftName: spec.canonical ?? 'テストギフト',
+          ...(spec.canonical ? { canonical: spec.canonical } : {}),
+          // カットインは effect 1件で自己完結の流儀(handleEvent と同じ)。
+          // fxFreezeUntilMs は張らない — テストで実イベントの適用を止めない。
+          ...(usableBand ? { fxBandClip: usableBand.clip, fxDurationMs } : {}),
+          ...(usableBand && usableBand.bgm !== 'off' && cfg.giftBandFx.bgmEnabled
+            ? { fxBandBgm: usableBand.bgm }
+            : {}),
+          diamonds: spec.diamonds,
+        };
+        break;
+      }
+      case 'roulette': {
+        const rl = cfg.roulette;
+        const idx = drawRouletteIndex(rl.segments, this.rand);
+        const seg = rl.segments[idx]!;
+        e = {
+          kind: 'roulette',
+          amount: rl.direction === 'sub' ? -seg.amount : seg.amount,
+          rouletteSegments: rl.segments.map((s) => s.amount),
+          rouletteIndex: idx,
+          nickname: 'テスト',
+        };
+        break;
+      }
+      case 'achieved':
+        e = { kind: 'achieved', amount: 0 };
+        break;
+    }
+    this.recentEffects.unshift({
+      id: this.nextEffectId++,
+      valueAfter: this.value + e.amount,
+      test: true,
+      atMs,
+      ...e,
+    });
+    while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
+    this.dirty = true;
   }
 
   // ── TikTok イベント ──────────────────────────────────────────────────────

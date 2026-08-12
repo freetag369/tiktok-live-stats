@@ -68,6 +68,8 @@ export const CH_WORKER_STATE = 'app:worker-state';
 export const CH_TOAST = 'app:toast';
 export const CH_VISIBILITY = 'ui:visibility';
 export const CH_MONITOR_STATE = 'app:monitor-state';
+/** cfg.set 直後の設定全量プッシュ。モニターの30秒ポーリングを待たずに反映する。 */
+export const CH_SETTINGS_PUSH = 'app:settings';
 
 /** Viewer table page size on the live dashboard. */
 export const VIEWER_PAGE_SIZE = 5000;

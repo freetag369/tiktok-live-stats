@@ -3,7 +3,7 @@ import type { AppSettings, ViewerFilter, ViewerSortKey } from '@shared/dto';
 import type { ToastMsg } from '@shared/ipc';
 import type { UserId } from '@shared/events';
 
-export type Route = 'connect' | 'live' | 'sessions' | 'analytics' | 'settings' | 'licenses';
+export type Route = 'connect' | 'live' | 'challenge' | 'sessions' | 'analytics' | 'settings' | 'licenses';
 
 interface UiState {
   route: Route;

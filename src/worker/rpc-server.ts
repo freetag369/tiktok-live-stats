@@ -92,6 +92,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       session.nudgeChallenge();
       return s;
     },
+    'challenge.testEffect': async (p) => {
+      challenge.testEffect(p);
+      // 未接続でも challenge-only の delta が出る(pushDelta の許可規約)。
+      session.nudgeChallenge();
+    },
 
     'q.viewerTable': async (p) => store.getSessionViewerTable(p.sessionId, p),
     'q.viewer': async (p) => store.getViewer(p.userId, p.sessionId),
@@ -167,6 +172,7 @@ type HandlerMap = {
   'challenge.stop': () => Promise<D.ChallengeState>;
   'challenge.reset': () => Promise<D.ChallengeState>;
   'challenge.press': () => Promise<D.ChallengeState>;
+  'challenge.testEffect': (p: D.ChallengeTestEffectSpec) => Promise<void>;
   'q.viewerTable': (p: { sessionId: number | null } & D.ViewerTableQuery) => Promise<unknown>;
   'q.viewer': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;
   'q.recallCard': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;

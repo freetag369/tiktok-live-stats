@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron';
 import type { AppSettings, CsvExportSpec } from '@shared/dto';
-import { CH_MONITOR_STATE, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
+import { CH_MONITOR_STATE, CH_SETTINGS_PUSH, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
 import { validateChallengeConfig } from '@shared/challenge';
 import { loadSettings, needsWorkerRestart, saveSettings } from './boot-settings';
 import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
@@ -174,6 +174,10 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
           // クラッシュ自動再起動が古い設定に巻き戻らないようにペイロードも更新。
           host?.refreshBoot(bootPayload());
         }
+        // 保存を両ウィンドウへ即時プッシュ — モニターの30秒ポーリングを待つと
+        // 「▶ モニター」の実演が保存前の割り当てで再生されうる。
+        win?.webContents.send(CH_SETTINGS_PUSH, settings);
+        getMonitorWindow()?.webContents.send(CH_SETTINGS_PUSH, settings);
         // チャレンジ関連の main 側リソースを追随させる。
         syncChallengeHotkey();
         if (prev.challenge.monitorWindowed !== settings.challenge.monitorWindowed && getMonitorWindow()) {

@@ -289,9 +289,12 @@ export function MonitorView(): React.JSX.Element {
   useEffect(() => {
     void rpc('cfg.get', undefined).then(setCfg);
     void rpc('challenge.get', undefined).then(setChallenge);
+    // 保存(cfg.set)は即時プッシュで受け、30秒ポーリングは取りこぼしの保険。
+    const offSettings = window.api.onSettings(setCfg);
     // 設定(lowThreshold / loadAvatars 等)は delta に乗らないので定期再取得する。
     const t2 = setInterval(() => void rpc('cfg.get', undefined).then(setCfg), 30_000);
     return () => {
+      offSettings();
       clearInterval(t2);
     };
   }, []);
@@ -838,13 +841,9 @@ export function MonitorView(): React.JSX.Element {
     const fx = fxRef.current;
     switch (e.kind) {
       case 'press': {
-        // フラッシュは連打で鬱陶しいので出さない(パンチは値の変化側で再生済み)。
-        // 代わりに 7 セグ中心からのリング波紋で「押した手応え」だけ足す。
-        const r = fx?.pointFor(countdownRef.current);
-        if (fx && r) {
-          fx.ringWave(r.x, r.y, { hue: 200, radius: Math.min(r.w, r.h) * 0.5 });
-          fx.sparkBurst(r.x, r.y, 6, { hue: 200, speed: 380 });
-        }
+        // 押下の映像演出は出さない。フラッシュは連打で鬱陶しいので元々無し、
+        // リング波紋＋火花も非表示にした（連打で画面がうるさいため）。手応えは効果音と、
+        // 値の変化側で再生される 7 セグのパンチが受け持つ。
         if (cfg) playMini(miniForSlot(cfg.challenge, 'press'), e.amount);
         return;
       }

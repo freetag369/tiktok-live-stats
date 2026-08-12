@@ -79,7 +79,9 @@ export function appendChallengeLog(
   // worker 再起動で id が 1 に戻ると、watermark が天井に残って以後すべて
   // 「取り込み済み」扱いになりログが凍る。巻き戻りを検知したら追従させる。
   const from = lastId === null || lastId > maxId ? 0 : lastId;
-  const fresh = effects.filter((e) => e.id > from).sort((a, b) => a.id - b.id);
+  // test(演出テスト再生)はログに積まない — 値に影響しない偽の行が履歴を汚す。
+  // maxId は全件で計算済みなので watermark はテスト分も通過する。
+  const fresh = effects.filter((e) => e.id > from && e.test !== true).sort((a, b) => a.id - b.id);
   if (fresh.length === 0) return { log: log as ChallengeLogEntry[], lastId: Math.max(from, maxId) };
 
   const out = log.slice();

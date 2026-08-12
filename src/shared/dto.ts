@@ -659,8 +659,36 @@ export interface ChallengeEffect {
    * giftBandFx.bgmVolume から読む(roulette-hit 等の既存前例と同じ)。
    */
   fxBandBgm?: string;
+  /**
+   * テスト再生(challenge.testEffect)由来。値・統計には影響しない演出だけの
+   * effect — ダッシュボードの履歴ログはこれを積まない(演出とSEは再生する)。
+   */
+  test?: true;
   atMs: Ms;
 }
+
+/**
+ * challenge.testEffect のパラメータ。設定画面の「▶ モニター」ボタンが、実際の
+ * モニターウィンドウ上で演出を実演再生するために使う。値・統計・状態は一切
+ * 変更しない — 演出(映像/SE)だけを本物の配信経路(effect ring buffer →
+ * LiveDelta → playEffect)で流す。
+ */
+export type ChallengeTestEffectSpec =
+  | { kind: 'press' }
+  | { kind: 'follow' }
+  | { kind: 'like' }
+  | { kind: 'stock-full' }
+  | {
+      kind: 'gift';
+      /** tier(小〜特大)判定とフラッシュ判定に使うダイヤ数。 */
+      diamonds: number;
+      /** クリップ割り当て行のテスト用。モニターが matchGiftClip で解決する。 */
+      canonical?: string;
+      /** 帯演出行のテスト用。指定時はこのバンドのカットインを強制する(帯域一致は評価しない)。 */
+      bandId?: string;
+    }
+  | { kind: 'roulette' }
+  | { kind: 'achieved' };
 
 export interface ChallengeStats {
   presses: number;

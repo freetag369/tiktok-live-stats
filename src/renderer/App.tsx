@@ -10,12 +10,14 @@ import { LiveDashboard } from './screens/LiveDashboard';
 import { Sessions } from './screens/Sessions';
 import { Analytics } from './screens/Analytics';
 import { Settings } from './screens/Settings';
+import { Challenge } from './screens/Challenge';
 import { Licenses } from './screens/Licenses';
 import { ViewerDetail } from './screens/ViewerDetail';
 
 const NAV: Array<[Route, string]> = [
   ['connect', '接続'],
   ['live', 'ライブ'],
+  ['challenge', 'チャレンジ'],
   ['sessions', '配信履歴'],
   ['analytics', '分析'],
   ['settings', '設定'],
@@ -68,6 +70,7 @@ export function App(): React.JSX.Element {
       <div className="main">
         {route === 'connect' ? <Connect /> : null}
         {route === 'live' ? <LiveDashboard /> : null}
+        {route === 'challenge' ? <Challenge /> : null}
         {route === 'sessions' ? <Sessions /> : null}
         {route === 'analytics' ? <Analytics /> : null}
         {route === 'settings' ? <Settings /> : null}
