@@ -25,8 +25,19 @@ export function defaultSettings(dataDir: string): AppSettings {
     alertMinTier: 1,
     giftAlertDiamonds: 100,
     zoomFactor: DEFAULT_ZOOM_FACTOR,
-    challenge: structuredClone(DEFAULT_CHALLENGE),
+    challenge: { ...structuredClone(DEFAULT_CHALLENGE), hotkey: defaultHotkey() },
   };
+}
+
+/**
+ * 既定のグローバルホットキー。mac の F9 は Mac キーボードでは早送りのメディアキーで、
+ * 「F1、F2 などのキーを標準のファンクションキーとして使用」が OFF(既定)だと F9 が
+ * アプリまで届かない — globalShortcut.register は成功するのに一度も発火しないという
+ * 一番わかりにくい壊れ方をする。mac だけ F キー行を避けた組み合わせを既定にする。
+ * 既存の settings.json は書き換えない(loadSettings が保存値を優先するため)。
+ */
+function defaultHotkey(): string {
+  return process.platform === 'darwin' ? 'Control+Alt+9' : 'F9';
 }
 
 function file(dataDir: string): string {

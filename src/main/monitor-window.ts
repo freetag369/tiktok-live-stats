@@ -67,6 +67,12 @@ export function openMonitorWindow(
       nodeIntegration: false,
       webviewTag: false,
       spellcheck: false,
+      // mac は他ウィンドウに完全に覆われた窓を occluded と判定して rAF を止め、
+      // setTimeout を 1Hz 以下に絞る(Windows には無い挙動で、isVisible() は true のまま)。
+      // 演出の据え置き解除は setTimeout の連鎖で、取りこぼし用の保険タイマー自体も
+      // setTimeout なので、絞られると7セグが固まったまま戻らない。背面ディスプレイに
+      // 出しっぱなしにする窓なので、スロットリングは常に切る。
+      backgroundThrottling: false,
     },
   });
   if (useSimpleFs && fullscreen) {

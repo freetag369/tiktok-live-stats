@@ -71,6 +71,13 @@ const api = {
   getZoom(): number {
     return webFrame.getZoomFactor();
   },
+
+  /**
+   * 実行中の OS。ホットキー捕獲で Cmd と Ctrl を見分けるために要る
+   * (Electron の 'CommandOrControl' は mac で Cmd に解決されるため)。
+   * process.platform は sandbox 付き preload でも読める数少ない値のひとつ。
+   */
+  platform: process.platform as string,
 } as const;
 
 export type Api = typeof api;

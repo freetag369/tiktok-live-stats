@@ -52,7 +52,16 @@ function hotkeyFromEvent(e: React.KeyboardEvent): string | null {
   const k = e.key;
   if (k === 'Escape') return '';
   if (k === 'Control' || k === 'Alt' || k === 'Shift' || k === 'Meta') return null;
-  const mods = [e.ctrlKey ? 'CommandOrControl' : '', e.altKey ? 'Alt' : '', e.shiftKey ? 'Shift' : ''].filter(Boolean);
+  // 'CommandOrControl' は mac で Cmd、それ以外で Ctrl に解決される。mac で ctrlKey を
+  // 見ると (1) Control を押したのに Cmd が登録される (2) Cmd 押下が「修飾なし」と判定され、
+  // 単独キーを OS 全域で奪うアクセラレータが保存される — の2つの事故になる。
+  const isMac = window.api.platform === 'darwin';
+  const mods = [
+    (isMac ? e.metaKey : e.ctrlKey) ? 'CommandOrControl' : '',
+    isMac && e.ctrlKey ? 'Control' : '',
+    e.altKey ? 'Alt' : '',
+    e.shiftKey ? 'Shift' : '',
+  ].filter(Boolean);
   let key = k;
   if (k === ' ') key = 'Space';
   else if (k.startsWith('Arrow')) key = k.slice(5); // ArrowUp -> Up
