@@ -1,7 +1,7 @@
 # TikTokライブ分析 (tiktok-live-stats)
 
 TikTok LIVE の配信中に起きたことを記録し、**リスナー一人ひとりの履歴**を
-パソコンの中に永続的に残すための Windows デスクトップアプリです。
+パソコンの中に永続的に残すためのデスクトップアプリです（Windows / macOS）。
 
 TikTok 公式の LIVE 分析は集計値中心で保持期間も約60日、しかも
 **リスナー個人単位の履歴が一切残りません**。このツールはその欠損をローカル
@@ -44,8 +44,9 @@ TikTok 公式の LIVE 分析は集計値中心で保持期間も約60日、し�
    APIキーを設定すると 1日2,500回まで接続できます（未設定は1日100回）。
    このアプリを他人に渡す場合、**キーは各自で取得**してもらってください。
 
-4. **未署名です。** 初回起動時に Windows SmartScreen の警告が出ます。
-   「詳細情報」→「実行」で起動できます。
+4. **未署名です。** Windows では初回起動時に SmartScreen の警告が出ます
+   （「詳細情報」→「実行」で起動）。Mac では「開発元を確認できません」と
+   出ます（右クリック→「開く」で起動。詳細は「はじめにお読みください」参照）。
 
 ## 使い方
 
@@ -59,16 +60,19 @@ TikTok 公式の LIVE 分析は集計値中心で保持期間も約60日、し�
 
 ## ソースからビルドする
 
-必要なもの: **Node.js 22.12 以降**（24.x 推奨）、Windows 10/11 x64。
+必要なもの: **Node.js 22.12 以降**（24.x 推奨）、Windows 10/11 x64 または macOS 11 以降。
 Visual Studio や Python などのビルドツールは **不要** です
 （SQLite は Node 組み込みの `node:sqlite` を使用しています）。
 
 ```bash
 npm ci
-npm run build:win
+npm run build:win   # Windows 上で: NSIS インストーラ + ポータブル exe
+npm run build:mac   # macOS 上で: Universal dmg (Intel + Apple Silicon)
 ```
 
-`release/<version>/` に NSIS インストーラとポータブル exe が生成されます。
+`release/<version>/` に成果物が生成されます。各 OS 向けのビルドはその OS 上で
+のみ実行できます（GitHub Actions の `build` ワークフローがタグ push /
+手動実行で両 OS 分を自動ビルドします）。
 
 開発時:
 

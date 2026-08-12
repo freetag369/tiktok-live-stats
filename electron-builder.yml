@@ -56,3 +56,24 @@ nsis:
 
 portable:
   artifactName: ${productName}-Portable-${version}.${ext}
+
+mac:
+  # Correct spelling deliberately mac-only: the top-level appId keeps the historical
+  # typo because it is the NSIS uninstall registry key for existing Windows installs.
+  # CFBundleIdentifier keys macOS permissions/saved state — fixed before any mac user exists.
+  appId: com.tiktoklivestats.app
+  icon: build/icon.png
+  category: public.app-category.utilities
+  target:
+    - target: dmg
+      arch: [universal]
+  # Unsigned distribution (no Developer ID). Do NOT set identity: null — electron-builder
+  # ad-hoc signs when no identity is found, and that ad-hoc signature is what keeps
+  # Apple Silicon from killing the binary ("壊れています" error).
+  notarize: false
+  hardenedRuntime: false
+  gatekeeperAssess: false
+
+dmg:
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  writeUpdateInfo: false # no auto-update -> no .blockmap

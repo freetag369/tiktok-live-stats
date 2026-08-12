@@ -328,7 +328,18 @@ async function boot(): Promise<void> {
   await app.whenReady();
 
   win = createWindow(join(__dirname, '../preload/index.js'));
-  Menu.setApplicationMenu(null);
+  if (process.platform === 'darwin') {
+    // mac ではメニューを null にすると Cmd+Q / Cmd+C/V ごとメニューバーが死ぬ。
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: 'appMenu' }, // Cmd+Q, Hide など
+        { role: 'editMenu' }, // Cmd+C/V/X/A — これがないとクリップボードが効かない
+        { role: 'windowMenu' },
+      ])
+    );
+  } else {
+    Menu.setApplicationMenu(null);
+  }
 
   const found = findExistingDb();
   if (!existsSync(settings.dbPath)) {
@@ -403,8 +414,21 @@ app.on('window-all-closed', () => {
   })();
 });
 
-app.on('before-quit', () => {
-  void host?.shutdown();
+// mac では Cmd+Q が主要な終了経路で window-all-closed を経由しないことがある。
+// shutdown を待たずに死ぬと worker の DB flush が保証されないため、ここで待つ。
+// (window-all-closed 経由で shutdown 済みの場合、2回目の shutdown は即 resolve する)
+let shuttingDown = false;
+app.on('before-quit', (e) => {
+  if (shuttingDown || !host) return;
+  e.preventDefault();
+  shuttingDown = true;
+  void (async () => {
+    try {
+      await host.shutdown();
+    } finally {
+      app.quit();
+    }
+  })();
 });
 
 app.on('will-quit', () => {

@@ -41,6 +41,9 @@ export function openMonitorWindow(
   // ウィンドウ表示設定なら常に全画面にしない(移動・リサイズできる普通の窓)。
   const fullscreen = picked.fullscreen && !windowed;
   const { x, y, width, height } = picked.display.bounds;
+  // mac の setFullScreen は Spaces 生成+約1秒のアニメーションを伴い、HDMI 抜き差し時の
+  // 置き直しと相性が悪い。専用ディスプレイを覆うだけなら simpleFullscreen で足りる。
+  const useSimpleFs = process.platform === 'darwin';
 
   monitor = new BrowserWindow({
     x: x + 50,
@@ -52,7 +55,7 @@ export function openMonitorWindow(
     // 全画面時は配信画面に OS のウィンドウ枠を映さない。ウィンドウ表示時は
     // 枠を付ける — 枠が無いと掴んで動かせず、閉じることもできないため。
     frame: windowed,
-    fullscreen,
+    fullscreen: fullscreen && !useSimpleFs,
     backgroundColor: '#000000', // カメラ映り優先の純黒(起動フラッシュ防止も兼ねる)
     show: false,
     skipTaskbar: false, // 事故復旧のためタスクバーには残す
@@ -66,6 +69,11 @@ export function openMonitorWindow(
       spellcheck: false,
     },
   });
+  if (useSimpleFs && fullscreen) {
+    // simpleFullscreen は「今いるディスプレイ」を覆うため、先に対象へ移動しておく。
+    monitor.setBounds(picked.display.bounds);
+    monitor.setSimpleFullScreen(true);
+  }
   revealWhenReady(monitor, false); // フォーカスは奪わない(配信操作中のため)
   hardenWebContents(monitor.webContents);
 
@@ -96,11 +104,16 @@ export function repositionMonitor(displayId: number | null, windowed: boolean): 
   if (!win) return;
   const picked = pickDisplay(displayId);
   const fullscreen = picked.fullscreen && !windowed;
-  win.setFullScreen(false);
+  const useSimpleFs = process.platform === 'darwin';
+  if (useSimpleFs) win.setSimpleFullScreen(false);
+  else win.setFullScreen(false);
   win.setBounds(
     fullscreen
       ? picked.display.bounds
       : { x: picked.display.bounds.x + 50, y: picked.display.bounds.y + 50, width: 506, height: 900 }
   );
-  if (fullscreen) win.setFullScreen(true);
+  if (fullscreen) {
+    if (useSimpleFs) win.setSimpleFullScreen(true);
+    else win.setFullScreen(true);
+  }
 }

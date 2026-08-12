@@ -11,8 +11,10 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+const version = pkg.version;
 const releaseDir = join('release', version);
+const isMac = process.platform === 'darwin';
 
 let failures = 0;
 const ok = (m) => console.log(`  OK   ${m}`);
@@ -24,22 +26,15 @@ const bad = (m) => {
 console.log(`パッケージ検証: ${releaseDir}`);
 
 if (!existsSync(releaseDir)) {
-  console.error(`${releaseDir} がありません。先に npm run build:win を実行してください。`);
+  console.error(`${releaseDir} がありません。先に npm run build:${isMac ? 'mac' : 'win'} を実行してください。`);
   process.exit(1);
 }
 
 const files = readdirSync(releaseDir);
-const setup = files.find((f) => /Setup.*\.exe$/i.test(f));
-const portable = files.find((f) => /Portable.*\.exe$/i.test(f));
-setup ? ok(`インストーラ: ${setup}`) : bad('NSIS インストーラが見つかりません');
-portable ? ok(`ポータブル: ${portable}`) : bad('ポータブル exe が見つかりません');
 
-const unpackedDir = join(releaseDir, 'win-unpacked');
-if (!existsSync(unpackedDir)) {
-  bad('win-unpacked がありません');
-} else {
-  // THE check this script exists for.
-  const workerPath = join(unpackedDir, 'resources', 'app.asar.unpacked', 'out', 'worker', 'index.mjs');
+/** THE check this script exists for — shared between win-unpacked and the .app bundle. */
+function checkResources(resourcesDir) {
+  const workerPath = join(resourcesDir, 'app.asar.unpacked', 'out', 'worker', 'index.mjs');
   if (!existsSync(workerPath)) {
     bad('out/worker/index.mjs が app.asar.unpacked にありません（electron-builder.yml の asarUnpack を確認）');
   } else {
@@ -59,11 +54,41 @@ if (!existsSync(unpackedDir)) {
   }
 
   for (const doc of ['LICENSE', 'SOURCE-OFFER.txt']) {
-    existsSync(join(unpackedDir, 'resources', doc)) ? ok(`同梱: ${doc}`) : bad(`AGPL 対応物が同梱されていません: ${doc}`);
+    existsSync(join(resourcesDir, doc)) ? ok(`同梱: ${doc}`) : bad(`AGPL 対応物が同梱されていません: ${doc}`);
   }
-  existsSync(join(unpackedDir, 'resources', 'app-resources', 'missions.default.json'))
+  existsSync(join(resourcesDir, 'app-resources', 'missions.default.json'))
     ? ok('同梱: missions.default.json')
     : bad('resources/ が同梱されていません');
+}
+
+if (isMac) {
+  const dmg = files.find((f) => /-mac-universal\.dmg$/i.test(f));
+  dmg ? ok(`dmg: ${dmg}`) : bad('universal dmg が見つかりません');
+
+  const appDir = join(releaseDir, 'mac-universal', 'TikTokLiveStats.app');
+  if (!existsSync(appDir)) {
+    bad('mac-universal/TikTokLiveStats.app がありません');
+  } else {
+    const resourcesDir = join(appDir, 'Contents', 'Resources');
+    checkResources(resourcesDir);
+    // universal マージ確認: 両アーキの asar が 1 つに collapse されているはず。
+    const asars = readdirSync(resourcesDir).filter((f) => /^app.*\.asar$/.test(f));
+    asars.length === 1 && asars[0] === 'app.asar'
+      ? ok('app.asar は 1 つ（universal マージ成功）')
+      : bad(`app.asar が想定外です: ${asars.join(', ') || 'なし'}`);
+  }
+} else {
+  const setup = files.find((f) => /Setup.*\.exe$/i.test(f));
+  const portable = files.find((f) => /Portable.*\.exe$/i.test(f));
+  setup ? ok(`インストーラ: ${setup}`) : bad('NSIS インストーラが見つかりません');
+  portable ? ok(`ポータブル: ${portable}`) : bad('ポータブル exe が見つかりません');
+
+  const unpackedDir = join(releaseDir, 'win-unpacked');
+  if (!existsSync(unpackedDir)) {
+    bad('win-unpacked がありません');
+  } else {
+    checkResources(join(unpackedDir, 'resources'));
+  }
 }
 
 const sourceZip = files.find((f) => /source-.*\.zip$/i.test(f));

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Generates build/icon.ico with no image dependencies.
+ * Generates build/icon.ico and build/icon.png with no image dependencies.
  *
  * Without an icon, electron-builder ships the default Electron logo — which for a
  * Japanese end user looks like they downloaded the wrong program.
@@ -149,3 +149,8 @@ for (const im of images) {
 mkdirSync('build', { recursive: true });
 writeFileSync('build/icon.ico', Buffer.concat([header, ...dir, ...images.map((i) => i.buf)]));
 console.log(`build/icon.ico (${SIZES.join(', ')}) — ${(offset / 1024).toFixed(1)} KB`);
+
+// macOS: electron-builder converts a >=512px PNG in buildResources to .icns.
+const macPng = png(1024, render(1024));
+writeFileSync('build/icon.png', macPng);
+console.log(`build/icon.png (1024) — ${(macPng.length / 1024).toFixed(1)} KB`);
