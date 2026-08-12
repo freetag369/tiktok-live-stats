@@ -969,9 +969,9 @@ pre.doc {
 .challenge-value.down {
   animation: ch-punch-down 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-/* 増は少し長く保持する。モニター(segup 720ms)と体感を揃える。 */
+/* 増は緑をしっかり保持してから赤へ戻す。モニター(segup)と体感を揃える。 */
 .challenge-value.up {
-  animation: ch-punch-up 720ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: ch-punch-up 980ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes ch-low {
   50% {
@@ -994,7 +994,12 @@ pre.doc {
     color: var(--ch-up);
     text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);
   }
-  35% {
+  26% {
+    transform: scale(1);
+    color: var(--ch-up);
+    text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);
+  }
+  52% {
     transform: scale(1);
     color: var(--ch-up);
     text-shadow: 0 0 24px rgba(74, 217, 145, 0.9);

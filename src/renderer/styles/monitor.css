@@ -180,12 +180,13 @@ body {
 .countdown.punch-up {
   animation:
     punchup 260ms ease-out,
-    segup 720ms ease-out;
+    segup 1120ms ease-out;
 }
 
+/* 0〜71% = 795ms が緑の保持。残り 325ms で赤へ戻す。 */
 @keyframes segup {
   0%,
-  55% {
+  71% {
     /* var(--ch-up) の実値。登録済み custom property の keyframe なので直値で置く。 */
     --seg-on: #4ad991;
     --seg-off: rgba(74, 217, 145, 0.1);
