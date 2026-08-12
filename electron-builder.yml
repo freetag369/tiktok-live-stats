@@ -51,7 +51,9 @@ nsis:
   shortcutName: TikTokライブ分析
   # NEVER delete the history DB on uninstall.
   deleteAppDataOnUninstall: false
-  license: build/license_ja.txt
+  # Named so the dmg builder does NOT auto-detect it as a dmg license pane:
+  # dmgbuild encodes ja licenses as Shift_JIS and chokes on the file's BOM.
+  license: build/installer-license_ja.txt
   artifactName: ${productName}-Setup-${version}.${ext}
 
 portable:
