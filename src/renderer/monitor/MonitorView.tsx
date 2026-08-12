@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AppSettings, ChallengeEffect } from '@shared/dto';
-import { matchGiftClip, tierForDiamonds } from '@shared/challenge';
+import { matchGiftClip, matchGiftMini, miniForSlot, tierForDiamonds } from '@shared/challenge';
 import { num } from '@shared/format';
 import { rpc, useQuery } from '../ipc/client';
 import { liveRows, setChallenge, useLive } from '../state/liveStore';
 import { Avatar } from '../components/common';
 import { useChallengeSe } from '../lib/useChallengeSe';
 import { ACHIEVED_CLIP_URL, fxClipUrl } from '../lib/fx';
+import { MiniFx } from './MiniFx';
 import { SevenSeg } from './SevenSeg';
 import { LikeGauge } from './LikeGauge';
 import { FxCanvas } from './fx/FxCanvas';
@@ -37,6 +38,16 @@ interface FlashItem {
 interface ClipItem {
   key: number;
   url: string;
+}
+/** 再生中の簡易演出。クリップとは独立に1つだけ持つ(併用できる)。 */
+interface MiniItem {
+  key: number;
+  id: string;
+  amount: number;
+  /** ステージ座標での中心と一辺(7セグの矩形から決める)。 */
+  x: number;
+  y: number;
+  size: number;
 }
 
 let fxKey = 0;
@@ -93,6 +104,7 @@ export function MonitorView(): React.JSX.Element {
   const [floats, setFloats] = useState<FloatItem[]>([]);
   const [flashes, setFlashes] = useState<FlashItem[]>([]);
   const [clip, setClip] = useState<ClipItem | null>(null);
+  const [mini, setMini] = useState<MiniItem | null>(null);
   const [shake, setShake] = useState<{ key: number; cls: string } | null>(null);
   // 粒子演出(紙吹雪・火花・光線)は canvas エンジンに任せる。
   const fxRef = useRef<FxEngine | null>(null);
@@ -177,6 +189,23 @@ export function MonitorView(): React.JSX.Element {
     setClip({ key: ++fxKey, url });
   }
 
+  /**
+   * 簡易演出を7セグの位置へ出す。id が null(未割り当て/無効)なら何もしない。
+   * 位置は canvas エンジンの pointFor を借りてステージ座標で取る — 縦横ステージ
+   * どちらでも数字の上に乗る。エンジン未接続時はステージ中央へ退避。
+   */
+  function playMini(id: string | null, amount: number): void {
+    if (!id) return;
+    const r = fxRef.current?.pointFor(countdownRef.current);
+    const stageW = landscape ? STAGE_LW : STAGE_W;
+    const stageH = landscape ? STAGE_LH : STAGE_H;
+    const x = r?.x ?? stageW / 2;
+    const y = r?.y ?? stageH * 0.45;
+    // 数字の短辺に合わせる — 7セグを覆い隠さない程度の大きさ。
+    const size = Math.max(120, Math.min(r ? Math.min(r.w, r.h) * 1.15 : 240, 340));
+    setMini({ key: ++fxKey, id, amount, x, y, size });
+  }
+
   /** フロート帯(上部 26%)付近のステージ座標 — 粒子演出の既定の発生点。 */
   function fxOrigin(): { x: number; y: number } {
     return {
@@ -205,6 +234,7 @@ export function MonitorView(): React.JSX.Element {
           fx.ringWave(r.x, r.y, { hue: 200, radius: Math.min(r.w, r.h) * 0.5 });
           fx.sparkBurst(r.x, r.y, 6, { hue: 200, speed: 380 });
         }
+        if (cfg) playMini(miniForSlot(cfg.challenge, 'press'), e.amount);
         return;
       }
       case 'follow': {
@@ -222,6 +252,7 @@ export function MonitorView(): React.JSX.Element {
         const o = fxOrigin();
         fx?.sparkBurst(o.x, o.y, 24, { hue: 0, speed: 560 });
         fx?.heartBurst(o.x, o.y, 10, { hue: 0 });
+        if (cfg) playMini(miniForSlot(cfg.challenge, 'follow'), e.amount);
         return;
       }
       case 'like': {
@@ -245,6 +276,7 @@ export function MonitorView(): React.JSX.Element {
         } else {
           fx?.heartBurst(o.x, o.y, 8, { hue: 338 });
         }
+        if (cfg) playMini(miniForSlot(cfg.challenge, 'like'), e.amount);
         return;
       }
       case 'gift': {
@@ -252,7 +284,9 @@ export function MonitorView(): React.JSX.Element {
         // 映像クリップ。canonical 一致の専用クリップ → 無ければ tier の汎用クリップ。
         // 割り当ては設定画面で変更でき、cfg は 30 秒ポーリングで届く。
         if (cfg) {
-          playClip(fxClipUrl(matchGiftClip(cfg.challenge, { canonical: e.canonical, diamonds: e.diamonds ?? 0 })));
+          const g = { canonical: e.canonical, diamonds: e.diamonds ?? 0 };
+          playClip(fxClipUrl(matchGiftClip(cfg.challenge, g)));
+          playMini(matchGiftMini(cfg.challenge, g), e.amount);
         }
         // 「照明」= 画面フラッシュ。flash 指定は「確実に見える t2 相当」を保証
         // するだけで tier を偽らない(旧実装は小額 flash ギフトが t3 に化けた)。
@@ -306,6 +340,7 @@ export function MonitorView(): React.JSX.Element {
         pushFlash('clear');
         pushShake('shake-strong');
         if (cfg?.challenge.fxClipsEnabled) playClip(ACHIEVED_CLIP_URL);
+        if (cfg) playMini(miniForSlot(cfg.challenge, 'achieved'), 0);
         fx?.celebrate();
         return;
     }
@@ -493,6 +528,21 @@ export function MonitorView(): React.JSX.Element {
           stageH={landscape ? STAGE_LH : STAGE_H}
           scale={scale}
         />
+        {mini ? (
+          <div
+            key={mini.key}
+            className="mini"
+            style={{ left: mini.x, top: mini.y, width: mini.size, height: mini.size }}
+            onAnimationEnd={(ev) => {
+              // SVG 内の子アニメーション(着弾の星)のバブリングで早死にしないよう、
+              // 自分の直下要素の終了だけを拾う。
+              if (ev.target !== ev.currentTarget.firstChild) return;
+              setMini((m) => (m?.key === mini.key ? null : m));
+            }}
+          >
+            <MiniFx id={mini.id} amount={mini.amount} />
+          </div>
+        ) : null}
         <div className="floats">
           {floats.map((f) => (
             <div

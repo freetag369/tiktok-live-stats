@@ -759,6 +759,149 @@ body {
   animation-duration: 1600ms;
 }
 
+/*
+ * 簡易演出(MiniFx)。SVG + keyframes だけの軽量アニメで、素材を持たない。
+ *
+ * .mini が中央寄せ(translate)、.mini-art が回転・拡縮を持つ二層構成。
+ * 1要素にまとめると keyframes の transform が中央寄せを上書きして飛ぶ。
+ * 位置は MonitorView が fx.pointFor(countdown) のステージ座標を入れる。
+ *
+ * 映像クリップと違い mix-blend-mode を使わないので .fx-layer の中で良い
+ * (スタッキングコンテキストの制約を受けない)。
+ */
+.mini {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.mini-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ── ピコピコハンマー ── */
+/*
+ * 支点は MiniFx.tsx の PIVOT(82,18)と一致させること。
+ * transform-box は必ず view-box — fill-box にすると基準がグループ自身の
+ * バウンディングボックスになり、支点が viewBox 座標とズレて軌道が崩れる。
+ */
+.mini-hammer .mh-body {
+  transform-box: view-box;
+  transform-origin: 82px 18px;
+  animation: mhswing 620ms cubic-bezier(0.3, 0.9, 0.4, 1) forwards;
+}
+
+/*
+ * 角度の向き: 0deg が「頭が7セグに当たっている」姿勢(MiniFx.tsx の ARM_DEG)。
+ * 正方向へ回すと頭は左上へ持ち上がる。したがって +72deg が振りかぶり、
+ * 0deg 付近が着弾。符号を逆にすると下から振り上げる動きになるので注意。
+ */
+@keyframes mhswing {
+  0% {
+    transform: rotate(72deg);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  /* 着弾 — mh-hit が開く 38% と揃える。少し押し込む */
+  34% {
+    transform: rotate(-4deg);
+  }
+  /* 反動で跳ね返る */
+  48% {
+    transform: rotate(14deg);
+  }
+  62% {
+    transform: rotate(2deg);
+  }
+  /* 振りかぶりへ戻しながら消える(その場で溶けないように) */
+  78% {
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(72deg);
+    opacity: 0;
+  }
+}
+
+.mini-hammer .mh-hit {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  opacity: 0;
+  animation: mhhit 620ms ease-out forwards;
+}
+
+@keyframes mhhit {
+  0%,
+  32% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  38% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  70% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+/* ── ハンコ ── */
+.mini-stamp {
+  transform-origin: 50% 50%;
+  animation: mstamp 460ms cubic-bezier(0.2, 1.4, 0.4, 1) forwards;
+}
+
+@keyframes mstamp {
+  0% {
+    transform: scale(2.1) rotate(-18deg);
+    opacity: 0;
+  }
+  30% {
+    opacity: 1;
+  }
+  55% {
+    transform: scale(0.94) rotate(0deg);
+    opacity: 1;
+  }
+  70% {
+    transform: scale(1.02) rotate(0deg);
+  }
+  100% {
+    transform: scale(1.12) rotate(0deg);
+    opacity: 0;
+  }
+}
+
+/* ── 集中線 ── */
+.mini-shock {
+  transform-origin: 50% 50%;
+  animation: mshock 260ms ease-out forwards;
+}
+
+@keyframes mshock {
+  0% {
+    transform: scale(0.55);
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
 /* ±N 浮上バッジ */
 .floats {
   position: absolute;
