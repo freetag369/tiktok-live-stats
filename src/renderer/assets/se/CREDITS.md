@@ -29,3 +29,27 @@ https://creativecommons.org/publicdomain/zero/1.0/
 | jingle-sax.ogg | Music Jingles | Audio/Sax jingles/jingles_SAX07.ogg |
 | fanfare-8bit.ogg | Music Jingles | Audio/8-Bit jingles/jingles_NES00.ogg |
 | fanfare-8bit-short.ogg | Music Jingles | Audio/8-Bit jingles/jingles_NES13.ogg |
+
+---
+
+# カットインBGM(`band/` サブフォルダ)— 出典が違うので注意
+
+上の Kenney 素材(CC0)とは**別物**。ダイヤ帯域カットイン(`../fx/band/`)の
+再生中に流すパチンコ風BGMで、**Higgsfield (https://higgsfield.ai) の
+`sonilo_music`(FAL / text-to-music)で AI 生成**した。**CC0 ではない** —
+利用条件は Higgsfield の利用規約に従う。AGPL でのソースzip再配布前に
+規約上の再配布可否を必ず確認すること(`../fx/CREDITS.md` と同じ注意)。
+
+生成日 2026-08-12。加工内容: 返却された m4a を ffmpeg で mp3(VBR q4)へ
+変換したのみ。カタログとループ/フェード再生は `src/renderer/lib/bgm.ts`
+(効果音の `se.ts` とは別モジュール — 長尺・停止可能ハンドル持ち)。
+
+| ファイル | 帯域 | 内容 | 実尺 |
+|---|---|---|---|
+| bgm-band1.mp3 | 1〜50💎(6秒) | 当たり(小)— 明るいチップチューン | 8.07 秒 |
+| bgm-band2.mp3 | 51〜100💎(6秒) | 当たり(中)— ブラス入りファンファーレ | 8.07 秒 |
+| bgm-band3.mp3 | 101〜600💎(8秒) | 大当たり — ユーロビート | 10.06 秒 |
+| bgm-band4.mp3 | 601💎〜(10秒) | 超大当たり — フィーバーアンセム | 12.07 秒 |
+
+実尺はカットイン尺よりやや長い。再生側は `loop = true` + カットイン終端
+0.4 秒前からのフェードで打ち切るため、尺の一致は要らない(映像と同じ設計)。

@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Store } from '../../src/worker/store/index';
 import { ReplayAdapter } from '../../src/worker/tiktok/replay-adapter';
+import { ChallengeEngine } from '../../src/worker/challenge';
+import { DEFAULT_CHALLENGE } from '@shared/challenge';
 import type { NormalizedEvent } from '@shared/events';
 
 /**
@@ -139,6 +141,30 @@ describe('replay — ハートミー', () => {
     // product's headline metric is not silently zero.
     expect(store.getSessionTotals(sid)!.heartMe).toBe(3);
     expect(store.getViewer('4', sid)!.row.heartMeLifetime).toBe(3);
+  });
+
+  it('spins the gift roulette on the live path (canonical is absent by design)', async () => {
+    // The fixture's gift id (888888) is unknown, so the trigger must fall back to
+    // the gift-name match — exactly what a TikTok-side id change would look like.
+    const sid = newSession();
+    const events = await replay('synth-heart-me.ndjson', sid);
+
+    const engine = new ChallengeEngine(
+      () => ({ ...structuredClone(DEFAULT_CHALLENGE), enabled: true }),
+      () => Date.UTC(2026, 6, 28, 12, 0, 0),
+      () => 0 // 既定盤面の先頭 = 出目 +5
+    );
+    engine.start();
+    for (const e of events) engine.handleEvent(e);
+
+    const s = engine.get();
+    // 2 gift messages in the fixture -> 2 spins of +5 each, and the default
+    // perDiamond rule must NOT stack on top (value would be +13 otherwise).
+    expect(s.stats.rouletteSpins).toBe(2);
+    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 10);
+    const spins = s.recentEffects.filter((e) => e.kind === 'roulette');
+    expect(spins).toHaveLength(2);
+    expect(spins[0]!.rouletteSegments![spins[0]!.rouletteIndex!]).toBe(5);
   });
 });
 

@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   AppSettings,
   ChallengeConfig,
   ChallengeGiftClip,
   ChallengeGiftRule,
+  ChallengeRouletteConfig,
+  ChallengeRouletteSegment,
+  GiftBandFxConfig,
+  GiftFxBand,
   ScoringConfig,
 } from '@shared/dto';
 import { bytes, num } from '@shared/format';
@@ -12,15 +16,19 @@ import {
   CHALLENGE_MINI_IDS,
   CHALLENGE_SE_SLOTS,
   DEFAULT_CHALLENGE,
+  DEFAULT_GIFT_BAND_FX,
   DEFAULT_GIFT_CLIPS,
   DEFAULT_MINI_FX,
+  DEFAULT_ROULETTE,
   DEFAULT_SE_VOLUMES,
+  ROULETTE_SEGMENTS_MAX,
   effectiveSeVolume,
 } from '@shared/challenge';
 import { DEFAULT_SCORING } from '@shared/scoring';
 import { rpc, useQuery } from '../ipc/client';
 import { go, setSettings, toast, useUi } from '../state/uiStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
+import { BAND_BGM, playBandBgm, type BgmHandle } from '../lib/bgm';
 import { FX_CLIPS } from '../lib/fx';
 
 /** 効果音スロットの表示名(設定画面の行ラベル)。 */
@@ -29,10 +37,13 @@ const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   follow: 'フォロー妨害',
   like: 'いいね妨害',
   'gauge-full': 'いいねゲージ満タン(着弾)',
+  'stock-full': 'いいねストック満杯(着弾)',
   'gift-t1': 'ギフト(小)',
   'gift-t2': 'ギフト(中)',
   'gift-t3': 'ギフト(大)',
   'gift-t4': 'ギフト(特大)',
+  roulette: 'ルーレット回転',
+  'roulette-hit': 'ルーレット確定',
   achieved: '達成',
 };
 
@@ -578,6 +589,237 @@ function GiftClipsSection({
 }
 
 /**
+ * ダイヤ帯域カットイン(バンド演出)。ダイヤ数の帯域で全画面カットインを再生し、
+ * 再生中は worker がカウンタを凍結する。一致時は「ギフトごとの演出クリップ」より
+ * 優先される。除外(既定: ハートミー 7934)は giftId ベース — ライブ経路では
+ * canonical が乗らないため。
+ */
+function GiftBandFxSection({
+  cfg,
+  onPatch,
+}: {
+  cfg: ChallengeConfig;
+  onPatch: (p: Partial<ChallengeConfig>) => void;
+}) {
+  const bf = cfg.giftBandFx;
+  const [preview, setPreview] = useState<{ key: number; url: string } | null>(null);
+  // BGM試聴。playSe と違い長尺・ループなのでハンドルを持って止められるようにする。
+  // ハンドルは ref(再レンダーで作り直さない)、ボタン表示用の id だけ state。
+  const auditionRef = useRef<BgmHandle | null>(null);
+  const [auditionId, setAuditionId] = useState<string | null>(null);
+  useEffect(
+    () => () => {
+      auditionRef.current?.stop(0); // 画面遷移で鳴りっぱなしにしない
+    },
+    []
+  );
+  const toggleAudition = (id: string): void => {
+    const playing = auditionId;
+    auditionRef.current?.stop(0);
+    auditionRef.current = null;
+    setAuditionId(null);
+    if (playing === id) return; // 同じ曲をもう一度 → 停止だけ
+    auditionRef.current = playBandBgm(id, bf.bgmVolume);
+    if (auditionRef.current) setAuditionId(id);
+  };
+
+  const patchBf = (p: Partial<GiftBandFxConfig>): void => {
+    onPatch({ giftBandFx: { ...bf, ...p } });
+  };
+  const patchBand = (i: number, p: Partial<GiftFxBand>): void => {
+    patchBf({ bands: bf.bands.map((b, j) => (j === i ? { ...b, ...p } : b)) });
+  };
+
+  return (
+    <>
+      <h3 style={{ marginTop: 14 }}>ダイヤ数のカットイン演出(カウント一時停止)</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={bf.enabled} onChange={(e) => patchBf({ enabled: e.target.checked })} />
+        <span>ダイヤ数の帯域で全画面カットインを再生する</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        帯域に一致したギフトで画面全体にカットイン動画を再生し、<b>再生中はカウントを一時停止</b>します
+        (その間のギフト・いいね・フォローは捨てられず、演出後に順番に反映されます)。
+        一致した帯域は「ギフトごとの演出クリップ」より優先。ハートミー等の除外は下の giftId 欄で指定します。
+        変更がモニターに反映されるまで最大30秒かかります。
+      </div>
+
+      {bf.enabled ? (
+        <>
+          {bf.bands.map((b, i) => (
+            <div className="challenge-rule" key={b.id}>
+              <label className="field" style={{ width: 92 }}>
+                💎下限
+                <input
+                  type="number"
+                  min="1"
+                  value={b.min}
+                  onChange={(e) => patchBand(i, { min: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field" style={{ width: 92 }}>
+                💎上限
+                <input
+                  type="number"
+                  min="1"
+                  value={b.max}
+                  onChange={(e) => patchBand(i, { max: Number(e.target.value) })}
+                />
+              </label>
+              <div className="row" style={{ gap: 6, flex: 1 }}>
+                <label className="field" style={{ flex: 1 }}>
+                  カットイン動画
+                  <select value={b.clip} onChange={(e) => patchBand(i, { clip: e.target.value })}>
+                    <option value="off">出さない</option>
+                    {FX_CLIPS.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="btn small"
+                  disabled={b.clip === 'off'}
+                  title="このクリップを試写"
+                  style={{ alignSelf: 'flex-end' }}
+                  onClick={() => {
+                    const url = FX_CLIPS.find((f) => f.id === b.clip)?.url;
+                    if (url) setPreview({ key: clipSeq++, url });
+                  }}
+                >
+                  ▶
+                </button>
+                <label className="field" style={{ width: 84 }}>
+                  秒数
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={b.durationSec}
+                    onChange={(e) => patchBand(i, { durationSec: Number(e.target.value) })}
+                  />
+                </label>
+                <label className="field" style={{ width: 190 }}>
+                  BGM
+                  <select value={b.bgm} onChange={(e) => patchBand(i, { bgm: e.target.value })}>
+                    <option value="off">鳴らさない</option>
+                    {BAND_BGM.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="btn small"
+                  disabled={b.bgm === 'off'}
+                  title={auditionId === b.bgm ? '試聴を停止' : 'このBGMを試聴'}
+                  style={{ alignSelf: 'flex-end' }}
+                  onClick={() => toggleAudition(b.bgm)}
+                >
+                  {auditionId === b.bgm ? '■' : '♪'}
+                </button>
+                <label className="row" style={{ cursor: 'pointer', alignSelf: 'flex-end', paddingBottom: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={b.enabled}
+                    onChange={(e) => patchBand(i, { enabled: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    有効
+                  </span>
+                </label>
+              </div>
+            </div>
+          ))}
+          <div className="row" style={{ gap: 10, marginTop: 8, alignItems: 'center' }}>
+            <label className="row" style={{ cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={bf.bgmEnabled}
+                onChange={(e) => patchBf({ bgmEnabled: e.target.checked })}
+              />
+              <span>カットイン中にBGMを鳴らす</span>
+            </label>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={bf.bgmVolume}
+              disabled={!bf.bgmEnabled}
+              onChange={(e) => patchBf({ bgmVolume: Number(e.target.value) })}
+            />
+            <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>
+              音量 {bf.bgmVolume}
+            </span>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 2 }}>
+            BGM中はそのギフトの効果音(ジングル)は鳴りません。音量は効果音の設定とは独立です。
+          </div>
+          <div className="row" style={{ gap: 8, marginTop: 8 }}>
+            <label className="field" style={{ flex: 1 }}>
+              最上位の上限を超えたギフト
+              <select
+                value={bf.overflow}
+                onChange={(e) => patchBf({ overflow: e.target.value === 'off' ? 'off' : 'top' })}
+              >
+                <option value="top">最上位のカットインを再生する</option>
+                <option value="off">カットインなし(従来の演出クリップ)</option>
+              </select>
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              除外する giftId(カンマ区切り)
+              <input
+                type="text"
+                defaultValue={bf.excludeGiftIds.join(', ')}
+                placeholder="例: 7934"
+                onBlur={(e) =>
+                  patchBf({
+                    excludeGiftIds: e.target.value
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            </label>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+            既定の除外はハートミー(giftId 7934)。1ダイヤの高頻度ギフトにカットインを出すと画面が埋まります。
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <button
+              className="btn small"
+              onClick={() => onPatch({ giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX) })}
+            >
+              カットイン設定を既定に戻す
+            </button>
+          </div>
+
+          {preview ? (
+            <div className="fx-preview">
+              <video
+                key={preview.key}
+                src={preview.url}
+                autoPlay
+                muted
+                playsInline
+                onEnded={() => setPreview(null)}
+                onError={() => setPreview(null)}
+              />
+              <button className="btn small" onClick={() => setPreview(null)}>
+                閉じる
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </>
+  );
+}
+
+/**
  * カウントダウンチャレンジの設定カード。
  * ギフト規則は上から順に評価され、最初に一致した1件だけが適用される。
  */
@@ -655,6 +897,24 @@ function ChallengeSettingsCard({
             min="0"
             value={cfg.likeStep}
             onChange={(e) => onPatch({ likeStep: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field">
+          ストック満杯に必要な満タン回数(0で無効)
+          <input
+            type="number"
+            min="0"
+            value={cfg.likeStockCount}
+            onChange={(e) => onPatch({ likeStockCount: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field">
+          ストック満杯の加算量(妨害)
+          <input
+            type="number"
+            min="0"
+            value={cfg.likeStockStep}
+            onChange={(e) => onPatch({ likeStockStep: Number(e.target.value) })}
           />
         </label>
         <label className="field">
@@ -875,6 +1135,10 @@ function ChallengeSettingsCard({
 
       <GiftClipsSection cfg={cfg} onPatch={onPatch} />
 
+      <GiftBandFxSection cfg={cfg} onPatch={onPatch} />
+
+      <RouletteSection cfg={cfg} onPatch={onPatch} />
+
       <h3 style={{ marginTop: 14 }}>ギフトの増減</h3>
       <div className="row" style={{ gap: 8 }}>
         <label className="field" style={{ flex: 1 }}>
@@ -973,5 +1237,125 @@ function ChallengeSettingsCard({
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * ギフトルーレットの設定セクション。
+ * トリガーに一致したギフトは下の「ギフトの増減」規則を通らない(ルーレットが
+ * 増減を置き換える)— worker/challenge.ts の handleEvent と同じ規約。
+ */
+function RouletteSection({
+  cfg,
+  onPatch,
+}: {
+  cfg: ChallengeConfig;
+  onPatch: (p: Partial<ChallengeConfig>) => void;
+}) {
+  const rl = cfg.roulette;
+  const patchRoulette = (p: Partial<ChallengeRouletteConfig>): void =>
+    onPatch({ roulette: { ...rl, ...p } });
+  const patchSeg = (i: number, p: Partial<ChallengeRouletteSegment>): void =>
+    patchRoulette({ segments: rl.segments.map((s, j) => (j === i ? { ...s, ...p } : s)) });
+  const totalWeight = rl.segments.reduce((s, x) => s + Math.max(0, x.weight), 0);
+
+  return (
+    <>
+      <h3 style={{ marginTop: 14 }}>ギフトルーレット</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={rl.enabled}
+          onChange={(e) => patchRoulette({ enabled: e.target.checked })}
+        />
+        <span>特定ギフトでルーレットを回す</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        トリガーギフト(既定: ハートミー)が届くとモニターでルーレットが回り、出目が数字に
+        {rl.direction === 'sub' ? '減算' : '加算'}されます。トリガーに一致したギフトは下の「ギフトの増減」規則を通りません。
+      </div>
+      {rl.enabled ? (
+        <>
+          <div className="row" style={{ gap: 8, marginLeft: 22 }}>
+            <label className="field" style={{ width: 130 }}>
+              トリガー giftId
+              <input
+                type="text"
+                placeholder="例: 7934(ハートミー)"
+                value={rl.giftId}
+                onChange={(e) => patchRoulette({ giftId: e.target.value.trim() })}
+              />
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              ギフト名(部分一致・IDが変わった時の保険)
+              <input
+                type="text"
+                placeholder="例: heart me"
+                value={rl.giftName}
+                onChange={(e) => patchRoulette({ giftName: e.target.value.toLowerCase() })}
+              />
+            </label>
+            <label className="field" style={{ width: 150 }}>
+              出目の方向
+              <select
+                value={rl.direction}
+                onChange={(e) => patchRoulette({ direction: e.target.value as 'add' | 'sub' })}
+              >
+                <option value="add">増やす(妨害)</option>
+                <option value="sub">減らす(応援)</option>
+              </select>
+            </label>
+          </div>
+          {rl.segments.map((s, i) => (
+            <div className="row" key={i} style={{ gap: 8, marginLeft: 22, alignItems: 'center' }}>
+              <label className="field" style={{ width: 110 }}>
+                {i === 0 ? '出目' : ''}
+                <input
+                  type="number"
+                  min="1"
+                  value={s.amount}
+                  onChange={(e) => patchSeg(i, { amount: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                {i === 0 ? '重み' : ''}
+                <input
+                  type="number"
+                  min="0"
+                  value={s.weight}
+                  onChange={(e) => patchSeg(i, { weight: Number(e.target.value) })}
+                />
+              </label>
+              <span className="faint" style={{ fontSize: 11, minWidth: 54, textAlign: 'right' }}>
+                {totalWeight > 0 ? `${((Math.max(0, s.weight) / totalWeight) * 100).toFixed(1)}%` : '—'}
+              </span>
+              <button
+                className="btn small danger"
+                disabled={rl.segments.length <= 1}
+                onClick={() => patchRoulette({ segments: rl.segments.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+          <div className="row" style={{ marginTop: 8, marginLeft: 22 }}>
+            <button
+              className="btn small"
+              disabled={rl.segments.length >= ROULETTE_SEGMENTS_MAX}
+              onClick={() => patchRoulette({ segments: [...rl.segments, { amount: 5, weight: 10 }] })}
+            >
+              出目を追加
+            </button>
+            <button className="btn small" onClick={() => onPatch({ roulette: structuredClone(DEFAULT_ROULETTE) })}>
+              ルーレットを既定に戻す
+            </button>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
+            確率 = 重み ÷ 重みの合計。既定は +5(30%) +10(25%) +20(20%) +30(15%) +100(9%) +1000(1%)。
+            重み 0 の出目は出ません。
+          </div>
+        </>
+      ) : null}
+    </>
   );
 }

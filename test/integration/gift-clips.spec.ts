@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,7 +8,10 @@ import {
   matchGiftClip,
   matchGiftMini,
   miniForSlot,
+  CHALLENGE_BAND_BGM_IDS,
+  CHALLENGE_FX_CLIP_IDS,
   DEFAULT_CHALLENGE,
+  DEFAULT_GIFT_BAND_FX,
   DEFAULT_GIFT_CLIPS,
 } from '@shared/challenge';
 import type { ChallengeConfig } from '@shared/dto';
@@ -132,6 +135,52 @@ describe('gift-aliases: 最上位ギフトの名寄せ順序', () => {
   it('16種すべてに既定のクリップ割り当てがある', () => {
     const assigned = new Set(DEFAULT_GIFT_CLIPS.map((c) => c.canonical));
     for (const [, canonical] of CASES) expect(assigned.has(canonical)).toBe(true);
+  });
+});
+
+describe('ダイヤ帯域カットイン(gift-band1〜4)の素材と登録の整合', () => {
+  // renderer/lib/fx.ts は mp4 を import するため node 環境では読み込めない。
+  // 代わりに「validate が許す id 一覧」と「実ファイルの存在」を突き合わせる —
+  // FX_CLIPS 側の登録漏れは validate で 'off' に倒されてもビルドは通ってしまうが、
+  // ファイルが無ければ import でビルドが落ちるので、この2点で片側ずつ守れる。
+  const BAND_DIR = join(__dirname, '../../src/renderer/assets/fx/band');
+
+  it('既定バンドのクリップ id はすべて CHALLENGE_FX_CLIP_IDS に登録されている', () => {
+    for (const b of DEFAULT_GIFT_BAND_FX.bands) {
+      expect(CHALLENGE_FX_CLIP_IDS).toContain(b.clip);
+    }
+  });
+
+  it('gift-band1〜4 の mp4 が実在する(fx.ts の import が解決できる)', () => {
+    for (const id of ['gift-band1', 'gift-band2', 'gift-band3', 'gift-band4']) {
+      expect(existsSync(join(BAND_DIR, `${id}.mp4`)), `${id}.mp4 が無い`).toBe(true);
+    }
+  });
+
+  it('既定バンドの BGM id はすべて CHALLENGE_BAND_BGM_IDS に登録されている', () => {
+    for (const b of DEFAULT_GIFT_BAND_FX.bands) {
+      expect(CHALLENGE_BAND_BGM_IDS).toContain(b.bgm);
+    }
+  });
+
+  it('bgm-band1〜4 の mp3 が実在する(bgm.ts の import が解決できる)', () => {
+    const BGM_DIR = join(__dirname, '../../src/renderer/assets/se/band');
+    for (const id of CHALLENGE_BAND_BGM_IDS) {
+      expect(existsSync(join(BGM_DIR, `${id}.mp3`)), `${id}.mp3 が無い`).toBe(true);
+    }
+  });
+
+  it('既定バンドは要件どおりの帯域と秒数(1-50/6s, 51-100/6s, 101-600/8s, 601-1000/10s)', () => {
+    expect(
+      DEFAULT_GIFT_BAND_FX.bands.map((b) => [b.min, b.max, b.durationSec])
+    ).toEqual([
+      [1, 50, 6],
+      [51, 100, 6],
+      [101, 600, 8],
+      [601, 1000, 10],
+    ]);
+    expect(DEFAULT_GIFT_BAND_FX.overflow).toBe('top');
+    expect(DEFAULT_GIFT_BAND_FX.excludeGiftIds).toContain('7934'); // ハートミー除外
   });
 });
 

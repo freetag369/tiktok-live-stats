@@ -3,7 +3,8 @@ import type { ChallengeEffect, ChallengeSeSlot, ChallengeState } from '@shared/d
 import { DEFAULT_SE_SOUNDS, effectiveSeVolume, tierForDiamonds } from '@shared/challenge';
 import { playSe } from './se';
 
-function slotFor(e: ChallengeEffect): ChallengeSeSlot {
+/** null = effect 到着時には鳴らさない(着弾の瞬間にモニターが直接鳴らすスロット)。 */
+function slotFor(e: ChallengeEffect): ChallengeSeSlot | null {
   switch (e.kind) {
     case 'press':
       return 'press';
@@ -11,8 +12,21 @@ function slotFor(e: ChallengeEffect): ChallengeSeSlot {
       return 'follow';
     case 'like':
       return 'like';
+    // 'stock-full' の音は2段目着弾の瞬間にモニターが直接鳴らす(impactStock —
+    // roulette-hit と同型)。ここで鳴らすと着弾より約1秒早く鳴ってしまう。
+    case 'stock-full':
+      return null;
     case 'gift':
+      // ダイヤ帯域カットイン付きのギフトはジングルを鳴らさない — カットインの
+      // BGM(MonitorView の playBandBgm)が主役で、重ねると音が濁る。
+      // ダッシュボード側(モニター閉時)はBGMを持たないが、カットインの視覚も
+      // 出ないので無音で整合する。
+      if (e.fxBandClip != null) return null;
       return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
+    // 到着時 = 回転開始音。確定音('roulette-hit')はモニターがリール停止の瞬間に
+    // 直接鳴らす(gauge-full の impactStrike と同型)。
+    case 'roulette':
+      return 'roulette';
     case 'achieved':
       return 'achieved';
   }
@@ -62,6 +76,7 @@ export function useChallengeSe(
       if (Date.now() - e.atMs > 5000) continue;
       if (!o.active || !o.enabled) continue; // watermark は進めるが音は出さない
       const slot = slotFor(e);
+      if (slot === null) continue; // 着弾側(モニター)が直接鳴らすスロット
       playSe(sounds[slot], effectiveSeVolume(o.volume, o.volumes?.[slot])); // 'off' は playSe 側で無音
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

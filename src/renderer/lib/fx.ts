@@ -18,6 +18,10 @@ import giftT1Url from '../assets/fx/gift-t1.mp4';
 import giftT2Url from '../assets/fx/gift-t2.mp4';
 import giftT3Url from '../assets/fx/gift-t3.mp4';
 import giftT4Url from '../assets/fx/gift-t4.mp4';
+import giftBand1Url from '../assets/fx/band/gift-band1.mp4';
+import giftBand2Url from '../assets/fx/band/gift-band2.mp4';
+import giftBand3Url from '../assets/fx/band/gift-band3.mp4';
+import giftBand4Url from '../assets/fx/band/gift-band4.mp4';
 import achievedUrl from '../assets/fx/achieved.mp4';
 import gaugeFullUrl from '../assets/fx/gauge-full.mp4';
 import strikeUrl from '../assets/fx/gauge-strike.mp4';
@@ -61,7 +65,23 @@ export const FX_CLIPS: readonly FxClip[] = [
   { id: 'gift-t2', label: '汎用: 中(金のバースト)', url: giftT2Url },
   { id: 'gift-t3', label: '汎用: 大(金の放射光)', url: giftT3Url },
   { id: 'gift-t4', label: '汎用: 特大(花火3連発)', url: giftT4Url },
+  { id: 'gift-band1', label: 'カットイン: びっくりした魚(1〜50💎・6秒)', url: giftBand1Url },
+  { id: 'gift-band2', label: 'カットイン: ハートポーズ(51〜100💎・6秒)', url: giftBand2Url },
+  { id: 'gift-band3', label: 'カットイン: マネーガン(101〜600💎・8秒)', url: giftBand3Url },
+  { id: 'gift-band4', label: 'カットイン: 銀河(601💎〜・10秒)', url: giftBand4Url },
 ];
+
+/**
+ * 不透明フルフレームのカットイン素材(assets/fx/band/*.mp4)。他の全クリップと
+ * 違い「純黒背景に発光体」ではないので、screen 合成ではなく .fx-clip-opaque
+ * (mix-blend-mode: normal)で最前面へ重ねる — MonitorView のバンド演出専用。
+ */
+export const BAND_CLIP_IDS: readonly string[] = ['gift-band1', 'gift-band2', 'gift-band3', 'gift-band4'];
+
+/** バンド(不透明カットイン)素材かどうか。screen 合成か normal 合成かの分岐に使う。 */
+export function isBandClip(id: string | null | undefined): boolean {
+  return id != null && BAND_CLIP_IDS.includes(id);
+}
 
 /** 達成(CLEAR)専用。ギフトには割り当てない固定クリップ。 */
 export const ACHIEVED_CLIP_URL = achievedUrl;
@@ -75,6 +95,19 @@ export const GAUGE_FULL_CLIP_URL = gaugeFullUrl;
 
 /** ゲージ満タンの弾が7セグに当たる瞬間。全画面ではなく数字の実位置に重ねる。 */
 export const STRIKE_CLIP_URL = strikeUrl;
+
+/**
+ * いいねストック満杯の瞬間(全画面・緑の衝撃波)。GAUGE_FULL_CLIP_URL と同じ
+ * 固定クリップ扱い。素材(Higgsfield 生成)を差し替え/削除してもビルドが
+ * 落ちないよう、静的 import ではなく 0 件許容の glob で拾い、無ければ
+ * gauge-full を代用する。
+ */
+const stockGlob = import.meta.glob('../assets/fx/stock-full.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+export const STOCK_FULL_CLIP_URL: string = stockGlob['../assets/fx/stock-full.mp4'] ?? gaugeFullUrl;
 
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 
