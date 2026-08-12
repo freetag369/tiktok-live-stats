@@ -6,7 +6,7 @@ import type { FxEngine } from './fx/engine';
 /**
  * いいね進捗ゲージ(◯いいねで +N の分子を見せる)。
  *
- * データは 2Hz の delta で届くため、幅は CSS transition(mbar と同カーブ)で
+ * データは 2Hz の delta で届くため、幅は CSS transition(MoveTowards 相当のカーブ)で
  * 滑らかに追従させる。満タン検出は counter の増減ではなく worker が持つ単調
  * カウンタ fills の前回比較で行う — counter は閾値跨ぎで「増えて見える」し
  * reset でも減るので、増減ヒューリスティックは誤発火する。

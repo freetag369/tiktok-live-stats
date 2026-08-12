@@ -14,6 +14,8 @@ import {
   DEFAULT_CHALLENGE,
   DEFAULT_GIFT_CLIPS,
   DEFAULT_MINI_FX,
+  DEFAULT_SE_VOLUMES,
+  effectiveSeVolume,
 } from '@shared/challenge';
 import { DEFAULT_SCORING } from '@shared/scoring';
 import { rpc, useQuery } from '../ipc/client';
@@ -26,6 +28,7 @@ const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   press: 'ボタン押下',
   follow: 'フォロー妨害',
   like: 'いいね妨害',
+  'gauge-full': 'いいねゲージ満タン(着弾)',
   'gift-t1': 'ギフト(小)',
   'gift-t2': 'ギフト(中)',
   'gift-t3': 'ギフト(大)',
@@ -743,39 +746,79 @@ function ChallengeSettingsCard({
           onChange={(e) => onPatch({ seVolume: Number(e.target.value) })}
         />
         <span className="faint" style={{ fontSize: 11, minWidth: 48 }}>
-          音量 {cfg.seVolume}
+          全体 {cfg.seVolume}
         </span>
       </div>
       {cfg.seEnabled ? (
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', marginLeft: 22, marginTop: 6 }}>
-          {CHALLENGE_SE_SLOTS.map((slot) => (
-            <div key={slot} className="row" style={{ gap: 6, alignItems: 'center' }}>
-              <span className="faint" style={{ fontSize: 11, minWidth: 88 }}>
-                {SE_SLOT_LABELS[slot]}
-              </span>
-              <select
-                style={{ flex: 1 }}
-                value={cfg.seSounds[slot]}
-                onChange={(e) => onPatch({ seSounds: { ...cfg.seSounds, [slot]: e.target.value } })}
-              >
-                <option value="off">鳴らさない</option>
-                {SE_SOUNDS.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="btn small"
-                disabled={cfg.seSounds[slot] === 'off'}
-                title="この音を試聴"
-                onClick={() => playSe(cfg.seSounds[slot], cfg.seVolume)}
-              >
-                ♪
-              </button>
-            </div>
-          ))}
-        </div>
+        <>
+          {/* 1カラム。2カラムだとカード最小幅(380px)で音量スライダーが入らない。 */}
+          <div className="grid" style={{ gridTemplateColumns: '1fr', marginLeft: 22, marginTop: 6 }}>
+            {CHALLENGE_SE_SLOTS.map((slot) => {
+              const off = cfg.seSounds[slot] === 'off';
+              return (
+                <div key={slot} className="row" style={{ gap: 6, alignItems: 'center' }}>
+                  <span className="faint" style={{ fontSize: 11, minWidth: 76 }}>
+                    {SE_SLOT_LABELS[slot]}
+                  </span>
+                  <select
+                    style={{ flex: 1, minWidth: 0 }}
+                    value={cfg.seSounds[slot]}
+                    onChange={(e) =>
+                      onPatch({ seSounds: { ...cfg.seSounds, [slot]: e.target.value } })
+                    }
+                  >
+                    <option value="off">鳴らさない</option>
+                    {SE_SOUNDS.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    style={{ width: 84 }}
+                    value={cfg.seVolumes[slot]}
+                    disabled={off}
+                    title="この音だけの音量(全体音量に対する割合)"
+                    onChange={(e) =>
+                      onPatch({ seVolumes: { ...cfg.seVolumes, [slot]: Number(e.target.value) } })
+                    }
+                  />
+                  <span
+                    className="faint"
+                    style={{ fontSize: 11, minWidth: 32, textAlign: 'right' }}
+                  >
+                    {cfg.seVolumes[slot]}%
+                  </span>
+                  <button
+                    className="btn small"
+                    disabled={off}
+                    title="この音を試聴(全体×個別の実際の音量で鳴ります)"
+                    onClick={() =>
+                      playSe(cfg.seSounds[slot], effectiveSeVolume(cfg.seVolume, cfg.seVolumes[slot]))
+                    }
+                  >
+                    ♪
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <div className="row" style={{ marginTop: 8, marginLeft: 22 }}>
+            <button
+              className="btn small"
+              onClick={() => onPatch({ seVolumes: { ...DEFAULT_SE_VOLUMES } })}
+            >
+              個別音量を既定(100%)に戻す
+            </button>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
+            各行のスライダーは音ごとの個別音量で、上の全体音量に対する割合です。連打される
+            「ボタン押下」を下げ、「達成」を上げる、といった調整に使えます。
+          </div>
+        </>
       ) : null}
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
         モニターを開いているときはモニター側で、閉じているときはライブ画面側で鳴ります。

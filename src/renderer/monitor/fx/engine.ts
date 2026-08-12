@@ -51,6 +51,13 @@ export interface FxEngine {
   fireworkVolley(x: number, y: number, opts?: { count?: number; hue?: number }): void;
   /** ゲージ満タンの複合バースト。 */
   burstGauge(x: number, y: number): void;
+  /**
+   * ゲージ→7セグへ撃ち込むハートの弾。ms で指定した時間ちょうどで着弾する
+   * (呼び出し側が同じ ms のタイマーで数字を切り替える前提の決定論的トゥイーン)。
+   * 着弾コールバックは持たない — 縦横切替で粒子が捨てられると呼ばれず、
+   * タイミングの権威が二重になるため。演出の同期は呼び出し側が一手に握る。
+   */
+  strike(from: FxPoint, to: FxPoint, opts?: { ms?: number; hue?: number; size?: number }): void;
   /** クリア時の多段祝祭(内部で段発タイマーを持つ)。 */
   celebrate(): void;
   dispose(): void;
@@ -62,7 +69,7 @@ const MAX_DT = 0.048;
 
 const TAU = Math.PI * 2;
 
-type Shape = 'spark' | 'heart' | 'diamond' | 'rect' | 'ribbon' | 'ring' | 'ray' | 'seek';
+type Shape = 'spark' | 'heart' | 'diamond' | 'rect' | 'ribbon' | 'ring' | 'ray' | 'seek' | 'comet';
 
 interface Particle {
   shape: Shape;
@@ -92,6 +99,9 @@ interface Particle {
   twinkle: number;
   tx: number;
   ty: number;
+  /** comet のトゥイーン始点。他の形状では使わない。 */
+  ox: number;
+  oy: number;
   /** seek の吸い込み加速 px/s²。 */
   accel: number;
   onArrive: (() => void) | null;
@@ -104,7 +114,7 @@ function blankParticle(): Particle {
     g: 0, drag: 0, life: 0, ttl: 1,
     size: 8, size2: 0, rot: 0, vr: 0,
     hue: -1, phase: 0, wobble: 0, twinkle: 0,
-    tx: 0, ty: 0, accel: 0, onArrive: null,
+    tx: 0, ty: 0, ox: 0, oy: 0, accel: 0, onArrive: null,
   };
 }
 
@@ -256,6 +266,23 @@ export function createFxEngine(): FxEngine {
         kill(i);
         continue;
       }
+      if (p.shape === 'comet') {
+        // 時間で位置が決まるトゥイーン。物理ホーミング(seek)だと accel/drag 次第で
+        // 到達時刻がブレて、7セグの数字が切り替わる瞬間とフレーム単位で合わせられない。
+        // ttl が飛翔時間そのものなので、呼び出し側はタイマーと同じ値を渡せば必ず一致する。
+        const t = p.life / p.ttl;
+        const bx = p.tx - p.ox;
+        const by = p.ty - p.oy;
+        const d = Math.hypot(bx, by) || 1;
+        // 進行方向の法線へ膨らませて弧を描く — 直線だと機械的に見える。
+        // 始点・終点では sin が 0 なので、狙った座標には必ず正確に着弾する。
+        const bulge = Math.sin(t * Math.PI) * p.wobble;
+        const e = t * t; // イーズイン = 加速して突っ込む
+        p.x = p.ox + bx * e - (by / d) * bulge;
+        p.y = p.oy + by * e + (bx / d) * bulge;
+        p.rot = Math.atan2(by, bx);
+        continue;
+      }
       if (p.shape === 'seek') {
         // 目標へのホーミング。減衰を強めにして終端で行き過ぎない。
         const dx = p.tx - p.x;
@@ -339,6 +366,26 @@ export function createFxEngine(): FxEngine {
         g.translate(p.x, p.y);
         g.rotate(p.rot);
         g.scale(p.size * 0.8, p.size * 0.8);
+        g.fill(getHeartPath());
+        g.restore();
+      } else if (p.shape === 'comet') {
+        const frac = p.life / p.ttl;
+        // 着弾の瞬間まで減光しない — 全速のまま数字へ消える(fadeAlpha は使わない)。
+        const ca = frac < 0.12 ? frac / 0.12 : 1;
+        g.globalAlpha = ca;
+        // 尾: raySprite は原点から +X へ広がる台形なので、進行方向の逆へ向ける。
+        g.save();
+        g.translate(p.x, p.y);
+        g.rotate(p.rot + Math.PI);
+        g.drawImage(raySprite(p.hue), 0, -p.size2 / 2, p.size * (2.4 + frac * 2.6), p.size2);
+        g.restore();
+        // 頭: グロー + 白いハート(傾けない — 回すと形が読めなくなる)。
+        const hs = p.size * 2.6;
+        g.drawImage(glowSprite(p.hue), p.x - hs / 2, p.y - hs / 2, hs, hs);
+        g.fillStyle = '#fff';
+        g.save();
+        g.translate(p.x, p.y);
+        g.scale(p.size, p.size);
         g.fill(getHeartPath());
         g.restore();
       } else if (p.shape === 'ring') {
@@ -584,6 +631,46 @@ export function createFxEngine(): FxEngine {
         const dy = i === 0 ? 0 : rand(-90, 60);
         if (i === 0) api.firework(x, y, { hue });
         else later(280 * i, () => api.firework(x + dx, y + dy, { hue: hue + rand(-8, 8) }));
+      }
+    },
+
+    strike(from, to, opts) {
+      const hue = opts?.hue ?? 332;
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const p = spawn();
+      if (p) {
+        p.shape = 'comet';
+        p.ox = from.x;
+        p.oy = from.y;
+        p.x = from.x;
+        p.y = from.y;
+        p.tx = to.x;
+        p.ty = to.y;
+        p.ttl = Math.max(0.08, (opts?.ms ?? 300) / 1000);
+        p.size = opts?.size ?? 26;
+        p.size2 = 46; // 尾の幅
+        p.hue = hue;
+        p.wobble = Math.hypot(dx, dy) * 0.12; // 弧の膨らみ(comet では横揺れに使わない)
+      }
+      // 発射の反動 — 弾が出ていった勢いをゲージ側に残す。
+      const ang = Math.atan2(dy, dx);
+      for (let i = 0; i < 8; i++) {
+        const s = spawn();
+        if (!s) break;
+        s.shape = 'spark';
+        s.x = from.x;
+        s.y = from.y;
+        const a = ang + rand(-0.9, 0.9);
+        const v = rand(160, 420);
+        s.vx = Math.cos(a) * v;
+        s.vy = Math.sin(a) * v;
+        s.drag = 3.2;
+        s.ttl = rand(0.25, 0.5);
+        s.size = rand(10, 22);
+        s.hue = hue;
+        s.twinkle = 18;
+        s.phase = Math.random() * TAU;
       }
     },
 

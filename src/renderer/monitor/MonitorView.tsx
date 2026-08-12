@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AppSettings, ChallengeEffect } from '@shared/dto';
-import { matchGiftClip, matchGiftMini, miniForSlot, tierForDiamonds } from '@shared/challenge';
+import type { AppSettings, ChallengeEffect, ChallengeRankRow } from '@shared/dto';
+import {
+  CHALLENGE_RESULT_TOP_N,
+  effectiveSeVolume,
+  matchGiftClip,
+  matchGiftMini,
+  miniForSlot,
+  tierForDiamonds,
+} from '@shared/challenge';
 import { num } from '@shared/format';
 import { rpc, useQuery } from '../ipc/client';
 import { liveRows, setChallenge, useLive } from '../state/liveStore';
 import { Avatar } from '../components/common';
 import { useChallengeSe } from '../lib/useChallengeSe';
-import { ACHIEVED_CLIP_URL, fxClipUrl } from '../lib/fx';
+import { ACHIEVED_CLIP_URL, GAUGE_FULL_CLIP_URL, STRIKE_CLIP_URL, fxClipUrl } from '../lib/fx';
+import { playSe } from '../lib/se';
 import { MiniFx } from './MiniFx';
 import { SevenSeg } from './SevenSeg';
 import { LikeGauge } from './LikeGauge';
@@ -16,7 +24,7 @@ import type { FxEngine } from './fx/engine';
 /**
  * 背面モニター画面(縦型フルスクリーン想定)。
  *
- * 構成(上から): 現在時刻 / 企画タイトル / 7セグ残数 / バー2本 / 配信時間 /
+ * 構成(上から): 企画タイトル / 7セグ残数 / いいね進捗ゲージ / 配信時間 /
  * ギフトランキング TOP3。FxLayer が照明フラッシュ・紙吹雪・±N 浮上を重ねる。
  *
  * 演出は ChallengeState.recentEffects(id 単調増加)を watermark 方式で冪等再生
@@ -50,7 +58,46 @@ interface MiniItem {
   size: number;
 }
 
+/** 着弾クリップ。全画面の ClipItem とは別枠で持つ — ギフト演出と食い合わせない。 */
+interface StrikeClipItem {
+  key: number;
+  /** ステージ座標での左上(transform を使わず left/top で置くため中心から引いた値)。 */
+  x: number;
+  y: number;
+  size: number;
+}
+
 let fxKey = 0;
+
+/*
+ * いいねゲージ満タン → 数字への「着弾」シーケンス。
+ *
+ * worker は likeFills と value を同じ tick で進めるので、両方が同一の 2Hz デルタで
+ * 届く。素直に描くと「数字が増える」→ 0.72 秒後に「ゲージが光る」となり因果が逆に
+ * 見える。そこで着弾の瞬間まで数字の表示を据え置き、ゲージ満タン → 弾が飛ぶ →
+ * 数字に当たって増える、の順に組み替える。
+ *
+ * STRIKE_LAUNCH_MS は LikeGauge の FILL_MS と一致していなければならない
+ * (ズレるとゲージが満タンになる前/後に弾が出る)。
+ */
+const STRIKE_LAUNCH_MS = 420;
+/**
+ * 弾の飛翔時間。fx.strike と着弾タイマーに同じ値を渡すので、数字が変わる瞬間と
+ * 弾の到達はフレーム単位で一致する。飛距離で決めるのは縦横で距離が倍以上違うため
+ * (縦は約 340px、横は約 700px)。固定値にすると横だけ弾が速すぎて何が飛んだか読めない。
+ */
+const STRIKE_TRAVEL_MS = 300;
+const STRIKE_TRAVEL_MIN_MS = 260;
+const STRIKE_TRAVEL_MAX_MS = 420;
+/** 飛翔速度 px/ms。この値で距離を割って飛翔時間にする。 */
+const STRIKE_SPEED = 1.15;
+/** 安全弁。バックグラウンドタブの setTimeout 抑制などで着弾が来なくても必ず解除する。 */
+const STRIKE_ABORT_MS = 1400;
+
+/** 動きの抑制設定。true ならラッチごとスキップし、数字は従来どおり即時更新する。 */
+function prefersReducedMotion() {
+  return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
 
 /**
  * 固定ステージの設計解像度。レイアウトは全てこの座標系の px で組み、
@@ -63,15 +110,8 @@ const STAGE_H = 960;
 const STAGE_LW = 1280;
 const STAGE_LH = 720;
 
-const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
-
-function clockText(d: Date): { time: string; date: string } {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return {
-    time: `${p(d.getHours())}時${p(d.getMinutes())}分${p(d.getSeconds())}秒`,
-    date: `${p(d.getMonth() + 1)}月${p(d.getDate())}日 ${WEEKDAY_JA[d.getDay()]}曜`,
-  };
-}
+/** CLEAR 演出(フラッシュ/紙吹雪/クリップ)を見せてからリザルトへ切り替えるまで。 */
+const RESULT_DELAY_MS = 2500;
 
 function elapsedText(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -79,10 +119,50 @@ function elapsedText(ms: number): string {
   return `${Math.floor(s / 3600)}時${p(Math.floor((s % 3600) / 60))}分${p(s % 60)}秒`;
 }
 
+/**
+ * リザルトのランキング1列。行の枠は常に TOP_N 件ぶん描く — 参加者が少ない
+ * ときにレイアウトが跳ねない(既存の TOP3 と同じ考え方)。
+ */
+function ResultList({
+  title,
+  rows,
+  kind,
+  showAvatars,
+}: {
+  title: string;
+  rows: ChallengeRankRow[];
+  kind: 'gift' | 'like';
+  showAvatars: boolean;
+}): React.JSX.Element {
+  return (
+    <section className={`rs-col rs-${kind}`}>
+      <h2 className="rs-head">{title}</h2>
+      <ol className="rs-list">
+        {Array.from({ length: CHALLENGE_RESULT_TOP_N }, (_, i) => {
+          const r = rows[i];
+          return (
+            <li key={r?.userId ?? `ph-${kind}-${i}`} className={`rs-row p${i + 1}${r ? '' : ' empty'}`}>
+              <span className="rs-place">{i + 1}</span>
+              {r ? (
+                <>
+                  <Avatar url={r.avatarUrl} name={r.nickname || '?'} size={56} enabled={showAvatars} />
+                  <span className="rs-name">{r.nickname || '名無し'}</span>
+                  <span className="rs-val">{kind === 'gift' ? `${num(r.diamonds)}💎` : `${num(r.likes)}♥`}</span>
+                </>
+              ) : (
+                <span className="rs-dash">—</span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
 export function MonitorView(): React.JSX.Element {
   const { challenge, totals, sessionId, version } = useLive();
   const [cfg, setCfg] = useState<AppSettings | null>(null);
-  const [now, setNow] = useState(() => new Date());
   const [scale, setScale] = useState(1);
   const [landscape, setLandscape] = useState(false);
 
@@ -104,6 +184,7 @@ export function MonitorView(): React.JSX.Element {
   const [floats, setFloats] = useState<FloatItem[]>([]);
   const [flashes, setFlashes] = useState<FlashItem[]>([]);
   const [clip, setClip] = useState<ClipItem | null>(null);
+  const [strikeClip, setStrikeClip] = useState<StrikeClipItem | null>(null);
   const [mini, setMini] = useState<MiniItem | null>(null);
   const [shake, setShake] = useState<{ key: number; cls: string } | null>(null);
   // 粒子演出(紙吹雪・火花・光線)は canvas エンジンに任せる。
@@ -111,20 +192,46 @@ export function MonitorView(): React.JSX.Element {
   const countdownRef = useRef<HTMLDivElement | null>(null);
   const gaugeTrackRef = useRef<HTMLDivElement | null>(null);
 
+  // CLEAR リザルト。演出を見せてから切り替えるので state で遅らせる。
+  const [showResult, setShowResult] = useState(false);
+  const hasResult = challenge?.status === 'achieved' && challenge.result != null;
+
+  useEffect(() => {
+    if (!hasResult) {
+      setShowResult(false);
+      return;
+    }
+    // 達成後に開き直したモニターは待たずに出す(achievedMs が過去なので残り 0)。
+    const wait = Math.max(0, RESULT_DELAY_MS - (Date.now() - (challenge?.achievedMs ?? 0)));
+    if (wait === 0) {
+      setShowResult(true);
+      return;
+    }
+    const t = setTimeout(() => setShowResult(true), wait);
+    return () => clearTimeout(t);
+    // 依存は boolean と数値だけ — 2Hz で同じ result が再配信されてもタイマーは再起動しない。
+  }, [hasResult, challenge?.achievedMs]);
+
   // 数字パンチ: 値が変わるたびに key を進めてアニメーションを再生する。
   // 方向(減=進捗/増=妨害)でグローの色と動きを変える。
   const prevValue = useRef<number | null>(null);
   const [punchKey, setPunchKey] = useState(0);
-  const [punchDir, setPunchDir] = useState<'down' | 'up'>('down');
+  const [punchDir, setPunchDir] = useState<'down' | 'up' | 'strike'>('down');
+  /**
+   * 着弾までの数字の据え置き。null = 据え置きなし(= challenge.value をそのまま出す)。
+   * 「複製」ではなく「一時上書き」にしてあるので、解除は常に null を入れるだけで
+   * worker の権威ある値へ必ず収束する。
+   */
+  const [heldValue, setHeldValue] = useState<number | null>(null);
+  const prevFills = useRef<number | null>(null);
+  const strikeTimers = useRef<number[]>([]);
 
   useEffect(() => {
     void rpc('cfg.get', undefined).then(setCfg);
     void rpc('challenge.get', undefined).then(setChallenge);
-    const t = setInterval(() => setNow(new Date()), 1000);
     // 設定(lowThreshold / loadAvatars 等)は delta に乗らないので定期再取得する。
     const t2 = setInterval(() => void rpc('cfg.get', undefined).then(setCfg), 30_000);
     return () => {
-      clearInterval(t);
       clearInterval(t2);
     };
   }, []);
@@ -132,12 +239,45 @@ export function MonitorView(): React.JSX.Element {
   useEffect(() => {
     if (!challenge) return;
     document.title = challenge.title || 'チャレンジモニター';
-    if (prevValue.current !== null && prevValue.current !== challenge.value) {
-      setPunchDir(challenge.value < prevValue.current ? 'down' : 'up');
-      setPunchKey((k) => k + 1);
-    }
+
+    const fills = challenge.likeGauge?.fills ?? null;
+    const step = challenge.likeGauge?.step ?? 0;
+    const prevF = prevFills.current;
+    const prevV = prevValue.current;
+    prevFills.current = fills;
     prevValue.current = challenge.value;
-  }, [challenge?.value, challenge?.title]);
+
+    if (prevV === null) return; // マウント直後はアダプト(過去の変化で光らせない)
+    if (prevV === challenge.value) return;
+
+    // ゲージ満タン由来かは fills の単調増加で判定する。recentEffects を見ないのは、
+    // watermark の 5 秒ゲートで落ちた古い演出とラッチがズレるのを避けるため。
+    const units = fills !== null && prevF !== null ? fills - prevF : 0;
+    const likeDelta = units > 0 ? units * step : 0;
+    // 2Hz のデルタはボタン押下といいね満タンを1スナップショットに相乗りさせうる。
+    // 丸ごと据え置くと押下の手応えが 0.72 秒遅れるので、いいね分だけを持ち越す。
+    const held = challenge.value - likeDelta;
+
+    const canStrike =
+      likeDelta > 0 &&
+      challenge.status === 'running' &&
+      held >= prevV && // 逆行するラッチは張らない(step が窓中に変わった場合の保険)
+      held < challenge.value &&
+      !prefersReducedMotion();
+
+    if (canStrike) {
+      startStrike(held, prevV);
+      return;
+    }
+
+    flushStrike(); // 保留があれば畳んでから通常のパンチへ
+    setPunchDir(challenge.value < prevV ? 'down' : 'up');
+    setPunchKey((k) => k + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [challenge?.value, challenge?.title, challenge?.likeGauge?.fills, challenge?.status]);
+
+  // タイマーをアンマウント跨ぎで生き残らせない。
+  useEffect(() => () => clearStrikeTimers(), []);
 
   // 効果音(視覚とは独立の watermark)。モニターが開いている間はここが鳴らし、
   // ダッシュボード側は monitorOpen ゲートで黙る。設定は 30 秒ポーリング(上の
@@ -147,6 +287,7 @@ export function MonitorView(): React.JSX.Element {
     enabled: cfg?.challenge.seEnabled ?? true,
     volume: cfg?.challenge.seVolume ?? 70,
     sounds: cfg?.challenge.seSounds,
+    volumes: cfg?.challenge.seVolumes,
   });
 
   // ── 演出再生(冪等) ─────────────────────────────────────────────────────
@@ -212,6 +353,97 @@ export function MonitorView(): React.JSX.Element {
       x: (landscape ? STAGE_LW : STAGE_W) / 2,
       y: (landscape ? STAGE_LH : STAGE_H) * 0.3,
     };
+  }
+
+  function clearStrikeTimers() {
+    for (const t of strikeTimers.current) window.clearTimeout(t);
+    strikeTimers.current = [];
+  }
+
+  /** 保留中の据え置きを即座に畳む。数字は常に worker の値へ収束する。 */
+  function flushStrike() {
+    clearStrikeTimers();
+    setHeldValue((h) => (h === null ? h : null));
+  }
+
+  /**
+   * 着弾シーケンスを開始する。全ビートをここのタイマーが握る —
+   * LikeGauge.onFull や canvas の到達判定に依存させない(ゲージが非表示になったり
+   * 縦横切替で粒子が捨てられても、数字は必ず着弾時刻に更新される)。
+   */
+  function startStrike(held: number, prevV: number) {
+    clearStrikeTimers();
+    setHeldValue(held);
+    // 同デルタに押下/ギフトが混ざっていた分は据え置かず、その場で見せる。
+    if (held !== prevV) {
+      setPunchDir(held < prevV ? 'down' : 'up');
+      setPunchKey((k) => k + 1);
+    }
+    const push = (ms: number, fn: () => void) => {
+      strikeTimers.current.push(window.setTimeout(fn, ms));
+    };
+    // レイアウトはゲージが溜まっても動かないので、飛翔時間は今の座標で確定できる。
+    const travel = strikeTravelMs();
+    push(STRIKE_LAUNCH_MS, () => launchStrike(travel));
+    push(STRIKE_LAUNCH_MS + travel, impactStrike);
+    push(STRIKE_ABORT_MS, flushStrike);
+  }
+
+  /** ゲージ→7セグの距離から飛翔時間を出す。座標が取れなければ既定値。 */
+  function strikeTravelMs(): number {
+    const fx = fxRef.current;
+    const a = fx?.pointFor(gaugeTrackRef.current);
+    const b = fx?.pointFor(countdownRef.current);
+    if (!a || !b) return STRIKE_TRAVEL_MS;
+    const d = Math.hypot(b.x - a.x, b.y - a.y);
+    return Math.round(Math.min(STRIKE_TRAVEL_MAX_MS, Math.max(STRIKE_TRAVEL_MIN_MS, d / STRIKE_SPEED)));
+  }
+
+  /** 満タンの瞬間 — ゲージから7セグへ弾を撃ち出す。 */
+  function launchStrike(travelMs: number) {
+    const fx = fxRef.current;
+    const from = fx?.pointFor(gaugeTrackRef.current);
+    const to = fx?.pointFor(countdownRef.current);
+    // pointFor が null(canvas 未アタッチ/幅0)でも粒子を諦めるだけ。
+    // 数字はタイマーが独立に更新するので演出が欠けても破綻しない。
+    if (fx && from && to) {
+      fx.strike({ x: from.x, y: from.y }, { x: to.x, y: to.y }, { ms: travelMs, hue: 332 });
+    }
+    if (cfg?.challenge.fxClipsEnabled) playClip(GAUGE_FULL_CLIP_URL);
+  }
+
+  /** 着弾 — ここで初めて数字が増える。 */
+  function impactStrike() {
+    clearStrikeTimers();
+    setHeldValue(null);
+    setPunchDir('strike');
+    setPunchKey((k) => k + 1);
+    pushShake('shake');
+
+    const fx = fxRef.current;
+    const r = fx?.pointFor(countdownRef.current);
+    const stageW = landscape ? STAGE_LW : STAGE_W;
+    const stageH = landscape ? STAGE_LH : STAGE_H;
+    const cx = r?.x ?? stageW / 2;
+    const cy = r?.y ?? stageH * 0.4;
+    if (fx && r) {
+      fx.ringWave(cx, cy, { hue: 330, radius: Math.max(r.w, r.h) * 0.62 });
+      fx.sparkBurst(cx, cy, 26, { hue: 332, speed: 620 });
+      fx.heartBurst(cx, cy, 12, { hue: 338 });
+    }
+    if (cfg?.challenge.fxClipsEnabled) {
+      // 全画面ではなく7セグの実位置へ。ステージからはみ出さない範囲で数字を覆う。
+      const base = r ? Math.min(r.w, r.h) : 320;
+      const size = Math.min(Math.max(base * 1.4, 300), Math.min(stageW, stageH));
+      setStrikeClip({ key: ++fxKey, x: cx - size / 2, y: cy - size / 2, size });
+    }
+    if (cfg?.challenge.seEnabled) {
+      playSe(
+        cfg.challenge.seSounds['gauge-full'],
+        effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['gauge-full'])
+      );
+    }
+    if (cfg) playMini(miniForSlot(cfg.challenge, 'gauge-full'), 0);
   }
 
   /** いいね着弾でゲージを明滅させる(remove→reflow→add で毎回再生)。 */
@@ -390,15 +622,15 @@ export function MonitorView(): React.JSX.Element {
   const lowThreshold = cfg?.challenge.lowThreshold ?? 10;
   const running = challenge.status === 'running';
   const achieved = challenge.status === 'achieved';
-  const remainRatio = challenge.initialValue > 0 ? Math.min(1, challenge.value / challenge.initialValue) : 0;
   const digits = Math.max(4, String(challenge.initialValue).length);
-  const clock = clockText(now);
+  // 据え置き中はこちらを出す。桁数(initialValue 由来)と status は据え置かない。
+  const shownValue = heldValue ?? challenge.value;
   const showAvatars = cfg?.loadAvatars ?? true;
   const segCls = [
     'countdown',
     `punch-${punchDir}`,
     achieved ? 'clear' : '',
-    running && challenge.value <= lowThreshold ? 'low' : '',
+    running && shownValue <= lowThreshold ? 'low' : '',
   ].join(' ');
 
   return (
@@ -424,14 +656,10 @@ export function MonitorView(): React.JSX.Element {
         if (e.target === e.currentTarget) setShake(null);
       }}
     >
-      <div className="clock-row">
-        現在時刻:{clock.time} {clock.date}
-      </div>
-
       <div className={`title-banner${achieved ? ' clear' : ''}`}>{challenge.title}</div>
 
       <div className={segCls} key={punchKey} ref={countdownRef}>
-        <SevenSeg value={challenge.value} digits={digits} />
+        <SevenSeg value={shownValue} digits={digits} />
         {achieved ? <div className="clear-banner">CLEAR!</div> : null}
         {!running && !achieved ? (
           <div className="idle-note">
@@ -444,16 +672,6 @@ export function MonitorView(): React.JSX.Element {
         {challenge.likeGauge && running ? (
           <LikeGauge gauge={challenge.likeGauge} fxRef={fxRef} trackRef={gaugeTrackRef} />
         ) : null}
-        <div className="mbar pink">
-          <i style={{ width: `${remainRatio * 100}%` }} />
-          <span className="mbar-label">残り {num(challenge.value)}</span>
-        </div>
-        <div className="mbar blue">
-          <i style={{ width: `${(1 - remainRatio) * 100}%` }} />
-          <span className="mbar-label">
-            進捗 {num(Math.max(0, challenge.initialValue - challenge.value))} / {num(challenge.initialValue)}
-          </span>
-        </div>
       </div>
 
       <div className="elapsed-row">
@@ -486,6 +704,45 @@ export function MonitorView(): React.JSX.Element {
       </div>
 
       {/*
+        CLEAR リザルト(全画面)。配置は monitor-root 直下・fx-clip より DOM 順で前。
+        - z-index は付けない。付けると position 済みなのでスタッキングの段が上がり、
+          z-index:auto の .fx-clip より手前に回って演出クリップが隠れる。
+        - fx-layer(z-index:50)と fx-clip は DOM 順で後ろなので、CLEAR のフラッシュ・
+          紙吹雪・映像クリップはリザルトの上でそのまま見える。
+        - 下の 7セグ等は unmount せず覆うだけ。display:none にすると
+          fxRef.pointFor(countdownRef) の矩形が潰れ、簡易演出と波紋が中央へ退避する。
+      */}
+      {showResult && challenge.result ? (
+        <div className="result-screen">
+          <div className="rs-title">CLEAR!</div>
+          <div className="rs-sub">{challenge.title}</div>
+          <div className="rs-lists">
+            <ResultList
+              title="ギフトランキング TOP5"
+              rows={challenge.result.gifts}
+              kind="gift"
+              showAvatars={showAvatars}
+            />
+            <ResultList
+              title="イイネランキング TOP5"
+              rows={challenge.result.likes}
+              kind="like"
+              showAvatars={showAvatars}
+            />
+          </div>
+          <div className="rs-foot">
+            {challenge.result.participants > 0
+              ? `参加 ${num(challenge.result.participants)}人 / 所要 ${
+                  challenge.result.startedMs
+                    ? elapsedText(challenge.result.atMs - challenge.result.startedMs)
+                    : '—'
+                }`
+              : 'このチャレンジ中の参加者はいませんでした'}
+          </div>
+        </div>
+      ) : null}
+
+      {/*
         演出クリップ。fx-layer の「中」には置けない — fx-layer は z-index:50 で
         スタッキングコンテキストを作るので、その内側の mix-blend-mode は
         fx-layer 内でしか合成されず、黒が抜けずに UI を覆ってしまう。
@@ -510,6 +767,35 @@ export function MonitorView(): React.JSX.Element {
           onEnded={() => setClip((c) => (c?.key === clip.key ? null : c))}
           // デコード失敗でも演出は canvas 側が主役なので黙って畳む。
           onError={() => setClip((c) => (c?.key === clip.key ? null : c))}
+        />
+      ) : null}
+
+      {/*
+        着弾クリップ。.fx-clip と同じスタッキングの制約を受ける — monitor-root 直下に
+        z-index 無しで置くこと。全画面ではなく7セグの実位置に重ねるので、位置と寸法は
+        fx.pointFor のステージ座標からインラインで入れる(transform は使わない)。
+      */}
+      {strikeClip ? (
+        <video
+          key={strikeClip.key}
+          className="fx-strike"
+          src={STRIKE_CLIP_URL}
+          style={{
+            left: strikeClip.x,
+            top: strikeClip.y,
+            width: strikeClip.size,
+            height: strikeClip.size,
+          }}
+          autoPlay
+          muted
+          playsInline
+          preload="auto"
+          onTimeUpdate={(ev) => {
+            // 素材は 4 秒だが演出のビートは 0.75 秒。残光に入る前に自分でフェードさせる。
+            if (ev.currentTarget.currentTime > 0.75) ev.currentTarget.classList.add('out');
+          }}
+          onEnded={() => setStrikeClip((c) => (c?.key === strikeClip.key ? null : c))}
+          onError={() => setStrikeClip((c) => (c?.key === strikeClip.key ? null : c))}
         />
       ) : null}
 

@@ -18,6 +18,9 @@ import type {
 /** recentEffects リングバッファの上限。モニターの演出再生分だけあれば足りる。 */
 export const CHALLENGE_EFFECTS_MAX = 12;
 
+/** CLEAR リザルト画面の各ランキング(ギフト/イイネ)の表示件数。 */
+export const CHALLENGE_RESULT_TOP_N = 5;
+
 /**
  * like 演出の合算窓。like は全メッセージの約9割の高頻度なので、この窓の間は
  * 加算分を積んでおき1件の effect にまとめる(リングバッファを食い潰さない)。
@@ -101,6 +104,7 @@ export const CHALLENGE_SE_SLOTS: readonly ChallengeSeSlot[] = [
   'press',
   'follow',
   'like',
+  'gauge-full',
   'gift-t1',
   'gift-t2',
   'gift-t3',
@@ -181,6 +185,7 @@ export const DEFAULT_MINI_FX: Record<ChallengeSeSlot, string> = {
   press: 'off',
   follow: 'hammer',
   like: 'shock',
+  'gauge-full': 'off',
   'gift-t1': 'stamp',
   'gift-t2': 'off',
   'gift-t3': 'off',
@@ -219,11 +224,28 @@ export const DEFAULT_SE_SOUNDS: Record<ChallengeSeSlot, string> = {
   press: 'click-soft',
   follow: 'question',
   like: 'pop',
+  'gauge-full': 'jingle-hit',
   'gift-t1': 'confirm-1',
   'gift-t2': 'confirm-2',
   'gift-t3': 'jingle-hit',
   'gift-t4': 'jingle-steel',
   achieved: 'fanfare-8bit',
+};
+
+/**
+ * スロットごとの相対音量(%)の既定。100 = 全体音量そのまま(= 個別音量を足す前の挙動)。
+ * 既存の settings.json には無いフィールドなので、欠損時もここに倒れる必要がある。
+ */
+export const DEFAULT_SE_VOLUMES: Record<ChallengeSeSlot, number> = {
+  press: 100,
+  follow: 100,
+  like: 100,
+  'gauge-full': 100,
+  'gift-t1': 100,
+  'gift-t2': 100,
+  'gift-t3': 100,
+  'gift-t4': 100,
+  achieved: 100,
 };
 
 export const DEFAULT_CHALLENGE: ChallengeConfig = {
@@ -246,11 +268,23 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   seEnabled: true,
   seVolume: 70,
   seSounds: { ...DEFAULT_SE_SOUNDS },
+  seVolumes: { ...DEFAULT_SE_VOLUMES },
   fxClipsEnabled: true,
   giftClips: DEFAULT_GIFT_CLIPS.map((c) => ({ ...c })),
   miniFxEnabled: true,
   miniFx: { ...DEFAULT_MINI_FX },
 };
+
+/**
+ * playSe に渡す実効音量(0-100)。全体音量 × スロットごとの相対音量(%)。
+ * slotPct が欠損なら 100(= 全体音量そのまま)として扱う — モニター窓は設定を
+ * 30秒ポーリングで拾うので、個別音量を持たない古い設定が渡ってくることがある。
+ */
+export function effectiveSeVolume(master: number, slotPct: number | undefined): number {
+  const m = Math.min(100, Math.max(0, master));
+  const p = Math.min(100, Math.max(0, slotPct ?? 100));
+  return (m * p) / 100;
+}
 
 /** ギフト演出の段階。1=小さなお礼〜4=全画面のお祭り。 */
 export function tierForDiamonds(diamonds: number): 1 | 2 | 3 | 4 {
@@ -370,6 +404,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     seEnabled: c.seEnabled !== false,
     seVolume: num(c.seVolume, d.seVolume, 0, 100),
     seSounds: validateSeSounds(c.seSounds),
+    seVolumes: validateSeVolumes(c.seVolumes),
     fxClipsEnabled: c.fxClipsEnabled !== false,
     giftClips: validateGiftClips(c.giftClips),
     miniFxEnabled: c.miniFxEnabled !== false,
@@ -416,6 +451,19 @@ function validateSeSounds(raw: unknown): Record<ChallengeSeSlot, string> {
     const v = src[slot];
     if (typeof v === 'string' && (v === 'off' || CHALLENGE_SE_SOUND_IDS.includes(v))) {
       out[slot] = v;
+    }
+  }
+  return out;
+}
+
+/** スロットごとに 0-100 の数値だけを通す。欠損・非数値・範囲外は既定(100)へ。 */
+function validateSeVolumes(raw: unknown): Record<ChallengeSeSlot, number> {
+  const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const out = { ...DEFAULT_SE_VOLUMES };
+  for (const slot of CHALLENGE_SE_SLOTS) {
+    const v = src[slot];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      out[slot] = Math.min(100, Math.max(0, Math.round(v)));
     }
   }
   return out;

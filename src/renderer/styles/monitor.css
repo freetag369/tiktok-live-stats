@@ -96,7 +96,15 @@ body {
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-rows: auto auto 1fr auto auto auto;
+  grid-template-rows: auto 1fr auto auto auto;
+  /* 子要素の暗黙配置に頼らず名前で置く — ブロックを1つ足し引きしても
+     1fr(=7セグの行)がズレない。横長側(下部)も同じ area 名を使う。 */
+  grid-template-areas:
+    'title'
+    'count'
+    'bars'
+    'elapsed'
+    'ranking';
   gap: 8px;
   padding: 8px 10px 10px;
   background:
@@ -112,21 +120,10 @@ body {
   font-size: 32px;
 }
 
-/* ── 時計 ─────────────────────────────────────────────────────────────── */
-
-/* 大きくした結果 540px に収まらない行は nowrap を外して折り返す(clip より可読) */
-.clock-row {
-  text-align: center;
-  color: var(--mon-blue);
-  font-family: var(--mono);
-  font-size: 42px;
-  font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 12px rgba(55, 182, 255, 0.5);
-}
-
 /* ── タイトル ─────────────────────────────────────────────────────────── */
 
 .title-banner {
+  grid-area: title;
   text-align: center;
   color: var(--mon-pink);
   font-size: 62px;
@@ -157,6 +154,7 @@ body {
 /* ── 7セグ ─────────────────────────────────────────────────────────────── */
 
 .countdown {
+  grid-area: count;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -232,6 +230,36 @@ body {
   }
 }
 
+/*
+ * いいねゲージ満タンの弾が当たった瞬間。punch-up(通常の妨害)より一段強く、
+ * 縦に潰れてから戻る「打たれた」動き。punchDir が 'strike' のときだけ付くので
+ * punch-down / punch-up とは排他 — animation プロパティの取り合いは起きない。
+ */
+.countdown.punch-strike {
+  animation: punchstrike 460ms cubic-bezier(0.16, 1.6, 0.36, 1);
+}
+
+@keyframes punchstrike {
+  0% {
+    transform: scale(1.26, 0.82) translateX(0);
+  }
+  18% {
+    transform: scale(0.9, 1.14) translateX(-10px);
+  }
+  36% {
+    transform: scale(1.1, 0.94) translateX(8px);
+  }
+  56% {
+    transform: scale(0.98, 1.03) translateX(-5px);
+  }
+  76% {
+    transform: scale(1.03, 0.99) translateX(3px);
+  }
+  100% {
+    transform: scale(1) translateX(0);
+  }
+}
+
 /* 数字背面の残光。再マウント時に一瞬灯って消える。 */
 .countdown::after {
   content: '';
@@ -249,6 +277,15 @@ body {
 
 .countdown.punch-up::after {
   background: radial-gradient(ellipse at center, rgba(74, 217, 145, 0.34), transparent 68%);
+}
+
+/*
+ * 着弾だけは --ch-up(緑)ではなくマゼンタ。この演出はゲージ→弾→着弾まで
+ * すべて いいね/ハートの色(hue 330-338)で一本に繋いで見せるものなので、
+ * 着弾点だけ緑にすると因果の線が切れる。増減の色分けより連続性を優先した。
+ */
+.countdown.punch-strike::after {
+  background: radial-gradient(ellipse at center, rgba(255, 79, 160, 0.55), transparent 72%);
 }
 
 @keyframes punchglow {
@@ -312,6 +349,49 @@ body {
   animation: lowblink 0.6s steps(2, jump-none) 8;
 }
 
+/*
+ * 着弾で桁が跳ねて白く飛ぶ。.low / .clear の .seg.on ルールと詳細度が同じなので、
+ * ここより前に書くと明滅に負ける — 必ずこの順序を保つこと。
+ * 桁数は可変なので nth-child のスタガは使わず全桁同時に動かす。
+ */
+.countdown.punch-strike .seg-digit {
+  animation: segjolt 380ms cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+
+.countdown.punch-strike .seg.on {
+  animation: segflash 280ms ease-out;
+}
+
+@keyframes segjolt {
+  0% {
+    transform: translateY(-14px) scale(1.12);
+  }
+  40% {
+    transform: translateY(5px) scale(0.97);
+  }
+  70% {
+    transform: translateY(-2px) scale(1.01);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes segflash {
+  0% {
+    fill: #fff;
+    filter: drop-shadow(0 0 26px rgba(255, 255, 255, 0.95));
+  }
+  45% {
+    fill: #ffa8d2;
+    filter: drop-shadow(0 0 18px rgba(255, 79, 160, 0.9));
+  }
+  100% {
+    fill: var(--seg-on);
+    filter: drop-shadow(0 0 10px var(--seg-glow));
+  }
+}
+
 .clear-banner {
   position: absolute;
   inset: 0;
@@ -371,48 +451,9 @@ body {
 /* ── バー ─────────────────────────────────────────────────────────────── */
 
 .bars {
+  grid-area: bars;
   display: grid;
   gap: 12px;
-}
-
-.mbar {
-  position: relative;
-  height: 56px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-}
-
-.mbar > i {
-  position: absolute;
-  inset: 0 auto 0 0;
-  border-radius: inherit;
-  /* GaugeHud の MoveTowards 相当 — 値が飛んでもバーは滑らかに追う */
-  transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.mbar.pink > i {
-  background: linear-gradient(90deg, #ff2d78, var(--mon-pink));
-  box-shadow: 0 0 14px rgba(255, 79, 160, 0.6);
-}
-
-.mbar.blue > i {
-  background: linear-gradient(90deg, #1d7ff0, var(--mon-blue));
-  box-shadow: 0 0 14px rgba(55, 182, 255, 0.6);
-}
-
-.mbar-label {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  padding-left: 20px;
-  font-size: 32px;
-  font-weight: 700;
-  color: #fff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
 /* ── いいね進捗ゲージ(◯いいねで +N) ─────────────────────────────────── */
@@ -445,7 +486,7 @@ body {
   border-radius: inherit;
   background: linear-gradient(90deg, #ff2d78, #ff7ab8 70%, #ffc0dc);
   box-shadow: 0 0 18px rgba(255, 79, 160, 0.75);
-  /* mbar と同じ MoveTowards 相当カーブ — 2Hz のデータでも連続して見える */
+  /* MoveTowards 相当カーブ — 2Hz のデータでも連続して見える */
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
   overflow: hidden;
 }
@@ -609,6 +650,7 @@ body {
 /* ── 配信時間 ─────────────────────────────────────────────────────────── */
 
 .elapsed-row {
+  grid-area: elapsed;
   text-align: center;
   color: var(--fg-dim);
   font-family: var(--mono);
@@ -625,6 +667,7 @@ body {
 /* ── ランキング ───────────────────────────────────────────────────────── */
 
 .ranking {
+  grid-area: ranking;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
@@ -681,6 +724,167 @@ body {
   color: var(--fg-faint);
   font-size: 32px;
   padding: 12px 0;
+}
+
+/* ── CLEAR リザルト画面(全画面・ギフト/イイネ TOP5) ───────────────────
+ *
+ * 【重要】z-index を付けないこと。position:absolute + z-index:auto のまま
+ * DOM 順で .fx-clip の手前に置くことで、演出クリップ(mix-blend-mode: screen)
+ * と .fx-layer(z-index:50)が上に乗り、CLEAR のフラッシュ・紙吹雪・映像が
+ * リザルトの上でそのまま見える。背景は不透明の暗色を保つ — screen 合成の
+ * 相手が明るいとクリップが白飛びして見えなくなる。
+ */
+.result-screen {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 6px;
+  padding: 12px 14px 14px;
+  background:
+    radial-gradient(ellipse at 50% 18%, rgba(70, 30, 100, 0.55), transparent 68%),
+    #05030a;
+  animation: rsin 420ms ease-out both;
+}
+
+@keyframes rsin {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.rs-title {
+  text-align: center;
+  font-size: 92px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  color: var(--gold);
+  text-shadow:
+    0 0 24px rgba(255, 197, 66, 0.8),
+    0 0 70px rgba(255, 197, 66, 0.4);
+}
+
+.rs-sub {
+  text-align: center;
+  font-size: 30px;
+  color: var(--mon-pink);
+  overflow-wrap: anywhere;
+}
+
+.rs-lists {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+  min-height: 0;
+}
+
+.rs-col {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 4px;
+  min-height: 0;
+  padding: 8px 10px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.rs-head {
+  font-size: 30px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.rs-gift .rs-head {
+  color: var(--gold);
+}
+
+.rs-like .rs-head {
+  color: var(--mon-pink);
+}
+
+.rs-list {
+  display: grid;
+  grid-template-rows: repeat(5, 1fr);
+  gap: 4px;
+  list-style: none;
+  min-height: 0;
+}
+
+/* 順位 / アバター / 名前 / 値 */
+.rs-row {
+  display: grid;
+  grid-template-columns: 44px 56px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.rs-row.p1 {
+  background: rgba(255, 197, 66, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 197, 66, 0.45);
+}
+
+.rs-row.empty {
+  opacity: 0.35;
+}
+
+.rs-place {
+  font-size: 30px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.rs-row.p1 .rs-place {
+  color: var(--gold);
+}
+
+.rs-row.p2 .rs-place {
+  color: #cfd8e6;
+}
+
+.rs-row.p3 .rs-place {
+  color: #d99a6c;
+}
+
+.rs-name {
+  font-size: 26px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rs-val {
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rs-gift .rs-val {
+  color: var(--gold);
+}
+
+.rs-like .rs-val {
+  color: var(--mon-pink);
+}
+
+.rs-dash {
+  grid-column: 2 / -1;
+  color: var(--fg-faint);
+  font-size: 24px;
+}
+
+.rs-foot {
+  text-align: center;
+  color: var(--fg-faint);
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Avatar(common.tsx)が使う2クラスだけ再定義 */
@@ -749,6 +953,34 @@ body {
 
 /* 終端に残光が残るクリップ用。MonitorView が終端 0.4 秒前に付ける。 */
 .fx-clip.out {
+  opacity: 0;
+}
+
+/*
+ * 着弾クリップ(assets/fx/gauge-strike.mp4)。
+ *
+ * .fx-clip とまったく同じスタッキングの制約を受ける — 必ず .monitor-root の直下に
+ * z-index を付けずに置くこと。上の長いコメントを参照。
+ *
+ * 違いは「全画面ではなく7セグの実位置に重ねる」点。縦画面ではゲージが数字の下、
+ * 横画面では右隣にあり、数字の位置も中央からズレるため、全画面 object-fit: cover
+ * では当たった場所に光が来ない。位置と寸法は MonitorView が fx.pointFor(countdown)
+ * のステージ座標からインラインで入れる。
+ *
+ * transform で中央寄せしないのは意図的。仕様上は自要素の transform で
+ * mix-blend-mode の合成相手は変わらないが、この罠は一度踏んで長時間溶かしている
+ * (上のコメント参照)。疑いの余地を残さないため left/top を中心から引いて置く。
+ */
+.fx-strike {
+  position: absolute;
+  object-fit: cover;
+  mix-blend-mode: screen;
+  opacity: 1;
+  transition: opacity 300ms linear;
+  pointer-events: none;
+}
+
+.fx-strike.out {
   opacity: 0;
 }
 
@@ -1168,24 +1400,18 @@ body {
 
 /* ── 横長ディスプレイ用レイアウト(1280×720 の 16:9 ステージ・2カラム) ──
  * 縦カラムをそのまま縮小すると左右が黒帯(余白)になるため、
- * 左=時計/タイトル/7セグ、右=バー/ランキング/経過時間 に組み替える。 */
+ * 左=タイトル/7セグ、右=ゲージ/ランキング/経過時間 に組み替える。 */
 
 .stage-scale.landscape .monitor-root {
   grid-template-columns: 1.3fr 1fr;
-  grid-template-rows: auto auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
   grid-template-areas:
-    'clock clock'
     'title title'
     'count bars'
     'count ranking'
     'count elapsed';
   column-gap: 24px;
   padding: 8px 14px 12px;
-}
-
-.stage-scale.landscape .clock-row {
-  grid-area: clock;
-  font-size: 40px;
 }
 
 .stage-scale.landscape .title-banner {
@@ -1214,6 +1440,26 @@ body {
 
 .stage-scale.landscape .elapsed-row {
   grid-area: elapsed;
+}
+
+/* リザルトはステージ全面を覆う独立レイアウト(グリッドエリアに乗らない)。
+   横長では 2 カラム(左=ギフト / 右=イイネ)にして 5 行の高さを稼ぐ。 */
+.stage-scale.landscape .rs-lists {
+  grid-template-rows: 1fr;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 18px;
+}
+
+.stage-scale.landscape .rs-title {
+  font-size: 84px;
+}
+
+.stage-scale.landscape .rs-row {
+  grid-template-columns: 48px 64px 1fr auto;
+}
+
+.stage-scale.landscape .rs-name {
+  font-size: 28px;
 }
 
 /* シェイク(妨害・大型ギフト) */
@@ -1266,5 +1512,22 @@ body {
   }
   90% {
     transform: translate(4px, -4px);
+  }
+}
+
+/*
+ * 動きの抑制。数字そのものは必ず更新される — MonitorView 側も
+ * prefersReducedMotion() を見て「着弾まで据え置く」ラッチごとスキップするので、
+ * ここで演出を止めても値が止まることはない。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .countdown.punch-strike,
+  .countdown.punch-strike .seg-digit,
+  .countdown.punch-strike .seg.on {
+    animation: none;
+  }
+
+  .fx-strike {
+    display: none;
   }
 }

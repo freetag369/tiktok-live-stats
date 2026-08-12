@@ -490,6 +490,11 @@ export interface ChallengeConfig {
    * (shared/challenge.ts の CHALLENGE_SE_SOUND_IDS)または 'off'(鳴らさない)。
    */
   seSounds: Record<ChallengeSeSlot, string>;
+  /**
+   * 演出スロットごとの相対音量 0-100(%)。実際に鳴る音量は
+   * seVolume × この値 ÷ 100(さらに素材ごとの gain が掛かる)。既定は全スロット 100。
+   */
+  seVolumes: Record<ChallengeSeSlot, number>;
   /** ギフト/達成の演出クリップ(映像)をモニターに重ねる。 */
   fxClipsEnabled: boolean;
   /** ギフト → クリップの割り当て。空なら全ギフトが tier クリップになる。 */
@@ -508,6 +513,7 @@ export type ChallengeSeSlot =
   | 'press'
   | 'follow'
   | 'like'
+  | 'gauge-full'
   | 'gift-t1'
   | 'gift-t2'
   | 'gift-t3'
@@ -578,6 +584,44 @@ export interface ChallengeLikeGauge {
   fills: number;
 }
 
+/**
+ * CLEAR リザルトのランキング1行。表示名は worker 側で確定させる —
+ * renderer 側に nickname/displayId のフォールバックを持たせると、画面ごとに
+ * 違う名前が出る。
+ */
+export interface ChallengeRankRow {
+  userId: UserId;
+  /** nickname → displayId → '' の順で確定済み。'' なら renderer が「名無し」を出す。 */
+  nickname: string;
+  /** cfg.loadAvatars=false でも worker は載せる(表示可否は renderer の判断)。 */
+  avatarUrl: string | null;
+  /** ラン中に受け取った 💎 の合計(GiftEvent.diamonds の素の合計。再計算はしない)。 */
+  diamonds: number;
+  /** ラン中のいいね件数の合計(LikeEvent.count はそのバッチ分の件数)。 */
+  likes: number;
+}
+
+/**
+ * CLEAR 時に凍結するリザルト。集計対象は「開始→達成」の1ランだけで、配信
+ * セッション全体ではない(モニター下部の TOP3 はセッション全体 — 別物)。
+ *
+ * maybeAchieve() で一度だけ組み立ててキャッシュし、以後は同じ値を配る。
+ * ChallengeState.result は status==='achieved' のときだけ載る — 走行中の
+ * 2Hz delta にアバターURL 10 本を乗せないため。
+ */
+export interface ChallengeResult {
+  /** 達成時刻(achievedMs と同値)。 */
+  atMs: Ms;
+  /** ランの開始時刻。所要時間の表示に使う。 */
+  startedMs: Ms | null;
+  /** ラン中にギフトかいいねを1件でも出したユニーク人数。 */
+  participants: number;
+  /** 💎降順・最大 CHALLENGE_RESULT_TOP_N 件。同数は先に参加した方が上。 */
+  gifts: ChallengeRankRow[];
+  /** いいね降順・最大 CHALLENGE_RESULT_TOP_N 件。並びの規約は gifts と同じ。 */
+  likes: ChallengeRankRow[];
+}
+
 export interface ChallengeState {
   status: ChallengeStatus;
   /** 現在値。0 未満にはならない(クランプ)。上方向は無制限。 */
@@ -592,6 +636,8 @@ export interface ChallengeState {
   recentEffects: ChallengeEffect[];
   /** null = いいね妨害が無効(likeEvery <= 0 または likeStep <= 0)。 */
   likeGauge: ChallengeLikeGauge | null;
+  /** CLEAR 時のリザルト。status!=='achieved' のときは常に null。 */
+  result: ChallengeResult | null;
 }
 
 /**

@@ -19,6 +19,8 @@ import giftT2Url from '../assets/fx/gift-t2.mp4';
 import giftT3Url from '../assets/fx/gift-t3.mp4';
 import giftT4Url from '../assets/fx/gift-t4.mp4';
 import achievedUrl from '../assets/fx/achieved.mp4';
+import gaugeFullUrl from '../assets/fx/gauge-full.mp4';
+import strikeUrl from '../assets/fx/gauge-strike.mp4';
 
 /**
  * モニターに重ねる演出クリップのカタログ(素材の由来は assets/fx/CREDITS.md)。
@@ -63,6 +65,16 @@ export const FX_CLIPS: readonly FxClip[] = [
 
 /** 達成(CLEAR)専用。ギフトには割り当てない固定クリップ。 */
 export const ACHIEVED_CLIP_URL = achievedUrl;
+
+/**
+ * いいねゲージ満タンの瞬間(全画面)。ギフトと同じ単一クリップ枠を使う。
+ * ACHIEVED_CLIP_URL と同じ固定クリップ扱いで、CHALLENGE_FX_CLIP_IDS には入れない
+ * (ユーザーがギフトへ割り当てる対象ではないため)。
+ */
+export const GAUGE_FULL_CLIP_URL = gaugeFullUrl;
+
+/** ゲージ満タンの弾が7セグに当たる瞬間。全画面ではなく数字の実位置に重ねる。 */
+export const STRIKE_CLIP_URL = strikeUrl;
 
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 

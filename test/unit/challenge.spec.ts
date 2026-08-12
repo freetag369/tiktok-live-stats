@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS, DEFAULT_MINI_FX, DEFAULT_SE_SOUNDS, LIKE_FX_WINDOW_MS, matchGiftRule, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
-import type { ChallengeConfig } from '@shared/dto';
+import { CHALLENGE_EFFECTS_MAX, DEFAULT_CHALLENGE, DEFAULT_GIFT_CLIPS, DEFAULT_MINI_FX, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, effectiveSeVolume, LIKE_FX_WINDOW_MS, matchGiftRule, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import type { ChallengeConfig, ChallengeResult } from '@shared/dto';
 import type { GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
 
@@ -115,6 +115,30 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
     expect(v.seSounds.like).toBe('jingle-sax');
     expect(v.seSounds.follow).toBe(DEFAULT_SE_SOUNDS.follow); // 未知は既定へ
     expect(v.seSounds['gift-t4']).toBe(DEFAULT_SE_SOUNDS['gift-t4']);
+  });
+
+  it('seVolumes: 欠損は既定(全100)、範囲外は clamp、非数値は既定、正常値は保持', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.seVolumes;
+    expect(validateChallengeConfig(legacy).seVolumes).toEqual(DEFAULT_SE_VOLUMES);
+    const v = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      seVolumes: { ...DEFAULT_SE_VOLUMES, press: 250, like: -5, follow: 'x', achieved: 40 },
+    } as unknown);
+    expect(v.seVolumes.press).toBe(100); // 過大は clamp
+    expect(v.seVolumes.like).toBe(0); // 負値は 0
+    expect(v.seVolumes.follow).toBe(100); // 非数値は既定
+    expect(v.seVolumes.achieved).toBe(40); // 正常値は保持
+  });
+
+  it('effectiveSeVolume: 全体×個別。個別欠損は全体そのまま(後方互換)', () => {
+    expect(effectiveSeVolume(70, 100)).toBe(70);
+    expect(effectiveSeVolume(70, 40)).toBe(28);
+    expect(effectiveSeVolume(70, undefined)).toBe(70); // 個別音量を持たない古い設定
+    expect(effectiveSeVolume(70, 0)).toBe(0);
+    expect(effectiveSeVolume(0, 100)).toBe(0);
+    expect(effectiveSeVolume(250, 250)).toBe(100); // 両方 clamp
+    expect(effectiveSeVolume(-5, -5)).toBe(0);
   });
 
   it('likeEvery / likeStep 欠損は既定(無効)へ、負値・過大は clamp する(後方互換)', () => {
@@ -632,5 +656,204 @@ describe('ChallengeEffect.giftCount — 連打ギフトを1行で説明できる
     expect(e.get().recentEffects[0]).not.toHaveProperty('giftCount');
     e.handleEvent(gift({ repeatCount: 7, diamondEach: 1, diamonds: 7 }));
     expect(e.get().recentEffects[0]).toMatchObject({ kind: 'gift', giftCount: 7, diamonds: 7 });
+  });
+});
+
+describe('ChallengeEngine — CLEAR リザルト(ラン中の参加者 TOP5)', () => {
+  /** 妨害でいくら増えていても1回で 0 まで落とせる押し方(達成させるためだけの道具)。 */
+  const CLEAR_CFG = { initialValue: 100, pressStep: 1_000_000 };
+
+  function clear(e: ChallengeEngine): ChallengeResult {
+    const s = e.press();
+    expect(s.status).toBe('achieved');
+    expect(s.result).not.toBeNull();
+    return s.result!;
+  }
+
+  it('result は idle / running 中は null、達成した瞬間に載る', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    expect(e.get().result).toBeNull();
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 10 }));
+    expect(e.get().result).toBeNull();
+    expect(clear(e).gifts).toHaveLength(1);
+  });
+
+  it('ギフトはユーザーごとに 💎 を合算し、降順 TOP5 で切られる', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    const senders: Array<[string, number]> = [
+      ['a', 10],
+      ['b', 300],
+      ['c', 50],
+      ['d', 5],
+      ['e', 1],
+      ['f', 2],
+    ];
+    for (const [id, dia] of senders) {
+      e.handleEvent(gift({ viewer: { userId: id, nickname: id.toUpperCase() }, diamonds: dia }));
+    }
+    e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 90 })); // a = 100
+    const r = clear(e);
+    expect(r.gifts.map((g) => [g.userId, g.diamonds])).toEqual([
+      ['b', 300],
+      ['a', 100],
+      ['c', 50],
+      ['d', 5],
+      ['f', 2],
+    ]);
+    expect(r.participants).toBe(6); // e(1💎)は TOP5 圏外だが参加者には数える
+  });
+
+  it('カウント規則に一致しないギフトもランキングには載る', () => {
+    const e = engine(cfg({ ...CLEAR_CFG, giftRules: [], giftDefault: null, flashMinDiamonds: null }));
+    e.start();
+    expect(e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 500 }))).toBe(false);
+    expect(e.get().value).toBe(100); // カウントは動かない
+    expect(clear(e).gifts).toEqual([{ userId: 'a', nickname: 'A', avatarUrl: null, diamonds: 500, likes: 0 }]);
+  });
+
+  it('0💎 のギフトはギフトランキングの行を作らない', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamondEach: 0, diamonds: 0 }));
+    const r = clear(e);
+    expect(r.gifts).toEqual([]);
+    expect(r.participants).toBe(0);
+  });
+
+  it('いいねはユーザーごとに件数を合算し、降順 TOP5 で切られる', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    const likers: Array<[string, number]> = [
+      ['a', 3],
+      ['b', 30],
+      ['c', 12],
+      ['d', 7],
+      ['e', 1],
+      ['f', 2],
+    ];
+    for (const [id, n] of likers) {
+      e.handleEvent(like(n, { viewer: { userId: id, nickname: id.toUpperCase() } }));
+    }
+    e.handleEvent(like(20, { viewer: { userId: 'a', nickname: 'A' } })); // a = 23
+    expect(clear(e).likes.map((l) => [l.userId, l.likes])).toEqual([
+      ['b', 30],
+      ['a', 23],
+      ['c', 12],
+      ['d', 7],
+      ['f', 2],
+    ]);
+  });
+
+  it('いいね妨害が無効(likeEvery=0)でもイイネランキングは集計する', () => {
+    const e = engine(cfg({ ...CLEAR_CFG, likeEvery: 0 }));
+    e.start();
+    expect(e.handleEvent(like(9, { viewer: { userId: 'a', nickname: 'A' } }))).toBe(false);
+    const s = e.get();
+    expect(s.value).toBe(100);
+    expect(s.stats.likeUp).toBe(0);
+    expect(s.likeGauge).toBeNull();
+    expect(clear(e).likes).toEqual([{ userId: 'a', nickname: 'A', avatarUrl: null, diamonds: 0, likes: 9 }]);
+  });
+
+  it('同じ msgId の再配信(再接続バックログ)は1回だけ数える', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    const g = gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 20 });
+    const l = like(5, { viewer: { userId: 'a', nickname: 'A' } });
+    e.handleEvent(g);
+    e.handleEvent(g);
+    e.handleEvent(l);
+    e.handleEvent(l);
+    const r = clear(e);
+    expect(r.gifts[0]).toMatchObject({ diamonds: 20 });
+    expect(r.likes[0]).toMatchObject({ likes: 5 });
+    expect(r.participants).toBe(1);
+  });
+
+  it('達成後は凍結される(以後のイベントで変わらない)', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 10 }));
+    const first = clear(e);
+    e.handleEvent(gift({ viewer: { userId: 'b', nickname: 'B' }, diamonds: 999 }));
+    e.handleEvent(like(50, { viewer: { userId: 'b', nickname: 'B' } }));
+    expect(e.get().result).toEqual(first);
+  });
+
+  it('start で前のランの参加者は消える', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'old', nickname: 'OLD' }, diamonds: 500 }));
+    clear(e);
+    e.start();
+    expect(e.get().result).toBeNull();
+    e.handleEvent(gift({ viewer: { userId: 'new', nickname: 'NEW' }, diamonds: 1 }));
+    expect(clear(e).gifts.map((g) => g.userId)).toEqual(['new']);
+  });
+
+  it('reset で result は null に戻る / stop 中も載らない', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 10 }));
+    clear(e);
+    expect(e.stop().result).toBeNull();
+    expect(e.reset().result).toBeNull();
+  });
+
+  it('同数は先に参加した方が上位(挿入順のタイブレーク)', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'first', nickname: 'F' }, diamonds: 50 }));
+    e.handleEvent(gift({ viewer: { userId: 'second', nickname: 'S' }, diamonds: 50 }));
+    expect(clear(e).gifts.map((g) => g.userId)).toEqual(['first', 'second']);
+  });
+
+  it('表示名: 後から来た値で更新し、未指定では潰さない。無ければ displayId → 空文字', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'a' }, diamonds: 10 })); // 名前なし
+    e.handleEvent(
+      gift({ viewer: { userId: 'a', nickname: 'あとから', avatarUrl: 'http://x/a.png' }, diamonds: 1 })
+    );
+    e.handleEvent(gift({ viewer: { userId: 'a' }, diamonds: 1 })); // undefined で潰さない
+    e.handleEvent(gift({ viewer: { userId: 'b', displayId: '@bee' }, diamonds: 5 }));
+    e.handleEvent(gift({ viewer: { userId: 'c' }, diamonds: 3 }));
+    const byId = new Map(clear(e).gifts.map((g) => [g.userId, g]));
+    expect(byId.get('a')).toMatchObject({ nickname: 'あとから', avatarUrl: 'http://x/a.png' });
+    expect(byId.get('b')).toMatchObject({ nickname: '@bee', avatarUrl: null });
+    expect(byId.get('c')).toMatchObject({ nickname: '', avatarUrl: null });
+  });
+
+  it('参加者ゼロ(ボタンだけで達成)でも空のリザルトを返す', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    const r = clear(e);
+    expect(r).toMatchObject({ participants: 0, gifts: [], likes: [], startedMs: NOW, atMs: NOW });
+  });
+
+  it('participants はギフトといいね両方出した人を1人として数える', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 10 }));
+    e.handleEvent(like(4, { viewer: { userId: 'a', nickname: 'A' } }));
+    const r = clear(e);
+    expect(r.participants).toBe(1);
+    expect(r.gifts[0]).toMatchObject({ diamonds: 10, likes: 4 });
+    expect(r.likes[0]).toMatchObject({ diamonds: 10, likes: 4 });
+  });
+
+  it('ユニーク参加者が上限を超えても上位は残る(メモリ間引きの安全性)', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'whale', nickname: 'WHALE' }, diamonds: 100_000 }));
+    e.handleEvent(like(9_999, { viewer: { userId: 'fan', nickname: 'FAN' } }));
+    for (let i = 0; i < 5000; i++) {
+      e.handleEvent(like(1, { viewer: { userId: `mob${i}` } }));
+    }
+    const r = clear(e);
+    expect(r.gifts[0]).toMatchObject({ userId: 'whale', diamonds: 100_000 });
+    expect(r.likes[0]).toMatchObject({ userId: 'fan', likes: 9_999 });
   });
 });

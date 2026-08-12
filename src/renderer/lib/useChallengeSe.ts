@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { ChallengeEffect, ChallengeSeSlot, ChallengeState } from '@shared/dto';
-import { DEFAULT_SE_SOUNDS, tierForDiamonds } from '@shared/challenge';
+import { DEFAULT_SE_SOUNDS, effectiveSeVolume, tierForDiamonds } from '@shared/challenge';
 import { playSe } from './se';
 
 function slotFor(e: ChallengeEffect): ChallengeSeSlot {
@@ -35,6 +35,8 @@ export function useChallengeSe(
     volume: number;
     /** スロット→音 id('off' で無音)。未指定は既定割り当て。 */
     sounds?: Record<ChallengeSeSlot, string>;
+    /** スロット→個別音量 0-100(%)。未指定・欠損スロットは 100(= volume そのまま)。 */
+    volumes?: Record<ChallengeSeSlot, number>;
   }
 ): void {
   const lastPlayed = useRef<number | null>(null);
@@ -59,7 +61,8 @@ export function useChallengeSe(
       lastPlayed.current = Math.max(lastPlayed.current, e.id);
       if (Date.now() - e.atMs > 5000) continue;
       if (!o.active || !o.enabled) continue; // watermark は進めるが音は出さない
-      playSe(sounds[slotFor(e)], o.volume); // 'off' は playSe 側で無音
+      const slot = slotFor(e);
+      playSe(sounds[slot], effectiveSeVolume(o.volume, o.volumes?.[slot])); // 'off' は playSe 側で無音
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [challenge?.recentEffects]);

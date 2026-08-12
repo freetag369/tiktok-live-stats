@@ -401,6 +401,7 @@ function ChallengeCard(): React.JSX.Element | null {
     enabled: settings?.challenge.seEnabled ?? true,
     volume: settings?.challenge.seVolume ?? 70,
     sounds: settings?.challenge.seSounds,
+    volumes: settings?.challenge.seVolumes,
   });
 
   // 値が動いたら1回だけ跳ねさせる(モニターの punch と同型)。punch は**消さない** —

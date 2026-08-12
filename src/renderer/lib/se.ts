@@ -69,7 +69,9 @@ function baseFor(s: SeSound): HTMLAudioElement {
 }
 
 /**
- * id の音を鳴らす。volume は 0-100(ChallengeConfig.seVolume をそのまま渡す)。
+ * id の音を鳴らす。volume は 0-100 の実効音量 — 全体音量とスロットごとの個別音量を
+ * 掛け合わせた値なので、呼び出し側は shared/challenge.ts の effectiveSeVolume() を
+ * 通した結果を渡すこと(seVolume を素で渡すと個別音量が効かない)。小数可。
  * 'off' や未知の id は無音(validate 済み設定なら既定に矯正されているが、
  * 30秒ポーリング前の古い設定が来ても落ちないように)。
  */

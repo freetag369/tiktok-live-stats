@@ -26,6 +26,7 @@ function state(effects: ChallengeEffect[], over: Partial<ChallengeState> = {}): 
     stats: { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0 },
     recentEffects: effects,
     likeGauge: null,
+    result: null,
     ...over,
   };
 }

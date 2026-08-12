@@ -12,6 +12,14 @@
 
 加工内容: **無し**。Higgsfield が返した mp4 をそのまま用途名へリネームして格納している。
 
+> `gauge-strike.mp4` だけ諸元が違う(**2026-08-12 生成 / 1:1 の 960×960 / 4.04 秒 / 音声なし**)。
+> これは全画面ではなく **7セグの実位置に正方形で重ねる**唯一のクリップだから。
+> 縦ステージ(540×960)と横ステージ(1280×720)で数字の位置もゲージとの位置関係も
+> 変わるため、16:9 の全画面素材だと `object-fit: cover` のクロップで当たった場所に
+> 光が来ない。「ゲージから飛んで数字に当たる」の**飛翔部分は canvas エンジンが
+> 実 DOM 座標で描き**(`monitor/fx/engine.ts` の `strike()`)、映像は中心で炸裂する
+> 着弾だけを担当する。
+
 > ライセンス: Higgsfield の生成物の利用条件は同サービスの利用規約(生成時のプラン: Plus)に従う。
 > 本リポジトリは AGPL で配布されるため、**再配布前に規約上の再配布可否を必ず確認すること**。
 > 同梱の効果音(`../se/`)は CC0 だが、こちらは CC0 ではない。
@@ -32,6 +40,7 @@
 | `gift-t4.mp4` | `gift-t4` | 金の花火3連発 + 光条 + 金粉の豪雨 | `#ffc542` / `#fff3d0` |
 | `achieved.mp4` | `achieved` | 白閃光 → 金の大輪が多段で炸裂(CLEAR 用・6秒) | `#fff3d0` / `#ffc542` |
 | `gauge-full.mp4` | (いいねゲージ満タン) | マゼンタの衝撃波 + ハートの飛散 | `#ff4fa0` |
+| `gauge-strike.mp4` | (着弾) | 白熱コア + マゼンタ衝撃波 + 放射クラック + ハートの破片 | `#ff4fa0` |
 
 色は `styles/tokens.css` / `styles/monitor.css` の実値と、`monitor/fx/engine.ts` が使う
 色相(press=200 / follow=0 / like=338 / gift=45 / gauge=330)に合わせてプロンプトで指定した。
@@ -100,6 +109,18 @@ Seedance 2.5 の出力は**アルファチャンネルを持たない**。その
 
 ### gauge-full.mp4
 > Abstract VFX element. A magenta-pink (#FF4FA0) energy burst detonates at the center of the frame: a bright pink shockwave ring snaps outward, about thirty hot-pink sparks fly radially with glowing trails, and ten glowing pink heart-shaped particles pop upward and arc back down. Punchy and sweet, a meter-full reward pop. Locked-off static camera, no camera movement, centered composition. Additive glow on a pure black (#000000) background, high contrast, nothing else in frame: no text, no letters, no numbers, no logos, no watermark, no people, no objects, no background scenery. The effect fires once near the start and fully decays — the frame returns to pure black and stays completely black.
+
+### gauge-strike.mp4
+
+いいねゲージ満タンの弾が7セグに当たる瞬間。**下に本物の数字が透けている**ので、
+文字・数字を出さない指定が他のクリップ以上に効いてくる。アプリ側のビートは 0.75 秒
+なので「最初の1秒で減衰しきる」を明示した(素材の実尺は 4.04 秒だが、
+`MonitorView` が 0.75 秒で `.out` を付けてフェードさせる)。
+
+> Abstract VFX element. A single violent impact detonates at the exact center of the frame, as if something heavy slammed into that spot: a blinding white-hot core flashes, a hard magenta-pink (#FF4FA0) shockwave ring snaps outward and thins rapidly as it expands, a second fainter ring chases it, jagged radial cracks of hot-pink light shoot out from the point of impact, and about twenty glowing pink heart-shaped shards are thrown outward and tumble away, burning out as they fly. Violent, punchy, a direct hit landing. Locked-off static camera, no camera movement, centered composition. Additive glow on a pure black (#000000) background, high contrast, nothing else in frame: no text, no letters, no numbers, no logos, no watermark, no people, no objects, no background scenery. The effect fires once immediately at the very start and fully decays within the first second — the frame returns to pure black and stays completely black.
+
+実測: 発光は 0〜1.1 秒でほぼ終わり、1.25 秒以降は最終フレームまで YMAX=18/255。
+黒はほぼ完全に抜ける。音声トラック無し。
 
 ---
 
