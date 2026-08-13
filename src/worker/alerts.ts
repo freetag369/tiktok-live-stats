@@ -9,9 +9,21 @@ import type { Store } from './store/index';
  * go ungreeted. This surfaces the recall aid — name, よみがな, 前回来店日, メモ,
  * 累計💎 — so the streamer can say 「〇〇さんいらっしゃい、この前の〇〇どうでした？」.
  */
+/**
+ * レイド時でもキューが無限に育たない上限。レンダラは12枚しか保持しないので、
+ * これを超えた分は最古から捨てても表示上の損失は無い。
+ */
+const QUEUE_CAP = 60;
+
 export class Alerts {
   private seen = new Set<UserId>();
   private queue: JoinAlertCard[] = [];
+
+  /** 上限つき push — 溢れたら最古(=もう画面に出る見込みの薄い)カードを落とす。 */
+  private enqueue(card: JoinAlertCard): void {
+    this.queue.push(card);
+    if (this.queue.length > QUEUE_CAP) this.queue.splice(0, this.queue.length - QUEUE_CAP);
+  }
 
   constructor(
     private readonly store: Store,
@@ -40,7 +52,7 @@ export class Alerts {
       if (e.diamonds < this.giftAlertDiamonds) return;
       const g = e.viewer;
       const base = this.store.getRecallCard(g.userId, sessionId) ?? this.synthesize(g, vipTier);
-      this.queue.push({
+      this.enqueue({
         ...base,
         kind: 'gift',
         atMs: e.tsMs,
@@ -72,8 +84,13 @@ export class Alerts {
     // event stream, and a brand-new viewer has never been written at all. Looking
     // the card up and giving up on a miss silently killed the 初見アラート, which
     // is the single feature this panel exists for. Synthesize from the event.
-    const card = this.store.getRecallCard(v.userId, sessionId) ?? this.synthesize(v, vipTier);
-    this.queue.push({ ...card, kind: 'join', atMs: e.tsMs });
+    //
+    // 初見は最初から合成に直行する — 履歴が無い相手に相関サブクエリ付きの
+    // getRecallCard を取り込みホットパスで撃つのはレイド時の同期SQL爆弾になる。
+    const card = firstEver
+      ? this.synthesize(v, vipTier)
+      : (this.store.getRecallCard(v.userId, sessionId) ?? this.synthesize(v, vipTier));
+    this.enqueue({ ...card, kind: 'join', atMs: e.tsMs });
   }
 
   /** Minimal card built from the event itself, for viewers not yet in the database. */

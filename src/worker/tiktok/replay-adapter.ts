@@ -56,7 +56,13 @@ export class ReplayAdapter implements TikTokAdapter {
       hostDisplayId: o.uniqueId || 'replay',
       startedMs: Date.now(),
     });
-    void this.run();
+    // ファイル不在等の reject を放置すると unhandled rejection → プロセスの
+    // クラッシュハンドラが DB を閉じる。status に変換して伝える。
+    void this.run().catch((e) => {
+      if (!this.stopped) {
+        this.sink.status({ state: 'error', message: `リプレイに失敗しました: ${(e as Error).message}`, fatal: true });
+      }
+    });
   }
 
   async disconnect(): Promise<void> {
@@ -69,6 +75,19 @@ export class ReplayAdapter implements TikTokAdapter {
 
   private async run(): Promise<void> {
     const rl = createInterface({ input: createReadStream(this.opts.file, 'utf8'), crlfDelay: Infinity });
+    try {
+      await this.pump(rl);
+    } finally {
+      // normalize / sink.event が throw しても fd を残さない。
+      rl.close();
+    }
+    if (!this.stopped) {
+      this.sink.status({ state: 'ended', reason: 'streamEnd' });
+      this.opts.onEnd?.();
+    }
+  }
+
+  private async pump(rl: ReturnType<typeof createInterface>): Promise<void> {
     const wallStart = Date.now();
     let shift = 0;
     let first = true;
@@ -110,12 +129,6 @@ export class ReplayAdapter implements TikTokAdapter {
       const kind = PROTO_TO_KIND[rec.type] ?? rec.type;
       const e = normalize(this.norm, kind, data);
       if (e) this.sink.event(e);
-    }
-
-    rl.close();
-    if (!this.stopped) {
-      this.sink.status({ state: 'ended', reason: 'streamEnd' });
-      this.opts.onEnd?.();
     }
   }
 }

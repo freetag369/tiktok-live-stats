@@ -3,7 +3,7 @@ import type { AppSettings, ScoringConfig } from '@shared/dto';
 import { bytes, num } from '@shared/format';
 import { formatDateJa } from '@shared/time';
 import { DEFAULT_SCORING } from '@shared/scoring';
-import { rpc, useQuery } from '../ipc/client';
+import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { go, setSettings, toast, useUi } from '../state/uiStore';
 
 export function Settings(): React.JSX.Element {
@@ -57,8 +57,12 @@ export function Settings(): React.JSX.Element {
   async function purgeAll(): Promise<void> {
     if (!window.confirm('すべての記録を削除します。元に戻せません。本当によろしいですか？')) return;
     if (!window.confirm('確認：リスナー・コメント・ギフト・配信履歴がすべて消えます。')) return;
-    await rpc('m.purge', { scope: 'all' });
-    toast({ level: 'warn', msgJa: 'すべての記録を削除しました。' });
+    try {
+      await rpc('m.purge', { scope: 'all' });
+      toast({ level: 'warn', msgJa: 'すべての記録を削除しました。' });
+    } catch (e) {
+      toast({ level: 'error', msgJa: `削除に失敗しました: ${(e as Error).message}` });
+    }
     reloadDiag();
   }
 
@@ -206,15 +210,17 @@ export function Settings(): React.JSX.Element {
             TikTok は報酬条件を改定します。しきい値はファイルで編集できます。
           </div>
           <div className="row wrap">
-            <button className="btn small" onClick={() => void rpc('file.openMissions', undefined)}>
+            <button className="btn small" onClick={() => rpcFire('file.openMissions', undefined, 'ミッション設定を開く')}>
               ミッション設定を開く
             </button>
             <button
               className="btn small"
               onClick={() =>
-                void rpc('m.reloadMissions', undefined).then((r) =>
-                  toast({ level: r.ok ? 'info' : 'error', msgJa: r.ok ? '再読み込みしました。' : (r.error ?? '失敗しました') })
-                )
+                void rpc('m.reloadMissions', undefined)
+                  .then((r) =>
+                    toast({ level: r.ok ? 'info' : 'error', msgJa: r.ok ? '再読み込みしました。' : (r.error ?? '失敗しました') })
+                  )
+                  .catch((e: Error) => toast({ level: 'error', msgJa: e.message }))
               }
             >
               再読み込み
@@ -228,7 +234,7 @@ export function Settings(): React.JSX.Element {
             {diag?.capabilities.dbPath}
           </div>
           <div className="row wrap">
-            <button className="btn small" onClick={() => void rpc('file.openDataDir', undefined)}>
+            <button className="btn small" onClick={() => rpcFire('file.openDataDir', undefined, 'フォルダを開く')}>
               フォルダを開く
             </button>
             <button

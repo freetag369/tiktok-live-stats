@@ -1,6 +1,6 @@
 import { closeSync, openSync, writeSync } from 'node:fs';
-import type { DatabaseSync } from 'node:sqlite';
-import { CSV_BOM, csvRow } from '@shared/format';
+import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { CSV_BOM, CsvText, csvRow } from '@shared/format';
 import type { CsvExportSpec, PurgeResult, PurgeSpec } from '@shared/dto';
 import { DAY_MS } from '@shared/constants';
 import { formatDateJa } from '@shared/time';
@@ -10,8 +10,20 @@ const CHUNK = 2000;
 interface ExportPlan {
   header: string[];
   sql: string;
-  params: Record<string, unknown>;
+  params: Record<string, SQLInputValue>;
   map: (r: Record<string, unknown>) => unknown[];
+}
+
+/**
+ * node:sqlite rejects bind parameters the statement does not reference
+ * (ERR_INVALID_STATE), so each plan declares exactly the set its SQL uses.
+ */
+function rangeParams(spec: CsvExportSpec): Record<string, SQLInputValue> {
+  return { from: spec.fromMs ?? null, to: spec.toMs ?? null };
+}
+
+function filterParams(spec: CsvExportSpec): Record<string, SQLInputValue> {
+  return { sid: spec.sessionId ?? null, uid: spec.userId ?? null, ...rangeParams(spec) };
 }
 
 function plan(spec: CsvExportSpec): ExportPlan {
@@ -43,7 +55,8 @@ function plan(spec: CsvExportSpec): ExportPlan {
                ORDER BY vl.diamonds DESC, vl.visits DESC`,
         params: {},
         map: (r) => [
-          r.user_id,
+          // int64 の user_id は素で出すと Excel が 6.88E+18 に丸める(復元不能)。
+          new CsvText(String(r.user_id)),
           r.nickname,
           r.display_id,
           r.reading_kana ?? '',
@@ -71,10 +84,10 @@ function plan(spec: CsvExportSpec): ExportPlan {
                  AND (:from IS NULL OR c.ts_ms >= :from)
                  AND (:to IS NULL OR c.ts_ms <= :to)
                ORDER BY c.ts_ms ASC`,
-        params: {},
+        params: filterParams(spec),
         map: (r) => [
           formatDateJa(r.ts_ms as number),
-          r.user_id,
+          new CsvText(String(r.user_id)),
           r.nickname,
           r.display_id,
           r.session_id,
@@ -98,10 +111,10 @@ function plan(spec: CsvExportSpec): ExportPlan {
                  AND (:from IS NULL OR g.ts_ms >= :from)
                  AND (:to IS NULL OR g.ts_ms <= :to)
                ORDER BY g.ts_ms ASC`,
-        params: {},
+        params: filterParams(spec),
         map: (r) => [
           formatDateJa(r.ts_ms as number),
-          r.user_id,
+          new CsvText(String(r.user_id)),
           r.nickname,
           r.display_id,
           r.gname,
@@ -136,7 +149,7 @@ function plan(spec: CsvExportSpec): ExportPlan {
         sql: `SELECT * FROM stream_session
                WHERE (:from IS NULL OR started_ms >= :from) AND (:to IS NULL OR started_ms <= :to)
                ORDER BY started_ms ASC`,
-        params: {},
+        params: rangeParams(spec),
         map: (r) => [
           r.session_id,
           formatDateJa(r.started_ms as number),
@@ -177,7 +190,7 @@ function plan(spec: CsvExportSpec): ExportPlan {
                WHERE ended_ms IS NOT NULL
                  AND (:from IS NULL OR started_ms >= :from) AND (:to IS NULL OR started_ms <= :to)
                GROUP BY ym ORDER BY ym ASC`,
-        params: {},
+        params: rangeParams(spec),
         map: (r) => [
           r.ym,
           r.days,
@@ -192,6 +205,8 @@ function plan(spec: CsvExportSpec): ExportPlan {
         ],
       };
   }
+  // 未知の kind でファイルを作成・切り詰める前に止める。
+  throw new Error(`unknown export kind: ${String((spec as { kind?: unknown }).kind)}`);
 }
 
 /** Streaming write — a 100k-comment export must not materialise in memory or freeze the app. */
@@ -202,13 +217,7 @@ export function exportCsv(
   onProgress?: (rows: number) => void
 ): number {
   const p = plan(spec);
-  const params = {
-    sid: spec.sessionId ?? null,
-    uid: spec.userId ?? null,
-    from: spec.fromMs ?? null,
-    to: spec.toMs ?? null,
-    ...p.params,
-  };
+  const params = p.params;
 
   const fd = openSync(outPath, 'w');
   let rows = 0;
@@ -247,10 +256,12 @@ export function purge(db: DatabaseSync, spec: PurgeSpec): PurgeResult {
   db.exec('BEGIN IMMEDIATE');
   try {
     if (spec.scope === 'all') {
+      // FK の向きに注意: gift_alias -> gift_catalog、各イベント -> viewer/stream_session。
       for (const t of [
         'comment',
         'gift_event',
         'like_bucket',
+        'like_seen',
         'join_event',
         'social_event',
         'sub_event',
@@ -263,8 +274,14 @@ export function purge(db: DatabaseSync, spec: PurgeSpec): PurgeResult {
         'viewer',
         'unknown_event',
         'connect_log',
+        'gift_alias',
+        'gift_catalog',
+        'host',
       ]) {
-        res.rowsDeleted += Number(db.prepare(`DELETE FROM ${t}`).run().changes);
+        const changes = Number(db.prepare(`DELETE FROM ${t}`).run().changes);
+        res.rowsDeleted += changes;
+        if (t === 'stream_session') res.sessionsDeleted = changes;
+        if (t === 'viewer') res.viewersDeleted = changes;
       }
     } else if (spec.scope === 'session') {
       res.rowsDeleted += Number(db.prepare('DELETE FROM stream_session WHERE session_id = ?').run(spec.sessionId).changes);
@@ -273,6 +290,8 @@ export function purge(db: DatabaseSync, spec: PurgeSpec): PurgeResult {
     } else if (spec.scope === 'viewer') {
       res.rowsDeleted += Number(db.prepare('DELETE FROM viewer WHERE user_id = ?').run(spec.userId).changes);
       res.viewersDeleted = 1;
+      // CASCADE で消えた行のぶん、過去配信の集計が水増しのまま残るのを修復する。
+      rebuildSessionCounters(db);
     } else {
       const cutoff = Date.now() - spec.days * DAY_MS;
       const ids = db.prepare('SELECT session_id FROM stream_session WHERE started_ms < ?').all(cutoff) as Array<{
@@ -288,6 +307,30 @@ export function purge(db: DatabaseSync, spec: PurgeSpec): PurgeResult {
     throw e;
   }
   return res;
+}
+
+/**
+ * Viewer deletion cascades the raw rows but stream_session keeps its incremental
+ * counters, so per-session totals are rebuilt from what actually remains.
+ * Room-wide numbers (peak/avg viewers, room_total_likes) are observations, not
+ * per-viewer sums — they stay.
+ */
+export function rebuildSessionCounters(db: DatabaseSync): void {
+  db.exec(`
+    UPDATE stream_session AS s SET
+      comments       = COALESCE((SELECT COUNT(*)      FROM comment        x WHERE x.session_id = s.session_id), 0),
+      gifts          = COALESCE((SELECT COUNT(*)      FROM gift_event     x WHERE x.session_id = s.session_id), 0),
+      diamonds       = COALESCE((SELECT SUM(diamonds) FROM gift_event     x WHERE x.session_id = s.session_id), 0)
+                     + COALESCE((SELECT SUM(diamonds) FROM envelope_event x WHERE x.session_id = s.session_id), 0),
+      observed_likes = COALESCE((SELECT SUM(likes)    FROM viewer_session_stat x WHERE x.session_id = s.session_id), 0),
+      heart_me       = COALESCE((SELECT SUM(heart_me) FROM viewer_session_stat x WHERE x.session_id = s.session_id), 0),
+      shares         = COALESCE((SELECT SUM(shares)   FROM viewer_session_stat x WHERE x.session_id = s.session_id), 0),
+      unique_viewers = COALESCE((SELECT COUNT(*)      FROM viewer_session_stat x WHERE x.session_id = s.session_id), 0),
+      first_timers   = COALESCE((SELECT COUNT(*)      FROM viewer_session_stat x
+                                  WHERE x.session_id = s.session_id AND x.is_first_ever = 1), 0),
+      new_followers  = COALESCE((SELECT COUNT(*)      FROM viewer_session_stat x
+                                  WHERE x.session_id = s.session_id AND x.followed = 1), 0)
+  `);
 }
 
 /**

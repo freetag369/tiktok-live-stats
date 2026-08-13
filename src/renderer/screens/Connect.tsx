@@ -7,7 +7,9 @@ import { go, openSession, setSettings, toast, useUi } from '../state/uiStore';
 import { StatusChip } from '../components/common';
 
 export function Connect(): React.JSX.Element {
-  const { status, quota, sessionId } = useLive();
+  const status = useLive((s) => s.status);
+  const quota = useLive((s) => s.quota);
+  const sessionId = useLive((s) => s.sessionId);
   const settings = useUi((s) => s.settings);
   const [name, setName] = useState('');
   const [wait, setWait] = useState(false);
@@ -44,6 +46,8 @@ export function Connect(): React.JSX.Element {
     try {
       await rpc('conn.stop', undefined);
       reload();
+    } catch (e) {
+      toast({ level: 'error', msgJa: `停止に失敗しました: ${(e as Error).message}` });
     } finally {
       setBusy(false);
     }

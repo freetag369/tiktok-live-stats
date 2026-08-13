@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { DELTA_MS, DELTA_MS_HIDDEN, FEED_MS } from '@shared/constants';
+import { DELTA_MS, DELTA_MS_HIDDEN, FEED_MS, LIKE_SEEN_PRUNE_EVERY_MS, LIKE_SEEN_TTL_MS } from '@shared/constants';
 import type { AdapterStatus, EndReason, NormalizedEvent, QuotaInfo, TikTokAdapter, UserId } from '@shared/events';
 import type { LiveMessage } from '@shared/ipc';
 import type { MissionConfig, MissionProgress } from '@shared/dto';
@@ -65,6 +65,7 @@ export class SessionManager {
   private sessionStartMs = 0;
   private lastMissions = '';
   private lastMissionsCheckMs = 0;
+  private lastLikeSeenPruneMs = 0;
 
   sessionId: number | null = null;
   status: AdapterStatus = { state: 'idle' };
@@ -109,7 +110,12 @@ export class SessionManager {
     this.adapter = adapter;
 
     if (settings.captureDebug) {
-      this.capture.start(join(this.deps.userDataDir, 'captures'), { uniqueId: clean });
+      try {
+        this.capture.start(join(this.deps.userDataDir, 'captures'), { uniqueId: clean });
+      } catch (e) {
+        // デバッグ記録が作れなくても(書込不可のフォルダ等)配信の記録は続ける。
+        this.deps.store.recordConnectLog('error', `capture: ${(e as Error).message}`);
+      }
     }
 
     this.batcher.start();
@@ -214,7 +220,7 @@ export class SessionManager {
     }
 
     if (s.state === 'ended') {
-      void this.stop(s.reason);
+      this.safeStop(s.reason);
       return;
     }
 
@@ -292,6 +298,15 @@ export class SessionManager {
   }
 
   private onEvent(e: NormalizedEvent): void {
+    // ライブ経路の normalize は canonical(ギフト名寄せ)を付けない。付けずに配る
+    // と heartMe のライブ集計が常に 0 になり、DB の値と食い違う。
+    if (e.kind === 'gift' && e.canonical === undefined) {
+      try {
+        e.canonical = this.deps.store.resolveGiftCanonical(e.giftId, e.giftName) ?? undefined;
+      } catch {
+        /* 名寄せ失敗でイベントを落とさない */
+      }
+    }
     // DB first — the record is the product; the UI is a view of it.
     this.batcher.push(e);
 
@@ -319,8 +334,23 @@ export class SessionManager {
     if (this.deps.challenge.handleEvent(e)) this.pushDelta(false);
 
     if (e.kind === 'roomControl' && (e.action === 'ended' || e.action === 'suspended')) {
-      void this.stop(e.action === 'suspended' ? 'suspended' : 'streamEnd');
+      this.safeStop(e.action === 'suspended' ? 'suspended' : 'streamEnd');
     }
+  }
+
+  /**
+   * fire-and-forget の stop。closeSession(採点込み)が throw すると unhandled
+   * rejection → プロセスのクラッシュハンドラが DB を閉じてしまうため、必ず捕捉する。
+   */
+  private safeStop(reason: EndReason): void {
+    void this.stop(reason).catch((err) => {
+      try {
+        this.deps.store.recordConnectLog('error', `stop: ${(err as Error).message}`);
+      } catch {
+        /* DB 自体が落ちている場合は諦める */
+      }
+      this.setStatus({ state: 'ended', reason });
+    });
   }
 
   /** チャレンジ操作(押下/開始/停止)の即時反映。タイマー停止中でも1回だけ delta を送る。 */
@@ -350,6 +380,7 @@ export class SessionManager {
     totals.elapsedMs = this.sessionStartMs ? Date.now() - this.sessionStartMs : 0;
 
     const missions = this.computeMissions();
+    this.pruneLikeSeen();
 
     this.deps.post({
       t: 'delta',
@@ -371,9 +402,10 @@ export class SessionManager {
     // nudge delta にゼロリセットされたミッションを相乗りさせないため。
     if (this.sessionId == null) return null;
     // チャレンジのボタン連打が pushDelta を高頻度で呼んでも、同期 SQL
-    // (getMissionInputs)の実行は tick 間隔に抑える。
+    // (getMissionInputs = 7日間ウィンドウの COUNT(DISTINCT) 込み5クエリ)の
+    // 実行は3秒間隔に抑える。ミッションは分単位で動く数字なので体感差はない。
     const t = Date.now();
-    if (t - this.lastMissionsCheckMs < 400) return null;
+    if (t - this.lastMissionsCheckMs < 3000) return null;
     this.lastMissionsCheckMs = t;
     try {
       const cfg = this.deps.getMissionConfig();
@@ -385,6 +417,19 @@ export class SessionManager {
       return list;
     } catch {
       return null;
+    }
+  }
+
+  /** 配信中10分ごと — like_seen の30分より古い行を捨て、耐久配信での肥大を止める。 */
+  private pruneLikeSeen(): void {
+    if (this.sessionId == null) return;
+    const now = Date.now();
+    if (now - this.lastLikeSeenPruneMs < LIKE_SEEN_PRUNE_EVERY_MS) return;
+    this.lastLikeSeenPruneMs = now;
+    try {
+      this.deps.store.pruneLikeSeen(now - LIKE_SEEN_TTL_MS);
+    } catch {
+      /* 掃除の失敗で配信を止めない */
     }
   }
 

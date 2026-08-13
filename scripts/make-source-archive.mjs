@@ -7,7 +7,7 @@
  * binary was built from — no stray local files, nothing missing.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
@@ -29,8 +29,14 @@ try {
   /* ignore */
 }
 if (dirty) {
-  console.error('警告: 未コミットの変更があります。配布前にコミットしてください。');
-  console.error('       （バイナリと公開ソースが一致しないと AGPL に違反します）');
+  console.error('エラー: 未コミットの変更があります。配布前にコミットしてください。');
+  console.error('        （git archive はコミット済みツリーだけを固めるため、');
+  console.error('          バイナリと公開ソースが一致せず AGPL に違反します）');
+  if (process.env.ALLOW_DIRTY === '1') {
+    console.error('        ALLOW_DIRTY=1 が指定されたため続行します。');
+  } else {
+    process.exit(1);
+  }
 }
 
 const zipPath = join(outDir, `tiktok-live-stats-source-${version}.zip`);
@@ -43,6 +49,16 @@ try {
   console.error('git archive に失敗しました:', e.message);
   process.exit(1);
 }
+
+// electron-builder の extraResources がここから拾って同梱する(file.saveSource の
+// 「ソースコードを保存」導線)。release:* は source:zip → build:* の順で走ること。
+const stageDir = join('build', 'source-archive');
+mkdirSync(stageDir, { recursive: true });
+for (const f of readdirSync(stageDir)) {
+  if (f.endsWith('.zip')) rmSync(join(stageDir, f)); // 旧バージョンの zip を同梱しない
+}
+copyFileSync(zipPath, join(stageDir, `tiktok-live-stats-source-${version}.zip`));
+console.log(`同梱ステージ: ${join(stageDir, `tiktok-live-stats-source-${version}.zip`)}`);
 
 // The exact commit must be identifiable FROM THE BINARY, so the offer travels
 // with the installer as well as being shown on the ライセンス screen.

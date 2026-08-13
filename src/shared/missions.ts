@@ -50,6 +50,17 @@ const VALID_METRICS: ReadonlySet<string> = new Set<MissionMetric>([
   'comments',
 ]);
 
+/**
+ * scope ごとに実際に算出できる metric(metricValue の switch と一対)。独立に
+ * 検証すると { scope:'day', metric:'uniqueViewers' } のような組が素通りし、
+ * 常に 0 の永久未達ミッションになる — 「typo を無言で無効化しない」方針に反する。
+ */
+const SCOPE_METRICS: Readonly<Record<MissionScope, ReadonlySet<MissionMetric>>> = {
+  session: new Set<MissionMetric>(['durationMin', 'newFollowers', 'diamonds', 'uniqueViewers', 'comments']),
+  day: new Set<MissionMetric>(['diamonds', 'durationMin', 'newFollowers']),
+  week: new Set<MissionMetric>(['validStreamDays', 'activeFans', 'diamonds', 'durationMin', 'newFollowers']),
+};
+
 export class MissionConfigError extends Error {}
 
 /** Strict — anything unrecognised is an error, so a typo does not silently disable a mission. */
@@ -70,6 +81,10 @@ export function parseMissionConfig(raw: unknown): MissionConfig {
     if (typeof d.labelJa !== 'string' || !d.labelJa) throw new MissionConfigError(`${at}.labelJa が不正です`);
     if (!VALID_SCOPES.has(d.scope as string)) throw new MissionConfigError(`${at}.scope が不正です: ${String(d.scope)}`);
     if (!VALID_METRICS.has(d.metric as string)) throw new MissionConfigError(`${at}.metric が不正です: ${String(d.metric)}`);
+    if (!SCOPE_METRICS[d.scope as MissionScope].has(d.metric as MissionMetric))
+      throw new MissionConfigError(
+        `${at}: scope '${String(d.scope)}' では metric '${String(d.metric)}' を算出できません（対応: ${[...SCOPE_METRICS[d.scope as MissionScope]].join(', ')}）`
+      );
     if (typeof d.target !== 'number' || !Number.isFinite(d.target) || d.target <= 0)
       throw new MissionConfigError(`${at}.target は正の数値である必要があります`);
     const out: MissionDef = {
@@ -80,11 +95,32 @@ export function parseMissionConfig(raw: unknown): MissionConfig {
       target: d.target,
     };
     if (d.pacer) out.pacer = true;
-    if (d.validDay && typeof d.validDay.minDurationMin === 'number') out.validDay = { minDurationMin: d.validDay.minDurationMin };
-    if (d.activeFan && typeof d.activeFan.windowDays === 'number' && typeof d.activeFan.minComments === 'number')
-      out.activeFan = { windowDays: d.activeFan.windowDays, minComments: d.activeFan.minComments };
+    // target と同じ基準(有限・正)で検証する — NaN や負値も number ではある。
+    if (d.validDay !== undefined) {
+      const v = (d.validDay as { minDurationMin?: unknown }).minDurationMin;
+      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0)
+        throw new MissionConfigError(`${at}.validDay.minDurationMin は正の数値である必要があります`);
+      out.validDay = { minDurationMin: v };
+    }
+    if (d.activeFan !== undefined) {
+      const w = (d.activeFan as { windowDays?: unknown }).windowDays;
+      const mc = (d.activeFan as { minComments?: unknown }).minComments;
+      if (typeof w !== 'number' || !Number.isFinite(w) || w <= 0)
+        throw new MissionConfigError(`${at}.activeFan.windowDays は正の数値である必要があります`);
+      if (typeof mc !== 'number' || !Number.isFinite(mc) || mc <= 0)
+        throw new MissionConfigError(`${at}.activeFan.minComments は正の数値である必要があります`);
+      out.activeFan = { windowDays: w, minComments: mc };
+    }
     return out;
   });
+
+  // timezone / dayResetHour は現状 Asia/Tokyo・0時固定でしか計算できない。
+  // 他の値を書いたユーザーに無言で 0 時を適用すると原因不明の挙動になるため、
+  // 未対応の値は他項目と同じく明示エラーにする(方針: typo を無言で無効化しない)。
+  if (c.timezone !== undefined && c.timezone !== 'Asia/Tokyo')
+    throw new MissionConfigError(`timezone は 'Asia/Tokyo' のみ対応です（実際: ${String(c.timezone)}）`);
+  if (c.dayResetHour !== undefined && c.dayResetHour !== 0)
+    throw new MissionConfigError(`dayResetHour は 0 のみ対応です（実際: ${String(c.dayResetHour)}）`);
 
   return {
     schemaVersion: 1,

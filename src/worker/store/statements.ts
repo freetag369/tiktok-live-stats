@@ -90,8 +90,11 @@ export const SQL = {
 
   // Likes accumulate, so they need an explicit dedupe gate; every other table
   // gets it for free from INSERT OR IGNORE on msg_id.
-  markLikeSeen: `INSERT OR IGNORE INTO like_seen (msg_id, session_id) VALUES (?, ?)`,
+  markLikeSeen: `INSERT OR IGNORE INTO like_seen (msg_id, session_id, ts_ms) VALUES (?, ?, ?)`,
   clearLikeSeen: `DELETE FROM like_seen WHERE session_id = ?`,
+  // dedupe が守るのは再接続バックログ(数分)+ resume 猶予(10分)だけ。
+  // それより古い行は長時間配信で積もるだけなので定期的に捨てる。
+  pruneLikeSeen: `DELETE FROM like_seen WHERE ts_ms < ?`,
 
   upsertLikeBucket: `
     INSERT INTO like_bucket (session_id, user_id, bucket_ms, likes)

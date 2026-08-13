@@ -437,6 +437,14 @@ export interface ChallengeGiftRule {
   flash?: boolean;
 }
 
+/**
+ * ルーレット終盤の演出パターン。**出目とは独立に引く** — 相関した瞬間
+ * 「キックが来たら大当たり」が学習されて演出が結果の予告になる。
+ * 'slow' = 最後の3個をゆっくり / 'pop' = 3個をポンポン飛び移る /
+ * 'kick' = ポンポン → 当選の1つ手前で止まったと見せてキックで1個ずれる。
+ */
+export type RoulettePattern = 'slow' | 'pop' | 'kick';
+
 /** ルーレットの出目1件。amount は表示値(絶対値)、適用方向は direction が決める。 */
 export interface ChallengeRouletteSegment {
   amount: number;
@@ -451,6 +459,17 @@ export interface ChallengeRouletteSegment {
  * 増減の写像を置き換える(二重適用防止)。
  */
 export interface ChallengeRouletteConfig {
+  /**
+   * 行の識別子。設定UIの key と、行ごとのテスト再生(ChallengeTestEffectSpec の
+   * rouletteId)の対象指定に使う — giftRules/giftClips と同じ流儀。
+   */
+  id: string;
+  /**
+   * モニター表示名。「{label} ○○がルーレット」の {label}。'' なら effect.giftName
+   * (TikTok から届く実名)へフォールバックする。実名は英語 'Heart Me' で届くことが
+   * あるので、日本語表記(ハートミー)を出すにはここに持たせる必要がある。
+   */
+  label: string;
   enabled: boolean;
   /**
    * トリガーギフトの giftId 直接一致。ライブ経路では NormalizedEvent.canonical が
@@ -464,6 +483,25 @@ export interface ChallengeRouletteConfig {
   segments: ChallengeRouletteSegment[];
   /** 'add' = カウント増(妨害・既定) / 'sub' = カウント減(応援)。 */
   direction: 'add' | 'sub';
+}
+
+/**
+ * ルーレット回転中のサウンド。**全ルーレット(roulettes の全行)共通で1組** —
+ * 行ごとに持たない。盤面(segments)と違い音は正しさに関与しないので、
+ * effect には載せずモニターが cfg から直接読む(音量を cfg から読む
+ * giftBandFx.bgmVolume と同じ扱い。設定変更は onSettings の即時プッシュで届く)。
+ * enabled ブールは持たない — 各スロットの 'off' が完全にその役を果たし、
+ * 「off なのに id が残る」状態を作らないため。
+ */
+export interface RouletteSoundConfig {
+  /** 回転中BGMの id(CHALLENGE_ROULETTE_BGM_IDS)または 'off'(鳴らさない)。 */
+  bgm: string;
+  /** BGMの音量 0-100。seVolume・giftBandFx.bgmVolume とは独立。 */
+  bgmVolume: number;
+  /** リール回転ループ音の id(CHALLENGE_ROULETTE_SPIN_SE_IDS)または 'off'。 */
+  spinSe: string;
+  /** ループ音の音量 0-100。 */
+  spinSeVolume: number;
 }
 
 /**
@@ -529,6 +567,69 @@ export interface GiftBandFxConfig {
   bgmVolume: number;
 }
 
+/**
+ * 連打ギフト(コンボ)の演出反復。TikTok の streakable ギフト(gift.type === 1)は
+ * 「連打中は repeatEnd=0、最後の1件だけ repeatEnd=1 + 合計 repeatCount」で届き、
+ * normalize.ts がそれを1件の NormalizedEvent へ畳む(diamonds はそこで確定 —
+ * 再計算禁止)。その1件の演出をモニター側で回数ぶん撃ち直すのがこの設定。
+ *
+ * **反復するのは見た目だけ** — 値・統計・ランキング・履歴ログは1件のまま。
+ * 唯一の例外は rouletteEnabled(抽選を N 回引くので増減も N 回ぶんになる)。
+ */
+export interface GiftRepeatFxConfig {
+  enabled: boolean;
+  /** 1イベントあたりの最大再生回数(1 = 従来どおり1回)。 */
+  max: number;
+  /** 反復の間隔(ms)。クリップ/簡易演出/効果音/フラッシュに効く。 */
+  intervalMs: number;
+  /**
+   * 帯域カットインも繰り返す。全画面動画なので間隔ではなく尺ぶんの直列再生になり、
+   * その間ずっとカウンタが凍結する(6秒バンド×5 = 30秒)。
+   */
+  bandEnabled: boolean;
+  /**
+   * ギフトルーレットも回数ぶん回す。**これだけは値の増減も回数ぶんになる** —
+   * ルーレットは抽選なので、反復するには出目を N 回引くしかないため。
+   */
+  rouletteEnabled: boolean;
+}
+
+/**
+ * お助け機能(ファンスタンプ)の設定。クリエイター専用のカスタムギフトが届いたら
+ * 「個数 × amountEach」だけカウントを動かす。単一設定だが、将来複数化したくなった
+ * ときのために matchFanStamp は boolean ではなく行そのものを返す(matchRoulette と
+ * 同じ形)— 呼び出し側のコードを変えずに配列化できる。
+ *
+ * トリガー3フィールド(giftId/giftName/canonical)は ChallengeRouletteConfig と
+ * 意味も '' = 無効の規約も同一。判定は matchGiftTrigger で共有する。
+ */
+export interface FanStampConfig {
+  enabled: boolean;
+  /**
+   * トリガーギフトの giftId 直接一致。ライブ経路では NormalizedEvent.canonical が
+   * 未代入(normalize.ts は名寄せ結果をイベントに載せない)なので、これが本線。
+   */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  /**
+   * ギフト1個(repeatCount 1)あたりの増減。負=減らす(お助け)、正=増える(妨害)。
+   * ダイヤ数ではなく**個数**に比例させる — 2ダイヤ以上のカスタムギフトを作られても
+   * 「1個につき -N」の意味が変わらないようにするため(perDiamond を流用しない理由)。
+   */
+  amountEach: number;
+  /**
+   * true: このギフトではダイヤ帯域カットイン(と 6 秒のカウンタ凍結)を出さない。
+   * ファンスタンプは 1 ダイヤ・高頻度なので、既定バンド(1〜50💎)に素で当たると
+   * 届くたびにカウントが止まる。既定 true。
+   */
+  suppressBandFx: boolean;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+}
+
 export interface ChallengeConfig {
   enabled: boolean;
   /** モニターの見出し。例「0まで寝ない」。 */
@@ -547,11 +648,22 @@ export interface ChallengeConfig {
   likeStockCount: number;
   /** ストック満杯1回あたりの加算量。 */
   likeStockStep: number;
+  /**
+   * 指定コメント(キーワード)の妨害規則。**上から順に評価し、最初に一致した
+   * 1件だけ適用**(giftRules と同じ先勝ち)。空配列 = 機能オフ。
+   */
+  commentRules: ChallengeCommentRule[];
   giftRules: ChallengeGiftRule[];
   /** どの規則にも一致しないギフトの既定動作。null なら無視。 */
   giftDefault: { mode: 'fixed' | 'perDiamond'; amount: number } | null;
-  /** ギフトルーレット。トリガー一致時は giftRules/giftDefault より優先。 */
-  roulette: ChallengeRouletteConfig;
+  /**
+   * ギフトルーレット。**上から順に評価し、最初に一致した1件だけ適用**(giftRules と
+   * 同じ規約)。トリガー一致時は giftRules/giftDefault より優先。
+   * 旧 settings.json の単一 `roulette` キーは validateChallengeConfig が1件の配列へ移行する。
+   */
+  roulettes: ChallengeRouletteConfig[];
+  /** ルーレット回転中のBGM・ループ音。全ルーレット共通で1組。 */
+  rouletteSound: RouletteSoundConfig;
   /** diamonds がこの値以上のギフトは規則に関係なく照明フラッシュ。null で無効。 */
   flashMinDiamonds: number | null;
   /** グローバルホットキー(Electron accelerator)。'' で無効。 */
@@ -560,6 +672,10 @@ export interface ChallengeConfig {
   monitorDisplayId: number | null;
   /** true = 全画面にせず通常のウィンドウ(枠付き・移動/リサイズ可)で出す。 */
   monitorWindowed: boolean;
+  /** 「何時起き」をモニター左下に出す。 */
+  wakeEnabled: boolean;
+  /** 起床時刻 'HH:mm'(24時間・ローカル時刻)。null = 未設定(何も出さない)。 */
+  wakeTime: string | null;
   /** 残数がこの値以下になるとモニターの数字が点滅する。 */
   lowThreshold: number;
   /** 演出(press/follow/like/gift/achieved)の効果音を鳴らす。 */
@@ -589,6 +705,23 @@ export interface ChallengeConfig {
   miniFx: Record<ChallengeSeSlot, string>;
   /** ダイヤ帯域カットイン。一致時は giftClips より優先(matchGiftBand)。 */
   giftBandFx: GiftBandFxConfig;
+  /** 連打ギフトの演出反復。値は動かさず見た目だけ回数ぶん撃つ(rouletteEnabled を除く)。 */
+  giftRepeatFx: GiftRepeatFxConfig;
+  /**
+   * お助け機能(ファンスタンプ)。クリエイター専用のカスタムギフトを「応援」に
+   * 割り当てる単一設定。**ルーレット/giftRules/giftDefault のどれよりも先に評価**
+   * され、一致したギフトはそれらの規則を通らない(matchFanStamp)。
+   */
+  fanStamp: FanStampConfig;
+}
+
+/** 指定コメント妨害の1規則。keyword はコメント本文への部分一致(大文字小文字無視)。 */
+export interface ChallengeCommentRule {
+  id: string;
+  /** 部分一致キーワード。空文字はどのコメントにも一致しない(''.includes 罠のガード)。 */
+  keyword: string;
+  /** 一致1件あたりの加算量(妨害)。正の数で保持。 */
+  amount: number;
 }
 
 /** 効果音を割り当てられる演出スロット。gift は演出 tier(ダイヤ数)で分かれる。 */
@@ -598,11 +731,14 @@ export type ChallengeSeSlot =
   | 'like'
   | 'gauge-full'
   | 'stock-full'
+  | 'comment'
   | 'gift-t1'
   | 'gift-t2'
   | 'gift-t3'
   | 'gift-t4'
   | 'roulette'
+  | 'roulette-near'
+  | 'roulette-kick'
   | 'roulette-hit'
   | 'achieved';
 
@@ -616,7 +752,7 @@ export type ChallengeStatus = 'idle' | 'running' | 'achieved';
 export interface ChallengeEffect {
   id: number;
   /** 'like' は1秒窓で合算して1件にまとめるため nickname を持たない。 */
-  kind: 'press' | 'follow' | 'like' | 'stock-full' | 'gift' | 'roulette' | 'achieved';
+  kind: 'press' | 'follow' | 'like' | 'stock-full' | 'comment' | 'gift' | 'roulette' | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
   /**
@@ -637,6 +773,19 @@ export interface ChallengeEffect {
   canonical?: string;
   diamonds?: number;
   /**
+   * kind='comment': 一致した規則のキーワード。rouletteLabel と同じ「effect 1件で
+   * 自己完結」の流儀 — 表示側で cfg を引き直すと、規則を変えた瞬間に過去の演出・
+   * ログの文言まで変わってしまう。
+   */
+  commentKeyword?: string;
+  /**
+   * kind='gift': この演出がお助け機能(ファンスタンプ)由来であること。モニターは
+   * ギフトカードの代わりに専用のお助けバナーを出す。**cfg を引き直して判定しない** —
+   * モニターの設定は 30 秒ポーリングで古くなりうるので、fxBandClip と同じ
+   * 「effect 1件で自己完結」の流儀で worker が焼き込む。
+   */
+  fanStamp?: true;
+  /**
    * kind='roulette': 盤面(表示順の出目の絶対値リスト)。モニターの設定取得は
    * 30秒ポーリングで古くなりうるため、演出は cfg からではなくここから盤面を
    * 読む — effect 1件で自己完結させる。
@@ -644,6 +793,18 @@ export interface ChallengeEffect {
   rouletteSegments?: number[];
   /** kind='roulette': 当選 index(rouletteSegments 内)。amount は符号適用後の実増減量。 */
   rouletteIndex?: number;
+  /**
+   * kind='roulette': 終盤の演出パターン。rouletteSegments と同じ「effect 1件で
+   * 自己完結」の流儀 — モニター側で毎回引くと StrictMode の二重レンダーで
+   * 振り直され、演出が途中で切り替わる。欠損時は 'slow'(旧 worker 混在の保険)。
+   */
+  roulettePattern?: RoulettePattern;
+  /**
+   * kind='roulette': モニターの見出しに出す表示名(「{rouletteLabel} ○○がルーレット」)。
+   * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニターの設定は 30秒
+   * ポーリングで古くなりうるので cfg から引き直さない。空なら従来の「○○がルーレット!」。
+   */
+  rouletteLabel?: string;
   /**
    * kind='gift' でダイヤ帯域カットインが一致したときのクリップ id。
    * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニターの設定は
@@ -659,6 +820,19 @@ export interface ChallengeEffect {
    * giftBandFx.bgmVolume から読む(roulette-hit 等の既存前例と同じ)。
    */
   fxBandBgm?: string;
+  /**
+   * kind='gift': 同じ見た目をモニターが何回撃つか(連打ギフト)。省略/1 = 1回。
+   * **値には一切影響しない** — amount/valueAfter/diamonds は連打全体を1回だけ表す。
+   * worker が権威(設定の上限と凍結尺の上限で clamp 済み)。giftCount とは別物で、
+   * giftCount=50 かつ fxRepeat=5 はありうる(前者は事実、後者は演出方針)。
+   * 注意: この effect の見た目は atMs + (fxRepeat-1)*fxRepeatIntervalMs まで続く。
+   */
+  fxRepeat?: number;
+  /**
+   * kind='gift': fxRepeat の間隔(ms)。カットイン反復では使わない(尺そのものが間隔)。
+   * fxDurationMs と同じく、凍結尺との同期のため effect 側に焼き込む。
+   */
+  fxRepeatIntervalMs?: number;
   /**
    * テスト再生(challenge.testEffect)由来。値・統計には影響しない演出だけの
    * effect — ダッシュボードの履歴ログはこれを積まない(演出とSEは再生する)。
@@ -678,6 +852,14 @@ export type ChallengeTestEffectSpec =
   | { kind: 'follow' }
   | { kind: 'like' }
   | { kind: 'stock-full' }
+  /** ruleId は設定UIの行ごとの ▶ 用。未指定なら最初の keyword 非空の規則で実演する。 */
+  | { kind: 'comment'; ruleId?: string }
+  /**
+   * お助け機能(ファンスタンプ)。設定中の amountEach/flash をそのまま使って
+   * 専用バナーを実演する — giftId が未設定でも(=まだ何にも一致しない状態でも)
+   * 見た目だけは確認できるようにするため、トリガー一致は評価しない。
+   */
+  | { kind: 'fanStamp' }
   | {
       kind: 'gift';
       /** tier(小〜特大)判定とフラッシュ判定に使うダイヤ数。 */
@@ -686,8 +868,15 @@ export type ChallengeTestEffectSpec =
       canonical?: string;
       /** 帯演出行のテスト用。指定時はこのバンドのカットインを強制する(帯域一致は評価しない)。 */
       bandId?: string;
+      /** 連打反復のテスト用。未指定は1回。bandId 併用時は 1 に倒す(testEffect は凍結を張らないため)。 */
+      repeat?: number;
     }
-  | { kind: 'roulette' }
+  /**
+   * rouletteId は設定UIの行ごとの ▶ ボタン用。未指定なら最初の有効な行を回す。
+   * pattern は終盤演出の指定(効果音スロットの試聴で 'kick' を狙い撃ちする)。
+   * 未指定なら通常どおり抽選する。
+   */
+  | { kind: 'roulette'; rouletteId?: string; pattern?: RoulettePattern }
   | { kind: 'achieved' };
 
 export interface ChallengeStats {
@@ -702,6 +891,8 @@ export interface ChallengeStats {
   likeUp: number;
   /** いいねストック満杯による加算量の合計(likeUp とは別枠 — likeUp = fills×step の検算を壊さない)。 */
   likeStockUp: number;
+  /** 指定コメント(commentRules)による加算量の合計。 */
+  commentUp: number;
   /** ルーレットの回転回数。増減量の合計は giftDown/giftUp に合算する(ギフト起因のため)。 */
   rouletteSpins: number;
 }
@@ -741,12 +932,35 @@ export interface ChallengeLikeStock {
   step: number;
   /** 満杯到達の累計回数。likeGauge.fills と同じ単調増加規約(reset でも巻き戻さない)。 */
   fills: number;
+  /**
+   * 点灯スロットごとの「そのゲージ区間で最もいいねしたユーザー」。長さ === filled
+   * (i 番目 = i 番目に点灯したドット)。モニターはこのアバターをドットに描く。
+   */
+  slots: Array<ChallengeStockSlot | null>;
+  /**
+   * 直近の満杯で消費された count 個ぶんのスナップショット。worker の満杯処理は
+   * 1 delta 内で完結する(「全点灯 + 全スロット」の状態は配信されない)ため、
+   * これが無いと満杯演出(charge/burst)中の最後のドットのアバターがモニターへ
+   * 届かない。null = 満杯未経験。
+   */
+  lastFullSlots: ChallengeStockSlot[] | null;
 }
 
 /**
- * CLEAR リザルトのランキング1行。表示名は worker 側で確定させる —
- * renderer 側に nickname/displayId のフォールバックを持たせると、画面ごとに
- * 違う名前が出る。
+ * いいねストック1個ぶんの区間1位。同数はその区間で先にいいねした方が勝つ
+ * (topRank の並びと同じ規約)。
+ */
+export interface ChallengeStockSlot {
+  /** cfg.loadAvatars=false でも worker は載せる(表示可否は renderer の判断)。 */
+  avatarUrl: string | null;
+  /** 名前は表示しないが、デバッグとアクセシビリティのために持つ。 */
+  nickname: string | null;
+}
+
+/**
+ * ランキング1行。CLEAR リザルトの TOP5 と、モニター下部のライブ TOP3 で共用する。
+ * 表示名は worker 側で確定させる — renderer 側に nickname/displayId の
+ * フォールバックを持たせると、画面ごとに違う名前が出る。
  */
 export interface ChallengeRankRow {
   userId: UserId;
@@ -762,7 +976,8 @@ export interface ChallengeRankRow {
 
 /**
  * CLEAR 時に凍結するリザルト。集計対象は「開始→達成」の1ランだけで、配信
- * セッション全体ではない(モニター下部の TOP3 はセッション全体 — 別物)。
+ * セッション全体ではない。モニター下部の TOP3(ChallengeState.runRank)も同じ
+ * runViewers を同じヘルパーで切り出したもので、TOP5 の先頭3件と必ず一致する。
  *
  * maybeAchieve() で一度だけ組み立ててキャッシュし、以後は同じ値を配る。
  * ChallengeState.result は status==='achieved' のときだけ載る — 走行中の
@@ -798,6 +1013,13 @@ export interface ChallengeState {
   /** CLEAR 時のリザルト。status!=='achieved' のときは常に null。 */
   result: ChallengeResult | null;
   /**
+   * モニター下部のライブギフトランキング(💎降順・最大 CHALLENGE_MONITOR_TOP_N)。
+   * 集計範囲は result と同じ「開始→達成」の1ランで、配信セッションの累計ではない —
+   * だからチャレンジの開始/リセットでそのまま消える。
+   * 該当者がいなければキーごと省く(2Hz の delta にアバターURL を無駄に載せない)。
+   */
+  runRank?: ChallengeRankRow[];
+  /**
    * カットイン再生中のカウンタ凍結の期限(ms)。null = 凍結なし。
    * ダッシュボードの表示・テスト用 — モニターは自前でクリップ再生中を知っている。
    */
@@ -830,12 +1052,16 @@ export interface ChallengeLogEntry {
   giftCount?: number;
   giftIconUrl?: string;
   diamonds?: number;
+  /** kind='roulette': どのルーレットが回ったか(設定の label)。複数登録できるため。 */
+  rouletteLabel?: string;
   /**
    * 取り込み時点の likeGauge スナップショット。「いいね300件で+3」と書くために要る —
    * 表示時に現在の設定を読むと、途中で設定を変えたとき過去の行まで書き換わる。
    */
   likeEvery?: number;
   likeStep?: number;
+  /** kind='comment': 一致した規則のキーワード(effect からそのまま引き継ぐ)。 */
+  commentKeyword?: string;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────
@@ -846,6 +1072,15 @@ export interface ChallengeLogEntry {
  * Ctrl+0 / ％クリックのリセット先もこの値(main と renderer で共有)。
  */
 export const DEFAULT_ZOOM_FACTOR = 2;
+
+/**
+ * 設定スキーマの世代。既定値の変更を既存の settings.json へ一度だけ反映するための印で、
+ * 上げるのは「保存済みの値を書き換える必要がある」ときだけ(形の追加は validate が吸収する)。
+ * 1: 妨害スロットの効果音を専用音へ(migrateChallengeSeSounds)。
+ * 2: ルーレットの回転サウンドを刷新 — 回転中BGMを既定オフ、回転ループ音を
+ *    spin-reel2、確定音を reel-confirm へ(migrateChallengeSeSounds)。
+ */
+export const SETTINGS_VERSION = 2;
 
 export interface AppSettings {
   eulerApiKey: string;
@@ -865,6 +1100,8 @@ export interface AppSettings {
   zoomFactor: number;
   /** カウントダウンチャレンジ設定。ワーカー再起動不要 — settings メッセージで即時反映。 */
   challenge: ChallengeConfig;
+  /** 適用済みの設定世代。未設定(= SETTINGS_VERSION 導入前の settings.json)は 0 とみなす。 */
+  settingsVersion?: number;
 }
 
 export type CsvExportKind = 'viewers' | 'comments' | 'gifts' | 'sessions' | 'agencyMonthly';

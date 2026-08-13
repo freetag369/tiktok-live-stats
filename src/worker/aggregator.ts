@@ -100,12 +100,6 @@ export class Aggregator {
     }
   }
 
-  /** Marks a gift as Heart Me after the store resolved the canonical family. */
-  addHeartMe(userId: UserId, n: number): void {
-    this.acc(userId).h += n;
-    this.totals.heartMe += n;
-  }
-
   countUnique(n: number, firstTimers: number): void {
     this.totals.uniqueViewers = n;
     this.totals.firstTimers = firstTimers;

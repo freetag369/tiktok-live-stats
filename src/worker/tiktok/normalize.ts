@@ -135,7 +135,10 @@ export function normalize(ctx: NormalizeCtx, libType: string, data: Any, now = D
       if (!v) return null;
       const count = numOr(data.count, 0);
       const total = numOr(data.total, NaN);
-      const b = baseOf(ctx, data, 'like', v.userId, now, String(count), idStr(data.total));
+      // createTime は秒粒度なので、同一秒に同じ count・同じ total の like が
+      // 2通来ると合成キーが衝突して2通目が重複扱いで捨てられる。clientSendTime
+      // (ms粒度・メッセージ固有・リプレイでも同値)を材料に足して分離する。
+      const b = baseOf(ctx, data, 'like', v.userId, now, String(count), `${idStr(data.total)}:${idStr(data?.common?.clientSendTime)}`);
       return {
         ...b,
         kind: 'like',

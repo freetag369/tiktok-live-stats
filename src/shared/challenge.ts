@@ -1,4 +1,5 @@
 import type {
+  ChallengeCommentRule,
   ChallengeConfig,
   ChallengeEffect,
   ChallengeGiftClip,
@@ -8,9 +9,13 @@ import type {
   ChallengeRouletteSegment,
   ChallengeSeSlot,
   ChallengeState,
+  FanStampConfig,
   GiftBandFxConfig,
   GiftFxBand,
+  RouletteSoundConfig,
+  GiftRepeatFxConfig,
 } from './dto';
+import { WAKE_TIME_RE } from './time';
 
 /**
  * カウントダウンチャレンジ — 純関数のみ。状態機械は worker/challenge.ts。
@@ -24,6 +29,12 @@ export const CHALLENGE_EFFECTS_MAX = 12;
 
 /** CLEAR リザルト画面の各ランキング(ギフト/イイネ)の表示件数。 */
 export const CHALLENGE_RESULT_TOP_N = 5;
+
+/**
+ * モニター下部の常時表示ギフトランキングの件数。CLEAR リザルトと同じ runViewers
+ * から同じヘルパーで切り出すので、この TOP3 は必ず TOP5 の先頭3件と一致する。
+ */
+export const CHALLENGE_MONITOR_TOP_N = 3;
 
 /**
  * like 演出の合算窓。like は全メッセージの約9割の高頻度なので、この窓の間は
@@ -40,20 +51,45 @@ export const CHALLENGE_LOG_MAX = 50;
 /**
  * ルーレット演出の尺。monitor.css の @keyframes とモニターの据え置き解除タイマーを
  * ここで同期させる — 片方だけ変えると「数字は動いたのにリールが回っている」が起きる。
- * 4300ms は要望値(「4.3秒で止まる」)。
+ * 6000ms は要望値。終盤の段(ゆっくり/ポンポン/キック)を読める長さが要るため、
+ * 旧 4300ms から伸ばした。キーフレームは割合で書いてあるのでここだけで効く。
  */
-export const ROULETTE_SPIN_MS = 4300;
-/** 当選ブロックの発光(確定見せ)の尺。 */
-export const ROULETTE_REVEAL_MS = 600;
+export const ROULETTE_SPIN_MS = 6000;
+/**
+ * 当選ブロックの発光(確定見せ)の尺。**確定するまで色を出さない**設計にした結果、
+ * 色・符号・発光・確定音の全部がこの窓に入るので 600ms では山場が一瞬で終わる。
+ */
+export const ROULETTE_REVEAL_MS = 900;
+/** 短縮スピンの確定見せ。キュー消化中は総尺を詰めたいので通常より短くする。 */
+export const ROULETTE_REVEAL_FAST_MS = 450;
 /** キュー詰まり時の短縮スピン。連続トリガーでも体感が間延びしない長さ。 */
 export const ROULETTE_SPIN_FAST_MS = 900;
-/** モニターの連続再生キュー上限。溢れた分は演出スキップ(値は worker が適用済み)。 */
-export const ROULETTE_QUEUE_MAX = 3;
+/**
+ * モニターの連続再生キュー上限。溢れた分は演出スキップ(値は worker が適用済み)。
+ * 溢れは「値だけ動いてリールが出ない」= 数字だけ動く最悪の見え方になるので、
+ * 連打ギフトの反復スピン(giftFxRouletteSpins)の上限ぶんは飲めるだけ確保する。
+ */
+export const ROULETTE_QUEUE_MAX = 9;
 /**
  * 据え置きの安全弁。onAnimationEnd が来なくても(タブ非表示等)この時刻で必ず
  * ラッチを解いて worker 値へ収束させる — startStrike の STRIKE_ABORT_MS と同じ役割。
  */
 export const ROULETTE_ABORT_MS = ROULETTE_SPIN_MS + ROULETTE_REVEAL_MS + 1500;
+
+/**
+ * スピン1本の実尺と安全弁。fast(キュー消化)と通常で尺が違うので、片方だけ見て
+ * 調整すると必ずもう片方が壊れる — 両経路をこの2関数に集約する。
+ */
+export function rouletteSpinMs(fast: boolean): number {
+  return fast ? ROULETTE_SPIN_FAST_MS : ROULETTE_SPIN_MS;
+}
+export function rouletteRevealMs(fast: boolean): number {
+  return fast ? ROULETTE_REVEAL_FAST_MS : ROULETTE_REVEAL_MS;
+}
+/** 据え置きの安全弁(ms)。実尺 + 確定見せ + 余裕。fast でも必ずアニメより後。 */
+export function rouletteAbortMs(fast: boolean): number {
+  return rouletteSpinMs(fast) + rouletteRevealMs(fast) + 1500;
+}
 
 /**
  * recentEffects を履歴ログへ取り込む。純関数(テスト可能)。
@@ -117,9 +153,11 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     ...(e.giftCount ? { giftCount: e.giftCount } : {}),
     ...(e.giftIconUrl ? { giftIconUrl: e.giftIconUrl } : {}),
     ...(e.diamonds != null ? { diamonds: e.diamonds } : {}),
+    ...(e.rouletteLabel ? { rouletteLabel: e.rouletteLabel } : {}),
     // like 行の「◯件で+N」は取り込み時の設定で固定する — あとで設定を変えても
     // 過去の行が書き換わらないようにするため。
     ...(e.kind === 'like' && lg ? { likeEvery: lg.every, likeStep: lg.step } : {}),
+    ...(e.commentKeyword ? { commentKeyword: e.commentKeyword } : {}),
   };
 }
 
@@ -130,11 +168,14 @@ export const CHALLENGE_SE_SLOTS: readonly ChallengeSeSlot[] = [
   'like',
   'gauge-full',
   'stock-full',
+  'comment',
   'gift-t1',
   'gift-t2',
   'gift-t3',
   'gift-t4',
   'roulette',
+  'roulette-near',
+  'roulette-kick',
   'roulette-hit',
   'achieved',
 ];
@@ -161,6 +202,10 @@ export const CHALLENGE_SE_SOUND_IDS: readonly string[] = [
   'jingle-sax',
   'fanfare-8bit',
   'fanfare-8bit-short',
+  'like-jam',
+  'follow-jam',
+  'reel-stop',
+  'reel-confirm',
 ];
 
 /**
@@ -205,8 +250,11 @@ export const CHALLENGE_FX_CLIP_IDS: readonly string[] = [
  *
  * 映像クリップ(CHALLENGE_FX_CLIP_IDS)と違い mp4 を持たないので、
  * 高頻度イベント(ハートミー・いいね・フォロー)でも画面が埋まらない。
+ *
+ * 'panic' だけは例外で写真素材(assets/fx/mini/panic-man.webp ≒ 97KB)を1枚持つ。
+ * mp4 のようなデコード待ちが無く、1枚を使い回すので実質 SVG 勢と同じ軽さ。
  */
-export const CHALLENGE_MINI_IDS: readonly string[] = ['hammer', 'stamp', 'shock'];
+export const CHALLENGE_MINI_IDS: readonly string[] = ['hammer', 'stamp', 'shock', 'panic'];
 
 /**
  * 演出スロットごとの簡易演出の既定。スロットは効果音と同じ CHALLENGE_SE_SLOTS。
@@ -214,16 +262,21 @@ export const CHALLENGE_MINI_IDS: readonly string[] = ['hammer', 'stamp', 'shock'
  */
 export const DEFAULT_MINI_FX: Record<ChallengeSeSlot, string> = {
   press: 'off',
-  follow: 'hammer',
+  // フォローは「妨害」— カウントが戻される絶望を写真カットインで受ける。
+  follow: 'panic',
   like: 'shock',
   'gauge-full': 'off',
   'stock-full': 'off',
+  // 指定コメント妨害は既定 off — 連投されうるので簡易演出まで出すと画面がうるさい。
+  comment: 'off',
   'gift-t1': 'stamp',
   'gift-t2': 'off',
   'gift-t3': 'off',
   'gift-t4': 'off',
   // ルーレットはリール自体が主演出なので簡易演出は既定 off。
   roulette: 'off',
+  'roulette-near': 'off',
+  'roulette-kick': 'off',
   'roulette-hit': 'off',
   achieved: 'off',
 };
@@ -257,17 +310,27 @@ export const DEFAULT_GIFT_CLIPS: readonly ChallengeGiftClip[] = [
 
 export const DEFAULT_SE_SOUNDS: Record<ChallengeSeSlot, string> = {
   press: 'click-soft',
-  follow: 'question',
-  like: 'pop',
+  // 妨害の2スロットだけ専用音。旧既定(question / pop)は選択肢としてカタログに残る
+  // — 既存 settings.json の寄せ替えは migrateChallengeSeSounds が一度だけ行う。
+  follow: 'follow-jam',
+  like: 'like-jam',
   'gauge-full': 'jingle-hit',
   'stock-full': 'jingle-steel',
+  // 指定コメント妨害は軽いポップ音(旧いいね妨害の既定 — 妨害の専用音化で空いた)。
+  // 連投されうるスロットなので、like-jam のような主張の強い音は既定にしない。
+  comment: 'pop',
   'gift-t1': 'confirm-1',
   'gift-t2': 'confirm-2',
   'gift-t3': 'jingle-hit',
   'gift-t4': 'jingle-steel',
-  // 回転開始はチクタク感のある tick、確定はゲージ満タンと同じ当たり音。
+  // 回転開始はチクタク感のある tick。
   roulette: 'tick',
-  'roulette-hit': 'jingle-hit',
+  // 「止まりそう」(当選の1つ手前に着いて溜めに入る瞬間)はスイッチのカチッ。
+  'roulette-near': 'reel-stop',
+  // キック(フェイク停止から蹴り出される一撃)は低い衝撃音。
+  'roulette-kick': 'bong',
+  // 確定は専用の確認音。
+  'roulette-hit': 'reel-confirm',
   achieved: 'fanfare-8bit',
 };
 
@@ -281,11 +344,14 @@ export const DEFAULT_SE_VOLUMES: Record<ChallengeSeSlot, number> = {
   like: 100,
   'gauge-full': 100,
   'stock-full': 100,
+  comment: 100,
   'gift-t1': 100,
   'gift-t2': 100,
   'gift-t3': 100,
   'gift-t4': 100,
   roulette: 100,
+  'roulette-near': 100,
+  'roulette-kick': 100,
   'roulette-hit': 100,
   achieved: 100,
 };
@@ -296,6 +362,10 @@ export const DEFAULT_SE_VOLUMES: Record<ChallengeSeSlot, number> = {
  * weight は合計 100 にしてある — 設定UIの確率表示がそのまま % になる。+1000 は 1%。
  */
 export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
+  id: 'rl-heart_me',
+  // モニターの見出しは「ハートミー ○○がルーレット」。TikTok から届く実名は
+  // 英語 'Heart Me' のことがあるので、日本語表記はここで固定する。
+  label: 'ハートミー',
   enabled: true,
   giftId: '7934',
   giftName: 'heart me',
@@ -312,6 +382,12 @@ export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
 };
 
 /**
+ * ルーレット群の既定。出荷時はハートミー1件 — 設定画面から何件でも足せる。
+ * 複数ある場合は**上から順に評価し、最初に一致した1件だけ**が回る(matchRoulette)。
+ */
+export const DEFAULT_ROULETTES: readonly ChallengeRouletteConfig[] = [DEFAULT_ROULETTE];
+
+/**
  * ダイヤ帯域カットインの凍結時間の上限(ms)。durationSec の clamp(30秒)より
  * 短くしてある — 凍結はイベント適用を遅らせるので、演出事故(設定ミス等)でも
  * この長さを超えてカウンタが止まらないようにする安全弁。
@@ -326,8 +402,45 @@ export const GIFT_FX_FREEZE_MARGIN_MS = 500;
 /**
  * 凍結中の保留オペキューの上限。溢れた分は演出なしで値だけ即時適用する
  * (値の正しさ優先、演出は捨てる — ルーレットキューの溢れ処理と同じ思想)。
+ * カットイン反復で凍結が最長 GIFT_FX_FREEZE_MAX_TOTAL_MS まで伸びるため、
+ * その間に届くイベントを飲めるだけの深さを持たせてある。
  */
-export const GIFT_FX_PENDING_OPS_MAX = 64;
+export const GIFT_FX_PENDING_OPS_MAX = 256;
+
+// ── 連打ギフトの演出反復(giftRepeatFx) ──────────────────────────────────────
+
+/** 反復回数の絶対上限。設定値(max)はこれで clamp する。 */
+export const GIFT_FX_REPEAT_MAX = 10;
+/** 反復間隔の既定(ms)。4秒前後のクリップが重なって「連打」に見える速さ。 */
+export const GIFT_FX_REPEAT_MS = 700;
+export const GIFT_FX_REPEAT_MIN_MS = 200;
+export const GIFT_FX_REPEAT_MAX_MS = 2_000;
+/** モニターが同時に抱える反復タイマーの上限(多人数の連打が重なったときの保険)。 */
+export const GIFT_FX_REPEAT_TIMERS_MAX = 64;
+/**
+ * カットインを反復したときの**総**凍結時間の上限(ms)。GIFT_FX_FREEZE_MAX_MS が
+ * 「1本あたり」の安全弁なのに対し、こちらは「反復ぶん全部」の安全弁。
+ * 超えるときは fxDurationMs ではなく**回数側を削る** — 1本の尺はモニターとの契約。
+ */
+export const GIFT_FX_FREEZE_MAX_TOTAL_MS = 45_000;
+
+/** モニターの演出クリップ連続再生キューの上限(ROULETTE_QUEUE_MAX と同じ思想)。 */
+export const CLIP_QUEUE_MAX = 3;
+/**
+ * クリップの安全弁(ms)。onEnded が来ない素材・遮蔽ウィンドウで再生中フラグが
+ * 固着すると、以後クリップが永久に出なくなる(直したいバグより悪い)。
+ */
+export const CLIP_ABORT_MS = 8_000;
+/**
+ * 同時に積める浮上バナーの上限。2 段組みで 1 枚 200〜260px あるので、
+ * ステージ(縦 960px)に収まるのはこのあたりが限界 — 増やすと下端が
+ * .fx-layer の overflow:hidden で切れる。
+ */
+export const FLOAT_MAX = 3;
+/** 同時に表示する簡易演出の上限(floats/flashes と同じ「積む」層)。 */
+export const MINI_MAX = 3;
+/** 簡易演出の安全弁(ms)。最長の mini が 880ms(panic)なので余裕を見た値。 */
+export const MINI_ABORT_MS = 1_200;
 
 /**
  * カットインBGMの id 一覧。実ファイルとラベルは renderer/lib/bgm.ts。
@@ -341,6 +454,33 @@ export const CHALLENGE_BAND_BGM_IDS: readonly string[] = [
   'bgm-band3',
   'bgm-band4',
 ];
+
+/**
+ * ルーレット回転中BGMの id 一覧。実ファイルとラベルは renderer/lib/bgm.ts の
+ * ROULETTE_BGM。**BAND_BGM の4曲も選択肢に連結する** — 既存曲を回転用に
+ * 使い回せるようにするため(逆方向は無し: 帯域の select に回転曲は出さない)。
+ */
+export const CHALLENGE_ROULETTE_BGM_IDS: readonly string[] = [
+  'bgm-roulette1',
+  ...CHALLENGE_BAND_BGM_IDS,
+];
+
+/** リール回転ループ音の id 一覧。実ファイルは renderer/lib/bgm.ts の ROULETTE_SPIN_SE。 */
+export const CHALLENGE_ROULETTE_SPIN_SE_IDS: readonly string[] = ['spin-reel2', 'spin-reel1'];
+
+/**
+ * ルーレット回転サウンドの既定。回転ループ音は**有効(鳴る)で出荷**、
+ * 回転中BGMは**既定オフ** — ループ音のジングルだけで場が持つ構成にしてあり、
+ * 曲を重ねると停止まわりの3音(near/kick/hit)が埋もれるため。BGM が欲しい人は
+ * 設定画面のドロップダウンから選ぶ(選択肢としてはカタログに残っている)。
+ * 音量は giftBandFx.bgmVolume の既定と同じ 70。素材間の音圧差は bgm.ts の gain で吸収する。
+ */
+export const DEFAULT_ROULETTE_SOUND: RouletteSoundConfig = {
+  bgm: 'off',
+  bgmVolume: 70,
+  spinSe: 'spin-reel2',
+  spinSeVolume: 70,
+};
 
 /**
  * ダイヤ帯域カットインの既定バンド。要件どおり 1〜50 / 51〜100 / 101〜600 /
@@ -363,6 +503,39 @@ export const DEFAULT_GIFT_BAND_FX: GiftBandFxConfig = {
   bgmVolume: 70,
 };
 
+/**
+ * お助け機能(ファンスタンプ)の既定。giftId は空 — クリエイター固有の値なので
+ * 既定を置きようがない(設定画面は placeholder で例示する)。トリガーが3つとも
+ * 空の設定はどのギフトにも一致しない(matchGiftTrigger)ので、enabled: true でも
+ * 既存の settings.json の挙動は変わらない。
+ *
+ * suppressBandFx の既定が true なのは、ファンスタンプが 1 ダイヤ・高頻度で
+ * 既定バンド(1〜50💎 → 6秒カットイン+カウンタ凍結)に素で当たるため。
+ */
+export const DEFAULT_FAN_STAMP: FanStampConfig = {
+  enabled: true,
+  giftId: '',
+  giftName: '',
+  canonical: '',
+  amountEach: -1,
+  suppressBandFx: true,
+  flash: true,
+};
+
+/**
+ * 連打ギフトの演出反復の既定。enabled: true — これは新機能ではなく「同じ人が同じ
+ * ギフトを連打しても演出が1回しか出ない」の修正なので、オプトインにはしない。
+ * bandEnabled / rouletteEnabled も既定 true(利用者の明示選択)。カットインは
+ * 6秒×5=30秒カウンタが止まるので、重ければ設定画面で回数を下げるか外す。
+ */
+export const DEFAULT_GIFT_REPEAT_FX: GiftRepeatFxConfig = {
+  enabled: true,
+  max: 5,
+  intervalMs: GIFT_FX_REPEAT_MS,
+  bandEnabled: true,
+  rouletteEnabled: true,
+};
+
 export const DEFAULT_CHALLENGE: ChallengeConfig = {
   enabled: false,
   title: '0まで寝ない',
@@ -375,14 +548,21 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   // ストックも既定で無効(likeStockCount: 0)— ゲージ満タンの従属機能なので同じくオプトイン。
   likeStockCount: 0,
   likeStockStep: 25,
+  // 指定コメント妨害は既定で規則なし(= オフ)— キーワードは企画ごとに違うので
+  // 既定を置きようがない(fanStamp の giftId と同じ判断)。
+  commentRules: [],
   giftRules: [],
   // 既定はギフト=妨害: 1ダイヤにつき +1(設定画面で応援方向へ変更できる)。
   giftDefault: { mode: 'perDiamond', amount: 1 },
-  roulette: structuredClone(DEFAULT_ROULETTE),
+  roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[],
+  rouletteSound: { ...DEFAULT_ROULETTE_SOUND },
   flashMinDiamonds: 100,
   hotkey: 'F9',
   monitorDisplayId: null,
   monitorWindowed: false,
+  // 「何時起き」は既定でオフ(全員がやる企画ではない)。時刻はライブ画面で入れる。
+  wakeEnabled: false,
+  wakeTime: null,
   lowThreshold: 10,
   seEnabled: true,
   seVolume: 70,
@@ -393,6 +573,8 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   miniFxEnabled: true,
   miniFx: { ...DEFAULT_MINI_FX },
   giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX),
+  giftRepeatFx: structuredClone(DEFAULT_GIFT_REPEAT_FX),
+  fanStamp: structuredClone(DEFAULT_FAN_STAMP),
 };
 
 /**
@@ -492,11 +674,121 @@ export function matchGiftBand(
   return null;
 }
 
+// ── 連打ギフトの演出反復 ─────────────────────────────────────────────────────
+//
+// 規約: **反復するのは見た目だけ。値・統計・ランキング・履歴ログは1件のまま。**
+// worker が回数を決めて effect に焼き込み(fxRepeat/fxRepeatIntervalMs)、モニターは
+// それを読むだけ — cfg は30秒ポーリングで古くなりうるので再判定させない
+// (fxBandClip / rouletteSegments と同じ「effect 1件で自己完結」の流儀)。
+
+/**
+ * ギフト1件に対して演出を何回撃つか。worker 側の唯一の判断点。
+ *
+ * banded(カットイン一致)のときは間隔ではなく尺ぶんの直列再生になるため、
+ * 総凍結が GIFT_FX_FREEZE_MAX_TOTAL_MS を超えないよう**回数側**を削る
+ * (fxDurationMs は削らない — 1本の尺はモニターとの契約)。
+ */
+export function giftFxRepeat(
+  cfg: ChallengeConfig,
+  repeatCount: number,
+  opts: { banded: boolean; fxDurationMs: number }
+): number {
+  const rf = cfg.giftRepeatFx;
+  if (!rf.enabled) return 1;
+  const cap = Math.min(GIFT_FX_REPEAT_MAX, Math.max(1, Math.round(rf.max)));
+  let rep = Math.min(cap, Math.max(1, Math.round(repeatCount)));
+  if (rep <= 1) return 1;
+  if (opts.banded) {
+    if (!rf.bandEnabled || opts.fxDurationMs <= 0) return 1;
+    rep = Math.min(rep, Math.max(1, Math.floor(GIFT_FX_FREEZE_MAX_TOTAL_MS / opts.fxDurationMs)));
+  }
+  return rep;
+}
+
+/**
+ * 連打ギフトでルーレットを何回まわすか。**これだけは値の増減も回数ぶんになる** —
+ * ルーレットは抽選なので、反復するには出目を N 回引くしかないため。
+ * モニターのキューに乗り切る数で頭打ちにする(溢れると「値だけ動いてリールが
+ * 出ない」= 数字だけ動く最悪の見え方になる)。
+ */
+export function giftFxRouletteSpins(cfg: ChallengeConfig, repeatCount: number): number {
+  const rf = cfg.giftRepeatFx;
+  if (!rf.enabled || !rf.rouletteEnabled) return 1;
+  const cap = Math.min(GIFT_FX_REPEAT_MAX, Math.max(1, Math.round(rf.max)));
+  const rep = Math.min(cap, Math.max(1, Math.round(repeatCount)));
+  return Math.min(rep, ROULETTE_QUEUE_MAX + 1);
+}
+
+/**
+ * effect から反復の再生パラメータを取り出す。renderer 側の唯一の clamp 点。
+ * **MonitorView と useChallengeSe の両方がこれを呼ぶこと** — 音と映像の回数が
+ * ずれない担保はこの関数を共有していることだけ。
+ */
+export function giftFxShots(e: ChallengeEffect): { rep: number; gap: number } {
+  const rep = Math.min(GIFT_FX_REPEAT_MAX, Math.max(1, Math.round(e.fxRepeat ?? 1)));
+  const raw = e.fxRepeatIntervalMs ?? GIFT_FX_REPEAT_MS;
+  const gap = Math.min(GIFT_FX_REPEAT_MAX_MS, Math.max(GIFT_FX_REPEAT_MIN_MS, Math.round(raw)));
+  return { rep, gap };
+}
+
 /** スロット(press/follow/like/achieved 等)の簡易演出。off/無効なら null。 */
 export function miniForSlot(cfg: ChallengeConfig, slot: ChallengeSeSlot): string | null {
   if (!cfg.miniFxEnabled) return null;
   const id = cfg.miniFx[slot];
   return id && id !== 'off' ? id : null;
+}
+
+/**
+ * 旧既定のまま保存されている音の割り当てを、新しい既定へ一度だけ寄せる。
+ * settingsVersion(dto.ts の SETTINGS_VERSION)が各世代より古い settings.json にだけ効く。
+ *
+ * 「旧既定と同じ値のときだけ」書き換えるのが要点 — 自分で旧既定以外を選んでいる人の
+ * 設定は触らない。validateChallengeConfig の中に入れてはいけない(あちらは UI からの
+ * cfg.set も通るので、後から旧既定を選び直した瞬間に上書きし返す)。
+ *
+ * 新しい世代を足すときは**段を積む**こと(if で早期 return しない) — v0 の
+ * settings.json は v1 と v2 の両方を順に通る必要がある。
+ */
+export function migrateChallengeSeSounds(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
+  let out = cfg;
+
+  // v1: 妨害スロットの効果音を専用音へ。
+  if (fromVersion < 1) {
+    const s = out.seSounds;
+    if (s.like === 'pop' || s.follow === 'question') {
+      out = {
+        ...out,
+        seSounds: {
+          ...s,
+          like: s.like === 'pop' ? 'like-jam' : s.like,
+          follow: s.follow === 'question' ? 'follow-jam' : s.follow,
+        },
+      };
+    }
+  }
+
+  // v2: ルーレットの回転サウンド刷新。回転中BGMを既定オフ・回転ループ音を
+  // ジングルへ・確定音を専用の確認音へ。'roulette-near' は旧ファイルにキー自体が
+  // 無く validateSeSounds が既定で埋めるので、ここで触る必要はない。
+  if (fromVersion < 2) {
+    const s = out.seSounds;
+    if (s['roulette-hit'] === 'jingle-hit') {
+      out = { ...out, seSounds: { ...s, 'roulette-hit': 'reel-confirm' } };
+    }
+    const r = out.rouletteSound;
+    if (r.bgm === 'bgm-roulette1' || r.spinSe === 'spin-reel1') {
+      out = {
+        ...out,
+        rouletteSound: {
+          ...r,
+          bgm: r.bgm === 'bgm-roulette1' ? 'off' : r.bgm,
+          spinSe: r.spinSe === 'spin-reel1' ? 'spin-reel2' : r.spinSe,
+        },
+      };
+    }
+  }
+
+  return out;
 }
 
 /**
@@ -545,9 +837,11 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     // count の上限 99 はドットUIの現実的上限(実用は 3〜10 想定)。
     likeStockCount: num(c.likeStockCount, d.likeStockCount, 0, 99),
     likeStockStep: num(c.likeStockStep, d.likeStockStep, 0, 999_999),
+    commentRules: validateCommentRules(c.commentRules),
     giftRules,
     giftDefault,
-    roulette: validateRoulette(c.roulette),
+    roulettes: validateRoulettes(raw),
+    rouletteSound: validateRouletteSound(c.rouletteSound),
     flashMinDiamonds:
       c.flashMinDiamonds === null ? null : num(c.flashMinDiamonds, d.flashMinDiamonds ?? 100, 1, 9_999_999),
     hotkey: str(c.hotkey, d.hotkey),
@@ -556,6 +850,9 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
         ? c.monitorDisplayId
         : null,
     monitorWindowed: c.monitorWindowed === true,
+    wakeEnabled: c.wakeEnabled === true,
+    // 書式が崩れた値は null(未設定)へ倒す — 表示側で NaN 時刻を作らせない。
+    wakeTime: typeof c.wakeTime === 'string' && WAKE_TIME_RE.test(c.wakeTime) ? c.wakeTime : null,
     lowThreshold: num(c.lowThreshold, d.lowThreshold, 0, 9_999_999),
     // 既定 true なので `!== false`(enabled/monitorWindowed の `=== true` とは逆向き)。
     seEnabled: c.seEnabled !== false,
@@ -567,6 +864,29 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     miniFxEnabled: c.miniFxEnabled !== false,
     miniFx: validateMiniFx(c.miniFx),
     giftBandFx: validateGiftBandFx(c.giftBandFx),
+    giftRepeatFx: validateGiftRepeatFx(c.giftRepeatFx),
+    fanStamp: validateFanStamp(c.fanStamp),
+  };
+}
+
+/**
+ * 連打ギフトの演出反復設定の検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(giftRepeatFx キー無し)は既定へ倒す。
+ * 真偽値の向きは既定に合わせること — 既定 true は `!== false`、既定 false は
+ * `=== true`。逆にすると既定が反転する(この関数群で一番踏みやすい罠)。
+ */
+function validateGiftRepeatFx(raw: unknown): GiftRepeatFxConfig {
+  const d = DEFAULT_GIFT_REPEAT_FX;
+  const c = raw as Partial<GiftRepeatFxConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  const n = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  return {
+    enabled: c.enabled !== false,
+    max: n(c.max, d.max, 1, GIFT_FX_REPEAT_MAX),
+    intervalMs: n(c.intervalMs, d.intervalMs, GIFT_FX_REPEAT_MIN_MS, GIFT_FX_REPEAT_MAX_MS),
+    bandEnabled: c.bandEnabled !== false,
+    rouletteEnabled: c.rouletteEnabled !== false,
   };
 }
 
@@ -576,6 +896,28 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
  * min>max の行は捨てる。未知のクリップ id は同じ id の既定バンドのクリップ、
  * それも無ければ 'off' に倒す。
  */
+/**
+ * ルーレット回転サウンドの検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(rouletteSound キー無し)は既定へ倒す(回転音は鳴る・BGM はオフ)。
+ * 未知の id は**既定の id** へ — 回転ループ音は既定が実在の音なので鳴り続け、
+ * BGM は既定が 'off' なので無音になる(どちらも既定の挙動に一致する)。
+ */
+function validateRouletteSound(raw: unknown): RouletteSoundConfig {
+  const d = DEFAULT_ROULETTE_SOUND;
+  const c = raw as Partial<RouletteSoundConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return { ...d };
+  const vol = (v: unknown, fb: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(100, Math.max(0, Math.round(v))) : fb;
+  const id = (v: unknown, list: readonly string[], fb: string): string =>
+    typeof v === 'string' && (v === 'off' || list.includes(v)) ? v : fb;
+  return {
+    bgm: id(c.bgm, CHALLENGE_ROULETTE_BGM_IDS, d.bgm),
+    bgmVolume: vol(c.bgmVolume, d.bgmVolume),
+    spinSe: id(c.spinSe, CHALLENGE_ROULETTE_SPIN_SE_IDS, d.spinSe),
+    spinSeVolume: vol(c.spinSeVolume, d.spinSeVolume),
+  };
+}
+
 function validateGiftBandFx(raw: unknown): GiftBandFxConfig {
   const d = DEFAULT_GIFT_BAND_FX;
   const c = raw as Partial<GiftBandFxConfig> | null | undefined;
@@ -630,18 +972,86 @@ function validateGiftBandFx(raw: unknown): GiftBandFxConfig {
   };
 }
 
+/**
+ * お助け機能(ファンスタンプ)の検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(fanStamp キー無し)は既定へ。giftName/canonical は小文字化して
+ * 保存する — マッチ側(matchGiftTrigger)が設定値を小文字前提で比較するため
+ * (validateRoulette と同じ規約)。
+ */
+function validateFanStamp(raw: unknown): FanStampConfig {
+  const d = DEFAULT_FAN_STAMP;
+  const c = raw as Partial<FanStampConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  return {
+    // 既定 true なので `!== false`(seEnabled / validateRoulette と同じ向き)。
+    // giftId/giftName/canonical が3つとも空なら matchGiftTrigger が構造的に
+    // 一致しないので、enabled のまま既定を配っても既存の挙動は変わらない。
+    enabled: c.enabled !== false,
+    giftId: typeof c.giftId === 'string' ? c.giftId.trim() : d.giftId,
+    giftName: typeof c.giftName === 'string' ? c.giftName.trim().toLowerCase() : d.giftName,
+    canonical: typeof c.canonical === 'string' ? c.canonical.trim().toLowerCase() : d.canonical,
+    // 負数を許すので Math.max(0, ...) はしない(応援方向が本命)。
+    amountEach:
+      typeof c.amountEach === 'number' && Number.isFinite(c.amountEach)
+        ? Math.min(999_999, Math.max(-999_999, Math.round(c.amountEach)))
+        : d.amountEach,
+    suppressBandFx: c.suppressBandFx !== false,
+    flash: c.flash !== false,
+  };
+}
+
 /** ルーレット盤面の上限行数。UI とリール演出が破綻しない範囲で余裕を持たせる。 */
 export const ROULETTE_SEGMENTS_MAX = 12;
 
+/** 登録できるルーレットの上限件数。設定UIと settings.json の現実的な上限。 */
+export const ROULETTES_MAX = 8;
+
+/** ルーレット表示名の最大長。モニターの見出し1行に収まる範囲。 */
+export const ROULETTE_LABEL_MAX = 24;
+
 /**
- * ギフトルーレット設定の検証。既存流儀どおり throw せずサニタイズする。
- * 旧 settings.json(roulette キー無し)は既定(有効・ハートミー)に倒す。
+ * ルーレット群の検証。既存流儀どおり throw せずサニタイズする。
+ *
+ * 移行: 旧 settings.json は単一の `roulette` キーを持つ。`roulettes` が無く
+ * `roulette` があればそれを1件の配列へ包んで引き継ぐ — ユーザーが調整した盤面を
+ * 「既定に戻す」で踏み潰さないため。どちらも無ければ既定(ハートミー1件)。
+ *
+ * 明示的な空配列は空のまま通す(validateGiftClips と同じ判断)— 全部消した
+ * ユーザーの意思を尊重する。ルーレット0件は「どのギフトでも回らない」で破綻しない。
+ */
+function validateRoulettes(raw: unknown): ChallengeRouletteConfig[] {
+  const c = raw as { roulettes?: unknown; roulette?: unknown } | null | undefined;
+  const legacy = !Array.isArray(c?.roulettes) && c?.roulette != null && typeof c.roulette === 'object';
+  const src = Array.isArray(c?.roulettes) ? c.roulettes : legacy ? [c!.roulette] : null;
+  if (src === null) return structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[];
+
+  // 旧形式には id/label が無い。移行分だけは既定(ハートミー)の名前を継がせる —
+  // そうしないと表示が TikTok の実名 'Heart Me' に落ちて要望の日本語表記が出ない。
+  // 新形式の行では欠損 label を '' のまま通す(giftName へフォールバックせよの意思)。
+  const fb = legacy
+    ? { id: DEFAULT_ROULETTE.id, label: DEFAULT_ROULETTE.label }
+    : { id: '', label: '' };
+
+  const out: ChallengeRouletteConfig[] = [];
+  const seen = new Set<string>();
+  for (const r of src.slice(0, ROULETTES_MAX)) {
+    const v = validateRoulette(r, fb);
+    // 重複・欠損 id は振り直す — UI の key と行ごとのテスト再生の対象特定がぶれるため。
+    const id = v.id !== '' && !seen.has(v.id) ? v.id : v.id !== '' ? `${v.id}-${out.length}` : `rl-${out.length}`;
+    seen.add(id);
+    out.push({ ...v, id });
+  }
+  return out;
+}
+
+/**
+ * ルーレット1件ぶんの検証。既存流儀どおり throw せずサニタイズする。
  * 有効な出目が 1 件も残らない/全 weight が 0 の盤面は抽選不能なので既定 segments に戻す。
  */
-function validateRoulette(raw: unknown): ChallengeRouletteConfig {
+function validateRoulette(raw: unknown, fb: { id: string; label: string }): ChallengeRouletteConfig {
   const d = DEFAULT_ROULETTE;
   const c = raw as Partial<ChallengeRouletteConfig> | null | undefined;
-  if (!c || typeof c !== 'object') return structuredClone(d);
+  if (!c || typeof c !== 'object') return { ...structuredClone(d), ...fb };
 
   const segments: ChallengeRouletteSegment[] = Array.isArray(c.segments)
     ? c.segments
@@ -663,6 +1073,11 @@ function validateRoulette(raw: unknown): ChallengeRouletteConfig {
   const usable = segments.length > 0 && segments.some((s) => s.weight > 0);
 
   return {
+    // 欠損・重複 id は呼び元(validateRoulettes)が振り直すので、ここは fb のまま通す。
+    id: typeof c.id === 'string' ? c.id.trim() : fb.id,
+    // giftName/canonical と違い小文字化しない — 日本語の表示名を原文のまま出す。
+    // `|| fb.label` にしないこと: ユーザーが意図して空にした label を既定名で潰さない。
+    label: typeof c.label === 'string' ? c.label.trim().slice(0, ROULETTE_LABEL_MAX) : fb.label,
     // enabled の既定は true なので `!== false`(seEnabled と同じ向き)。
     enabled: c.enabled !== false,
     giftId: typeof c.giftId === 'string' ? c.giftId.trim() : d.giftId,
@@ -691,6 +1106,46 @@ function validateGiftClips(raw: unknown): ChallengeGiftClip[] {
     out.push({ id: r.id, canonical: r.canonical.toLowerCase(), clip, mini });
   }
   return out;
+}
+
+/** 登録できる指定コメント規則の上限件数。設定UIと settings.json の現実的な上限。 */
+export const COMMENT_RULES_MAX = 20;
+
+/**
+ * 指定コメント妨害規則の検証。既存流儀どおり throw せずサニタイズする。
+ * 非配列(旧 settings.json のキー無し含む)は空 = 機能オフへ。keyword は trim して
+ * 原文のまま保存する(小文字化しない — 日本語の表示をそのまま出す。比較は
+ * matchCommentRule が toLowerCase で行う)。amount 0 以下・非有限の行は捨てる —
+ * 「一致しても何も起きない行」を残すと設定画面で無反応の原因が見えなくなる。
+ */
+function validateCommentRules(raw: unknown): ChallengeCommentRule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ChallengeCommentRule[] = [];
+  for (const r of raw.slice(0, COMMENT_RULES_MAX) as Array<Partial<ChallengeCommentRule>>) {
+    if (!r || typeof r !== 'object' || typeof r.id !== 'string') continue;
+    if (typeof r.keyword !== 'string') continue;
+    if (typeof r.amount !== 'number' || !Number.isFinite(r.amount)) continue;
+    const amount = Math.min(999_999, Math.round(r.amount));
+    if (amount <= 0) continue;
+    out.push({ id: r.id, keyword: r.keyword.trim(), amount });
+  }
+  return out;
+}
+
+/**
+ * コメント → 妨害規則の写像。**部分一致・上から先勝ち**(giftRules と同じ規約)。
+ * 大文字小文字は無視する(英字キーワード用 — 日本語には影響しない)。
+ * 戻り null は「このコメントでは何も起きない」。
+ *
+ * ⚠ `keyword !== ''` は外さないこと。`''.includes()` は常に true なので、空欄の
+ * 規則が全コメントを拾ってしまう(matchGiftTrigger と同じ罠)。
+ */
+export function matchCommentRule(cfg: ChallengeConfig, content: string): ChallengeCommentRule | null {
+  const t = content.toLowerCase();
+  for (const r of cfg.commentRules) {
+    if (r.keyword !== '' && t.includes(r.keyword.toLowerCase())) return r;
+  }
+  return null;
 }
 
 /** スロットごとに既知の簡易演出 id か 'off' だけを通し、それ以外は既定に戻す。 */
@@ -783,10 +1238,77 @@ export function matchRouletteTrigger(
   rl: ChallengeRouletteConfig,
   g: { canonical?: string; giftId: string; giftName?: string }
 ): boolean {
-  if (rl.giftId !== '' && rl.giftId === g.giftId) return true;
-  if (rl.canonical !== '' && g.canonical != null && rl.canonical === g.canonical.toLowerCase()) return true;
-  if (rl.giftName !== '' && g.giftName != null && g.giftName.toLowerCase().includes(rl.giftName)) return true;
+  return matchGiftTrigger(rl, g);
+}
+
+/**
+ * giftId / giftName / canonical の3段マッチ。ルーレットのトリガー判定と
+ * ファンスタンプ(お助け)の判定で共有する唯一の出所。
+ *
+ * ⚠ 3つとも '' の設定は**どのギフトにも一致しない**。''.includes() が常に true に
+ * なる罠(空欄の設定が全ギフトを拾う)を塞ぐガードなので、各行の `!== ''` は外さない。
+ */
+export function matchGiftTrigger(
+  t: { giftId: string; giftName: string; canonical: string },
+  g: { canonical?: string; giftId: string; giftName?: string }
+): boolean {
+  if (t.giftId !== '' && t.giftId === g.giftId) return true;
+  if (t.canonical !== '' && g.canonical != null && t.canonical === g.canonical.toLowerCase()) return true;
+  if (t.giftName !== '' && g.giftName != null && g.giftName.toLowerCase().includes(t.giftName)) return true;
   return false;
+}
+
+/**
+ * ギフト → ルーレット行の写像。**上から順に評価し、最初に一致した1件だけ**を返す
+ * (giftRules / giftClips と同じ先勝ち)。enabled でない行は飛ばす。
+ * 戻り null は「このギフトではルーレットを回さない」= 通常のギフト規則へ落ちる。
+ */
+export function matchRoulette(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): ChallengeRouletteConfig | null {
+  for (const rl of cfg.roulettes) {
+    if (!rl.enabled) continue;
+    if (matchGiftTrigger(rl, g)) return rl;
+  }
+  return null;
+}
+
+/**
+ * ギフト → ファンスタンプ(お助け)行の写像。**ルーレット・giftRules・giftDefault の
+ * どれよりも先に評価し、一致したらそれらを一切評価しない**(二重適用防止 —
+ * matchRoulette がルーレットで果たしているのと同じ役割)。
+ * 戻り null は「このギフトはお助けではない」= 従来のギフト経路へ落ちる。
+ *
+ * 単一設定だが戻り値を boolean にしない — 将来 fanStamp を配列化しても
+ * 呼び出し側(worker/challenge.ts)のコードが変わらないようにするため。
+ */
+export function matchFanStamp(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): FanStampConfig | null {
+  const fs = cfg.fanStamp;
+  if (!fs.enabled) return null;
+  return matchGiftTrigger(fs, g) ? fs : null;
+}
+
+/**
+ * ルーレット見出しの文言。回転パネル(RouletteFx)・確定バナー・盤面なしの
+ * フォールバックバナーの3箇所で同じ文にするための唯一の出所。
+ *
+ * 「ハートミー ○○がルーレット」— 前置きは設定側の label。TikTok から届く実名は
+ * 'Heart Me' のような英語のことがあり、それでは日本語表記にならないため label が主。
+ * label が空なら実名(giftName)、それも無ければ前置きなしで「○○がルーレット」。
+ *
+ * &lt;b&gt; でニックネームを括る都合で1本の文字列にはできないので、前後の2片で返す。
+ * prefix は末尾に区切りの空白を含む(suffix は先頭空白なし)。
+ */
+export function rouletteHeadline(e: { rouletteLabel?: string; giftName?: string }): {
+  prefix: string;
+  suffix: string;
+} {
+  const name = (e.rouletteLabel ?? '').trim() || (e.giftName ?? '').trim();
+  return { prefix: name !== '' ? `${name} ` : '', suffix: 'がルーレット' };
 }
 
 /**

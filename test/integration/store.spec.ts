@@ -315,6 +315,31 @@ describe('P1 analytics', () => {
   });
 });
 
+describe('like_seen prune (migration 005)', () => {
+  it('drops rows older than the cutoff but keeps in-window dedupe intact', () => {
+    const sid = openSession();
+    const oldTs = T0;
+    const newTs = T0 + 40 * 60_000;
+    store.applyBatch(sid, [
+      ev('like', { common: { msgId: 'l-old', createTime: String(oldTs / 1000) }, user: u('1'), count: 5 }, oldTs),
+    ]);
+    store.applyBatch(sid, [
+      ev('like', { common: { msgId: 'l-new', createTime: String(newTs / 1000) }, user: u('1'), count: 3 }, newTs),
+    ]);
+
+    // 配信中の定期掃除と同じ形: 「今」から30分より古い行を捨てる。
+    store.pruneLikeSeen(newTs - 30 * 60_000);
+    const count = (store.rawAll('SELECT COUNT(*) AS c FROM like_seen') as Array<{ c: number }>)[0]!.c;
+    expect(count).toBe(1);
+
+    // ウィンドウ内の再送(再接続バックログ)は引き続き二重計上されない。
+    store.applyBatch(sid, [
+      ev('like', { common: { msgId: 'l-new', createTime: String(newTs / 1000) }, user: u('1'), count: 3 }, newTs),
+    ]);
+    expect(store.getSessionViewerTable(sid, {}).rows[0]!.likesCurrent).toBe(8);
+  });
+});
+
 describe('purge', () => {
   it('rebuilds lifetime totals after a session is deleted', () => {
     const s1 = openSession(T0, 'r1');

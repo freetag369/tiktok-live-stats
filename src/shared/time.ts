@@ -56,6 +56,36 @@ export function formatDurationJa(ms: number): string {
   return h > 0 ? `${h}時間${m}分` : `${m}分`;
 }
 
+/** 起床時刻の書式 'HH:mm'(24時間・ローカル時刻)。設定の検証と表示で共有する。 */
+export const WAKE_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * 'HH:mm' を「refMs 以前で最も近いその時刻」の epoch ms に解決する。
+ * refMs より未来になるなら前日の同時刻 — 深夜配信(0時をまたぐ)で「今日の 5:30」を
+ * 掴んで経過が負になるのを防ぐ。
+ *
+ * ここだけ jstDayStart 系のオフセット演算ではなくローカル時刻の setHours を使う。
+ * モニターに出すのは配信者の壁時計時刻(LiveDashboard の hms() と同じ)であり、
+ * 日本に DST は無いのでこれで厳密。
+ */
+export function wakeAnchorMs(hhmm: string, refMs: number): number | null {
+  if (!WAKE_TIME_RE.test(hhmm)) return null;
+  const d = new Date(refMs);
+  d.setHours(Number(hhmm.slice(0, 2)), Number(hhmm.slice(3, 5)), 0, 0);
+  const t = d.getTime();
+  return t > refMs ? t - DAY_MS : t;
+}
+
+/**
+ * 起床からの経過 ms。refMs は「起床時刻がどの日か」を決める錨 —
+ * 企画の開始時刻(未開始なら now)を渡す。now を錨にすると 24 時間を超えて
+ * 起きている配信で 25時間3分 が 1時間3分 へ巻き戻る。
+ */
+export function wakeElapsedMs(hhmm: string, refMs: number, nowMs: number): number | null {
+  const a = wakeAnchorMs(hhmm, refMs);
+  return a === null ? null : Math.max(0, nowMs - a);
+}
+
 /** 「3日前」「今日」 — used everywhere a 前回来店日 is shown. */
 export function relativeDayJa(ms: number | null | undefined, now = Date.now()): string {
   if (ms == null) return '—';

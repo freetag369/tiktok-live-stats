@@ -1,5 +1,7 @@
+import panicUrl from '../assets/fx/mini/panic-man.webp';
+
 /**
- * 簡易演出 — 素材を持たない SVG + CSS キーフレームの軽量アニメ。
+ * 簡易演出 — SVG + CSS キーフレームの軽量アニメ。
  *
  * 映像クリップ(assets/fx/*.mp4)が最短4秒で高頻度イベントには重いのに対し、
  * こちらはバンドル増加ゼロ・デコード無しで一瞬だけ出る。ハートミーやいいねの
@@ -9,9 +11,21 @@
  * - 動き(@keyframes)は monitor.css 側。ここは形だけを持つ。
  * - 衝撃の星・集中線も同じ SVG 内に置き、同じアニメーションで動かす。
  *   JS タイマーで canvas と同期させると必ずズレるため、外に出さない。
- * - 中央寄せ(translate)は外側の .mini が持ち、回転・拡縮は内側の .mini-art が
- *   持つ。1要素に両方載せると keyframes の transform が中央寄せを上書きする。
+ * - 位置(数字の左上)と寸法は外側の .mini が left/top/width/height で持ち、
+ *   回転・拡縮は内側の .mini-art が持つ。1要素に両方載せると keyframes の
+ *   transform が位置指定を上書きする。
+ *
+ * 素材を持つのは 'panic' の1枚だけ(理由は Panic のコメント)。
  */
+
+/*
+ * 初回発火で復号待ちの空フレームが出ないよう、モジュール読み込み時に温めておく。
+ * <img> には <video> のような preload 属性が無く、CSS 経由でも先読みされない。
+ */
+if (typeof Image !== 'undefined') {
+  const warm = new Image();
+  warm.src = panicUrl;
+}
 
 export interface MiniFxProps {
   /** CHALLENGE_MINI_IDS の id。 */
@@ -24,6 +38,7 @@ export function MiniFx({ id, amount }: MiniFxProps): React.JSX.Element | null {
   if (id === 'hammer') return <Hammer />;
   if (id === 'stamp') return <Stamp amount={amount} />;
   if (id === 'shock') return <Shock />;
+  if (id === 'panic') return <Panic />;
   return null;
 }
 
@@ -113,4 +128,20 @@ function Shock(): React.JSX.Element {
       </g>
     </svg>
   );
+}
+
+/**
+ * 絶望カットイン。フォロー妨害の既定 — 戻された数字の左上で頭を抱える。
+ *
+ * SVG 勢と違い素材を持つが、mp4 のようなデコード待ちが無く1枚を使い回すので
+ * 連発しても軽い(≒97KB)。素材(assets/fx/mini/panic-man.webp)は元写真の黒背景を
+ * そのまま置くと矩形の切り口が見えるため、**楕円のアルファを焼き込んである**。
+ * したがって CSS 側で mask を重ねないこと — 二重にフェードして芯まで薄くなる。
+ *
+ * 箱が素材と同じ 3:2 になるよう playMini が w/h を分けて出しているので、
+ * ここは縦横比を触らない。amount(±N)も載せない — フォローの +N は
+ * 浮上バナーが既に出しており、小さな写真の上で重ねても読めない。
+ */
+function Panic(): React.JSX.Element {
+  return <img className="mini-art mini-panic" src={panicUrl} alt="" aria-hidden />;
 }

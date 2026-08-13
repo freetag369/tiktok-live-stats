@@ -158,13 +158,43 @@ describe('replay — ハートミー', () => {
     for (const e of events) engine.handleEvent(e);
 
     const s = engine.get();
-    // 2 gift messages in the fixture -> 2 spins of +5 each, and the default
-    // perDiamond rule must NOT stack on top (value would be +13 otherwise).
+    // The fixture is 2 gift messages carrying 3 taps (repeatCount 2 then 1), and
+    // giftRepeatFx.rouletteEnabled is on by default -> one spin per tap = 3 spins
+    // of +5 each. The default perDiamond rule must still NOT stack on top.
+    expect(s.stats.rouletteSpins).toBe(3);
+    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 15);
+    const spins = s.recentEffects.filter((e) => e.kind === 'roulette');
+    expect(spins).toHaveLength(3);
+    expect(spins[0]!.rouletteSegments![spins[0]!.rouletteIndex!]).toBe(5);
+    // The monitor headline reads "ハートミー ○○がルーレット". The label rides on the
+    // effect (self-contained) — the live path never carries canonical, so a
+    // cfg-side lookup in the monitor would be the wrong place to resolve it.
+    expect(spins[0]!.rouletteLabel).toBe('ハートミー');
+  });
+
+  it('falls back to one spin per message when giftRepeatFx.rouletteEnabled is off', async () => {
+    // 連打反復を切ったときは旧来の不変条件「連打でも1イベント=1スピン」へ戻る。
+    // ルーレットは反復すると増減量も回数ぶんになる唯一の演出なので、切り戻しが
+    // 効くことをライブ経路で固定しておく。
+    const sid = newSession();
+    const events = await replay('synth-heart-me.ndjson', sid);
+
+    const base = structuredClone(DEFAULT_CHALLENGE);
+    const engine = new ChallengeEngine(
+      () => ({
+        ...base,
+        enabled: true,
+        giftRepeatFx: { ...base.giftRepeatFx, rouletteEnabled: false },
+      }),
+      () => Date.UTC(2026, 6, 28, 12, 0, 0),
+      () => 0
+    );
+    engine.start();
+    for (const e of events) engine.handleEvent(e);
+
+    const s = engine.get();
     expect(s.stats.rouletteSpins).toBe(2);
     expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 10);
-    const spins = s.recentEffects.filter((e) => e.kind === 'roulette');
-    expect(spins).toHaveLength(2);
-    expect(spins[0]!.rouletteSegments![spins[0]!.rouletteIndex!]).toBe(5);
   });
 });
 

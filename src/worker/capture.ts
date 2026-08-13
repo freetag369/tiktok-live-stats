@@ -18,7 +18,14 @@ export class Capture {
     mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const path = join(dir, `capture-${stamp}.ndjson`);
-    this.stream = createWriteStream(path, { encoding: 'utf8' });
+    const stream = createWriteStream(path, { encoding: 'utf8' });
+    // 書き込み失敗(ENOSPC/EPERM/ロック等)は同期 throw ではなく非同期の 'error'
+    // イベントで届く。リスナーが無いと uncaughtException に昇格してワーカー
+    // プロセスごと巻き込むため、記録の停止に格下げする。
+    stream.on('error', () => {
+      if (this.stream === stream) this.stream = null;
+    });
+    this.stream = stream;
     this.startMs = Date.now();
     this.count = 0;
     this.stream.write(`${JSON.stringify({ o: -1, meta: { ...meta, capturedAt: new Date().toISOString() } })}\n`);

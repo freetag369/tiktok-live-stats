@@ -112,6 +112,23 @@ body {
     #000;
 }
 
+/*
+ * 「何時起き」を出す間だけ最下段をもう1行足す。行を常設しないのは、機能オフでも
+ * row-gap の 8px ぶん 7セグの 1fr が痩せるため。
+ * 【重要】このクラスで足してよいのは grid-template-* だけ。上の注意書きどおり
+ * z-index / opacity / filter / isolation / transform は絶対に付けないこと。
+ */
+.monitor-root.has-wake {
+  grid-template-rows: auto 1fr auto auto auto auto;
+  grid-template-areas:
+    'title'
+    'count'
+    'bars'
+    'elapsed'
+    'ranking'
+    'wake';
+}
+
 .idle-hint {
   display: flex;
   align-items: center;
@@ -462,7 +479,9 @@ body {
 .lg-track {
   position: relative;
   height: 64px;
-  border-radius: 999px;
+  /* 角あり(直角)。.lg-fill / .lg-flash は inherit なので、変えるのはここ1箇所。
+     先端の光点(.lg-spark)とストックのドット(.lgs-dot)は枠の形と無関係なので丸のまま。 */
+  border-radius: 0;
   background:
     linear-gradient(180deg, rgba(255, 79, 160, 0.08), rgba(255, 79, 160, 0.02)),
     rgba(255, 255, 255, 0.06);
@@ -487,9 +506,28 @@ body {
   border-radius: inherit;
   background: linear-gradient(90deg, #ff2d78, #ff7ab8 70%, #ffc0dc);
   box-shadow: 0 0 18px rgba(255, 79, 160, 0.75);
-  /* MoveTowards 相当カーブ — 2Hz のデータでも連続して見える */
+  /*
+   * fill 相の掃引カーブ。0.4s は LikeGauge の FILL_MS(420)= MonitorView の
+   * STRIKE_LAUNCH_MS と対になっている(バーが 100% に届く瞬間に弾が出る)ので
+   * 絶対に変えないこと。idle 中の追従だけ下で短くしている。
+   */
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
   overflow: hidden;
+}
+
+/*
+ * idle(=滴下中)の追従は短い linear にする。滑らかさは LikeGauge の滴下
+ * (DRIP_STEP_MS ごとの小刻みな加算)が担うようになったので、0.4s ease のままだと
+ * バーだけが数字より一拍遅れて「刻み」が見えなくなる。
+ *
+ * 相が idle → fill へ変わる commit では data-phase も同時に変わるため、100% への
+ * 掃引には after-change style の 0.4s が使われる(CSS Transitions の規定どおり)。
+ * snap のインライン transition:'none' はどちらにも勝つ。
+ */
+.like-gauge[data-phase='idle'] .lg-fill,
+.like-gauge[data-phase='idle'] .lg-spark {
+  transition-duration: 0.12s;
+  transition-timing-function: linear;
 }
 
 .like-gauge[data-hot='true'] .lg-fill {
@@ -666,6 +704,7 @@ body {
 }
 
 .lgs-dot {
+  position: relative; /* .lgs-avatar / ::after リングの絶対配置の基準 */
   width: 26px;
   height: 26px;
   border-radius: 50%;
@@ -683,6 +722,29 @@ body {
     0 0 16px rgba(61, 255, 156, 0.85),
     inset 0 0 0 2px rgba(184, 255, 217, 0.6);
   animation: lgs-pop 300ms ease-out;
+}
+
+/* 点灯ドットのアバター(その区間で最もいいねしたユーザー)。URL 無し・読込失敗・
+   アバター表示 OFF では img を出さず、上の緑グラデがそのまま見える。 */
+.lgs-avatar {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 画像がインセットリング(box-shadow inset)を覆い隠すので、リングを上へ重ね直す。
+   外側の glow はコンテナの box-shadow なので画像の影響を受けない。 */
+.lgs-dot.on.has-avatar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2px rgba(184, 255, 217, 0.6);
+  pointer-events: none;
 }
 
 @keyframes lgs-pop {
@@ -734,6 +796,20 @@ body {
   }
 }
 
+/* burst の白閃(background)は画像の下に隠れるため、画像側は brightness で飽和させる */
+.lg-stock[data-sphase='burst'] .lgs-dot.on .lgs-avatar {
+  animation: lgs-burst-avatar 300ms ease-out;
+}
+
+@keyframes lgs-burst-avatar {
+  0% {
+    filter: brightness(3) saturate(0.3);
+  }
+  100% {
+    filter: none;
+  }
+}
+
 .lgs-label {
   font-size: 22px;
   font-weight: 800;
@@ -753,12 +829,6 @@ body {
   font-family: var(--mono);
   font-size: 36px;
   font-variant-numeric: tabular-nums;
-}
-
-.stats-inline {
-  color: var(--fg-faint);
-  font-size: 26px;
-  margin-left: 10px;
 }
 
 /* ── ランキング ───────────────────────────────────────────────────────── */
@@ -821,6 +891,27 @@ body {
   color: var(--fg-faint);
   font-size: 32px;
   padding: 12px 0;
+}
+
+/* ── 何時起き(左下) ───────────────────────────────────────────────────
+ * 地の色は 配信時間(.elapsed-row)と同じ --fg-dim。数字だけ青にするため、
+ * ラベルと数値を別 span に割る(.lg-label / .lg-heart と同じ手)。
+ * 左端は .monitor-root の padding — タイトルや1位カードと同じ線に揃う。 */
+
+.wake-row {
+  grid-area: wake;
+  text-align: left;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 34px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wake-num {
+  color: var(--mon-blue);
+  text-shadow: 0 0 14px rgba(55, 182, 255, 0.45);
 }
 
 /* ── CLEAR リザルト画面(全画面・ギフト/イイネ TOP5) ───────────────────
@@ -1163,18 +1254,22 @@ body {
 }
 
 /*
- * 簡易演出(MiniFx)。SVG + keyframes だけの軽量アニメで、素材を持たない。
+ * 簡易演出(MiniFx)。ほぼ SVG + keyframes だけの軽量アニメ。
  *
- * .mini が中央寄せ(translate)、.mini-art が回転・拡縮を持つ二層構成。
- * 1要素にまとめると keyframes の transform が中央寄せを上書きして飛ぶ。
- * 位置は MonitorView が fx.pointFor(countdown) のステージ座標を入れる。
+ * .mini が位置と寸法、.mini-art が回転・拡縮を持つ二層構成。
+ * 1要素にまとめると keyframes の transform が位置指定を上書きして飛ぶ。
+ *
+ * **left/top は中心ではなく左上**。以前は translate(-50%,-50%) で数字の中心へ
+ * 重ねていたが、7セグと数字が読めなくなるので数字の左上の外側へ出した。
+ * 座標と寸法は MonitorView の playMini が先頭桁(.seg-digit)の
+ * fx.pointFor から出してインラインで入れる。ここで transform を足すと
+ * その座標がズレるので足さないこと。
  *
  * 映像クリップと違い mix-blend-mode を使わないので .fx-layer の中で良い
  * (スタッキングコンテキストの制約を受けない)。
  */
 .mini {
   position: absolute;
-  transform: translate(-50%, -50%);
   pointer-events: none;
 }
 
@@ -1305,49 +1400,186 @@ body {
   }
 }
 
-/* ±N 浮上バッジ */
+/* ── 絶望カットイン(写真) ── */
+/*
+ * 唯一の写真素材の簡易演出(フォロー妨害の既定)。
+ *
+ * **縁を CSS で触らないこと。** 素材側に楕円のアルファを焼き込んであるので
+ * (MiniFx.tsx の Panic を参照)、mask や border を重ねると二重にフェードして
+ * 芯まで薄くなる。箱の縦横比は playMini が素材と同じ 3:2 に合わせている。
+ *
+ * 左外から滑り込み、着地でブルブル動揺してから左へ抜ける。
+ * 尺 880ms は MINI_ABORT_MS(1200ms)の手前 — 伸ばすときは向こうも見ること。
+ * 飛び込みの開始位置はステージ外にはみ出すが、.fx-layer の overflow:hidden が
+ * 切ってくれるので「画面外から入ってくる」ように見える。
+ */
+.mini-panic {
+  object-fit: contain;
+  transform-origin: 30% 55%;
+  opacity: 0;
+  animation: mpanic 880ms cubic-bezier(0.22, 1.1, 0.36, 1) forwards;
+}
+
+/*
+ * transform は毎キーで全項目を書く — 省略した項目は初期値に戻るので、
+ * ブレの最中に scale/rotate が勝手にリセットされる。
+ */
+@keyframes mpanic {
+  /* 左外から */
+  0% {
+    opacity: 0;
+    transform: translate(-52%, 4%) scale(0.88) rotate(-7deg);
+  }
+  12% {
+    opacity: 1;
+    transform: translate(-22%, 2%) scale(0.95) rotate(-4deg);
+  }
+  /* 行き過ぎて */
+  22% {
+    opacity: 1;
+    transform: translate(3%, 0%) scale(1.05) rotate(2.5deg);
+  }
+  /* 着地 */
+  30% {
+    opacity: 1;
+    transform: translate(0%, 0%) scale(1) rotate(0deg);
+  }
+  /* 動揺のブレ(2往復) */
+  39% {
+    transform: translate(-2.4%, 1.2%) scale(1) rotate(-1.8deg);
+  }
+  48% {
+    transform: translate(2.4%, -1.2%) scale(1) rotate(1.8deg);
+  }
+  57% {
+    transform: translate(-1.6%, 0.8%) scale(1) rotate(-1.2deg);
+  }
+  66% {
+    opacity: 1;
+    transform: translate(0%, 0%) scale(1) rotate(0deg);
+  }
+  /* 少し持ってから左へ抜ける */
+  80% {
+    opacity: 1;
+    transform: translate(0%, 0%) scale(1) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-16%, 0%) scale(0.93) rotate(-4deg);
+  }
+}
+
+/* ── ±N 浮上バナー(フォロー / いいね / ストック満杯 / ルーレット / ギフト) ──
+ *
+ * 【大きさを変えたいときは --float-scale の 1 行だけ】
+ * 2 = ご要望の「今の 2 倍」。1 でおおよそ v0.4.0 相当の大きさに戻るが、
+ * 2 段組み・幅固定・余白の取り方が変わっているので厳密に同一ではない。
+ * 以下の px は全てその基準値として書いてあり、calc() でまとめて拡縮する。文字だけでなく余白・
+ * リング太さ・グローの半径まで同じ係数で動くので、どの倍率でも比率が崩れない。
+ *
+ * 【なぜ 2 段組みなのか】ステージは 540×960 の固定 px(先頭の注記参照)。
+ * 従来の 1 行組みは "+10 テスト がフォロー!" で既に幅 438px を使っており、
+ * 上限(旧 max-width:86% = 464px)の目前だった。素直に 2 倍にすると 1 行
+ * 876px でステージ幅を超え、.fx-layer の overflow:hidden に無言で切られる。
+ * そこで上段=数字(.f-amt / ハート)、下段=文言(.f-txt / .gc-amt)に分け、
+ * 高さ方向へ伸ばして「2 倍」を出している。
+ *
+ * 段分けは下段の要素に flex-basis:100% を与えているだけ — MonitorView 側の
+ * JSX は素のまま(fragment に span を並べるだけ)で済む。
+ *
+ * 下段の文言(.f-txt)だけは 25px 基準 = 2 倍時 50px と、他より控えめにして
+ * ある。ここを 2 倍(64px)にすると "いいねストック満杯!" が 1 行に収まらず
+ * 折り返してしまうため。数字・ハート・アイコンは素直に 2 倍。
+ */
 .floats {
+  /* ← ここ 1 行が全バナーの大きさ */
+  --float-scale: 2;
   position: absolute;
-  top: 26%;
+  /* 2 段組みで背が高くなったぶん開始位置を上げる。FLOAT_MAX 枚が縦 960px に
+     収まる上限がこのあたり(ギフトカード 3 枚でおよそ 950px)。 */
+  top: 14%;
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: calc(4px * var(--float-scale));
 }
 
 .float {
   display: flex;
+  /* 下段送りの土台。flex-basis:100% の子だけが次の行へ落ちる。 */
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
-  gap: 12px;
-  font-size: 36px;
+  column-gap: calc(12px * var(--float-scale));
+  row-gap: calc(3px * var(--float-scale));
+  font-size: calc(36px * var(--float-scale));
   font-weight: 900;
-  padding: 8px 26px;
-  border-radius: 999px;
+  padding: calc(9px * var(--float-scale)) calc(12px * var(--float-scale));
+  /*
+   * 【999px にしないこと】高さが 203px あるので、スタジアム型にすると角丸半径が
+   * 101px(=高さの半分)まで太り、1 段目の左右端 — ♥ や桁数の多い +N — が曲面の
+   * 外側に出て overflow:hidden に削られる。半径 56px なら、文字が始まる y=18px の
+   * 位置でも曲面のめり込みは 15px で、左右 padding(24px)の内側に収まる。
+   */
+  border-radius: calc(28px * var(--float-scale));
+  /* 幅は倍率に比例させ、ステージ幅で頭打ちにする。% だけで書くと横長ステージ
+     (1280px)で 1200px 超の間延びしたバナーになるため、px 基準 + % の上限。 */
+  width: calc(260px * var(--float-scale));
+  max-width: 96%;
   background: linear-gradient(180deg, rgba(38, 32, 52, 0.92), rgba(12, 10, 20, 0.88));
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
-    inset 0 12px 20px -14px rgba(255, 255, 255, 0.35),
-    0 8px 28px rgba(0, 0, 0, 0.55);
+    inset 0 0 0 calc(1px * var(--float-scale)) rgba(255, 255, 255, 0.16),
+    inset 0 calc(12px * var(--float-scale)) calc(20px * var(--float-scale))
+      calc(-14px * var(--float-scale)) rgba(255, 255, 255, 0.35),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
   animation: floatup 1.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-  max-width: 86%;
   overflow: hidden;
   white-space: nowrap;
 }
 
 .float .f-amt {
   font-family: var(--mono);
-  font-size: 48px;
+  font-size: calc(48px * var(--float-scale));
   font-variant-numeric: tabular-nums;
   line-height: 1;
+  /*
+   * num() は Intl.NumberFormat なので桁区切りが入る。7 桁(+1,234,567 = 10 文字)
+   * まで伸びると 96px では 576px になり、バナーの内寸(470px)を突き抜けて
+   * .float の overflow:hidden に字の途中で切られる。ここで頭打ちにして "…" で
+   * 終わらせる。hidden ではなく clip + clip-margin を使うのが肝 — hidden だと
+   * 赤い発光(text-shadow のにじみ)まで箱で切られて数字が平板になる。
+   */
+  max-width: 100%;
+  overflow: clip;
+  /* 【calc 不可】Chromium の overflow-clip-margin は計算値を受け付けず、
+     calc(...) を書くと丸ごと無効化されて 0px になる(= 発光が切れる)。
+     倍率 2 のときのにじみ(ぼかし 28px + 字の食み出し 4px)を覆う固定値にする。 */
+  overflow-clip-margin: 48px;
+  text-overflow: ellipsis;
 }
 
+/*
+ * 文言は必ず下段へ(flex-basis:100%)。長い名前は 1 行 ellipsis ではなく折り返す
+ * — 旧実装は "…" で「がフォロー!」ごと消えて何の通知か読めなくなっていた。
+ * 2 行を超えたぶんだけ line-clamp で畳む(青天井に伸ばすと段が崩れる)。
+ */
 .float .f-txt {
-  font-size: 32px;
+  flex-basis: 100%;
+  font-size: calc(var(--float-text, 25px) * var(--float-scale));
   font-weight: 800;
   color: #fff;
+  text-align: center;
+  white-space: normal;
+  /* 区切りの無い長い英字ニックネームでも必ず折り返す。 */
+  overflow-wrap: anywhere;
+  /* 詰めすぎると和文の下ぶくれ(descender)が overflow:hidden で削れる。 */
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .float .f-txt b {
@@ -1356,19 +1588,19 @@ body {
 
 .float.bad .f-amt {
   color: #ff6b6b;
-  text-shadow: 0 0 14px rgba(255, 59, 59, 0.8);
+  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(255, 59, 59, 0.8);
 }
 
 .float.good .f-amt {
   color: var(--green);
-  text-shadow: 0 0 14px rgba(74, 217, 145, 0.8);
+  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(74, 217, 145, 0.8);
 }
 
-/* いいね: ハート付き */
+/* いいね: ハート付き(上段で数字と並ぶ) */
 .float .f-heart {
   color: #ff8fbf;
-  font-size: 40px;
-  text-shadow: 0 0 14px rgba(255, 79, 160, 0.9);
+  font-size: calc(40px * var(--float-scale));
+  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(255, 79, 160, 0.9);
   line-height: 1;
 }
 
@@ -1376,21 +1608,51 @@ body {
 .float.banner-follow {
   background: linear-gradient(180deg, rgba(84, 18, 30, 0.94), rgba(30, 6, 12, 0.9));
   box-shadow:
-    inset 0 0 0 2px rgba(255, 82, 82, 0.75),
-    0 0 26px rgba(255, 59, 59, 0.45),
-    0 8px 28px rgba(0, 0, 0, 0.55);
+    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 82, 82, 0.75),
+    0 0 calc(26px * var(--float-scale)) rgba(255, 59, 59, 0.45),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
 }
 
-/* ギフトカード(アイコン + 名前 + 誰から + ±N + 💎) */
+/*
+ * お助け(ファンスタンプ): 緑リングのバナー。フォロー(妨害)の赤と対にして、
+ * リングの色だけで「助けられた/戻された」が読めるようにする。コメント応援は素の
+ * .float + .good で出しているので、リング付きはここだけ — ファンスタンプは
+ * 「わざわざ買って送った応援」なので一段強い見た目にする。
+ *
+ * amountEach を正(妨害)に設定された場合はクラスが .bad になるので、リングも
+ * 赤へ倒す — 数字だけ赤・枠は緑という読み違えを作らない。
+ */
+.float.banner-helper {
+  background: linear-gradient(180deg, rgba(16, 66, 44, 0.94), rgba(5, 24, 16, 0.9));
+  box-shadow:
+    inset 0 0 0 calc(2px * var(--float-scale)) rgba(74, 217, 145, 0.75),
+    0 0 calc(26px * var(--float-scale)) rgba(74, 217, 145, 0.45),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+}
+
+.float.banner-helper.bad {
+  background: linear-gradient(180deg, rgba(84, 18, 30, 0.94), rgba(30, 6, 12, 0.9));
+  box-shadow:
+    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 82, 82, 0.75),
+    0 0 calc(26px * var(--float-scale)) rgba(255, 59, 59, 0.45),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+}
+
+/*
+ * ギフトカード。上段=アイコン + ギフト名/送り主、下段=±N。
+ * 幅は他のバナーより一回り小さく取ってある — t4 が scale:1.12 で一段大きく
+ * なるため、素の幅を 96% にすると t4 だけステージからはみ出して切れる。
+ */
 .float.gift-card {
-  padding: 10px 28px 10px 14px;
+  padding: calc(10px * var(--float-scale)) calc(12px * var(--float-scale));
+  width: calc(232px * var(--float-scale));
   animation-duration: 2.2s;
 }
 
 .gc-icon {
   position: relative;
-  width: 60px;
-  height: 60px;
+  width: calc(60px * var(--float-scale));
+  height: calc(60px * var(--float-scale));
   flex: none;
 }
 
@@ -1400,7 +1662,7 @@ body {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.6));
+  filter: drop-shadow(0 calc(2px * var(--float-scale)) calc(8px * var(--float-scale)) rgba(0, 0, 0, 0.6));
 }
 
 .gc-icon .gc-emoji {
@@ -1409,86 +1671,89 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 44px;
+  font-size: calc(44px * var(--float-scale));
 }
 
 .gc-main {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  line-height: 1.1;
+  /* ellipsis のため overflow:hidden なので、和文が削れない行高を取る。 */
+  line-height: 1.3;
   min-width: 0;
 }
 
 .gc-name {
-  font-size: 30px;
+  font-size: calc(30px * var(--float-scale));
   font-weight: 900;
   color: #fff;
-  max-width: 280px;
+  max-width: calc(134px * var(--float-scale));
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .gc-who {
-  font-size: 20px;
+  font-size: calc(20px * var(--float-scale));
   font-weight: 700;
   color: var(--fg-dim, #aab);
-  max-width: 280px;
+  max-width: calc(134px * var(--float-scale));
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .gc-amt {
+  /* .f-txt と同じ理屈で下段へ送る。 */
+  flex-basis: 100%;
+  text-align: center;
   font-family: var(--mono);
-  font-size: 46px;
+  font-size: calc(46px * var(--float-scale));
   font-weight: 900;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+  /* 桁あふれの扱いは .f-amt と同じ(そちらのコメント参照)。 */
+  max-width: 100%;
+  overflow: clip;
+  overflow-clip-margin: 48px;
+  text-overflow: ellipsis;
 }
 
 .float.bad .gc-amt {
   color: #ff6b6b;
-  text-shadow: 0 0 14px rgba(255, 59, 59, 0.8);
+  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(255, 59, 59, 0.8);
 }
 
 .float.good .gc-amt {
   color: var(--green);
-  text-shadow: 0 0 14px rgba(74, 217, 145, 0.8);
-}
-
-.gc-dia {
-  font-size: 22px;
-  font-weight: 800;
-  color: var(--gold);
-  background: rgba(255, 197, 66, 0.14);
-  box-shadow: inset 0 0 0 1px rgba(255, 197, 66, 0.4);
-  border-radius: 999px;
-  padding: 4px 14px;
-  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(74, 217, 145, 0.8);
 }
 
 /* tier 別の格(枠と光)。t3+ は金、t4 は白金 + 一段大きく */
 .float.gift-card.t2 {
   box-shadow:
-    inset 0 0 0 2px rgba(255, 197, 66, 0.55),
-    0 8px 28px rgba(0, 0, 0, 0.55);
+    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 197, 66, 0.55),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
 }
 
 .float.gift-card.t3 {
   box-shadow:
-    inset 0 0 0 2px rgba(255, 197, 66, 0.85),
-    0 0 30px rgba(255, 197, 66, 0.45),
-    0 8px 28px rgba(0, 0, 0, 0.55);
+    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 197, 66, 0.85),
+    0 0 calc(30px * var(--float-scale)) rgba(255, 197, 66, 0.45),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
 }
 
+/*
+ * 【重要】拡大には transform ではなく scale プロパティを使うこと。
+ * floatup の keyframes が transform を丸ごと書き換えるため、transform:scale()
+ * だとアニメ開始と同時に無効化される(個別変形プロパティなら合成される)。
+ */
 .float.gift-card.t4 {
   transform-origin: center;
   scale: 1.12;
   background: linear-gradient(180deg, rgba(64, 52, 18, 0.95), rgba(26, 20, 6, 0.92));
   box-shadow:
-    inset 0 0 0 3px rgba(255, 224, 130, 0.95),
-    0 0 44px rgba(255, 197, 66, 0.65),
-    0 8px 28px rgba(0, 0, 0, 0.55);
+    inset 0 0 0 calc(3px * var(--float-scale)) rgba(255, 224, 130, 0.95),
+    0 0 calc(44px * var(--float-scale)) rgba(255, 197, 66, 0.65),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
 }
 
 .float.gift-card.t4 .gc-name {
@@ -1521,6 +1786,22 @@ body {
  * 縦カラムをそのまま縮小すると左右が黒帯(余白)になるため、
  * 左=タイトル/7セグ、右=ゲージ/ランキング/経過時間 に組み替える。 */
 
+/*
+ * 横長ステージは縦が 720px しかない(縦ステージは 960px)。同じ倍率だと
+ * バナー 3 枚で画面がほぼ埋まるので、ここだけ控えめにする — ステージ自体が
+ * 小さいぶん、1.6 倍で縦ステージの 2 倍と同じくらいの占有率になる。
+ * 幅は .float 側が px 基準(calc(260px * scale))なので追従し、横に間延びしない。
+ */
+.stage-scale.landscape .floats {
+  /*
+   * 1.6 だとギフトカード(1 枚 214px)3 枚 + gap で 656px になり、top 12%
+   * (86px)から積むと 742px でステージ(720px)の下端をはみ出す。1.5 なら
+   * 1 枚 201px・3 枚で 615px、top 8%(58px)から 673px に収まる。
+   */
+  --float-scale: 1.5;
+  top: 8%;
+}
+
 .stage-scale.landscape .monitor-root {
   grid-template-columns: 1.3fr 1fr;
   grid-template-rows: auto auto 1fr auto;
@@ -1531,6 +1812,17 @@ body {
     'count elapsed';
   column-gap: 24px;
   padding: 8px 14px 12px;
+}
+
+/* 横長でも「何時起き」は最下段の全幅行。詳細度 (0,4,0) で上の (0,3,0) に勝つ。 */
+.stage-scale.landscape .monitor-root.has-wake {
+  grid-template-rows: auto auto 1fr auto auto;
+  grid-template-areas:
+    'title title'
+    'count bars'
+    'count ranking'
+    'count elapsed'
+    'wake  wake';
 }
 
 .stage-scale.landscape .title-banner {
@@ -1655,10 +1947,23 @@ body {
  * ギフトルーレット(RouletteFx)。横並びブロックのスロットリール —
  * ブロック列が右→左へ流れ、窓の中央で止まったブロックが確定。
  *
- * ステップ幅 150px(ブロック幅 138 + 左右マージン 6×2)は RouletteFx.tsx の
- * ROULETTE_BLOCK_W と一致させること — 着地位置(--rl-shift)はステップ幅 × 個数で
- * 計算されるため、片方だけ変えると当選ブロックが窓の中央からズレて止まる。
- * 尺(--rl-ms)は shared/challenge.ts の ROULETTE_SPIN_MS 系がインライン変数で入る。
+ * px の数値は shared/roulette-fx.ts の ROULETTE_BLOCK_W / _GAP が唯一の出所で、
+ * インライン変数 --rl-w / --rl-gap として入ってくる。ブロック幅も窓幅もそこから
+ * calc() で導くので「ブロック幅 + 左右マージン = ステップ幅」は代数的に保証される
+ * (旧実装は 138 + 6×2 = 150 を CSS と TS の両方に書いていて手動同期が要った)。
+ * 尺(--rl-ms)と走行距離(--rl-run)も TS から入る。
+ *
+ * ── 終盤の3パターン ──────────────────────────────────────────────────────
+ * .rl-p-slow  最後の3個をゆっくり移動して止まる
+ * .rl-p-pop   最後の3個をポンポンと飛び移って決まる
+ * .rl-p-kick  ポンポン → 当選の1つ手前で止まったと見せ、キックで1個ずれて決まる
+ * .rl-p-fast  キュー消化の短縮スピン。段は入れず単調に減速する(900ms に保持や
+ *             フェイク停止は入らず、入れても「止まりかけて再加速」になるだけ)
+ *
+ * 段の位置は「当選の k 個手前」= calc(var(--rl-shift) + var(--rl-w) * k)。
+ * 保持(止まって見える間)は同じ値の隣接キーフレームで表現し、緩急はキーフレーム内の
+ * animation-timing-function で作る(要素側は linear)。
+ * **着地は3パターンとも同一の var(--rl-shift)** — worker が決めた出目から動かない。
  *
  * MiniFx と同じく mix-blend-mode を使わないので .fx-layer の中で良い。
  * 配置はフロート帯より少し上の中央 — 7セグ(数字)を覆わない位置。
@@ -1701,14 +2006,26 @@ body {
   font-size: 24px;
   font-weight: 800;
   color: #fff;
-  max-width: 380px;
+  /* ギフト名の前置き(「ハートミー ○○がルーレット」)が入るぶん、窓幅まで許す。 */
+  max-width: calc(var(--rl-w, 150px) * 3);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
+/* ギフト名の前置き。ニックネームより一段控えめにして主役を食わない。 */
+.roulette-panel .rl-head .rl-gift {
+  flex: 0 0 auto;
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
 .roulette-panel .rl-head b {
   color: #ffd7e8;
+  /* 長い名前はニックネームだけが縮む — ギフト名と「がルーレット」は必ず残す。 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .roulette-panel .rl-head img {
@@ -1720,7 +2037,7 @@ body {
 /* 窓は3ブロックぶん。左右はグラデーションで溶かして「流れている」奥行きを出す。 */
 .roulette-panel .rl-window {
   position: relative;
-  width: 450px; /* 150px × 3ブロック */
+  width: calc(var(--rl-w) * 3);
   height: 128px;
   overflow: hidden;
   border-radius: 12px;
@@ -1730,29 +2047,314 @@ body {
   mask-image: linear-gradient(90deg, transparent 0, #000 14%, #000 86%, transparent 100%);
 }
 
+/*
+ * ぼかしとズームの層。リール本体(6,000px 超)に filter を掛けると Chromium が
+ * 巨大レイヤをラスタライズして OBS のブラウザソースでコマ落ちしうるので、窓と
+ * 同じ大きさのこの層に閉じる。序盤は数字を潰して先読みを封じ、終盤に向けて
+ * ゆっくり寄ることで「近づいてくる」圧を出す。
+ */
+.roulette-panel .rl-zoom {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  transform-origin: 50% 50%;
+  animation: rl-zoom var(--rl-ms) linear both;
+}
+
+@keyframes rl-zoom {
+  0% {
+    filter: blur(2.4px) saturate(0.8);
+    transform: scale(1.008);
+  }
+  47% {
+    filter: blur(0) saturate(1);
+    transform: scale(1.012);
+  }
+  100% {
+    filter: blur(0) saturate(1);
+    transform: scale(1.035);
+  }
+}
+
 .roulette-reel {
   display: flex;
   height: 100%;
   align-items: center;
   width: max-content; /* 窓幅に押し潰されない(flex-shrink 対策とセット) */
-  animation: rl-spin var(--rl-ms, 4300ms) cubic-bezier(0.15, 0.85, 0.25, 1) forwards;
+  /*
+   * fill-mode: both — forwards だけだと開始前の1フレームがストリップ先頭
+   * (translateX(0))で描かれ、一瞬だけ盤面の頭が見えてしまう。
+   * animation-name はパターンのクラスが決める(既定は短縮スピンの単調減速)。
+   */
+  animation: rl-run-fast var(--rl-ms) linear both;
   will-change: transform;
 }
 
-@keyframes rl-spin {
-  from {
-    transform: translateX(0);
+.rl-p-slow .roulette-reel {
+  animation-name: rl-run-slow;
+}
+.rl-p-pop .roulette-reel {
+  animation-name: rl-run-pop;
+}
+.rl-p-kick .roulette-reel {
+  animation-name: rl-run-kick;
+}
+
+/* 短縮スピン(キュー消化)。段は入れず、末速 0 まで単調に減速するだけ。 */
+@keyframes rl-run-fast {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.2, 0.6, 0.3, 1);
   }
-  to {
-    transform: translateX(var(--rl-shift, 0px));
+  100% {
+    transform: translateX(var(--rl-shift));
   }
 }
 
-/* ステップ幅 = 138 + 6×2 = 150px(= ROULETTE_BLOCK_W)。 */
+/* パターン1「ゆっくり」— 最後の3個を一段ずつ遅く通り、あと一歩で溜めて着地。 */
+@keyframes rl-run-slow {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    /* 発進の予備動作。右へ 0.06 ブロック引く(窓の左端はマスクで透明)。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.05, 0.62, 0.28, 0.9);
+  }
+  54% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  66% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  80% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.55, 0.35, 0.45, 1);
+  }
+  94% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.1));
+    animation-timing-function: linear;
+  }
+  96% {
+    /* 保持 — 94% と同値。「あと一歩で止まった?」の間。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.1));
+    animation-timing-function: cubic-bezier(0.25, 0.9, 0.35, 1);
+  }
+  99% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/* パターン2「ポンポン」— 最後の3個を保持つきで飛び移る。最後の間がいちばん長い。 */
+@keyframes rl-run-pop {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.06, 0.66, 0.2, 1);
+  }
+  50% {
+    /* 末速ほぼ 0 = いったん完全に止まったように見せる。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  58% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  62% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  70% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  74% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: linear;
+  }
+  84% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1)); /* 保持(最長) */
+    animation-timing-function: cubic-bezier(0.3, 0.9, 0.3, 1);
+  }
+  88% {
+    /* 行き過ぎ。ここが着地の衝撃 — rl-cam-pop の跳ねと同時刻。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.06));
+    animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1);
+  }
+  92% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
+  }
+  95% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン3「キック」— ポンポン飛び移り → **当選の1つ手前で完全静止**(フェイク)
+ * → 予備動作 → キックで1個ずれて着地。
+ * 着地点は他パターンと完全に同一の var(--rl-shift) = worker が決めた出目。
+ * フェイク停止は他の保持(7%)の 2 倍以上に取る — 明確に「終わった」長さにしないと
+ * ただの間に見えてキックの落差が出ない。
+ */
+@keyframes rl-run-kick {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
+  }
+  48% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  55% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  59% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  66% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  70% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: linear;
+  }
+  86% {
+    /* フェイク停止。70% と同値のまま引っ張る(6秒スピンなら約 960ms)。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  87.5% {
+    /* 予備動作。右へ 0.05 ブロック引いて「溜め」を作る。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.05));
+    animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
+  }
+  90.5% {
+    /* キック本体。当選を 0.1 ブロック行き過ぎるまで一気に叩き込む。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.1));
+    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
+  }
+  93% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.025));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+  }
+  95.5% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * 窓のカメラ揺れ。着地の衝撃をリールではなく「窓が殴られた」側で表現する。
+ * キックだけは反作用としてリールと逆向きへ弾く。段の無いパターンには付けない。
+ */
+.rl-p-pop .rl-window {
+  animation: rl-cam-pop var(--rl-ms) linear both;
+}
+.rl-p-kick .rl-window {
+  animation: rl-cam-kick var(--rl-ms) linear both;
+}
+
+@keyframes rl-cam-pop {
+  0%,
+  61% {
+    transform: translateX(0);
+  }
+  63% {
+    transform: translateX(-2.2px);
+  }
+  66%,
+  73% {
+    transform: translateX(0);
+  }
+  75% {
+    transform: translateX(-2.6px);
+  }
+  78%,
+  87% {
+    transform: translateX(0);
+  }
+  89% {
+    transform: translateX(-6px);
+  }
+  91% {
+    transform: translateX(4px);
+  }
+  93% {
+    transform: translateX(-2px);
+  }
+  96%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-kick {
+  0%,
+  58% {
+    transform: translateX(0);
+  }
+  60% {
+    transform: translateX(-2px);
+  }
+  62%,
+  86% {
+    /* フェイク停止の間は完全な凪。静寂を作ってキックの落差を最大にする。 */
+    transform: translateX(0);
+  }
+  87.5% {
+    transform: translateX(2px); /* 溜め(リールと同方向へ引かれる) */
+  }
+  90.5% {
+    transform: translateX(-14px); /* 反作用。リールと逆向きへ弾ける */
+  }
+  92.5% {
+    transform: translateX(9px);
+  }
+  94.5% {
+    transform: translateX(-5px);
+  }
+  96.5% {
+    transform: translateX(2.4px);
+  }
+  98.5% {
+    transform: translateX(-1px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+/* ステップ幅 = ブロック幅 + 左右マージン = var(--rl-w)。 */
 .roulette-reel .rl-block {
-  flex: 0 0 138px;
+  flex: 0 0 calc(var(--rl-w) - var(--rl-gap) * 2);
   height: 104px;
-  margin: 0 6px;
+  margin: 0 var(--rl-gap);
   box-sizing: border-box;
   display: flex;
   align-items: center;
@@ -1771,36 +2373,99 @@ body {
   white-space: nowrap;
 }
 
-/* 当選ブロックの色は増減方向で変える(float の bad/good と同じ規約)。 */
-.roulette-panel.bad .rl-block.win {
+/*
+ * 終盤の目隠し。窓の左右(中央スロット以外)を潰して、隣のブロックを読ませない。
+ * これが無いと「当選の1つ手前で止まる」パターン3のフェイク停止中に、当選の数字が
+ * 右のスロットに約1秒間ただ表示されてしまい、キックの意外性が消える。
+ * リール本体ではなく窓に掛けるので、消灯した枠から当選が蹴り出されてくる絵になる。
+ */
+.roulette-panel .rl-veil {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgba(6, 4, 12, 0.95) 0%,
+    rgba(6, 4, 12, 0.92) 25%,
+    rgba(6, 4, 12, 0) 34%,
+    rgba(6, 4, 12, 0) 66%,
+    rgba(6, 4, 12, 0.92) 75%,
+    rgba(6, 4, 12, 0.95) 100%
+  );
+  animation: rl-veil var(--rl-ms) linear both;
+}
+
+@keyframes rl-veil {
+  0%,
+  30% {
+    opacity: 0;
+  }
+  /* 高速域が終わって段に入る手前で閉じきる(どのパターンも 48% までに k=3 へ着く)。 */
+  46%,
+  100% {
+    opacity: 1;
+  }
+}
+
+/* 確定したら目隠しを開けて、当選の左右も見せる(答え合わせ)。 */
+.roulette-panel.hit .rl-veil {
+  animation: rl-veil-out 320ms ease-out both;
+}
+
+@keyframes rl-veil-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/*
+ * 確定 — **ここで初めて色と符号が出る。**
+ * 回転中に色を出すと、減速して当選ブロックが近づいてくる「一番緊張してほしい
+ * 瞬間」に答えが見えてしまう(旧実装の不具合)。.win は DOM にも .hit まで無い。
+ */
+.roulette-panel.hit.bad .rl-block.win {
   color: #ff6b6b;
   box-shadow:
-    inset 0 0 0 2px rgba(255, 107, 107, 0.6),
+    inset 0 0 0 2px rgba(255, 107, 107, 0.75),
     inset 0 10px 16px -12px rgba(255, 255, 255, 0.4);
 }
 
-.roulette-panel.good .rl-block.win {
+.roulette-panel.hit.good .rl-block.win {
   color: var(--green);
   box-shadow:
-    inset 0 0 0 2px rgba(74, 217, 145, 0.6),
+    inset 0 0 0 2px rgba(74, 217, 145, 0.75),
     inset 0 10px 16px -12px rgba(255, 255, 255, 0.4);
 }
 
-/* 確定 — 当選ブロックが発光し、パネルのリングも一拍強くなる。 */
 .roulette-panel.hit .rl-block.win {
-  animation: rl-win 600ms ease-out;
+  animation: rl-win 900ms cubic-bezier(0.22, 1, 0.36, 1);
   text-shadow: 0 0 22px currentColor;
+}
+
+.roulette-panel .rl-block .rl-sign {
+  margin-right: 2px;
 }
 
 @keyframes rl-win {
   0% {
-    transform: scale(1);
+    transform: scale(0.94);
+    filter: brightness(2.4);
   }
-  30% {
-    transform: scale(1.18);
+  22% {
+    transform: scale(1.2);
+    filter: brightness(1.5);
+  }
+  46% {
+    transform: scale(1.06);
+    filter: brightness(1.1);
+  }
+  70% {
+    transform: scale(1.16);
+    filter: brightness(1.2);
   }
   100% {
     transform: scale(1);
+    filter: brightness(1);
   }
 }
 
@@ -1811,15 +2476,84 @@ body {
     0 10px 32px rgba(0, 0, 0, 0.6);
 }
 
-/* 窓の中央(確定位置)を上下から指すポインタ。 */
+/*
+ * 窓の中央(確定位置)を上下から指すポインタ。脈動の間隔を詰めていく
+ * (アクセレランド)ことで「そろそろ止まる」を時間軸だけで伝える —
+ * どのブロックが当たりかは一切示さない。
+ */
 .roulette-panel .rl-pointer {
   position: absolute;
   left: 50%;
-  transform: translateX(-50%);
   font-size: 20px;
   line-height: 1;
   color: rgba(255, 214, 90, 0.9);
   text-shadow: 0 0 10px rgba(255, 190, 60, 0.8);
+  transform: translateX(-50%);
+  transform-origin: 50% 50%;
+  animation: rl-point var(--rl-ms) linear both;
+}
+
+/* キックはフェイク停止の間だけ脈動を止める(凪 → 一撃の落差を作る)。 */
+.rl-p-kick .rl-pointer {
+  animation-name: rl-point-kick;
+}
+
+@keyframes rl-point {
+  0%,
+  40% {
+    transform: translateX(-50%) scale(1);
+  }
+  52% {
+    transform: translateX(-50%) scale(1.1);
+  }
+  64% {
+    transform: translateX(-50%) scale(1);
+  }
+  73% {
+    transform: translateX(-50%) scale(1.14);
+  }
+  82% {
+    transform: translateX(-50%) scale(1);
+  }
+  88% {
+    transform: translateX(-50%) scale(1.18);
+  }
+  94% {
+    transform: translateX(-50%) scale(1);
+  }
+  97% {
+    transform: translateX(-50%) scale(1.22);
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+@keyframes rl-point-kick {
+  0%,
+  40% {
+    transform: translateX(-50%) scale(1);
+  }
+  52% {
+    transform: translateX(-50%) scale(1.1);
+  }
+  62% {
+    transform: translateX(-50%) scale(1);
+  }
+  66%,
+  86% {
+    /* フェイク停止と同区間の凪。 */
+    transform: translateX(-50%) scale(1);
+  }
+  90.5% {
+    transform: translateX(-50%) scale(1.36);
+  }
+  94% {
+    transform: translateX(-50%) scale(1.02);
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
 }
 
 .roulette-panel .rl-pointer-top {
@@ -1833,9 +2567,9 @@ body {
 /* ルーレット確定のバナー(float)は金リングで少し格上に。 */
 .float.banner-roulette {
   box-shadow:
-    inset 0 0 0 2px rgba(255, 214, 90, 0.7),
-    0 0 26px rgba(255, 190, 60, 0.4),
-    0 8px 28px rgba(0, 0, 0, 0.55);
+    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 214, 90, 0.7),
+    0 0 calc(26px * var(--float-scale)) rgba(255, 190, 60, 0.4),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
 }
 
 @media (prefers-reduced-motion: reduce) {

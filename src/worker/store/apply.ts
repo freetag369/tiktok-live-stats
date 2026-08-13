@@ -88,7 +88,7 @@ function bump(ctx: ApplyCtx, sessionId: number, userId: UserId, col: string, n: 
   ctx.st.get(SQL.bumpLifetime(col)).run(n, userId);
 }
 
-function resolveCanonical(ctx: ApplyCtx, giftId: string, giftName: string | undefined): string | null {
+export function resolveCanonical(ctx: ApplyCtx, giftId: string, giftName: string | undefined): string | null {
   const cached = ctx.giftAlias.get(giftId);
   if (cached) return cached;
   const row = ctx.st.get(SQL.selectGiftAlias).get(giftId) as { canonical: string } | undefined;
@@ -167,6 +167,15 @@ export function applyEvent(ctx: ApplyCtx, sessionId: number, e: NormalizedEvent,
     // The envelope message carries no user object, so only attribute if we know them.
     const known = st.get('SELECT 1 AS x FROM viewer WHERE user_id = ?').get(e.senderUserId);
     if (known) {
+      // 既知だが今セッションの vss 行がまだ無い(過去配信からの常連が今回未入室)
+      // 場合、bump が 0行更新で静かに消えてセッション合計とだけ乖離する。
+      // touchViewer と同じ流儀で行を確保してから加算する。
+      st.get(SQL.ensureLifetime).run(e.senderUserId, e.tsMs, e.tsMs);
+      const vssNew = Number(st.get(SQL.insertVss).run(sessionId, e.senderUserId, e.tsMs, e.tsMs, 0).changes) > 0;
+      if (vssNew) {
+        st.get(SQL.bumpSession('unique_viewers')).run(1, sessionId);
+        st.get(SQL.markLifetimeVisit).run(sessionId, sessionId, e.tsMs, e.tsMs, e.senderUserId);
+      }
       bump(ctx, sessionId, e.senderUserId, 'diamonds', e.diamonds);
       st.get(SQL.bumpSession('diamonds')).run(e.diamonds, sessionId);
     }
@@ -240,7 +249,7 @@ export function applyEvent(ctx: ApplyCtx, sessionId: number, e: NormalizedEvent,
       if (e.count <= 0) return;
       // Bucketed likes are an accumulator, so replaying the same message adds
       // again. This gate is what makes reconnect safe for the firehose.
-      if (Number(st.get(SQL.markLikeSeen).run(e.msgId, sessionId).changes) === 0) {
+      if (Number(st.get(SQL.markLikeSeen).run(e.msgId, sessionId, e.tsMs).changes) === 0) {
         res.ignoredDuplicates++;
         return;
       }

@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ViewerSortKey, ViewerTableRow } from '@shared/dto';
 import { compact, num } from '@shared/format';
 import { relativeDayJa } from '@shared/time';
+import { liveRow } from '../state/liveStore';
 import { Avatar, Observed, TierBadge } from './common';
 import { MemoButton } from './Memo';
 
@@ -31,6 +32,12 @@ export const ViewerTable = memo(function ViewerTable({
   onSort: (k: ViewerSortKey) => void;
   onPick: (userId: string) => void;
   showAvatars: boolean;
+  /**
+   * live delta の世代。値そのものは使わないが、memo を破って可視行だけ再描画
+   * させる — 全 5000 行を親で再マップするより桁違いに安い。DB 行は8秒ごとの
+   * 再クエリで追いつくので、その間の鮮度は下の liveRow マージが埋める。
+   */
+  liveTick?: number;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const virt = useVirtualizer({
@@ -69,10 +76,16 @@ export const ViewerTable = memo(function ViewerTable({
           {items.map((vi) => {
             const r = rows[vi.index];
             if (!r) return null;
+            // DB 行(8秒ごと更新)に live 集計を重ねて、数字が巻き戻って見える
+            // 瞬間を作らない。可視行ぶんだけなので毎 tick でも実質タダ。
+            const l = liveRow(r.userId);
+            const likesCurrent = l ? Math.max(r.likesCurrent, l.likes) : r.likesCurrent;
+            const diamondsCurrent = l ? Math.max(r.diamondsCurrent, l.diamonds) : r.diamondsCurrent;
+            const presentNow = r.presentNow || (l != null && l.lastSeenMs > 0);
             return (
               <div
                 key={r.userId}
-                className={`vt-row${r.presentNow ? '' : ' absent'}`}
+                className={`vt-row${presentNow ? '' : ' absent'}`}
                 style={{ position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)` }}
                 onClick={() => onPick(r.userId)}
               >
@@ -90,9 +103,9 @@ export const ViewerTable = memo(function ViewerTable({
                   {r.isSubscriber ? <span className="badge sub">サブ</span> : null}
                 </div>
                 <div className="num">{num(r.visits)}</div>
-                <div className="num">{compact(r.likesCurrent)}</div>
+                <div className="num">{compact(likesCurrent)}</div>
                 <div className="num faint">{compact(r.likesLifetime)}</div>
-                <div className="num">{r.diamondsCurrent ? compact(r.diamondsCurrent) : '—'}</div>
+                <div className="num">{diamondsCurrent ? compact(diamondsCurrent) : '—'}</div>
                 <div className="num">{r.heartMeLifetime ? num(r.heartMeLifetime) : '—'}</div>
                 <div className="vt-sub" title={r.note ? `📝 ${r.note}` : (r.lastComment ?? '')}>
                   {r.note ? <span style={{ color: 'var(--gold)' }}>📝{r.note} · </span> : null}

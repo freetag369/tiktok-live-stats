@@ -79,12 +79,17 @@ export function MemoEditor(): React.JSX.Element | null {
   }, [t]);
 
   useEffect(() => {
+    // 開いている間だけ capture で取り、そこで止める — ビューア詳細(bubble)の
+    // Escape ハンドラまで届いて両方が同時に閉じるのを防ぐ(ConfirmDialog と同じ流儀)。
+    if (!t) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setT(null);
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      setT(null);
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [t]);
 
   if (!t) return null;
 

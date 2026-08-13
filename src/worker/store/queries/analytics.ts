@@ -26,7 +26,28 @@ interface VssRow {
   heart_me: number;
   followed: number;
   subscribed: number;
+  scored_pts: number;
+  scored_pts_e: number;
 }
+
+function pointsOf(r: VssRow, cfg: ScoringConfig): number {
+  return sessionPoints(
+    {
+      diamonds: Number(r.diamonds),
+      comments: Number(r.comments),
+      likes: Number(r.likes),
+      shares: Number(r.shares),
+      heartMe: Number(r.heart_me),
+      followed: Number(r.followed) === 1,
+      subscribed: Number(r.subscribed) === 1,
+    },
+    cfg
+  );
+}
+
+const VSS_SCORE_SELECT = `SELECT user_id, diamonds, comments, likes, shares, heart_me, followed, subscribed,
+        scored_pts, scored_pts_e
+   FROM viewer_session_stat WHERE session_id = ?`;
 
 /**
  * Incremental at session close, O(attendees). The stored value is
@@ -34,37 +55,38 @@ interface VssRow {
  * correct forever without a nightly decay pass over every viewer.
  */
 export function applySessionScores(db: DatabaseSync, sessionId: number, cfg: ScoringConfig, now = Date.now()): number {
-  const s = db.prepare('SELECT started_ms FROM stream_session WHERE session_id = ?').get(sessionId) as
-    | { started_ms: number }
+  const s = db.prepare('SELECT started_ms, scored_ms FROM stream_session WHERE session_id = ?').get(sessionId) as
+    | { started_ms: number; scored_ms: number | null }
     | undefined;
   if (!s) return 0;
   const factor = epochFactor(Number(s.started_ms), cfg.halfLifeDays);
 
-  const rows = db
-    .prepare(
-      `SELECT user_id, diamonds, comments, likes, shares, heart_me, followed, subscribed
-         FROM viewer_session_stat WHERE session_id = ?`
-    )
-    .all(sessionId) as unknown as VssRow[];
+  const rows = db.prepare(VSS_SCORE_SELECT).all(sessionId) as unknown as VssRow[];
 
-  const upd = db.prepare('UPDATE viewer_lifetime SET score_e = score_e + ?, score_raw = score_raw + ? WHERE user_id = ?');
-  for (const r of rows) {
-    const p = sessionPoints(
-      {
-        diamonds: Number(r.diamonds),
-        comments: Number(r.comments),
-        likes: Number(r.likes),
-        shares: Number(r.shares),
-        heartMe: Number(r.heart_me),
-        followed: Number(r.followed) === 1,
-        subscribed: Number(r.subscribed) === 1,
-      },
-      cfg
+  // 停止→再開→再停止で同じセッションが二重採点されないよう、適用済み値との
+  // 差分だけを加える(冪等)。1トランザクションにまとめるのは原子性に加えて、
+  // 数千出席者ぶんの autocommit fsync で終了処理が固まるのを防ぐため。
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const upd = db.prepare('UPDATE viewer_lifetime SET score_e = score_e + ?, score_raw = score_raw + ? WHERE user_id = ?');
+    const mark = db.prepare(
+      'UPDATE viewer_session_stat SET scored_pts = ?, scored_pts_e = ? WHERE session_id = ? AND user_id = ?'
     );
-    upd.run(p * factor, p, r.user_id);
+    for (const r of rows) {
+      const p = pointsOf(r, cfg);
+      const pe = p * factor;
+      upd.run(pe - Number(r.scored_pts_e), p - Number(r.scored_pts), r.user_id);
+      mark.run(p, pe, sessionId, r.user_id);
+    }
+    // ストリークは加算型なので、セッションにつき一度だけ。
+    if (s.scored_ms == null) updateStreaks(db, sessionId);
+    db.prepare('UPDATE stream_session SET scored_ms = ? WHERE session_id = ?').run(now, sessionId);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
   }
 
-  updateStreaks(db, sessionId);
   updateIntervals(db, sessionId);
   retierAttendees(db, sessionId, cfg, now);
   return rows.length;
@@ -86,30 +108,26 @@ export function recomputeAllScores(
   try {
     db.exec('UPDATE viewer_lifetime SET score_e = 0, score_raw = 0');
     const upd = db.prepare('UPDATE viewer_lifetime SET score_e = score_e + ?, score_raw = score_raw + ? WHERE user_id = ?');
-    const sel = db.prepare(
-      `SELECT user_id, diamonds, comments, likes, shares, heart_me, followed, subscribed
-         FROM viewer_session_stat WHERE session_id = ?`
+    const mark = db.prepare(
+      'UPDATE viewer_session_stat SET scored_pts = ?, scored_pts_e = ? WHERE session_id = ? AND user_id = ?'
     );
+    const sel = db.prepare(VSS_SCORE_SELECT);
     let i = 0;
     for (const s of sessions) {
       const factor = epochFactor(Number(s.started_ms), cfg.halfLifeDays);
       for (const r of sel.all(s.session_id) as unknown as VssRow[]) {
-        const p = sessionPoints(
-          {
-            diamonds: Number(r.diamonds),
-            comments: Number(r.comments),
-            likes: Number(r.likes),
-            shares: Number(r.shares),
-            heartMe: Number(r.heart_me),
-            followed: Number(r.followed) === 1,
-            subscribed: Number(r.subscribed) === 1,
-          },
-          cfg
-        );
-        upd.run(p * factor, p, r.user_id);
+        const p = pointsOf(r, cfg);
+        const pe = p * factor;
+        upd.run(pe, p, r.user_id);
+        // 適用済みマークも新ウェイトで揃えないと、次回 closeSession の差分計算が狂う。
+        mark.run(p, pe, s.session_id, r.user_id);
       }
       if (++i % 25 === 0) onProgress?.(i, sessions.length);
     }
+    // ストリークは加算型なので、最後のセッションだけ流すと「最終回に来なかった
+    // 全員が 0 リセット」になる。全セッションを時系列で流し直して再現する。
+    db.exec('UPDATE viewer_lifetime SET consecutive_streak = 0');
+    for (const s of sessions) updateStreaks(db, s.session_id);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
@@ -117,17 +135,21 @@ export function recomputeAllScores(
   }
   onProgress?.(sessions.length, sessions.length);
 
-  const last = sessions.at(-1);
-  if (last) {
-    updateStreaks(db, last.session_id);
-    for (const s of sessions) updateIntervals(db, s.session_id);
-  }
+  updateIntervals(db, null);
   return retierAll(db, cfg, now);
 }
 
 function updateStreaks(db: DatabaseSync, sessionId: number): void {
+  // 「前回」は同一ホストの直前セッション。複数アカウントを記録していると、
+  // 他ホストの配信が間に挟まるだけでストリークが切れてしまう。
   const prev = (
-    db.prepare('SELECT MAX(session_id) AS p FROM stream_session WHERE session_id < ?').get(sessionId) as { p: number | null }
+    db
+      .prepare(
+        `SELECT MAX(session_id) AS p FROM stream_session
+          WHERE session_id < :sid
+            AND host_unique_id = (SELECT host_unique_id FROM stream_session WHERE session_id = :sid)`
+      )
+      .get({ sid: sessionId }) as { p: number | null }
   ).p;
   db.prepare(
     `UPDATE viewer_lifetime
@@ -150,10 +172,14 @@ function updateStreaks(db: DatabaseSync, sessionId: number): void {
  * Median visit gap, precomputed here so the churn query is a plain indexed
  * predicate instead of a window function at read time.
  */
-function updateIntervals(db: DatabaseSync, sessionId: number): void {
-  const users = db.prepare('SELECT user_id FROM viewer_session_stat WHERE session_id = ?').all(sessionId) as Array<{
-    user_id: string;
-  }>;
+function updateIntervals(db: DatabaseSync, sessionId: number | null): void {
+  // sessionId null = 全ユーザー再計算(recompute 用)。ユーザーごとに全履歴から
+  // 求め直すので、セッションごとに繰り返す必要はない。
+  const users = (
+    sessionId == null
+      ? db.prepare('SELECT DISTINCT user_id FROM viewer_session_stat').all()
+      : db.prepare('SELECT user_id FROM viewer_session_stat WHERE session_id = ?').all(sessionId)
+  ) as Array<{ user_id: string }>;
   const sel = db.prepare(
     `SELECT s.started_ms AS m FROM viewer_session_stat vss
        JOIN stream_session s ON s.session_id = vss.session_id
@@ -216,6 +242,15 @@ export function retierAll(db: DatabaseSync, cfg: ScoringConfig, now = Date.now()
 
 // ── ランキング ────────────────────────────────────────────────────────────────
 
+/**
+ * SQL 片の辞書引き。プレーンオブジェクトは Object.prototype を継承するため、
+ * 'constructor' のようなキーが `??` を素通りして関数ソースが SQL に埋まる。
+ * 必ず own property のみを引く。
+ */
+function pickSql(map: Record<string, string>, key: string, fallback: string): string {
+  return Object.hasOwn(map, key) ? map[key]! : fallback;
+}
+
 const LB_METRIC: Record<string, string> = {
   score: 'vl.score_e',
   diamonds: 'vl.diamonds',
@@ -244,8 +279,18 @@ export function getLeaderboard(
   const offset = Math.max(q.offset ?? 0, 0);
 
   if (q.scope === 'lifetime') {
-    const col = LB_METRIC[q.metric] ?? LB_METRIC.score!;
-    const total = Number((db.prepare('SELECT COUNT(*) AS c FROM viewer WHERE is_blocked = 0').get() as { c: number }).c);
+    const col = pickSql(LB_METRIC, q.metric, LB_METRIC.score!);
+    // ページャの総数は行と同じ絞り込み(> 0)で数えないと過大になる。
+    const total = Number(
+      (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM viewer v JOIN viewer_lifetime vl ON vl.user_id = v.user_id
+              WHERE v.is_blocked = 0 AND ${col} > 0`
+          )
+          .get() as { c: number }
+      ).c
+    );
     const rows = db
       .prepare(
         `SELECT v.user_id, v.nickname, v.display_id, v.avatar_url, v.vip_tier,
@@ -274,7 +319,23 @@ export function getLeaderboard(
   }
 
   const since = q.scope === 'week' ? jstWeekStart(now) : jstDayStart(now) - 30 * DAY_MS;
-  const agg = LB_SCOPED_METRIC[q.metric] ?? LB_SCOPED_METRIC.diamonds!;
+  const agg = pickSql(LB_SCOPED_METRIC, q.metric, LB_SCOPED_METRIC.diamonds!);
+  const total = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM (
+             SELECT 1
+               FROM viewer_session_stat vss
+               JOIN stream_session s ON s.session_id = vss.session_id
+               JOIN viewer v ON v.user_id = vss.user_id
+              WHERE s.started_ms >= :since AND v.is_blocked = 0
+              GROUP BY v.user_id
+             HAVING ${agg} > 0)`
+        )
+        .get({ since }) as { c: number }
+    ).c
+  );
   const rows = db
     .prepare(
       `SELECT v.user_id, v.nickname, v.display_id, v.avatar_url, v.vip_tier,
@@ -301,7 +362,7 @@ export function getLeaderboard(
       visits: Number(r.visits ?? 0),
       lastSeenMs: Number(r.last_seen_ms ?? 0),
     })),
-    total: rows.length + offset,
+    total,
     limit,
     offset,
   };
@@ -383,7 +444,7 @@ const MATRIX_AGG: Record<string, string> = {
  * to the slot it STARTED in.
  */
 export function getHourWeekdayMatrix(db: DatabaseSync, q: MatrixQuery): MatrixCell[] {
-  const agg = MATRIX_AGG[q.metric] ?? MATRIX_AGG.avgViewers!;
+  const agg = pickSql(MATRIX_AGG, q.metric, MATRIX_AGG.avgViewers!);
   const rows = db
     .prepare(
       `SELECT ((started_ms + ${JST_OFFSET_MS}) / ${DAY_MS} + 4) % 7 AS wd,
@@ -446,7 +507,9 @@ export function getMissionInputs(
   const d = win(dayStart);
   const w = win(weekStart);
 
-  const minValid = cfg.missions.find((m) => m.metric === 'validStreamDays')?.validDay?.minDurationMin ?? 25;
+  // getMissionConfig の戻り値は外部ファイル由来。missions 欠落で落とさない。
+  const missions = cfg.missions ?? [];
+  const minValid = missions.find((m) => m.metric === 'validStreamDays')?.validDay?.minDurationMin ?? 25;
   const validStreamDays = Number(
     (
       db
@@ -460,7 +523,7 @@ export function getMissionInputs(
     ).c
   );
 
-  const fanCfg = cfg.missions.find((m) => m.metric === 'activeFans')?.activeFan ?? { windowDays: 7, minComments: 1 };
+  const fanCfg = missions.find((m) => m.metric === 'activeFans')?.activeFan ?? { windowDays: 7, minComments: 1 };
   const fanSince = now - fanCfg.windowDays * DAY_MS;
   const activeFans = Number(
     (

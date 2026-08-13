@@ -258,7 +258,7 @@ describe('matchGiftMini / miniForSlot — 簡易演出の割り当て', () => {
   });
 
   it('フォローといいねはスロットから引く', () => {
-    expect(miniForSlot(cfg(), 'follow')).toBe('hammer');
+    expect(miniForSlot(cfg(), 'follow')).toBe('panic');
     expect(miniForSlot(cfg(), 'like')).toBe('shock');
     expect(miniForSlot(cfg(), 'press')).toBeNull(); // 既定 off
   });

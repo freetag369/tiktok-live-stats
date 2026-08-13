@@ -201,6 +201,7 @@ input[type='text'],
 input[type='password'],
 input[type='number'],
 input[type='search'],
+input[type='time'],
 select,
 textarea {
   background: var(--bg-2);
@@ -208,6 +209,13 @@ textarea {
   border-radius: var(--radius-sm);
   padding: 7px 9px;
   outline: none;
+}
+/* 時刻入力はネイティブのスピナ/時計 UI を持つ。color-scheme を暗に倒さないと、
+   暗い地の上に明るいウィジェットだけが浮く。:root には付けない — スクロールバー等
+   アプリ全体の描画が変わるので、この入力だけに閉じる。 */
+input[type='time'] {
+  color-scheme: dark;
+  font-variant-numeric: tabular-nums;
 }
 input:focus,
 select:focus,
@@ -811,6 +819,22 @@ table.data th.n {
 }
 .modal > .body {
   padding: 16px;
+}
+
+/* 確認ダイアログ。.modal は一覧を載せる想定で 920px あるので、確認用は細くする。 */
+.modal.confirm {
+  width: min(430px, 92vw);
+}
+.modal.confirm .body p {
+  margin: 0 0 8px;
+  line-height: 1.65;
+}
+.modal.confirm .body p:last-of-type {
+  margin-bottom: 0;
+}
+.modal.confirm .confirm-actions {
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 .tabs {

@@ -56,6 +56,10 @@ function checkResources(resourcesDir) {
   for (const doc of ['LICENSE', 'SOURCE-OFFER.txt']) {
     existsSync(join(resourcesDir, doc)) ? ok(`同梱: ${doc}`) : bad(`AGPL 対応物が同梱されていません: ${doc}`);
   }
+  // 「ソースコードを保存」(file.saveSource)はこのパスを探す。無いと packaged で必ず失敗する。
+  existsSync(join(resourcesDir, `tiktok-live-stats-source-${version}.zip`))
+    ? ok('同梱: ソースアーカイブ zip')
+    : bad('ソースアーカイブ zip が resources に同梱されていません（release:* は source:zip → build:* の順で）');
   existsSync(join(resourcesDir, 'app-resources', 'missions.default.json'))
     ? ok('同梱: missions.default.json')
     : bad('resources/ が同梱されていません');

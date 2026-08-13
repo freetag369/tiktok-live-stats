@@ -14,9 +14,14 @@ import jinglePizziUrl from '../assets/se/jingle-pizzi.ogg';
 import jingleSaxUrl from '../assets/se/jingle-sax.ogg';
 import fanfare8bitUrl from '../assets/se/fanfare-8bit.ogg';
 import fanfare8bitShortUrl from '../assets/se/fanfare-8bit-short.ogg';
+import likeJamUrl from '../assets/se/like-jam.mp3';
+import followJamUrl from '../assets/se/follow-jam.mp3';
+import reelStopUrl from '../assets/se/reel-stop.ogg';
+import reelConfirmUrl from '../assets/se/reel-confirm.ogg';
 
 /**
- * チャレンジ演出の効果音カタログ(素材の由来は assets/se/CREDITS.md、すべて CC0)。
+ * チャレンジ演出の効果音カタログ(素材の由来は assets/se/CREDITS.md)。Kenney の CC0 と
+ * 妨害演出用の作者自作 mp3 が混在する — 追加時は CREDITS.md の該当セクションに書くこと。
  * id の一覧は shared/challenge.ts の CHALLENGE_SE_SOUND_IDS と一致させること
  * (validate がそのリストで設定値を検証する)。
  *
@@ -51,37 +56,58 @@ export const SE_SOUNDS: readonly SeSound[] = [
   { id: 'jingle-sax', label: 'ジングル(サックス)', url: jingleSaxUrl, gain: 1 },
   { id: 'fanfare-8bit', label: 'ファンファーレ(8bit)', url: fanfare8bitUrl, gain: 1 },
   { id: 'fanfare-8bit-short', label: 'ファンファーレ(8bit・短)', url: fanfare8bitShortUrl, gain: 1 },
+  // 妨害演出の専用音。ピークが -0.4dB と熱いので gain で既存素材の体感に寄せる
+  // (mean は like-jam -22.4dB / follow-jam -12.6dB。pop -19.8dB=0.6 / question -10.0dB=0.9 が比較対象)。
+  { id: 'like-jam', label: 'いいね妨害(専用)', url: likeJamUrl, gain: 0.9 },
+  { id: 'follow-jam', label: 'フォロー妨害(専用)', url: followJamUrl, gain: 0.85 },
+  // ルーレットの停止まわりの専用音(元は作者提供の mp3 — 前後の無音を落として ogg 化)。
+  // reel-stop は素材のピークが低かったので取り込み時に +10.9dB してある(bong と同じ
+  // ピーク -1.5dB 前後)。gain は like-jam と同じ考え方でピークの熱さぶんを引く。
+  { id: 'reel-stop', label: 'リール停止(スイッチ)', url: reelStopUrl, gain: 0.9 },
+  { id: 'reel-confirm', label: 'ルーレット確定(確認音)', url: reelConfirmUrl, gain: 0.85 },
 ];
 
 const BY_ID = new Map(SE_SOUNDS.map((s) => [s.id, s]));
 
-/** 事前ロード済みのベース要素(遅延生成)。再生時は clone するので同時再生できる。 */
-const base = new Map<string, HTMLAudioElement>();
-
-function baseFor(s: SeSound): HTMLAudioElement {
-  let a = base.get(s.id);
-  if (!a) {
-    a = new Audio(s.url);
-    a.preload = 'auto';
-    base.set(s.id, a);
-  }
-  return a;
-}
+/**
+ * 音ごとの再生プール。以前は再生のたびに cloneNode で新しい HTMLAudioElement を
+ * 作り捨てていた — 連打ギフトの多い長時間配信では毎時数千要素の GC 餌になる。
+ * 同じ音の同時再生は POOL_SIZE 発まで(それ以上は最古の発音を巻き戻して使い回す)。
+ */
+const POOL_SIZE = 4;
+const pools = new Map<string, { els: HTMLAudioElement[]; next: number }>();
 
 /**
  * id の音を鳴らす。volume は 0-100 の実効音量 — 全体音量とスロットごとの個別音量を
  * 掛け合わせた値なので、呼び出し側は shared/challenge.ts の effectiveSeVolume() を
  * 通した結果を渡すこと(seVolume を素で渡すと個別音量が効かない)。小数可。
  * 'off' や未知の id は無音(validate 済み設定なら既定に矯正されているが、
- * 30秒ポーリング前の古い設定が来ても落ちないように)。
+ * ポーリング前の古い設定が来ても落ちないように)。
  */
 export function playSe(id: string, volume: number): void {
   const s = BY_ID.get(id);
   if (!s) return;
   const v = Math.min(1, Math.max(0, volume / 100)) * s.gain;
   if (v <= 0) return;
-  // clone は同一URLがキャッシュに載っているため実質コストゼロで、直前の音を切らない。
-  const a = baseFor(s).cloneNode(true) as HTMLAudioElement;
+  let p = pools.get(s.id);
+  if (!p) {
+    p = { els: [], next: 0 };
+    pools.set(s.id, p);
+  }
+  let a: HTMLAudioElement;
+  if (p.els.length < POOL_SIZE) {
+    a = new Audio(s.url);
+    a.preload = 'auto';
+    p.els.push(a);
+  } else {
+    a = p.els[p.next]!;
+    p.next = (p.next + 1) % POOL_SIZE;
+    try {
+      a.currentTime = 0;
+    } catch {
+      /* ロード前の seek 失敗は無視 — play() が先頭から鳴らす */
+    }
+  }
   a.volume = Math.min(1, v);
   // デコード失敗や autoplay ポリシー変更で reject し得る — 演出は視覚が主なので握りつぶす。
   void a.play().catch(() => {});

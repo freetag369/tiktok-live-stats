@@ -118,9 +118,13 @@ export function getSessionViewerTable(
 
   const limit = Math.min(Math.max(q.limit ?? 5000, 1), 20000);
   const offset = Math.max(q.offset ?? 0, 0);
-  const sortCol = SORT_SQL[q.sort ?? 'lastSeen'] ?? SORT_SQL.lastSeen!;
+  // own property のみ引く: 'constructor' 等の継承キーが `??` を素通りすると
+  // 関数ソースが SQL に埋まって構文エラーになる。
+  const sortKey = q.sort ?? 'lastSeen';
+  const sortCol = Object.hasOwn(SORT_SQL, sortKey) ? SORT_SQL[sortKey]! : SORT_SQL.lastSeen!;
   const dir = q.desc === false ? 'ASC' : 'DESC';
-  const filter = FILTER_SQL[q.filter ?? 'all'] ?? '';
+  const filterKey = q.filter ?? 'all';
+  const filter = Object.hasOwn(FILTER_SQL, filterKey) ? (FILTER_SQL[filterKey] ?? '') : '';
 
   const search = (q.search ?? '').trim();
   const searchSql = search
@@ -229,7 +233,7 @@ export function getViewerDetail(
 }
 
 /** Single-row, sub-millisecond — fired on every VIP/常連 join so the streamer can greet by name. */
-export function getRecallCard(db: DatabaseSync, userId: UserId, sessionId: number | null, now = Date.now()): RecallCard | null {
+export function getRecallCard(db: DatabaseSync, userId: UserId, sessionId: number | null): RecallCard | null {
   const sid =
     sessionId ??
     (db.prepare('SELECT MAX(session_id) AS s FROM stream_session').get() as { s: number | null }).s ??

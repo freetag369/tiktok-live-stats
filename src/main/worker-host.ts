@@ -28,6 +28,8 @@ export class WorkerHost {
   private ready = false;
   private restarts = 0;
   private stopping = false;
+  /** クラッシュ後の自動再起動タイマー。shutdown で必ず止める(終了処理中の再 fork 防止)。 */
+  private restartTimer: NodeJS.Timeout | null = null;
   /** メイン窓とモニター窓 — firehose ポートはウィンドウごとに1本張る。 */
   private wcs = new Set<WebContents>();
   /**
@@ -49,6 +51,10 @@ export class WorkerHost {
     settings: AppSettings;
     appInfo: { gitSha: string; buildTime: string; appVersion: string };
   }): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     this.stopping = false;
     this.ready = false;
     this.bootPayload = boot;
@@ -110,6 +116,7 @@ export class WorkerHost {
       this.pending.clear();
       if (this.stopping) {
         this.deps.onState('dead');
+        this.failQueue();
         return;
       }
       // A crash must not end the session silently — restart, but give up rather
@@ -117,11 +124,26 @@ export class WorkerHost {
       if (this.restarts < 5) {
         this.restarts++;
         this.deps.onState('restarting', `exit ${code}`);
-        setTimeout(() => this.start(this.bootPayload ?? boot), 1000 * this.restarts);
+        this.restartTimer = setTimeout(() => {
+          this.restartTimer = null;
+          this.start(this.bootPayload ?? boot);
+        }, 1000 * this.restarts);
       } else {
         this.deps.onState('dead', `exit ${code}`);
+        // dead になったら flushQueue は二度と呼ばれない — 起動待ちキューの
+        // Promise を放置すると renderer の await が永遠に戻らず UI が固まる。
+        this.failQueue();
       }
     });
+  }
+
+  /** 起動待ちキューを全部 WORKER_DOWN で解決する(dead 遷移時)。 */
+  private failQueue(): void {
+    const q = this.queue;
+    this.queue = [];
+    for (const item of q) {
+      item.resolve({ id: item.req.id, ok: false, error: { code: 'WORKER_DOWN', message: 'ワーカーが停止しました。' } });
+    }
   }
 
   /** Renderer gets a direct line to the worker; 20k events/min never touch main. */
@@ -191,6 +213,12 @@ export class WorkerHost {
 
   async shutdown(): Promise<void> {
     this.stopping = true;
+    // クラッシュ直後(proc なし・再起動タイマー保留中)に終了すると、タイマーが
+    // 発火して終了処理中に新しい worker が fork される。必ずここで止める。
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     if (!this.proc) return;
     const p = this.proc;
     p.postMessage({ t: 'shutdown' });

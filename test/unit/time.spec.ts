@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { jstDayNumber, jstHour, jstWeekStart, jstWeekday, normaliseTs, relativeDayJa } from '@shared/time';
+import {
+  jstDayNumber,
+  jstHour,
+  jstWeekStart,
+  jstWeekday,
+  normaliseTs,
+  relativeDayJa,
+  wakeAnchorMs,
+  wakeElapsedMs,
+} from '@shared/time';
 
 const NOW = Date.UTC(2026, 6, 28, 3, 0, 0); // 2026-07-28 12:00 JST (Tuesday)
 
@@ -59,5 +68,58 @@ describe('relativeDayJa', () => {
     expect(relativeDayJa(NOW - 14 * 86_400_000, NOW)).toBe('14日前');
     expect(relativeDayJa(NOW - 90 * 86_400_000, NOW)).toBe('3ヶ月前');
     expect(relativeDayJa(null, NOW)).toBe('—');
+  });
+});
+
+/*
+ * 何時起き。ここだけ Date.UTC ではなくローカルの new Date(y, m, d, h, mi) で
+ * 基準を作る — 実装が壁時計時刻(setHours)で解決するので、UTC で組むと
+ * テストが実行環境のタイムゾーン依存になる。
+ */
+const local = (y: number, mo: number, d: number, h: number, mi = 0): number =>
+  new Date(y, mo, d, h, mi, 0, 0).getTime();
+
+const HOUR = 3_600_000;
+
+describe('wakeAnchorMs — 起床時刻がどの日か', () => {
+  it('resolves to the same day when the time has already passed', () => {
+    const ref = local(2026, 7, 1, 23, 0); // 8/1 23:00
+    expect(wakeAnchorMs('05:30', ref)).toBe(local(2026, 7, 1, 5, 30));
+  });
+
+  it('falls back to YESTERDAY when the time is still ahead — 深夜配信で経過が負になる罠', () => {
+    const ref = local(2026, 7, 2, 2, 0); // 8/2 02:00(0時をまたいだ配信)
+    expect(wakeAnchorMs('05:30', ref)).toBe(local(2026, 7, 1, 5, 30));
+  });
+
+  it('accepts the boundaries and rejects anything else', () => {
+    const ref = local(2026, 7, 1, 12, 0);
+    expect(wakeAnchorMs('00:00', ref)).toBe(local(2026, 7, 1, 0, 0));
+    expect(wakeAnchorMs('23:59', ref)).not.toBeNull();
+    for (const bad of ['24:00', '7:30', '0730', '', '05:60', 'ab:cd']) {
+      expect(wakeAnchorMs(bad, ref)).toBeNull();
+    }
+  });
+});
+
+describe('wakeElapsedMs — 錨は now ではなく企画の開始時刻', () => {
+  it('counts from the wake instant', () => {
+    const ref = local(2026, 7, 1, 23, 0);
+    expect(wakeElapsedMs('05:30', ref, ref)).toBe(17 * HOUR + 30 * 60_000);
+  });
+
+  it('keeps growing past 24h instead of wrapping to 0 — 「0まで寝ない」が1日を超える', () => {
+    const start = local(2026, 7, 1, 7, 0); // 7:00 起床・その時刻に開始
+    const now = local(2026, 7, 2, 9, 0); // 翌日 9:00 = 26時間後
+    expect(wakeElapsedMs('07:00', start, now)).toBe(26 * HOUR);
+  });
+
+  it('never goes negative when the clock jumps backwards', () => {
+    const ref = local(2026, 7, 1, 12, 0);
+    expect(wakeElapsedMs('11:00', ref, local(2026, 7, 1, 10, 0))).toBe(0);
+  });
+
+  it('returns null for an invalid time so the monitor draws nothing', () => {
+    expect(wakeElapsedMs('25:00', Date.now(), Date.now())).toBeNull();
   });
 });

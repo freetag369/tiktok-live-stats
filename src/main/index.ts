@@ -3,11 +3,10 @@ import { join } from 'node:path';
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron';
 import type { AppSettings, CsvExportSpec } from '@shared/dto';
 import { CH_MONITOR_STATE, CH_SETTINGS_PUSH, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
-import { validateChallengeConfig } from '@shared/challenge';
-import { loadSettings, needsWorkerRestart, saveSettings } from './boot-settings';
+import { loadSettings, needsWorkerRestart, sanitizeSettings, saveSettings } from './boot-settings';
 import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
 import { closeMonitorWindow, getMonitorWindow, openMonitorWindow, repositionMonitor } from './monitor-window';
-import { configDirIn, defaultDataDir, dbPathIn, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
+import { configDirIn, defaultDataDir, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
 import { WorkerHost } from './worker-host';
 import { createWindow } from './window';
 
@@ -160,10 +159,10 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
 
       case 'cfg.set': {
         const prev = settings;
-        const next: AppSettings = { ...settings, ...(req.params as Partial<AppSettings>) };
         // 起動時(loadSettings)と同じ防御をこの経路にも — UI から来た値でも
-        // clamp してからエンジンに渡す(pressStep 負値などが素通りしないように)。
-        next.challenge = validateChallengeConfig(next.challenge);
+        // clamp してからエンジンに渡す。challenge だけでなく scoring の負の重みや
+        // 非有限の diamondToJpy 等も、DB のスコアに永続化される前にここで止める。
+        const next: AppSettings = sanitizeSettings(settings, req.params as Partial<AppSettings>);
         const restart = needsWorkerRestart(settings, next);
         settings = next;
         saveSettings(dataDir, settings);
@@ -207,9 +206,12 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
         return { id, ok: true, result: { path } } as RpcResponse;
       }
 
-      case 'file.openDataDir':
-        await shell.openPath(dataDir);
+      case 'file.openDataDir': {
+        // openPath は throw せずエラー文字列を返す — 捨てると失敗が成功に見える。
+        const openErr = await shell.openPath(dataDir);
+        if (openErr) return { id, ok: false, error: { code: 'INTERNAL', message: openErr } };
         return { id, ok: true, result: undefined } as RpcResponse;
+      }
 
       /**
        * Point this build at a database that lives somewhere else.
@@ -260,7 +262,8 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
             copyFileSync(src, p);
           }
         }
-        await shell.openPath(p);
+        const openErr = await shell.openPath(p);
+        if (openErr) return { id, ok: false, error: { code: 'INTERNAL', message: openErr } };
         return { id, ok: true, result: undefined } as RpcResponse;
       }
 
@@ -439,4 +442,15 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
 });
 
-void boot();
+// 初期化失敗(書込不可のポータブルUSB・権限のないフォルダ等)を無言で握らない —
+// ウィンドウが出ないままプロセスだけ残るのが一番わかりにくい壊れ方になる。
+void boot().catch((e) => {
+  try {
+    dialog.showErrorBox(
+      '起動に失敗しました',
+      `${(e as Error)?.message ?? String(e)}\n\nデータフォルダに書き込めない可能性があります。`
+    );
+  } finally {
+    app.exit(1);
+  }
+});

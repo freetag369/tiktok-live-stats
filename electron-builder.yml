@@ -20,6 +20,12 @@ extraResources:
     to: SOURCE-OFFER.txt
   - from: resources
     to: app-resources
+  # AGPL: 「ソースコードを保存」(file.saveSource)が resources 直下の zip を探す。
+  # make-source-archive.mjs がここへステージするので、release:* は
+  # source:zip → build:* の順で実行すること(package.json 参照)。
+  - from: build/source-archive
+    to: .
+    filter: ['*.zip']
 
 # Nothing native to rebuild — node:sqlite is built into Electron's Node.
 npmRebuild: false

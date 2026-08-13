@@ -40,6 +40,16 @@ export class Batcher {
   push(e: NormalizedEvent): void {
     this.pending.push(e);
     if (this.pending.length > this.stats.queueHigh) this.stats.queueHigh = this.pending.length;
+    // セッション未確定の間は flush が排出せず戻るだけなので、放置すると
+    // pending が無限に育つ(接続直後のバックログ豪雨で顕在化)。上限で切る。
+    if (this.sessionId == null) {
+      const cap = FLUSH_MAX_BATCH * 8;
+      if (this.pending.length > cap) {
+        this.stats.dropped += this.pending.length - cap;
+        this.pending.splice(0, this.pending.length - cap);
+      }
+      return;
+    }
     // Under a real firehose the interval alone can fall behind; drain eagerly.
     if (this.pending.length >= FLUSH_MAX_BATCH * 4) this.flush();
   }
@@ -56,7 +66,13 @@ export class Batcher {
       this.stats.dropped += r.droppedBlocked;
     } catch (e) {
       this.stats.errors++;
-      this.onError(e as Error);
+      try {
+        this.onError(e as Error);
+      } catch {
+        // onError は connect_log への DB 書き込み — flush が失敗した原因そのもの
+        // (ディスクフル・DBクローズ等)で再度 throw しうる。setInterval コールバック
+        // を貫通させて uncaughtException にしない。
+      }
     }
     const dt = performance.now() - t0;
     if (dt > this.stats.maxFlushMs) this.stats.maxFlushMs = dt;

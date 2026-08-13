@@ -4,8 +4,20 @@
 export const FLUSH_MS = 250;
 export const FLUSH_MAX_BATCH = 500;
 
-/** Likes are bucketed per (session, user, 10s) at ingest, or the table dwarfs everything else. */
-export const LIKE_BUCKET_MS = 10_000;
+/**
+ * Likes are bucketed per (session, user, 60s) at ingest, or the table dwarfs
+ * everything else. アプリ内でこのテーブルを読む機能は無い(CSVエクスポートの
+ * 粒度にのみ影響)。10s→60s で長時間配信の行数・upsert 負荷を約1/6にした。
+ */
+export const LIKE_BUCKET_MS = 60_000;
+
+/**
+ * like_seen(いいね二重計上ガード)の保持期間と掃除間隔。dedupe が守るのは
+ * 再接続バックログの再生(数分)+ SESSION_RESUME_GAP_MS(10分)だけなので、
+ * 30分より古い行は捨てても安全 — 残すと耐久配信でいいね1件=1行のまま育つ。
+ */
+export const LIKE_SEEN_TTL_MS = 30 * 60_000;
+export const LIKE_SEEN_PRUNE_EVERY_MS = 10 * 60_000;
 
 /** Aggregate deltas pushed to the renderer. 2 Hz visible, 0.5 Hz when the window is hidden. */
 export const DELTA_MS = 500;

@@ -36,9 +36,9 @@ export interface FxEngine {
   /** 拡大するリング波紋(press の手応え)。 */
   ringWave(x: number, y: number, opts?: { hue?: number; radius?: number }): void;
   /** 放射状の火花。 */
-  sparkBurst(x: number, y: number, count: number, opts?: { hue?: number; speed?: number }): void;
+  sparkBurst(x: number, y: number, count: number, opts?: { hue?: number; speed?: number; size?: number }): void;
   /** ハートが弾け上がって落ちる。 */
-  heartBurst(x: number, y: number, count: number, opts?: { hue?: number }): void;
+  heartBurst(x: number, y: number, count: number, opts?: { hue?: number; size?: number }): void;
   /** ハートが目標へ吸い込まれる(いいね→ゲージ)。着弾ごとに onArrive。 */
   heartStream(from: FxPoint, to: FxPoint, count: number, onArrive?: () => void): void;
   /** 紙吹雪(旧 DOM confetti の置換)。 */
@@ -487,7 +487,7 @@ export function createFxEngine(): FxEngine {
         p.g = 700;
         p.drag = 2.4;
         p.ttl = rand(0.5, 0.95);
-        p.size = rand(10, 26);
+        p.size = rand(10, 26) * (opts?.size ?? 1);
         p.hue = opts?.hue ?? -1;
         p.twinkle = 22;
         p.phase = Math.random() * TAU;
@@ -506,7 +506,7 @@ export function createFxEngine(): FxEngine {
         p.g = 620;
         p.drag = 1.1;
         p.ttl = rand(1.1, 1.7);
-        p.size = rand(14, 30);
+        p.size = rand(14, 30) * (opts?.size ?? 1);
         p.hue = opts?.hue ?? 338;
         p.rot = rand(-0.5, 0.5);
         p.vr = rand(-2.4, 2.4);

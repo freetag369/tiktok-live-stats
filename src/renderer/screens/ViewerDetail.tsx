@@ -44,16 +44,24 @@ export function ViewerDetail(): React.JSX.Element | null {
 
   async function save(): Promise<void> {
     if (!userId) return;
-    await rpc('m.viewerMeta', { userId, patch: { readingKana: kana || null, note: note || null } });
-    setDirty(false);
-    reload();
-    toast({ level: 'info', msgJa: '保存しました。' });
+    try {
+      await rpc('m.viewerMeta', { userId, patch: { readingKana: kana || null, note: note || null } });
+      setDirty(false);
+      reload();
+      toast({ level: 'info', msgJa: '保存しました。' });
+    } catch (e) {
+      toast({ level: 'error', msgJa: `保存に失敗しました: ${(e as Error).message}` });
+    }
   }
 
   async function setTier(tier: number | null): Promise<void> {
     if (!userId) return;
-    await rpc('m.viewerMeta', { userId, patch: { vipTierManual: tier } });
-    reload();
+    try {
+      await rpc('m.viewerMeta', { userId, patch: { vipTierManual: tier } });
+      reload();
+    } catch (e) {
+      toast({ level: 'error', msgJa: `VIP設定に失敗しました: ${(e as Error).message}` });
+    }
   }
 
   async function forget(mode: 'block' | 'purge'): Promise<void> {
@@ -63,9 +71,13 @@ export function ViewerDetail(): React.JSX.Element | null {
         ? 'この人を今後記録しないようにします。これまでの記録は残ります。よろしいですか？'
         : 'この人の記録をすべて削除します。元に戻せません。よろしいですか？';
     if (!window.confirm(msg)) return;
-    await rpc('m.forgetViewer', { userId, mode });
-    openViewer(null);
-    toast({ level: 'info', msgJa: mode === 'block' ? '今後は記録しません。' : '削除しました。' });
+    try {
+      await rpc('m.forgetViewer', { userId, mode });
+      openViewer(null);
+      toast({ level: 'info', msgJa: mode === 'block' ? '今後は記録しません。' : '削除しました。' });
+    } catch (e) {
+      toast({ level: 'error', msgJa: `処理に失敗しました: ${(e as Error).message}` });
+    }
   }
 
   return (

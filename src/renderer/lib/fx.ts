@@ -109,6 +109,20 @@ const stockGlob = import.meta.glob('../assets/fx/stock-full.mp4', {
 }) as Record<string, string>;
 export const STOCK_FULL_CLIP_URL: string = stockGlob['../assets/fx/stock-full.mp4'] ?? gaugeFullUrl;
 
+/**
+ * いいねストック満杯の着弾後に流す5秒のフルスクリーンカットイン(不透明・音声焼き込み)。
+ * band/*.mp4 と同族の不透明素材なので screen 合成は禁止(.fx-clip-opaque で重ねる)。
+ * 無ければ null — モニターは従来のストック着弾(カットインなし)へフォールバックする。
+ * gauge-full での代用はしない: screen 前提の黒背景素材を不透明で出すと黒画面5秒になる。
+ */
+const stockCutinGlob = import.meta.glob('../assets/fx/stock-cutin.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+export const STOCK_CUTIN_CLIP_URL: string | null =
+  stockCutinGlob['../assets/fx/stock-cutin.mp4'] ?? null;
+
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 
 /** クリップ id → URL。未知の id は null(設定が古い/壊れていても落とさない)。 */

@@ -54,6 +54,7 @@ function record(meta: FeedMeta): FeedViewerRecord {
   const r: FeedViewerRecord = { vis: meta.vis };
   if (meta.pv) r.pv = meta.pv;
   if (meta.dl) r.dl = meta.dl;
+  if (meta.ll) r.ll = meta.ll;
   if (meta.hl) r.hl = meta.hl;
   if (meta.kana) r.kana = meta.kana;
   if (meta.note) r.note = meta.note;

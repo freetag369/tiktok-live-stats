@@ -6,10 +6,15 @@ import type { FxEngine } from './fx/engine';
 /**
  * いいね進捗ゲージ(◯いいねで +N の分子を見せる)。
  *
- * データは 2Hz の delta で届くため、幅は CSS transition(MoveTowards 相当のカーブ)で
- * 滑らかに追従させる。満タン検出は counter の増減ではなく worker が持つ単調
- * カウンタ fills の前回比較で行う — counter は閾値跨ぎで「増えて見える」し
- * reset でも減るので、増減ヒューリスティックは誤発火する。
+ * データは 2Hz の delta で届き、しかも TikTok はいいねをバッチで送ってくる
+ * (LikeEvent.count が 15 など)。素の counter をそのまま出すと 0→15→30 と飛ぶので、
+ * idle 中は表示用の分子 drip を cubic ease-out の時間補間で追いつかせる(滴下)—
+ * 速く始まってゆっくり止まるスコアカウンターの動き。CSS transition は tick 間を
+ * 潰さない程度の追従だけを担当する(monitor.css の data-phase='idle' 参照)。
+ *
+ * 満タン検出は counter の増減ではなく worker が持つ単調カウンタ fills の前回比較で
+ * 行う — counter は閾値跨ぎで「増えて見える」し reset でも減るので、増減
+ * ヒューリスティックは誤発火する。滴下側も同じ理由で counter の減少を単独では信じない。
  *
  * 満タン演出の相:
  *   idle → fill(100% へ掃引)→ hold(バースト)→ snap(transition 無効で
@@ -25,6 +30,24 @@ type Phase = 'idle' | 'fill' | 'hold' | 'snap';
 const FILL_MS = 420;
 /** hold 相(白閃+バースト)の長さ。CSS の lg-burst と同じ。 */
 const HOLD_MS = 300;
+
+/**
+ * 1バッチ分のカウントアップ尺。ease-out でこの時間内に必ず追いつく。
+ * DELTA_MS(500)より短いので遅れを次のバッチへ繰り越さず、
+ * FILL_MS + HOLD_MS(720)より短いので満タン演出中に持ち越しが残ることもない。
+ */
+const DRIP_MS = 450;
+/**
+ * 表示更新の間隔。イージングの評価は時刻ベースなので、tick が遅れても
+ * 追いつきの保証(DRIP_MS)は崩れない。
+ */
+const DRIP_TICK_MS = 28;
+
+/** 動きの抑制設定。MonitorView の同名関数と同じ(あちらは module private で、
+ *  import すると MonitorView → LikeGauge と循環するため複製している)。 */
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
 
 /**
  * ストック満杯シーケンスの相:
@@ -43,11 +66,47 @@ const STOCK_BURST_MS = 300;
 /** drain(順次消灯)の長さ。ドット数 × transitionDelay 40ms + 余白。 */
 const STOCK_DRAIN_MS = 700;
 
+/**
+ * ストックドット1個。点灯中は区間1位のアバターを描き、URL 無し・読込失敗・
+ * アバター表示 OFF では従来の緑グラデ(.lgs-dot.on)がそのまま見える。
+ * <i> コンテナを維持するので lgs-pop/charge/burst と drain の transitionDelay は
+ * 全部そのまま効き、stockRowRef(FX 発射点)の矩形も変わらない。
+ */
+function StockDot({ on, url, delay }: { on: boolean; url: string | null; delay?: string }): React.JSX.Element {
+  // 読込失敗のラッチ。URL が変わったら再挑戦する(common.tsx の Avatar と同じ流儀)。
+  const [failed, setFailed] = useState(false);
+  const prevUrl = useRef(url);
+  if (prevUrl.current !== url) {
+    prevUrl.current = url;
+    if (failed) setFailed(false);
+  }
+  const showImg = on && url !== null && !failed;
+  return (
+    <i
+      className={`lgs-dot${on ? ' on' : ''}${showImg ? ' has-avatar' : ''}`}
+      style={delay ? { transitionDelay: delay } : undefined}
+    >
+      {showImg ? (
+        <img
+          className="lgs-avatar"
+          src={url}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(true)}
+        />
+      ) : null}
+    </i>
+  );
+}
+
 export function LikeGauge({
   gauge,
   fxRef,
   trackRef,
   stockRowRef,
+  showAvatars,
 }: {
   gauge: ChallengeLikeGauge;
   fxRef: { current: FxEngine | null };
@@ -55,6 +114,8 @@ export function LikeGauge({
   trackRef: React.RefObject<HTMLDivElement | null>;
   /** 親(ストック満杯の弾の発射点)と共有するドット行の ref。 */
   stockRowRef: React.RefObject<HTMLDivElement | null>;
+  /** cfg.loadAvatars。OFF ならドットは従来の緑丸のまま。 */
+  showAvatars: boolean;
 }): React.JSX.Element {
   const [phase, setPhase] = useState<Phase>('idle');
   const prevFills = useRef<number | null>(null);
@@ -67,6 +128,55 @@ export function LikeGauge({
   /** タイマー系 effect の閉包が古い stock を掴まないための最新値。 */
   const stockRef = useRef(gauge.stock);
   stockRef.current = gauge.stock;
+
+  /**
+   * 表示用の分子(滴下値・小数許容)。idle 中だけ gauge.counter を追いかけ、
+   * それ以外の相では素の counter に張り付く — idle 復帰時にゼロ距離で再開でき、
+   * snap の transition:'none' と表示権を取り合わない。バーは小数のまま使い、
+   * 数字は floor で整数にする(render 側)。
+   */
+  const [drip, setDrip] = useState(gauge.counter);
+  const dripRef = useRef(gauge.counter);
+  const dripTimer = useRef(0);
+  /** 補間のアンカー(開始値・開始時刻・目標)。バッチが重なったら現在値から張り直す。 */
+  const dripFrom = useRef(gauge.counter);
+  const dripStart = useRef(0);
+  const dripTarget = useRef(gauge.counter);
+  /** 滴下側の fills 前回値。相マシンの prevFills とは共有しない — あちらは先に
+   *  走る effect で更新済みなので、読むと effect の宣言順が仕様になってしまう。 */
+  const dripFills = useRef<number | null>(null);
+  const dripEvery = useRef(gauge.every);
+
+  /** 滴下を止めて表示を即時同期する。アンカーも揃えて補間の残骸を消す。 */
+  function adoptDrip(v: number): void {
+    if (dripTimer.current) {
+      clearTimeout(dripTimer.current);
+      dripTimer.current = 0;
+    }
+    dripRef.current = v;
+    dripFrom.current = v;
+    dripTarget.current = v;
+    setDrip(v);
+  }
+
+  /**
+   * 滴下1歩 — 時刻ベースの quadratic ease-out 補間。速く始まってゆっくり止まる
+   * (スコアカウンターの動き)ので、等間隔で 1 ずつ刻むより連打が自然に見える。
+   * cubic だと序盤に距離の半分を 90ms で消化してしまい +5 ずつ飛んで見えた
+   * (実測)ので、一段浅い 2 乗にしてある。増分ではなく経過時間から現在値を
+   * 引くため、バックログ量によらず必ず DRIP_MS で追いつき、tick の遅延
+   * (タブ非表示等)でも到達時刻はズレない。
+   */
+  function dripStep(): void {
+    dripTimer.current = 0;
+    const t = Math.min(1, (Date.now() - dripStart.current) / DRIP_MS);
+    const e = 1 - (1 - t) ** 2;
+    const v = dripFrom.current + (dripTarget.current - dripFrom.current) * e;
+    dripRef.current = v;
+    setDrip(v);
+    if (t >= 1) return; // 到達(v は厳密に target の整数)— 次の増加で effect が再点火
+    dripTimer.current = window.setTimeout(dripStep, DRIP_TICK_MS);
+  }
 
   useEffect(() => {
     const f = gauge.fills;
@@ -83,6 +193,52 @@ export function LikeGauge({
       setPhase('fill');
     }
   }, [gauge.fills]);
+
+  // 滴下の司令塔。判定順がそのまま仕様なので入れ替えないこと。
+  useEffect(() => {
+    const f = gauge.fills;
+    const prevF = dripFills.current;
+    const prevEvery = dripEvery.current;
+    dripFills.current = f;
+    dripEvery.current = gauge.every;
+
+    // fill/hold/snap は表示が固定(100% / 端数)。素の counter に張り付かせておく。
+    if (phase !== 'idle') return adoptDrip(gauge.counter);
+    // マウント採用 / worker 再起動の巻き戻り / 分母変更 — fills と同じ3点規約で無音追従。
+    if (prevF === null || f < prevF || gauge.every !== prevEvery) return adoptDrip(gauge.counter);
+    // 満タン跨ぎ。counter は端数へ落ちているが、この commit の phase はまだ 'idle'
+    // (上の effect の setPhase は同じフラッシュ内では見えない)。ここで追従すると
+    // バーが 92%→8% と逆走してから 100% へ掃引してしまうので、drip は据え置く。
+    if (f > prevF) {
+      if (dripTimer.current) {
+        clearTimeout(dripTimer.current);
+        dripTimer.current = 0;
+      }
+      return;
+    }
+    // reset / 再 start による 0 復帰。減らす向きの滴下は「いいねを取り消された」
+    // ように見えるので即時(ストックドットの減少と同じ扱い)。
+    if (gauge.counter < dripRef.current) return adoptDrip(gauge.counter);
+    if (gauge.counter === dripRef.current) return;
+    if (prefersReducedMotion()) return adoptDrip(gauge.counter);
+
+    // 現在の表示値から新目標へ張り直す。補間中に次のバッチが来たら、そこまでの
+    // 到達点を新しい起点にする — 連続流入時は 500ms ごとにサージが重なる動きになる。
+    dripFrom.current = dripRef.current;
+    dripStart.current = Date.now();
+    dripTarget.current = gauge.counter;
+    if (!dripTimer.current) dripTimer.current = window.setTimeout(dripStep, DRIP_TICK_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gauge.counter, gauge.fills, gauge.every, phase]);
+
+  // 連鎖を止めるのはアンマウントの時だけ。依存配列の cleanup に置くと delta ごとに
+  // 切れて張り直され、期限(dripDeadline)の割り付けが毎回リセットされてしまう。
+  useEffect(
+    () => () => {
+      if (dripTimer.current) clearTimeout(dripTimer.current);
+    },
+    []
+  );
 
   // ストックの表示更新。fills(満杯累計)は likeFills と同じ3点規約:
   // マウント採用 / 巻き戻り追従(worker 再起動)/ 増分のみ満杯シーケンス発火。
@@ -184,17 +340,30 @@ export function LikeGauge({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
-  const pct = gauge.every > 0 ? Math.min(100, (gauge.counter / gauge.every) * 100) : 0;
   const filling = phase === 'fill' || phase === 'hold';
+  // 分子の権威は相ごとに1つだけ: fill/hold は「満タン到達」を出し切る(state 上は
+  // もう端数)/ snap は端数へハード同期 / idle は滴下値。
+  // バーは小数のままなめらかに、数字は floor で整数カウントアップにする。
+  const shownFloat = filling ? gauge.every : phase === 'snap' ? gauge.counter : drip;
+  const shownCount = Math.floor(shownFloat);
+  const pct = gauge.every > 0 ? Math.min(100, (shownFloat / gauge.every) * 100) : 0;
   const displayPct = filling ? 100 : pct;
-  // hold 中は state 上もう端数だが、見た目は「満タン到達」を出し切る。
-  const shownCount = filling ? gauge.every : gauge.counter;
   const noAnim = phase === 'snap' ? { transition: 'none' } : undefined;
 
   const stock = gauge.stock;
   // charge/burst 中は「満杯到達」を出し切る(ゲージの shownCount と同じ思想)。
   const litCount = sphase === 'charge' || sphase === 'burst' ? (stock?.count ?? 0) : shownFilled;
   const draining = sphase === 'drain';
+  // ドット i のアバターURL。worker は満杯処理を1 delta 内で完結させるので、満杯
+  // シーケンス(arm/charge/burst)中の stock.slots は既に消費済み — 消費一式の
+  // スナップショット lastFullSlots から引く(arm は litCount がまだ旧値だが、
+  // lastFullSlots の先頭は直前まで表示していたスロットと同一なので絵は変わらない)。
+  const slotUrlFor = (i: number): string | null => {
+    if (!showAvatars) return null;
+    const inFullSeq = sphase === 'arm' || sphase === 'charge' || sphase === 'burst';
+    const slot = inFullSeq ? (stock?.lastFullSlots?.[i] ?? stock?.slots?.[i]) : stock?.slots?.[i];
+    return slot?.avatarUrl ?? null;
+  };
 
   return (
     <div className="like-gauge" data-phase={phase} data-hot={!filling && pct >= 85}>
@@ -213,10 +382,11 @@ export function LikeGauge({
         <div className="lg-stock" data-sphase={sphase} ref={stockRowRef}>
           <span className="lgs-dots">
             {Array.from({ length: stock.count }, (_, i) => (
-              <i
+              <StockDot
                 key={i}
-                className={`lgs-dot${i < litCount ? ' on' : ''}`}
-                style={draining ? { transitionDelay: `${i * 40}ms` } : undefined}
+                on={i < litCount}
+                url={slotUrlFor(i)}
+                delay={draining ? `${i * 40}ms` : undefined}
               />
             ))}
           </span>

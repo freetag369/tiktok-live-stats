@@ -4,8 +4,8 @@ import { SESSION_RESUME_GAP_MS } from '@shared/constants';
 import type * as D from '@shared/dto';
 import type { NormalizedEvent, UserId } from '@shared/events';
 import { DEFAULT_SCORING, validateScoringConfig } from '@shared/scoring';
-import { applyEvent, makeCtx, type ApplyCtx } from './apply';
-import { openDatabase } from './open';
+import { applyEvent, makeCtx, resolveCanonical, type ApplyCtx } from './apply';
+import { lastEventTs, openDatabase } from './open';
 import { Statements, SQL } from './statements';
 import * as QV from './queries/viewers';
 import * as QS from './queries/sessions';
@@ -122,12 +122,23 @@ export class Store {
 
   maintain(opts?: { checkpoint?: 'PASSIVE' | 'TRUNCATE' }): void {
     try {
+      // connect_log は追記専用で保持ポリシーが無かった — 30日で切る。
+      this.db.prepare('DELETE FROM connect_log WHERE ts_ms < ?').run(Date.now() - 30 * 24 * 3600 * 1000);
       this.db.exec('PRAGMA analysis_limit = 400');
       this.db.exec('PRAGMA optimize');
       this.db.exec(`PRAGMA wal_checkpoint(${opts?.checkpoint ?? 'PASSIVE'})`);
     } catch {
       /* non-fatal */
     }
+  }
+
+  /**
+   * 配信中の定期掃除。like_seen は再接続バックログ + resume 猶予(10分)の
+   * 二重計上防止にしか要らないのに、いいね1件 = 1行で終了まで育っていた。
+   * 呼び出し側は 30 分より古い行を渡す想定。
+   */
+  pruneLikeSeen(beforeMs: number): number {
+    return Number(this.st.get(SQL.pruneLikeSeen).run(beforeMs).changes);
   }
 
   private reloadBlocklist(): void {
@@ -169,7 +180,8 @@ export class Store {
           .run(input.hostUserId, input.hostUniqueId, input.hostNickname ?? '', input.startedMs);
       }
 
-      // A 3-minute network drop is the same broadcast; 15 minutes is a new one.
+      // A short network drop (< SESSION_RESUME_GAP_MS) is the same broadcast;
+      // anything longer is a new one.
       //
       // Matching on room_id alone is not enough: the first connect can succeed
       // before TikTok has returned a room id, and the websocket then re-handshakes
@@ -189,7 +201,13 @@ export class Store {
       if (cand) {
         const sameRoom = Boolean(input.roomId) && cand.room_id === input.roomId;
         const roomUnknown = !input.roomId || !cand.room_id;
-        const lastActivity = Number(cand.ended_ms ?? cand.started_ms);
+        // 開いたまま(ended_ms NULL)の候補 = ライブ中の再接続。started_ms を
+        // 最終活動とみなすと配信開始10分でセッションが分裂するので、実際に
+        // 記録された最終イベント時刻で判定する。
+        const lastActivity =
+          cand.ended_ms == null
+            ? (lastEventTs(this.db, cand.session_id) ?? Number(cand.started_ms))
+            : Number(cand.ended_ms);
         if ((sameRoom || roomUnknown) && input.startedMs - lastActivity < SESSION_RESUME_GAP_MS) {
           this.db
             .prepare(
@@ -257,6 +275,9 @@ export class Store {
       this.db.exec('ROLLBACK');
       throw e;
     }
+    // resume は openSession を通らないので、ここで消さないとセッションをまたいで
+    // ユニーク視聴者ぶん育ち続ける。
+    this.ctx.lastJoinMs.clear();
     // Scores/streaks/intervals are recomputed outside the close transaction so a
     // slow analytics pass cannot hold a write lock during teardown.
     QA.applySessionScores(this.db, sessionId, this.scoring);
@@ -265,6 +286,15 @@ export class Store {
 
   recordConnectLog(kind: D.ConnectLogKind, detail?: string): void {
     this.db.prepare(SQL.insertConnectLog).run(Date.now(), kind, detail ?? null);
+  }
+
+  /**
+   * ライブ経路用のギフト名寄せ。normalize は canonical を付けない(DB 書き込み時に
+   * 解決される)ため、ダッシュボード集計・フィード・アラートが同じ名寄せを見る
+   * にはここを通す。alias キャッシュ込みなのでホットパスでも安い。
+   */
+  resolveGiftCanonical(giftId: string, giftName?: string): string | null {
+    return resolveCanonical(this.ctx, giftId, giftName);
   }
 
   // ── identity / CRM ────────────────────────────────────────────────────────
@@ -437,7 +467,7 @@ export class Store {
   setSetting(key: string, value: unknown): void {
     this.db
       .prepare(`INSERT INTO app_setting (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
-      .run(key, JSON.stringify(value));
+      .run(key, JSON.stringify(value ?? null)); // undefined は stringify で消えて NOT NULL 制約に落ちる
   }
 
   exportCsv(spec: D.CsvExportSpec, outPath: string, onProgress?: (rows: number) => void): number {
@@ -450,8 +480,14 @@ export class Store {
 
   purge(spec: D.PurgeSpec): D.PurgeResult {
     const res = purge(this.db, spec);
+    // メモリ側キャッシュはテーブルと一緒には消えない。
+    this.ctx.giftAlias.clear();
+    this.ctx.lastJoinMs.clear();
     this.reloadBlocklist();
-    if (spec.scope !== 'viewer') QA.retierAll(this.db, this.scoring);
+    // 削除後の score / streak / interval は差分修復できないので、残った実データ
+    // から全再計算する(retier 込み)。purge はユーザー起点の稀な操作なので全再
+    // 計算のコストは許容範囲。
+    QA.recomputeAllScores(this.db, this.scoring);
     return res;
   }
 

@@ -55,6 +55,8 @@
 
 Seedance 2.5 の出力は**アルファチャンネルを持たない**。そのため全クリップを
 **純黒(#000000)背景に発光体だけ**という構成で生成してある。黒地に加算的に重ねれば黒が抜ける。
+(例外: `band/*.mp4` と `stock-cutin.mp4` は不透明フルフレーム素材 — screen 禁止で
+`.fx-clip-opaque` を使う。各セクションの注意書きを参照。)
 
 ```css
 .fx-clip {
@@ -317,3 +319,83 @@ the start, peaks, and fully decays — the frame returns to pure black and stays
 - **gift-band2.mp4** — 同上のハートポーズ版(pink and gold radial rays, floating heart particles, confetti, rotating lens flares)。
 - **gift-band3.mp4** — 同上のマネーガン版(explosive storm of golden banknotes and coins toward the camera, fireworks, camera shake, gold and green strobe edges)。
 - **gift-band4.mp4** — 同上の銀河版・最高レア(swirling nebula arms, storms of golden shooting stars, massive firework volleys, lightning bolts, rotating god-rays, rainbow-and-gold strobe edges, multiple escalating explosion waves)。
+
+# ストック着弾カットイン(`stock-cutin.mp4`)
+
+いいねストック満杯の2発目(緑の弾)が7セグに**着弾した瞬間**から流す、
+パチンコ大当たり風の5秒フルスクリーンカットイン。再生中はモニターが数字を
+据え置き、終端で `revealStock`(ボーナス反映)が走る(`MonitorView.tsx` の
+`STOCK_CUTIN_MS` 一式)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | Higgsfield / `seedance_2_0`(mode `std`、参照画像あり `image_references`) |
+| 生成日 | 2026-08-13 |
+| 出力 | 1280×720 (16:9) / 24fps / H.264 / **AAC 音声トラックあり**(`generate_audio: true`) |
+| 尺 | 5.06 秒(アプリ側は `STOCK_CUTIN_MS = 5000` のタイマーで打ち切り) |
+| 参照画像 | ユーザー提供のフェニックスのイラスト(TikTok ギフト一覧アイコンのスクリーンショット) |
+
+加工内容: **無し**(返却された mp4 をそのままリネームして格納)。
+
+> 配色はストックUI(`monitor.css` の `.lgs-dot` `#3dff9c`、canvas 2発目の弾 hue 140)に
+> 合わせた**エメラルドグリーン**。初回生成は参照画像そのままの赤で、ユーザー指示で
+> 緑に再生成した(赤→緑の指定だけだと人型の天使に化けたため、プロンプトで
+> 「strictly a bird / no humanoid」と鳥の解剖を明示している — 再生成時は必ず残すこと)。
+
+> ## ⚠️ band/*.mp4 と同族 — screen 禁止・`.fx-clip-opaque` 必須・音声あり
+>
+> 不透明フルフレーム素材(黒背景発光体ではない)なので `mix-blend-mode: screen` 禁止。
+> `.fx-clip-opaque` で重ねる。配置の制約(`.monitor-root` 直下・z-index なし)は同じ。
+>
+> **このクリップだけは音声を焼き込んである**(他は全部無音)。`MonitorView` は
+> この `<video>` に限り muted を外し、音量を `seVolumes['stock-full']` に連動させる。
+> 音声は終端 0.4 秒で無音まで減衰する構成(実測 RMS -47dB→-80dB)— 映像の
+> `.out` フェード(`STOCK_CUTIN_FADE_MS = 400`)と揃えてある。
+>
+> このファイルを削除してもビルドは壊れない(`lib/fx.ts` の 0 件許容 glob)。
+> 無ければモニターは従来のストック着弾(カットインなし)へフォールバックする。
+>
+> 著作権の注意は `gift/` / `band/` と同じ — TikTok 本家のギフト演出の再現ではなく、
+> 題材(炎の鳳凰)を参照した完全オリジナル。生成物の利用条件は Higgsfield の
+> 利用規約(生成時のプラン: Plus)に従う。CC0 ではない。
+
+## 生成プロンプト(全文)
+
+> A majestic phoenix BIRD made of roaring emerald-green fire, keeping exactly the same bird anatomy and silhouette as the creature in the reference image — a bird with a crested bird head and beak, two vast spread wings, and long flowing ribbon-like tail feathers — but recolored: every feather and flame burns in vivid emerald green (#3DFF9C), mint-green and white-hot green tones instead of red. Strictly a bird: no human, no humanoid figure, no angel, no woman, no face, no arms, no legs. The green fire phoenix bursts upward through the center of the frame and unfurls its vast burning wings in a triumphant pachinko-jackpot cut-in. Behind it, long pale-green and gold light rays sweep and rotate radially from the center like a slot-machine victory starburst; waves of emerald and teal flame ripple outward to the edges of the frame, and thousands of glowing green embers and white-green sparks storm upward around the phoenix. The phoenix rears its bird head, wings fully spread at the climax, feathers drawn as emerald, mint and white-green flame filaments trailing green fire, its long tail feathers streaming below. Maximum spectacle, screen-filling, loud and celebratory jackpot energy, action starting immediately from the first frame. The phoenix and the main action stay in the horizontal center of the frame (safe for a vertical center crop). Dynamic but centered composition, slight dramatic push-in. No text, no letters, no numbers, no logos, no watermark, no people. Audio: a dramatic rising orchestral jackpot fanfare with taiko-style impact hits as the wings spread, sizzling fire roar underneath, ending with the music and flames decaying toward silence in the final half second.
+
+---
+
+# mini/panic-man.webp — 簡易演出「絶望カットイン」の写真素材
+
+このディレクトリで**唯一の写真素材**であり、唯一の映像でない素材。
+簡易演出(`CHALLENGE_MINI_IDS` の `'panic'`、フォロー妨害の既定)で使う。
+
+| 項目 | 値 |
+|---|---|
+| 元ファイル | `IMAGE/c4bf9a41-f05e-4160-b87f-3263de3c13a0.png`(リポジトリ外・ユーザー提供) |
+| 元の諸元 | 1536×1024 / PNG / RGBA(アルファ未使用)/ 約 1.9MB |
+| 格納形式 | 1024×682 / WebP q88(アルファあり)/ 約 97KB |
+| 格納日 | 2026-08-13 |
+
+加工内容:
+
+1. `(190, 10)-(1350, 783)` で切り出し(顔と両手を主役にし、下の胴と外側の肘を落とす)。
+   結果は 1160×773 ≒ 3:2 で、素材と箱の縦横比が一致する。
+2. Lanczos で 1024×682 へ縮小。表示は最大でも 281 ステージpx 幅、
+   4K モニターの拡大込みでも実ピクセル 850px 程度なので、これで頭打ち。
+3. **楕円のアルファを焼き込み**(smoothstep + ガウスぼかし 12px)。
+   元写真は「黒背景」ではなく「黒へ落ちるハロー」で、左右と下の辺に光が残っている。
+   黒ステージにそのまま置くと矩形の切り口が見えるため、素材側で縁を溶かしてある。
+   **CSS 側で `mask` や `border` を重ねないこと** — 二重にフェードして芯まで薄くなる。
+4. WebP へ再エンコード。写真に PNG は不向き(1024px でも 1MB 超)で、
+   アルファが要るので JPEG も使えない。`img-src 'self'` は WebP も同じく通る。
+
+> ⚠️ **ライセンス未確認 — 再配布前に必ず出典と再配布可否を確認すること。**
+> この写真は AI 生成物ではなく、**実在人物が写った写真**で、
+> スタジオ撮影のストックフォトの特徴(均一なハロー・胴の切れ方・メタデータ無し)がある。
+> 本リポジトリは AGPL で配布され、`scripts/make-source-archive.mjs` が
+> ソース一式を同梱して配布する。ストックフォトのライセンスは
+> **ソース同梱のような再配布を禁じているものが多い**。
+> 出典と許諾が確認できるまで、この素材を含むビルドを配布しないこと。
+> 差し替える場合は、同じパス・同じ 3:2・同じ縁のアルファ処理を施した WebP を置けば
+> コード側の変更は不要。

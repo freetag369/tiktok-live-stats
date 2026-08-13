@@ -7,8 +7,8 @@ import { appendChallengeLog } from '@shared/challenge';
 /**
  * The live table can hold 5,000 rows updating twice a second. Putting that Map in
  * React state would re-render everything on every tick, so the Map lives outside
- * React and only a monotonic version counter is reactive; components read the
- * snapshot array that is rebuilt at most twice a second.
+ * React and only a monotonic version counter is reactive; components do point
+ * lookups via liveRow() when the version bumps.
  */
 export interface LiveRow {
   userId: UserId;
@@ -25,11 +25,6 @@ export interface LiveRow {
 }
 
 const rows = new Map<UserId, LiveRow>();
-let snapshot: LiveRow[] = [];
-
-export function liveRows(): LiveRow[] {
-  return snapshot;
-}
 
 export function liveRow(userId: UserId): LiveRow | undefined {
   return rows.get(userId);
@@ -129,7 +124,9 @@ function mergeViewer(d: DeltaViewer): void {
 
 export function resetLive(): void {
   rows.clear();
-  snapshot = [];
+  // 保留中のフラッシュを捨てる: 直前 delta の totals/feed が rAF でクリア直後に
+  // 復活する(配信開始 = status 'live' と delta が近接する瞬間に起きる)のを防ぐ。
+  for (const k of Object.keys(pendingPatch)) delete (pendingPatch as Record<string, unknown>)[k];
   useLive.setState({
     version: 0,
     totals: EMPTY_TOTALS,
@@ -149,7 +146,6 @@ function scheduleFlush(patch: Partial<LiveState>): void {
   pendingFlush = true;
   requestAnimationFrame(() => {
     pendingFlush = false;
-    snapshot = Array.from(rows.values());
     const p = { ...pendingPatch, version: useLive.getState().version + 1 };
     for (const k of Object.keys(pendingPatch)) delete (pendingPatch as Record<string, unknown>)[k];
     useLive.setState(p);
@@ -157,29 +153,51 @@ function scheduleFlush(patch: Partial<LiveState>): void {
 }
 const pendingPatch: Partial<LiveState> = {};
 
-export function attachLive(): () => void {
+/**
+ * 「未フラッシュの値も含めた」現在値。ストアだけを読むと、同一フレーム内の
+ * 2通目の feed/alerts が1通目を無かったことにする(rAF コアレスの取りこぼし)。
+ */
+function effective<K extends keyof LiveState>(k: K): LiveState[K] {
+  return k in pendingPatch ? (pendingPatch as LiveState)[k] : useLive.getState()[k];
+}
+
+/**
+ * `lite` はモニター窓用 — MonitorView が消費するのは challenge / totals /
+ * sessionId だけなので、視聴者 Map のマージとフィード取り込みを丸ごと省く。
+ * モニター窓は backgroundThrottling が無効で常時フル稼働のため、ここを削ると
+ * 長時間配信での CPU / GC 負荷が視聴者数に比例して積み上がらなくなる。
+ */
+export function attachLive(opts?: { lite?: boolean }): () => void {
+  const lite = opts?.lite ?? false;
   const offLive = window.api.onLive((m: LiveMessage) => {
     switch (m.t) {
       case 'delta': {
+        if (lite) {
+          scheduleFlush({
+            totals: m.totals,
+            sessionId: m.sessionId,
+            ...(m.challenge ? ingestChallenge(m.challenge) : {}),
+          });
+          return;
+        }
         for (const v of m.viewers) mergeViewer(v);
-        const s = useLive.getState();
         scheduleFlush({
           totals: m.totals,
           sessionId: m.sessionId,
           deferred: m.deferred,
           ...(m.missions ? { missions: m.missions } : {}),
           ...(m.challenge ? ingestChallenge(m.challenge) : {}),
-          ...(m.alerts.length ? { alerts: [...m.alerts, ...s.alerts].slice(0, ALERT_CAP) } : {}),
+          ...(m.alerts.length ? { alerts: [...m.alerts, ...effective('alerts')].slice(0, ALERT_CAP) } : {}),
         });
         return;
       }
       case 'feed': {
-        const s = useLive.getState();
+        if (lite) return;
         // NEWEST FIRST. `m.items` arrives oldest-first within the tick, so it is
         // reversed before being placed ahead of everything already on screen —
         // index 0 is the most recent comment and renders at the top.
-        const nextFeed = [...m.items].reverse().concat(s.feed).slice(0, FEED_CAP);
-        scheduleFlush({ feed: nextFeed, droppedFeed: s.droppedFeed + m.dropped });
+        const nextFeed = [...m.items].reverse().concat(effective('feed')).slice(0, FEED_CAP);
+        scheduleFlush({ feed: nextFeed, droppedFeed: effective('droppedFeed') + m.dropped });
         return;
       }
       case 'status':

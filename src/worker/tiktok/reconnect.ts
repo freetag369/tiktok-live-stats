@@ -15,8 +15,11 @@ export function backoffMs(attempt: number): number {
 }
 
 function errName(e: unknown): string {
+  // err.name を優先: constructor.name はミニファイでマングルされうるし、
+  // 素の Error では常に 'Error' が返って name のカスタム値を隠してしまう。
   const err = e as { name?: string; constructor?: { name?: string } } | null;
-  return err?.constructor?.name || err?.name || '';
+  const own = typeof err?.name === 'string' && err.name !== 'Error' ? err.name : '';
+  return own || err?.constructor?.name || err?.name || '';
 }
 
 function errMessage(e: unknown): string {
@@ -43,7 +46,9 @@ export function classify(e: unknown, attempt: number): RetryDecision {
   const name = errName(e);
   const msg = errMessage(e);
 
-  if (name === 'SignatureRateLimitError' || /rate limit|too many connections|429/i.test(msg)) {
+  // 数値コードは単語境界で照合する: room id 等に「429」「402」を含むだけの
+  // メッセージで誤分類(最悪 giveUp = 恒久停止)しないように。
+  if (name === 'SignatureRateLimitError' || /rate limit|too many connections|\b429\b/i.test(msg)) {
     const wait = retryAfterMs(e);
     const scope: 'minute' | 'hour' | 'day' | 'unknown' = /day/i.test(msg)
       ? 'day'
@@ -56,11 +61,13 @@ export function classify(e: unknown, attempt: number): RetryDecision {
     return { action: 'rateLimited', delayMs: wait ?? 60_000, scope };
   }
 
-  if (name === 'PremiumFeatureError' || /402|premium/i.test(msg)) {
+  if (name === 'PremiumFeatureError' || /\b402\b|premium/i.test(msg)) {
     return { action: 'giveUp', reason: '有料プラン限定の機能が要求されました。' };
   }
 
-  if (name === 'UserOfflineError' || /offline|not.*live|isn't live/i.test(msg)) {
+  // `not.*live` は "could not resolve live stream" のような別種のメッセージにも
+  // 一致してしまう。ライブ状態の否定表現に限定する。
+  if (name === 'UserOfflineError' || /offline|is not (currently )?live|isn't live|not live now/i.test(msg)) {
     return { action: 'waitOffline', reason: '配信が始まっていません。' };
   }
 

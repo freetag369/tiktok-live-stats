@@ -62,6 +62,7 @@ export class LiveAdapter implements TikTokAdapter {
   private norm: NormalizeCtx = makeNormalizeCtx();
   private abort: AbortController | null = null;
   private stopped = false;
+  private looping = false;
   private attempt = 0;
   private quota: QuotaInfo | null = null;
   private apiKey: string | undefined;
@@ -83,7 +84,16 @@ export class LiveAdapter implements TikTokAdapter {
 
     this.lastOpts = o;
     await this.refreshQuota();
-    void this.loop(o);
+    // fire-and-forget だが、reject を放置すると unhandled rejection がプロセス
+    // 全体のクラッシュハンドラに落ちて DB ごと閉じられる。必ず status に変換する。
+    void this.loop(o).catch((e) => this.fail(e));
+  }
+
+  private fail(e: unknown): void {
+    this.deps.log?.('error', String((e as Error)?.message ?? e));
+    if (!this.stopped) {
+      this.sink.status({ state: 'error', message: '接続処理で予期しないエラーが発生しました。', fatal: false });
+    }
   }
 
   async disconnect(reason: string): Promise<void> {
@@ -97,6 +107,7 @@ export class LiveAdapter implements TikTokAdapter {
       } catch {
         /* already gone */
       }
+      c.removeAllListeners();
     }
   }
 
@@ -107,8 +118,12 @@ export class LiveAdapter implements TikTokAdapter {
 
   private async refreshQuota(): Promise<QuotaInfo | null> {
     try {
+      // タイムアウト必須: waitForLive がループ先頭で毎回 await するため、Euler が
+      // ハングするとオフライン待機ごと無期限に固まる。abort にも連動させる。
+      const signals = [AbortSignal.timeout(10_000), this.abort?.signal].filter(Boolean) as AbortSignal[];
       const res = await fetch(EULER_RATE_LIMIT_URL, {
         headers: this.apiKey ? { 'X-Api-Key': this.apiKey, Authorization: `Bearer ${this.apiKey}` } : {},
+        signal: AbortSignal.any(signals),
       });
       if (!res.ok) return this.quota;
       const j = (await res.json()) as Record<string, any>;
@@ -135,6 +150,19 @@ export class LiveAdapter implements TikTokAdapter {
   }
 
   private async loop(o: ConnectOptions): Promise<void> {
+    // connect 失敗時の catch 内 disconnect() が DISCONNECTED を発火し、そこから
+    // reconnectSoon() → 2本目の loop() が起動して増殖する事故があった。ハンドラ側の
+    // conn 同一性ガードに加え、loop 自体を単一実行にする。
+    if (this.looping) return;
+    this.looping = true;
+    try {
+      await this.loopInner(o);
+    } finally {
+      this.looping = false;
+    }
+  }
+
+  private async loopInner(o: ConnectOptions): Promise<void> {
     while (!this.stopped) {
       this.attempt++;
       this.sink.status({ state: 'connecting', uniqueId: o.uniqueId, attempt: this.attempt });
@@ -175,6 +203,9 @@ export class LiveAdapter implements TikTokAdapter {
         } catch {
           /* ignore */
         }
+        // 捨てた接続のリスナーを残すと、ゾンビ接続からのコールバックが
+        // 二重取り込み・二重再接続の火種になる。
+        conn.removeAllListeners();
         if (this.stopped) return;
 
         const d = classify(e, this.attempt);
@@ -277,13 +308,17 @@ export class LiveAdapter implements TikTokAdapter {
 
     conn.on(ControlEvent.DISCONNECTED, () => {
       this.deps.log?.('disconnected');
+      // 捨て済み接続(connect 失敗時の catch 内 disconnect 等)からの発火で
+      // 並列の再接続 loop を起動しない。現役の接続だけが再接続を駆動する。
+      if (conn !== this.conn) return;
       if (this.stopped) return;
       // Reconnects must not replay TikTok's buffered backlog.
       this.sink.status({ state: 'reconnecting', attempt: 1, nextAttemptMs: Date.now() + 5000 });
-      void this.reconnectSoon();
+      void this.reconnectSoon().catch((e) => this.fail(e));
     });
 
     conn.on(ControlEvent.DECODED_DATA, (protoType: string, decoded: unknown) => {
+      if (conn !== this.conn) return; // ゾンビ接続からの二重取り込み防止
       const wrapper = decoded as { type?: string; data?: unknown } | undefined;
       const type = wrapper?.type ?? protoType;
       const payload = (wrapper && 'data' in wrapper ? wrapper.data : decoded) as Record<string, any>;
@@ -305,6 +340,6 @@ export class LiveAdapter implements TikTokAdapter {
     if (!o || this.stopped) return;
     if (!(await this.sleep(5000))) return;
     // processInitialData is forced off: the backlog has already been recorded.
-    void this.loop({ ...o, processInitialData: false });
+    await this.loop({ ...o, processInitialData: false });
   }
 }

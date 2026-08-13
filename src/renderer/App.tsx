@@ -26,7 +26,10 @@ const NAV: Array<[Route, string]> = [
 export function App(): React.JSX.Element {
   const route = useUi((s) => s.route);
   const toasts = useUi((s) => s.toasts);
-  const { status, workerState } = useLive();
+  // version を購読しない — セレクタなしだと delta のたび(4〜6Hz)にルートツリー
+  // 全体が再レンダーされる。status/workerState は状態遷移時しか変わらない。
+  const status = useLive((s) => s.status);
+  const workerState = useLive((s) => s.workerState);
 
   useEffect(() => {
     const off = attachLive();

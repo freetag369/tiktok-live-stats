@@ -1,15 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChallengeLogEntry, ViewerFilter, ViewerTableRow } from '@shared/dto';
 import type { FeedItem } from '@shared/ipc';
 import { compact, diamondsToJpy, num } from '@shared/format';
 import { formatDurationJa, relativeDayJa } from '@shared/time';
-import { rpc, useQuery, useDebounced } from '../ipc/client';
+import { rpc, rpcFire, useQuery, useDebounced } from '../ipc/client';
 import { dismissAlert, liveRow, setChallenge, useLive } from '../state/liveStore';
-import { openViewer, setSort, useUi } from '../state/uiStore';
+import { openViewer, setSettings, setSort, toast, useUi } from '../state/uiStore';
 import { Avatar, Bar, Observed, TierBadge, useStickyTop } from '../components/common';
 import { MemoButton } from '../components/Memo';
+import type { ConfirmOptions } from '../components/ConfirmDialog';
+import { useConfirm } from '../components/ConfirmDialog';
 import { ObservedLegend, ViewerTable } from '../components/ViewerTable';
 import { useChallengeSe } from '../lib/useChallengeSe';
+
+/** data 未着時に毎レンダー新しい [] を作らないための安定参照。 */
+const EMPTY_ROWS: ViewerTableRow[] = [];
 
 const FILTERS: Array<{ k: ViewerFilter; label: string }> = [
   { k: 'all', label: 'すべて' },
@@ -21,7 +26,13 @@ const FILTERS: Array<{ k: ViewerFilter; label: string }> = [
 ];
 
 export function LiveDashboard(): React.JSX.Element {
-  const { sessionId, totals, feed, alerts, missions, droppedFeed, version } = useLive();
+  const sessionId = useLive((s) => s.sessionId);
+  const totals = useLive((s) => s.totals);
+  const feed = useLive((s) => s.feed);
+  const alerts = useLive((s) => s.alerts);
+  const missions = useLive((s) => s.missions);
+  const droppedFeed = useLive((s) => s.droppedFeed);
+  const version = useLive((s) => s.version);
   const { sort, desc, filter, search, settings, showJoins, showRecord, memoNonce } = useUi();
   const debouncedSearch = useDebounced(search, 250);
   const visibleFeed = useMemo(() => (showJoins ? feed : feed.filter((f) => f.k !== 'j')), [feed, showJoins]);
@@ -30,27 +41,25 @@ export function LiveDashboard(): React.JSX.Element {
 
   // The database is the source of truth. Live deltas fill the gap between
   // refreshes so the numbers never appear to go backwards mid-stream.
+  //
+  // リフレッシュは壁時計8秒 — version 連動(≈2秒)だと、全期間 viewer テーブルを
+  // 走査するこのクエリが取り込みと同じワーカースレッドを DB サイズ比例で食い続ける。
+  // 8秒の空白は下の liveRow マージが埋めるので見た目は変わらない。
+  // ユーザー操作(ソート・絞り込み・検索・メモ)は deps に残るため即時反映。
+  const [dbTick, setDbTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setDbTick((t) => t + 1), 8000);
+    return () => window.clearInterval(id);
+  }, []);
   const { data } = useQuery(
     'q.viewerTable',
     { sessionId, sort, desc, filter, search: debouncedSearch, limit: 5000 },
-    [sessionId, sort, desc, filter, debouncedSearch, memoNonce, Math.floor(version / 6)]
+    [sessionId, sort, desc, filter, debouncedSearch, memoNonce, dbTick]
   );
 
-  const rows = useMemo<ViewerTableRow[]>(() => {
-    const base = data?.rows ?? [];
-    return base.map((r) => {
-      const l = liveRow(r.userId);
-      if (!l) return r;
-      return {
-        ...r,
-        likesCurrent: Math.max(r.likesCurrent, l.likes),
-        commentsCurrent: Math.max(r.commentsCurrent, l.comments),
-        diamondsCurrent: Math.max(r.diamondsCurrent, l.diamonds),
-        heartMeCurrent: Math.max(r.heartMeCurrent, l.heartMe),
-        presentNow: r.presentNow || l.lastSeenMs > 0,
-      };
-    });
-  }, [data, version]);
+  // live 値のマージは ViewerTable の仮想化行(見えている ~30 行)の描画内で行う。
+  // 以前はここで version(rAF レート)ごとに最大 5000 行を再マップしていた。
+  const rows = data?.rows ?? EMPTY_ROWS;
 
   const jpy = settings?.diamondToJpy ?? 0.5;
 
@@ -78,6 +87,7 @@ export function LiveDashboard(): React.JSX.Element {
               item={f}
               showAvatars={settings?.loadAvatars ?? true}
               showRecord={showRecord}
+              liveTick={showRecord ? Math.floor(version / 6) : 0}
             />
           ))}
           {visibleFeed.length === 0 ? <div className="empty">配信を開始するとコメントが流れます。</div> : null}
@@ -142,6 +152,7 @@ export function LiveDashboard(): React.JSX.Element {
           onSort={setSort}
           onPick={openViewer}
           showAvatars={settings?.loadAvatars ?? true}
+          liveTick={version}
         />
         <footer style={{ padding: '5px 10px', borderTop: '1px solid var(--line)' }}>
           <ObservedLegend />
@@ -272,6 +283,7 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   follow: '👤',
   like: '💗',
   'stock-full': '💚',
+  comment: '💬',
   gift: '🎁',
   roulette: '🎰',
   achieved: '🏁',
@@ -308,6 +320,8 @@ function logWhat(e: ChallengeLogEntry): string {
     }
     case 'stock-full':
       return 'いいねストック満杯(妨害)';
+    case 'comment':
+      return e.commentKeyword ? `コメント「${e.commentKeyword}」(妨害)` : 'コメント(妨害)';
     case 'gift': {
       const name = e.giftName ?? 'ギフト';
       const cnt = e.giftCount && e.giftCount > 1 ? ` ×${num(e.giftCount)}` : '';
@@ -315,7 +329,10 @@ function logWhat(e: ChallengeLogEntry): string {
       return `${name}${cnt}${dia}`;
     }
     case 'roulette': {
-      const name = e.giftName ? `(${e.giftName})` : '';
+      // ルーレットは複数登録できるので、どれが回ったかを設定の表示名で示す。
+      // 表示名が空の行は従来どおり実ギフト名で照合できるようにする。
+      const label = e.rouletteLabel || e.giftName;
+      const name = label ? `(${label})` : '';
       return `ルーレット 出目${e.amount > 0 ? '+' : ''}${num(e.amount)}${name}`;
     }
     case 'achieved':
@@ -396,8 +413,10 @@ function ChallengeCard(): React.JSX.Element | null {
 
   useEffect(() => {
     if (!enabled) return;
-    void rpc('challenge.get', undefined).then(setChallenge);
-    void rpc('monitor.status', undefined).then((r) => setMonitorOpen(r.open));
+    void rpc('challenge.get', undefined).then(setChallenge).catch(() => undefined); // delta 経由で回復する
+    void rpc('monitor.status', undefined)
+      .then((r) => setMonitorOpen(r.open))
+      .catch(() => undefined); // onMonitorState 購読で回復する
     return window.api.onMonitorState((s) => setMonitorOpen(s.open));
   }, [enabled]);
 
@@ -417,6 +436,38 @@ function ChallengeCard(): React.JSX.Element | null {
   // 経路を問わず必ず増えるうえ、リングバッファから押し出されても取りこぼさない。
   const prevPresses = useRef<number | null>(null);
   const [hit, setHit] = useState(0);
+
+  // 企画が飛ぶ操作(リセット/開始し直し)と配信中の一時停止は一度確認する。
+  const [confirmNode, confirm] = useConfirm();
+
+  // 起床時刻(何時起き)。入力中は自分の draft を出す — cfg.set → cfg.get の往復で
+  // カーソル下の値が巻き戻らないようにするため。
+  const [wakeDraft, setWakeDraft] = useState<string | null>(null);
+  const wakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (wakeTimer.current) clearTimeout(wakeTimer.current);
+    },
+    [],
+  );
+
+  /**
+   * challenge は cfg.set で**丸ごと**置き換わる(main の浅いマージはトップレベルの
+   * キーまで)。かつ、この窓の store は設定のプッシュを購読していない(購読して
+   * いるのはモニター窓だけ)ので古いことがある。よって送る直前に cfg.get で全量を
+   * 取り直し、wakeTime だけ差し替える read-modify-write にする。
+   */
+  const commitWake = useCallback(async (v: string): Promise<void> => {
+    try {
+      const cur = await rpc('cfg.get', undefined);
+      await rpc('cfg.set', { challenge: { ...cur.challenge, wakeTime: v === '' ? null : v } });
+      setSettings(await rpc('cfg.get', undefined));
+    } catch (e) {
+      toast({ level: 'error', msgJa: (e as Error).message });
+    } finally {
+      setWakeDraft(null);
+    }
+  }, []);
   useEffect(() => {
     const p = challenge?.stats.presses;
     if (p == null) return;
@@ -440,8 +491,19 @@ function ChallengeCard(): React.JSX.Element | null {
   const done = Math.max(0, initial - value);
   const elapsedMs =
     challenge?.startedMs != null ? (challenge.achievedMs ?? Date.now()) - challenge.startedMs : null;
+  // PUSH/開始/停止が無言で失敗すると配信事故になる — 必ずトーストへ落とす。
   const call = (m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press') =>
-    void rpc(m, undefined).then(setChallenge);
+    void rpc(m, undefined)
+      .then(setChallenge)
+      .catch((e: Error) => toast({ level: 'error', msgJa: `チャレンジ操作に失敗しました: ${e.message}` }));
+  // 押し間違いは配信中だと取り返しがつかない(値も統計もログも戻せない)。
+  const callConfirmed = (m: 'challenge.start' | 'challenge.stop' | 'challenge.reset', o: ConfirmOptions) =>
+    void confirm(o).then((ok) => {
+      if (ok) call(m);
+    });
+  // 一度でも開始していれば途中の値と統計がある。reset だけが startedMs を消すので、
+  // これがそのまま「失うものがあるか」の判定になる(バッジの一時停止中と同じ条件)。
+  const hasRun = challenge?.startedMs != null;
 
   return (
     <div className={`card challenge-card${running || achieved ? ' stuck' : ''}${achieved ? ' cleared' : ''}`}>
@@ -465,7 +527,7 @@ function ChallengeCard(): React.JSX.Element | null {
       {/* 進行中なのにモニターが閉じている = 背面モニターに演出が何も出ていない。
           気づかないまま企画が進むと配信事故になるので目立たせる。 */}
       {running && !monitorOpen ? (
-        <button className="ch-warn" onClick={() => void rpc('monitor.open', undefined)}>
+        <button className="ch-warn" onClick={() => rpcFire('monitor.open', undefined, 'モニターを開く')}>
           モニター未表示 — 演出が出ていません（クリックで開く）
         </button>
       ) : null}
@@ -515,21 +577,85 @@ function ChallengeCard(): React.JSX.Element | null {
       </button>
 
       <div className="row wrap" style={{ marginTop: 8 }}>
+        {/* 何時起き。入力途中や不正値では DOM の value が必ず '' になるので、
+            '' は自動保存しない(クリアの確定は onBlur だけが行う)。 */}
+        {settings.challenge.wakeEnabled ? (
+          <label
+            className="row"
+            style={{ gap: 6 }}
+            title="起きた時刻。モニターの左下に「起床 5:30 / 18時間42分」と出ます"
+          >
+            <span className="faint">起床</span>
+            <input
+              type="time"
+              value={wakeDraft ?? settings.challenge.wakeTime ?? ''}
+              onChange={(e) => {
+                const v = e.target.value;
+                setWakeDraft(v);
+                if (wakeTimer.current) clearTimeout(wakeTimer.current);
+                if (v === '') return;
+                wakeTimer.current = setTimeout(() => void commitWake(v), 600);
+              }}
+              onBlur={() => {
+                if (wakeTimer.current) clearTimeout(wakeTimer.current);
+                if (wakeDraft === null) return;
+                if (wakeDraft === (settings.challenge.wakeTime ?? '')) {
+                  setWakeDraft(null);
+                  return;
+                }
+                void commitWake(wakeDraft);
+              }}
+            />
+          </label>
+        ) : null}
         {running ? (
-          <button className="btn small" onClick={() => call('challenge.stop')}>
+          <button
+            className="btn small"
+            onClick={() =>
+              callConfirmed('challenge.stop', {
+                title: 'カウントダウンを一時停止しますか？',
+                message: `残り ${num(value)} は保持されます。止まっている間は PUSH もフォロー・ギフト・いいねも数字に反映されません。`,
+                confirmLabel: '一時停止する',
+              })
+            }
+          >
             一時停止
           </button>
         ) : (
-          <button className="btn small primary" onClick={() => call('challenge.start')}>
+          <button
+            className="btn small primary"
+            onClick={() =>
+              hasRun
+                ? callConfirmed('challenge.start', {
+                    title: '最初から始め直しますか？',
+                    message: `いまの残り ${num(value)} と進捗・統計は引き継がれません。初期値 ${num(initial)} から新しく始めます。`,
+                    detail: '一時停止の続きから再開する方法はありません。',
+                    confirmLabel: '最初から始める',
+                    danger: true,
+                  })
+                : call('challenge.start')
+            }
+          >
             開始
           </button>
         )}
-        <button className="btn small" onClick={() => call('challenge.reset')}>
+        <button
+          className="btn small"
+          onClick={() =>
+            callConfirmed('challenge.reset', {
+              title: 'カウントダウンをリセットしますか？',
+              message: `残り ${num(value)} と、これまでの進捗・統計・ログがすべて消えて初期値 ${num(initial)} に戻ります。`,
+              detail: '元に戻せません。',
+              confirmLabel: 'リセットする',
+              danger: true,
+            })
+          }
+        >
           リセット
         </button>
         <button
           className="btn small"
-          onClick={() => void rpc(monitorOpen ? 'monitor.close' : 'monitor.open', undefined)}
+          onClick={() => rpcFire(monitorOpen ? 'monitor.close' : 'monitor.open', undefined, 'モニターの開閉')}
         >
           {monitorOpen ? 'モニターを閉じる' : 'モニターを開く'}
         </button>
@@ -571,6 +697,11 @@ function ChallengeCard(): React.JSX.Element | null {
               💚 <b>+{num(challenge.stats.likeStockUp)}</b>
             </span>
           ) : null}
+          {challenge.stats.commentUp > 0 ? (
+            <span className="cs up">
+              💬 <b>+{num(challenge.stats.commentUp)}</b>
+            </span>
+          ) : null}
           {challenge.stats.giftUp > 0 ? (
             <span className="cs up">
               🎁 <b>+{num(challenge.stats.giftUp)}</b>
@@ -589,8 +720,11 @@ function ChallengeCard(): React.JSX.Element | null {
         {settings.challenge.likeEvery > 0
           ? ` ・ いいね${num(settings.challenge.likeEvery)}件で +${num(settings.challenge.likeStep)}`
           : ''}
+        {settings.challenge.commentRules.length > 0 ? ' ・ 指定コメントで加算(妨害)' : ''}
         {settings.challenge.hotkey ? ` ・ ホットキー ${settings.challenge.hotkey}` : ''}
       </div>
+
+      {confirmNode}
     </div>
   );
 }
@@ -680,7 +814,12 @@ function Record({ f }: { f: FeedItem }) {
   );
 }
 
-function FeedRow({
+/**
+ * memo 必須 — フィードは最大300行を 4〜6Hz で親が再レンダーする。アイテムは
+ * 安定参照なので、memo で新着行だけの差分描画に落ちる。「記録」行は liveRow()
+ * の生データを読むため、粗い liveTick(約1.5秒刻み)で意図的に memo を破る。
+ */
+const FeedRow = memo(function FeedRow({
   item: f,
   showAvatars,
   showRecord,
@@ -688,6 +827,8 @@ function FeedRow({
   item: FeedItem;
   showAvatars: boolean;
   showRecord: boolean;
+  /** 値は未使用。showRecord 時に live 数字を追従させるための世代カウンタ。 */
+  liveTick?: number;
 }) {
   const rec = showRecord ? <Record f={f} /> : null;
   if (f.k === 'c') {
@@ -767,4 +908,4 @@ function FeedRow({
       </div>
     </div>
   );
-}
+});

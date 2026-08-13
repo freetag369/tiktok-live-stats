@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { AdapterStatus } from '@shared/events';
 import { TIER_LABEL_JA } from '@shared/scoring';
 
@@ -26,6 +26,13 @@ export const Avatar = memo(function Avatar({
   enabled?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
+  // URL が更新されたら失敗ラッチを解除 — 同じ userId のアバター URL が差し替わっ
+  // ても永久にプレースホルダのまま、を防ぐ。
+  const prevUrl = useRef(url);
+  if (prevUrl.current !== url) {
+    prevUrl.current = url;
+    if (failed) setFailed(false);
+  }
   const style = { width: size, height: size, fontSize: Math.round(size * 0.42) };
   if (!enabled || !url || failed) {
     return (
@@ -121,21 +128,29 @@ export function Bar({ value, target, done, pace }: { value: number; target: numb
   );
 }
 
-/** Scroll container that sticks to the top unless the user has scrolled away. */
-export function useStickyTop(dep: unknown): React.RefObject<HTMLDivElement | null> {
-  const ref = useRef<HTMLDivElement>(null);
+/**
+ * Scroll container that sticks to the top unless the user has scrolled away.
+ * callback ref を返す: 対象が条件付きレンダー(ログが空の間は描画されない等)でも、
+ * 生えた瞬間に scroll リスナーが付く。マウント時 effect + `ref.current` 方式だと
+ * 後から生えた要素にはリスナーが一生付かず、追従停止が効かない。
+ */
+export function useStickyTop(dep: unknown): (el: HTMLDivElement | null) => void {
+  const elRef = useRef<HTMLDivElement | null>(null);
   const stick = useRef(true);
-  useEffect(() => {
-    const el = ref.current;
+  const cleanup = useRef<(() => void) | null>(null);
+  const setRef = useCallback((el: HTMLDivElement | null) => {
+    cleanup.current?.();
+    cleanup.current = null;
+    elRef.current = el;
     if (!el) return;
     const onScroll = () => {
       stick.current = el.scrollTop < 24;
     };
     el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    cleanup.current = () => el.removeEventListener('scroll', onScroll);
   }, []);
   useEffect(() => {
-    if (stick.current && ref.current) ref.current.scrollTop = 0;
+    if (stick.current && elRef.current) elRef.current.scrollTop = 0;
   }, [dep]);
-  return ref;
+  return setRef;
 }

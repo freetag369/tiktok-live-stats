@@ -1,31 +1,44 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
+  ChallengeCommentRule,
   ChallengeConfig,
   ChallengeGiftClip,
   ChallengeGiftRule,
   ChallengeRouletteConfig,
+  RouletteSoundConfig,
   ChallengeRouletteSegment,
   ChallengeSeSlot,
   ChallengeTestEffectSpec,
+  FanStampConfig,
   GiftBandFxConfig,
   GiftFxBand,
+  GiftRepeatFxConfig,
 } from '@shared/dto';
 import {
   CHALLENGE_MINI_IDS,
   CHALLENGE_SE_SLOTS,
+  COMMENT_RULES_MAX,
   DEFAULT_CHALLENGE,
+  DEFAULT_FAN_STAMP,
   DEFAULT_GIFT_BAND_FX,
+  DEFAULT_GIFT_REPEAT_FX,
+  GIFT_FX_FREEZE_MAX_TOTAL_MS,
+  GIFT_FX_REPEAT_MAX,
+  GIFT_FX_REPEAT_MAX_MS,
+  GIFT_FX_REPEAT_MIN_MS,
   DEFAULT_GIFT_CLIPS,
   DEFAULT_MINI_FX,
   DEFAULT_ROULETTE,
   DEFAULT_SE_VOLUMES,
+  ROULETTE_LABEL_MAX,
   ROULETTE_SEGMENTS_MAX,
+  ROULETTES_MAX,
   effectiveSeVolume,
 } from '@shared/challenge';
-import { rpc, useQuery } from '../ipc/client';
+import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { setSettings, toast } from '../state/uiStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
-import { BAND_BGM, playBandBgm, type BgmHandle } from '../lib/bgm';
+import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
 import { FX_CLIPS } from '../lib/fx';
 
 /** 効果音スロットの表示名(設定画面の行ラベル)。 */
@@ -35,13 +48,44 @@ const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   like: 'いいね妨害',
   'gauge-full': 'いいねゲージ満タン(着弾)',
   'stock-full': 'いいねストック満杯(着弾)',
+  comment: 'コメント妨害(指定コメント)',
   'gift-t1': 'ギフト(小)',
   'gift-t2': 'ギフト(中)',
   'gift-t3': 'ギフト(大)',
   'gift-t4': 'ギフト(特大)',
   roulette: 'ルーレット回転',
+  'roulette-near': 'ルーレット 止まりそう(あと1個の溜め)',
+  'roulette-kick': 'ルーレット キック(フェイク停止からの一撃)',
   'roulette-hit': 'ルーレット確定',
   achieved: '達成',
+};
+
+/**
+ * 各スロットが「どの瞬間に鳴るか」の1行説明(設定画面でラベルの下に出る)。
+ * 演出の名前だけでは着弾チェーンのどこで鳴るのかが読み取れず、目的の行を
+ * 探せないという報告があったので、鳴る瞬間を行そのものに書いてある。
+ *
+ * 「(モニター表示中のみ)」の5つは useChallengeSe の slotFor が null を返すか
+ * 対応する effect kind がそもそも無く、MonitorView の着弾/停止タイマーからしか
+ * 鳴らないもの — ライブ画面だけで使っていると無音になる。
+ */
+const SE_SLOT_HINTS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
+  press: 'ボタンを押した瞬間',
+  follow: 'フォロー妨害で数字が増えた瞬間',
+  like: 'いいね妨害の +N が流れる瞬間',
+  'gauge-full': 'ゲージが満タンになり、弾が7セグに着弾して数字が増える瞬間(モニター表示中のみ)',
+  'stock-full':
+    'ドットが全部埋まったあと、カットイン(約5秒)が終わって7セグに +N が乗る瞬間(モニター表示中のみ)',
+  comment: 'コメント応援で数字が減った瞬間',
+  'gift-t1': 'ダイヤ 1〜99 のギフトを受け取った瞬間',
+  'gift-t2': 'ダイヤ 100〜999 のギフトを受け取った瞬間',
+  'gift-t3': 'ダイヤ 1000〜4999 のギフトを受け取った瞬間',
+  'gift-t4': 'ダイヤ 5000〜 のギフトを受け取った瞬間',
+  roulette: 'リールが回り始める瞬間',
+  'roulette-near': '当たりの1つ手前に着いて溜めに入る瞬間(モニター表示中のみ)',
+  'roulette-kick': 'フェイク停止から蹴り出される瞬間。この演出が出たときだけ(モニター表示中のみ)',
+  'roulette-hit': 'リールが止まって出目が確定する瞬間(モニター表示中のみ)',
+  achieved: '目標を達成して CLEAR が出る瞬間',
 };
 
 /** キー入力を Electron accelerator 文字列へ。Esc でクリア、修飾キー単独は無視。 */
@@ -68,12 +112,15 @@ function hotkeyFromEvent(e: React.KeyboardEvent): string | null {
 
 let ruleSeq = 0;
 let clipSeq = 0;
+let rlSeq = 0;
+let crSeq = 0;
 
 /** 簡易演出の表示名。id は shared/challenge.ts の CHALLENGE_MINI_IDS と一致させる。 */
 const MINI_LABELS: Record<string, string> = {
   hammer: 'ピコピコハンマー(叩く)',
   stamp: 'ハンコ(+N がドン)',
   shock: '集中線(最軽量)',
+  panic: '絶望カットイン(写真)',
 };
 
 /**
@@ -119,6 +166,8 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
       return null;
     case 'stock-full':
       return { kind: 'stock-full' };
+    case 'comment':
+      return { kind: 'comment' };
     case 'gift-t1':
       return { kind: 'gift', diamonds: 1 };
     case 'gift-t2':
@@ -128,9 +177,13 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
     case 'gift-t4':
       return { kind: 'gift', diamonds: 5000 };
     case 'roulette':
+    case 'roulette-near':
     case 'roulette-hit':
-      // 1回のスピンで回転開始音と確定音の両方が確認できる。
+      // 1回のスピンで回転開始音・止まりそう・確定音がまとめて確認できる。
       return { kind: 'roulette' };
+    case 'roulette-kick':
+      // キック音はパターン3でしか鳴らないので、演出を狙い撃ちで再生する。
+      return { kind: 'roulette', pattern: 'kick' };
     case 'achieved':
       return { kind: 'achieved' };
   }
@@ -169,7 +222,7 @@ function MonitorTestBtn({
   );
 }
 
-type Tab = 'basic' | 'se' | 'fx' | 'roulette' | 'gifts';
+type Tab = 'basic' | 'se' | 'fx' | 'roulette' | 'gifts' | 'comment' | 'helper';
 
 const TABS: Array<[Tab, string]> = [
   ['basic', '基本設定'],
@@ -177,6 +230,8 @@ const TABS: Array<[Tab, string]> = [
   ['fx', '演出'],
   ['roulette', 'ルーレット'],
   ['gifts', 'ギフト増減'],
+  ['comment', 'コメント'],
+  ['helper', 'お助け'],
 ];
 
 /**
@@ -196,11 +251,16 @@ export function Challenge(): React.JSX.Element {
 
   useEffect(() => {
     // マウント時に必ず最新を取り直す — 設定画面での変更後でも古い draft を種にしない。
-    void rpc('cfg.get', undefined).then((s) => {
-      setSettings(s);
-      setDraft(s.challenge);
-    });
-    void rpc('monitor.status', undefined).then((r) => setMonitorOpen(r.open));
+    // 失敗すると draft が null のまま「読み込み中…」で固着するため、必ず知らせる。
+    void rpc('cfg.get', undefined)
+      .then((s) => {
+        setSettings(s);
+        setDraft(s.challenge);
+      })
+      .catch((e: Error) => toast({ level: 'error', msgJa: `設定の読み込みに失敗しました: ${e.message}` }));
+    void rpc('monitor.status', undefined)
+      .then((r) => setMonitorOpen(r.open))
+      .catch(() => undefined); // onMonitorState 購読で回復する
     return window.api.onMonitorState((s) => setMonitorOpen(s.open));
   }, []);
 
@@ -216,7 +276,10 @@ export function Challenge(): React.JSX.Element {
     setBusy(true);
     try {
       // challenge だけを送る — 他の設定(APIキー等)は main が保持している値のまま。
-      await rpc('cfg.set', { challenge: draft });
+      // wakeTime だけは直前に取り直す — この画面ではなくライブ画面が持つ値なので、
+      // 設定画面を開いたまま配信中に起床時刻を入れられると mount 時の draft で潰れる。
+      const cur = await rpc('cfg.get', undefined);
+      await rpc('cfg.set', { challenge: { ...draft, wakeTime: cur.challenge.wakeTime } });
       const s = await rpc('cfg.get', undefined);
       setSettings(s);
       // 検証(clamp)後の値を draft に反映する — 保存されなかった値を画面に残さない。
@@ -261,7 +324,7 @@ export function Challenge(): React.JSX.Element {
         <div className="spacer" />
         <button
           className="btn small"
-          onClick={() => void rpc(monitorOpen ? 'monitor.close' : 'monitor.open', undefined)}
+          onClick={() => rpcFire(monitorOpen ? 'monitor.close' : 'monitor.open', undefined, 'モニターの開閉')}
         >
           {monitorOpen ? 'モニターを閉じる' : 'モニターを開く'}
         </button>
@@ -275,7 +338,7 @@ export function Challenge(): React.JSX.Element {
         <span>有効にする(ライブ画面に操作カードが出ます)</span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
-        「0まで寝ない」型の企画: ボタンで数字が減り、フォロー・いいねで増え(妨害)、ギフトで増減します。
+        「0まで寝ない」型の企画: ボタンで数字が減り、フォロー・いいねで増え(妨害)、ギフトで増減します。指定コメントの妨害は「コメント」タブで設定できます。
         各演出の「▶」を押すと、モニターウィンドウ(視聴者に見せる画面)でその演出を実演再生できます。
       </div>
 
@@ -295,10 +358,17 @@ export function Challenge(): React.JSX.Element {
             <MiniFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftClipsSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftBandFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+            <GiftRepeatFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
           </>
         ) : null}
         {tab === 'roulette' ? <RouletteSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} /> : null}
         {tab === 'gifts' ? <GiftRulesSection cfg={draft} onPatch={patch} /> : null}
+        {tab === 'comment' ? (
+          <CommentRulesSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+        ) : null}
+        {tab === 'helper' ? (
+          <HelperSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+        ) : null}
       </div>
     </div>
   );
@@ -452,6 +522,18 @@ function BasicSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
       <div className="faint" style={{ fontSize: 11, marginLeft: 22 }}>
         枠付きの普通のウィンドウで開き、移動やサイズ変更ができます。OBSで一部だけ映したいときや、同じ画面で作業しながら使うときに。
       </div>
+      <label className="row" style={{ marginTop: 8, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={cfg.wakeEnabled}
+          onChange={(e) => onPatch({ wakeEnabled: e.target.checked })}
+        />
+        <span>「何時起き」をモニターの左下に出す</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22 }}>
+        起きた時刻はライブ画面の操作カード(開始ボタンの横)で設定します。企画の途中でも変えられます。表示は「起床
+        5:30 / 18時間42分」。
+      </div>
       <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
         市販の「USB押しボタン」はキーボードとして認識されます。ボタンが送るキーを上の欄で押して登録してください。
         アプリにフォーカスが無くても反応します。
@@ -503,8 +585,14 @@ function SoundSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
               const off = cfg.seSounds[slot] === 'off';
               return (
                 <div key={slot} className="row" style={{ gap: 6, alignItems: 'center' }}>
-                  <span className="faint" style={{ fontSize: 11, minWidth: 76 }}>
-                    {SE_SLOT_LABELS[slot]}
+                  <span style={{ flex: '0 0 240px', minWidth: 0, fontSize: 11 }}>
+                    <span style={{ display: 'block' }}>{SE_SLOT_LABELS[slot]}</span>
+                    <span
+                      className="faint"
+                      style={{ display: 'block', fontSize: 10, lineHeight: 1.25 }}
+                    >
+                      {SE_SLOT_HINTS[slot]}
+                    </span>
                   </span>
                   <select
                     style={{ flex: 1, minWidth: 0 }}
@@ -569,7 +657,9 @@ function SoundSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
         </>
       ) : null}
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
-        モニターを開いているときはモニター側で、閉じているときはライブ画面側で鳴ります。
+        音はモニターを開いているときはモニター側で、閉じているときはライブ画面側で鳴ります。
+        ただし各行に「モニター表示中のみ」と書いてある音だけは、着弾やリール停止の瞬間に
+        合わせてモニターが直接鳴らすため、モニターを閉じていると鳴りません。
       </div>
     </>
   );
@@ -780,6 +870,113 @@ function GiftClipsSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
  * 優先される。除外(既定: ハートミー 7934)は giftId ベース — ライブ経路では
  * canonical が乗らないため。
  */
+/**
+ * 連打ギフト(コンボ)の演出反復。TikTok は同じギフトの連打を1メッセージに畳んで
+ * 送るため、素だと「10連打でも演出1回」になる。ここはその回数ぶん演出を撃ち直す設定。
+ * 値・統計・履歴は動かさない(ルーレットだけは抽選をやり直すので増減も回数ぶん)。
+ */
+function GiftRepeatFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const rf = cfg.giftRepeatFx;
+  const patchRf = (p: Partial<GiftRepeatFxConfig>): void => {
+    onPatch({ giftRepeatFx: { ...rf, ...p } });
+  };
+  // カットイン反復の最悪ケースを実数値で見せる — 「何秒カウントが止まるか」は
+  // 設定次第で大きく変わるので、文章ではなく計算結果を出す。
+  const longestBandSec = cfg.giftBandFx.enabled
+    ? Math.max(0, ...cfg.giftBandFx.bands.filter((b) => b.enabled && b.clip !== 'off').map((b) => b.durationSec))
+    : 0;
+  const worstFreezeSec = Math.min(longestBandSec * rf.max, GIFT_FX_FREEZE_MAX_TOTAL_MS / 1000);
+
+  return (
+    <>
+      <h3 style={{ marginTop: 14 }}>連打ギフトの演出(同じギフトを連続で出す)</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={rf.enabled} onChange={(e) => patchRf({ enabled: e.target.checked })} />
+        <span>同じ人が同じギフトを連打したら、まとめて1回ではなく回数ぶん演出する</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        TikTok は連打(バラ・指ハート等)を<b>1メッセージにまとめて</b>送るため、既定では
+        「10連打でも演出1回」になります。ここを有効にすると回数ぶん撃ち直します。
+        <b>ダイヤ合計・統計・履歴ログは変わりません</b>(演出だけを繰り返します)。
+      </div>
+      <div className="row">
+        <label className="field">
+          最大の繰り返し回数
+          <input
+            type="number"
+            min="1"
+            max={GIFT_FX_REPEAT_MAX}
+            value={rf.max}
+            onChange={(e) => patchRf({ max: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field">
+          間隔(ミリ秒)
+          <input
+            type="number"
+            min={GIFT_FX_REPEAT_MIN_MS}
+            max={GIFT_FX_REPEAT_MAX_MS}
+            step="100"
+            value={rf.intervalMs}
+            onChange={(e) => patchRf({ intervalMs: Number(e.target.value) })}
+          />
+        </label>
+        <MonitorTestBtn
+          spec={{ kind: 'gift', diamonds: 10, repeat: rf.max }}
+          onTest={onTest}
+          busy={testBusy}
+          label="▶ モニターで連打を実演"
+          title="モニターウィンドウで反復演出を再生します(値は動きません)"
+          style={{ alignSelf: 'flex-end' }}
+        />
+      </div>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={rf.bandEnabled}
+          disabled={!rf.enabled}
+          onChange={(e) => patchRf({ bandEnabled: e.target.checked })}
+        />
+        <span>ダイヤ帯域カットインも繰り返す</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        カットインは全画面なので間隔ではなく<b>尺ぶん続けて</b>再生し、その間ずっとカウントが
+        止まります。
+        {longestBandSec > 0 ? (
+          <>
+            {' '}
+            いまの設定だと最長 <b>約{worstFreezeSec}秒</b>(
+            {longestBandSec}秒 × {rf.max}回)止まります。
+          </>
+        ) : null}{' '}
+        長すぎるときは回数を下げるか、このチェックを外してください。
+        <b>既定のバンドは1💎から全ギフトに当たる</b>ので、軽いクリップ演出で繰り返したい場合は
+        上の「ダイヤ数のカットイン演出」で対象ギフトを除外するか、その帯域のクリップを
+        「出さない」にしてください。
+      </div>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={rf.rouletteEnabled}
+          disabled={!rf.enabled}
+          onChange={(e) => patchRf({ rouletteEnabled: e.target.checked })}
+        />
+        <span>ギフトルーレットも回数ぶん回す</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        ルーレットは抽選なので、繰り返すには出目を引き直すことになります。つまり
+        <b>これだけはカウントの増減も回数ぶんになります</b>(3連打なら3回転ぶん)。
+        企画のバランスが変わるので、変えたくないときは外してください。
+      </div>
+      <div className="row">
+        <button className="btn small" onClick={() => patchRf({ ...DEFAULT_GIFT_REPEAT_FX })}>
+          既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
 function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
   const bf = cfg.giftBandFx;
   const [preview, setPreview] = useState<{ key: number; url: string } | null>(null);
@@ -963,6 +1160,9 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
               除外する giftId(カンマ区切り)
               <input
                 type="text"
+                // key で外部からの変更(「既定に戻す」・保存後の setDraft)に追従させる。
+                // 素の defaultValue だけだと表示が古いまま draft と乖離する。
+                key={bf.excludeGiftIds.join(',')}
                 defaultValue={bf.excludeGiftIds.join(', ')}
                 placeholder="例: 7934"
                 onBlur={(e) =>
@@ -1012,125 +1212,301 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
 
 /**
  * ギフトルーレットの設定セクション。
- * トリガーに一致したギフトは「ギフト増減」規則を通らない(ルーレットが
- * 増減を置き換える)— worker/challenge.ts の handleEvent と同じ規約。
+ *
+ * ルーレットは複数登録できる。**上から順に評価し、最初に一致した1件だけ**が回る
+ * (worker/challenge.ts の matchRoulette と同じ規約)。トリガーに一致したギフトは
+ * 「ギフト増減」規則を通らない — ルーレットが増減を置き換える。
  */
 function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
-  const rl = cfg.roulette;
-  const patchRoulette = (p: Partial<ChallengeRouletteConfig>): void =>
-    onPatch({ roulette: { ...rl, ...p } });
-  const patchSeg = (i: number, p: Partial<ChallengeRouletteSegment>): void =>
-    patchRoulette({ segments: rl.segments.map((s, j) => (j === i ? { ...s, ...p } : s)) });
-  const totalWeight = rl.segments.reduce((s, x) => s + Math.max(0, x.weight), 0);
+  const list = cfg.roulettes;
+  const snd = cfg.rouletteSound;
+  const patchAt = (i: number, p: Partial<ChallengeRouletteConfig>): void =>
+    onPatch({ roulettes: list.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  const patchSnd = (p: Partial<RouletteSoundConfig>): void =>
+    onPatch({ rouletteSound: { ...snd, ...p } });
+
+  // 回転サウンドの試聴(GiftBandFxSection の auditionRef と同じ持ち方)。
+  // key は 'bgm:'/'spin:' の接頭辞付き — 同じ id が両スロットに現れることは
+  // 無いが、■/♪ 表示の判定を単純に保つため。
+  const auditionRef = useRef<BgmHandle | null>(null);
+  const [auditionKey, setAuditionKey] = useState<string | null>(null);
+  useEffect(
+    () => () => {
+      auditionRef.current?.stop(0);
+    },
+    []
+  );
+  const toggleAudition = (key: string, id: string, volume: number): void => {
+    const playing = auditionKey;
+    auditionRef.current?.stop(0);
+    auditionRef.current = null;
+    setAuditionKey(null);
+    if (playing === key) return;
+    auditionRef.current = playBandBgm(id, volume);
+    if (auditionRef.current) setAuditionKey(key);
+  };
 
   return (
     <>
       <div className="row">
         <h3 style={{ margin: 0 }}>ギフトルーレット</h3>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 10 }}>
+        指定したギフトが届くとモニターでルーレットが回り、出目が数字に加算(または減算)されます。
+        複数登録できますが、<b>上から順に評価し、最初に一致した1件だけ</b>が回ります。
+        トリガーに一致したギフトは「ギフト増減」規則を通りません。
+      </div>
+      <div
+        style={{
+          border: '1px solid rgba(255,255,255,.12)',
+          borderRadius: 8,
+          padding: '10px 12px',
+          marginBottom: 10,
+        }}
+      >
+        <h4 style={{ margin: '0 0 8px' }}>回転中のサウンド(全ルーレット共通)</h4>
+        <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+          <label className="field" style={{ width: 230 }}>
+            BGM
+            <select value={snd.bgm} onChange={(e) => patchSnd({ bgm: e.target.value })}>
+              <option value="off">鳴らさない(既定)</option>
+              {[...ROULETTE_BGM, ...BAND_BGM].map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="btn small"
+            disabled={snd.bgm === 'off'}
+            title={auditionKey === `bgm:${snd.bgm}` ? '試聴を停止' : 'このBGMを試聴'}
+            onClick={() => toggleAudition(`bgm:${snd.bgm}`, snd.bgm, snd.bgmVolume)}
+          >
+            {auditionKey === `bgm:${snd.bgm}` ? '■' : '♪'}
+          </button>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={snd.bgmVolume}
+            disabled={snd.bgm === 'off'}
+            onChange={(e) => patchSnd({ bgmVolume: Number(e.target.value) })}
+          />
+          <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.bgmVolume}</span>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: 'flex-end', marginTop: 6 }}>
+          <label className="field" style={{ width: 230 }}>
+            リール回転音(ループ)
+            <select value={snd.spinSe} onChange={(e) => patchSnd({ spinSe: e.target.value })}>
+              <option value="off">鳴らさない</option>
+              {ROULETTE_SPIN_SE.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="btn small"
+            disabled={snd.spinSe === 'off'}
+            title={auditionKey === `spin:${snd.spinSe}` ? '試聴を停止' : 'この回転音を試聴'}
+            onClick={() => toggleAudition(`spin:${snd.spinSe}`, snd.spinSe, snd.spinSeVolume)}
+          >
+            {auditionKey === `spin:${snd.spinSe}` ? '■' : '♪'}
+          </button>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={snd.spinSeVolume}
+            disabled={snd.spinSe === 'off'}
+            onChange={(e) => patchSnd({ spinSeVolume: Number(e.target.value) })}
+          />
+          <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.spinSeVolume}</span>
+        </div>
+        <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+          リールが回っている間だけ鳴ります。連続スピン中はBGMを止めません。回転音は終盤の
+          「止まりそう」の間で自動的に静かになります。音量は効果音の設定とは独立です。
+          各行の「▶ モニターで回す」でも鳴ります。既定はBGM無し・回転音のジングルのみ —
+          停止まわりの3音(回転 / 止まりそう / 確定)は「効果音」のセクションで差し替えます。
+        </div>
+      </div>
+      {list.length === 0 ? (
+        <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>
+          登録されたルーレットはありません(どのギフトでもルーレットは回りません)。
+        </div>
+      ) : null}
+      {list.map((rl, i) => (
+        <RouletteRow
+          key={rl.id}
+          rl={rl}
+          onPatch={(p) => patchAt(i, p)}
+          onRemove={() => onPatch({ roulettes: list.filter((_, j) => j !== i) })}
+          onTest={onTest}
+          testBusy={testBusy}
+        />
+      ))}
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          className="btn small"
+          disabled={list.length >= ROULETTES_MAX}
+          onClick={() =>
+            onPatch({
+              roulettes: [
+                ...list,
+                {
+                  id: `rl-${Date.now().toString(36)}-${rlSeq++}`,
+                  label: '',
+                  enabled: true,
+                  // トリガーは空で出して設定を促す。出目だけ既定を配る。
+                  giftId: '',
+                  giftName: '',
+                  canonical: '',
+                  segments: structuredClone(DEFAULT_ROULETTE.segments),
+                  direction: 'add',
+                },
+              ],
+            })
+          }
+        >
+          ルーレットを追加
+        </button>
+        <button
+          className="btn small"
+          onClick={() => onPatch({ roulettes: [structuredClone(DEFAULT_ROULETTE)] })}
+        >
+          既定(ハートミー1件)に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** ルーレット1件ぶんの設定行。トリガー・出目・確率をここで完結させる。 */
+function RouletteRow({
+  rl,
+  onPatch,
+  onRemove,
+  onTest,
+  testBusy,
+}: {
+  rl: ChallengeRouletteConfig;
+  onPatch: (p: Partial<ChallengeRouletteConfig>) => void;
+  onRemove: () => void;
+  onTest: OnTest;
+  testBusy: boolean;
+}): React.JSX.Element {
+  const patchSeg = (i: number, p: Partial<ChallengeRouletteSegment>): void =>
+    onPatch({ segments: rl.segments.map((s, j) => (j === i ? { ...s, ...p } : s)) });
+  const totalWeight = rl.segments.reduce((s, x) => s + Math.max(0, x.weight), 0);
+
+  return (
+    <div
+      style={{
+        border: '1px solid rgba(255,255,255,.12)',
+        borderRadius: 8,
+        padding: '10px 12px',
+        marginBottom: 10,
+      }}
+    >
+      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+        <label className="row" style={{ cursor: 'pointer', gap: 4 }}>
+          <input type="checkbox" checked={rl.enabled} onChange={(e) => onPatch({ enabled: e.target.checked })} />
+          <span>有効</span>
+        </label>
         <div className="spacer" />
         <MonitorTestBtn
-          spec={{ kind: 'roulette' }}
+          spec={{ kind: 'roulette', rouletteId: rl.id }}
           onTest={onTest}
           busy={testBusy}
           label="▶ モニターで回す"
-          title="いまの盤面で抽選してモニターのルーレットを実演再生します(カウントは変わりません)"
+          title="この盤面で抽選してモニターのルーレットを実演再生します(カウントは変わりません)"
         />
+        <button className="btn small danger" onClick={onRemove}>
+          この行を削除
+        </button>
       </div>
-      <label className="row" style={{ cursor: 'pointer', marginTop: 8 }}>
-        <input
-          type="checkbox"
-          checked={rl.enabled}
-          onChange={(e) => patchRoulette({ enabled: e.target.checked })}
-        />
-        <span>特定ギフトでルーレットを回す</span>
-      </label>
-      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
-        トリガーギフト(既定: ハートミー)が届くとモニターでルーレットが回り、出目が数字に
-        {rl.direction === 'sub' ? '減算' : '加算'}されます。トリガーに一致したギフトは「ギフト増減」規則を通りません。
+      <div className="row" style={{ gap: 8, marginTop: 8 }}>
+        <label className="field" style={{ width: 170 }}>
+          表示名(モニター)
+          <input
+            type="text"
+            placeholder="例: ハートミー"
+            maxLength={ROULETTE_LABEL_MAX}
+            value={rl.label}
+            onChange={(e) => onPatch({ label: e.target.value })}
+          />
+        </label>
+        <label className="field" style={{ width: 130 }}>
+          トリガー giftId
+          <input
+            type="text"
+            placeholder="例: 7934(ハートミー)"
+            value={rl.giftId}
+            onChange={(e) => onPatch({ giftId: e.target.value.trim() })}
+          />
+        </label>
+        <label className="field" style={{ flex: 1 }}>
+          ギフト名(部分一致・IDが変わった時の保険)
+          <input
+            type="text"
+            placeholder="例: heart me"
+            value={rl.giftName}
+            onChange={(e) => onPatch({ giftName: e.target.value.toLowerCase() })}
+          />
+        </label>
+        <label className="field" style={{ width: 150 }}>
+          出目の方向
+          <select value={rl.direction} onChange={(e) => onPatch({ direction: e.target.value as 'add' | 'sub' })}>
+            <option value="add">増やす(妨害)</option>
+            <option value="sub">減らす(応援)</option>
+          </select>
+        </label>
       </div>
-      {rl.enabled ? (
-        <>
-          <div className="row" style={{ gap: 8, marginLeft: 22 }}>
-            <label className="field" style={{ width: 130 }}>
-              トリガー giftId
-              <input
-                type="text"
-                placeholder="例: 7934(ハートミー)"
-                value={rl.giftId}
-                onChange={(e) => patchRoulette({ giftId: e.target.value.trim() })}
-              />
-            </label>
-            <label className="field" style={{ flex: 1 }}>
-              ギフト名(部分一致・IDが変わった時の保険)
-              <input
-                type="text"
-                placeholder="例: heart me"
-                value={rl.giftName}
-                onChange={(e) => patchRoulette({ giftName: e.target.value.toLowerCase() })}
-              />
-            </label>
-            <label className="field" style={{ width: 150 }}>
-              出目の方向
-              <select
-                value={rl.direction}
-                onChange={(e) => patchRoulette({ direction: e.target.value as 'add' | 'sub' })}
-              >
-                <option value="add">増やす(妨害)</option>
-                <option value="sub">減らす(応援)</option>
-              </select>
-            </label>
-          </div>
-          {rl.segments.map((s, i) => (
-            <div className="row" key={i} style={{ gap: 8, marginLeft: 22, alignItems: 'center' }}>
-              <label className="field" style={{ width: 110 }}>
-                {i === 0 ? '出目' : ''}
-                <input
-                  type="number"
-                  min="1"
-                  value={s.amount}
-                  onChange={(e) => patchSeg(i, { amount: Number(e.target.value) })}
-                />
-              </label>
-              <label className="field" style={{ width: 110 }}>
-                {i === 0 ? '重み' : ''}
-                <input
-                  type="number"
-                  min="0"
-                  value={s.weight}
-                  onChange={(e) => patchSeg(i, { weight: Number(e.target.value) })}
-                />
-              </label>
-              <span className="faint" style={{ fontSize: 11, minWidth: 54, textAlign: 'right' }}>
-                {totalWeight > 0 ? `${((Math.max(0, s.weight) / totalWeight) * 100).toFixed(1)}%` : '—'}
-              </span>
-              <button
-                className="btn small danger"
-                disabled={rl.segments.length <= 1}
-                onClick={() => patchRoulette({ segments: rl.segments.filter((_, j) => j !== i) })}
-              >
-                削除
-              </button>
-            </div>
-          ))}
-          <div className="row" style={{ marginTop: 8, marginLeft: 22 }}>
-            <button
-              className="btn small"
-              disabled={rl.segments.length >= ROULETTE_SEGMENTS_MAX}
-              onClick={() => patchRoulette({ segments: [...rl.segments, { amount: 5, weight: 10 }] })}
-            >
-              出目を追加
-            </button>
-            <button className="btn small" onClick={() => onPatch({ roulette: structuredClone(DEFAULT_ROULETTE) })}>
-              ルーレットを既定に戻す
-            </button>
-          </div>
-          <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
-            確率 = 重み ÷ 重みの合計。既定は +5(30%) +10(25%) +20(20%) +30(15%) +100(9%) +1000(1%)。
-            重み 0 の出目は出ません。
-          </div>
-        </>
-      ) : null}
-    </>
+      <div className="faint" style={{ fontSize: 11, marginTop: 4, marginBottom: 6 }}>
+        モニターには「{rl.label.trim() !== '' ? rl.label.trim() : 'ギフト名'} ○○がルーレット」と出ます
+        (○○ = 送信者の名前)。表示名が空のときは TikTok から届く実際のギフト名を使います。
+      </div>
+      {rl.segments.map((s, i) => (
+        <div className="row" key={i} style={{ gap: 8, alignItems: 'center' }}>
+          <label className="field" style={{ width: 110 }}>
+            {i === 0 ? '出目' : ''}
+            <input type="number" min="1" value={s.amount} onChange={(e) => patchSeg(i, { amount: Number(e.target.value) })} />
+          </label>
+          <label className="field" style={{ width: 110 }}>
+            {i === 0 ? '重み' : ''}
+            <input type="number" min="0" value={s.weight} onChange={(e) => patchSeg(i, { weight: Number(e.target.value) })} />
+          </label>
+          <span className="faint" style={{ fontSize: 11, minWidth: 54, textAlign: 'right' }}>
+            {totalWeight > 0 ? `${((Math.max(0, s.weight) / totalWeight) * 100).toFixed(1)}%` : '—'}
+          </span>
+          <button
+            className="btn small danger"
+            disabled={rl.segments.length <= 1}
+            onClick={() => onPatch({ segments: rl.segments.filter((_, j) => j !== i) })}
+          >
+            削除
+          </button>
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 8 }}>
+        <button
+          className="btn small"
+          disabled={rl.segments.length >= ROULETTE_SEGMENTS_MAX}
+          onClick={() => onPatch({ segments: [...rl.segments, { amount: 5, weight: 10 }] })}
+        >
+          出目を追加
+        </button>
+        <button className="btn small" onClick={() => onPatch({ segments: structuredClone(DEFAULT_ROULETTE.segments) })}>
+          出目を既定に戻す
+        </button>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+        確率 = 重み ÷ 重みの合計。既定は +5(30%) +10(25%) +20(20%) +30(15%) +100(9%) +1000(1%)。
+        重み 0 の出目は出ません。
+      </div>
+    </div>
   );
 }
 
@@ -1246,6 +1622,204 @@ function GiftRulesSection({
         </button>
         <button className="btn small" onClick={() => onPatch(structuredClone(DEFAULT_CHALLENGE))}>
           チャレンジ設定をすべて既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * 指定コメント妨害。キーワードがコメントに含まれたらカウントが増える。
+ * 規則は上から先勝ち(giftRules と同じ)。登録なし = 機能オフ。
+ */
+function CommentRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const rules = cfg.commentRules;
+  const patchRule = (i: number, p: Partial<ChallengeCommentRule>): void => {
+    onPatch({ commentRules: rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+
+  return (
+    <>
+      <h3>指定コメントの妨害</h3>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 10 }}>
+        登録したキーワードが<b>コメントに含まれていたら</b>(部分一致)、その規則の量だけカウントが
+        <b>増えます</b>(妨害)。複数の規則は<b>上から順に評価し、最初に一致した1件だけ</b>適用。
+        同じ人が連投しても<b>打たれるたび毎回</b>反応します。規則が1件も無ければこの機能はオフです。
+        効果音・簡易演出は「効果音」「演出」タブの「コメント妨害」スロットで変えられます。
+      </div>
+
+      {rules.length === 0 ? (
+        <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>
+          登録された規則はありません(どのコメントでもカウントは動きません)。
+        </div>
+      ) : null}
+      {rules.map((r, i) => (
+        <div className="challenge-rule" key={r.id}>
+          <label className="field" style={{ flex: 1 }}>
+            キーワード(コメントに含まれたら反応)
+            <input
+              type="text"
+              placeholder="例: おやすみ"
+              value={r.keyword}
+              onChange={(e) => patchRule(i, { keyword: e.target.value })}
+            />
+          </label>
+          <div className="row" style={{ gap: 6 }}>
+            <label className="field" style={{ width: 110 }}>
+              加算量(妨害)
+              <input
+                type="number"
+                min="1"
+                value={r.amount}
+                onChange={(e) => patchRule(i, { amount: Number(e.target.value) })}
+              />
+            </label>
+            <MonitorTestBtn
+              spec={r.keyword.trim() !== '' ? { kind: 'comment', ruleId: r.id } : null}
+              onTest={onTest}
+              busy={testBusy}
+              label="▶ モニター"
+              title={
+                r.keyword.trim() !== ''
+                  ? 'このコメントが届いた体でモニターに実演再生(値は動きません)'
+                  : 'キーワードを入力すると実演再生できます'
+              }
+              style={{ alignSelf: 'flex-end' }}
+            />
+          </div>
+          <button
+            className="btn small danger"
+            onClick={() => onPatch({ commentRules: rules.filter((_, j) => j !== i) })}
+          >
+            削除
+          </button>
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 8 }}>
+        <button
+          className="btn small"
+          disabled={rules.length >= COMMENT_RULES_MAX}
+          onClick={() =>
+            onPatch({
+              commentRules: [
+                ...rules,
+                { id: `cr-${Date.now().toString(36)}-${crSeq++}`, keyword: '', amount: 10 },
+              ],
+            })
+          }
+        >
+          規則を追加
+        </button>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+        キーワードは絵文字や語尾が付いても反応します(例:「おやすみ」→「おやすみ〜🌙」)。
+        英字は大文字小文字を区別しません。空欄の規則は何にも反応しません。
+      </div>
+    </>
+  );
+}
+
+/**
+ * お助け機能(ファンスタンプ)。クリエイター専用のカスタムギフトを「応援」に割り当て、
+ * 届いた個数ぶんカウントを減らす。ルーレット/ギフト増減規則より先に評価される。
+ *
+ * giftId は文字列比較(normalize.ts の idStr)なので type="text" で扱う —
+ * type="number" にすると前置ゼロや長い ID が壊れる(RouletteRow と同じ理由)。
+ */
+function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const fs = cfg.fanStamp;
+  // fanStamp はネストしたオブジェクト — 丸ごと差し替える(patchBf と同じ作法)。
+  const patchFs = (p: Partial<FanStampConfig>): void => {
+    onPatch({ fanStamp: { ...fs, ...p } });
+  };
+
+  return (
+    <>
+      <h3>お助け機能(ファンスタンプ)</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={fs.enabled} onChange={(e) => patchFs({ enabled: e.target.checked })} />
+        <span>ファンスタンプでカウントを減らす</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        あなた専用のカスタムギフト(ファンスタンプ)が届いたら、<b>個数 × 指定量</b>だけカウントを動かします。
+        <b>ギフト増減規則・ギフトルーレットより先に評価</b>され、一致したギフトはそちらの規則を通りません。
+      </div>
+
+      {fs.enabled ? (
+        <>
+          <div className="row" style={{ gap: 8 }}>
+            <label className="field" style={{ width: 160 }}>
+              対象 giftId
+              <input
+                type="text"
+                placeholder="例: 76637"
+                value={fs.giftId}
+                onChange={(e) => patchFs({ giftId: e.target.value.trim() })}
+              />
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              ギフト名(部分一致・IDが変わった時の保険)
+              <input
+                type="text"
+                placeholder="例: おやすみトッポ"
+                value={fs.giftName}
+                onChange={(e) => patchFs({ giftName: e.target.value.toLowerCase() })}
+              />
+            </label>
+            <label className="field" style={{ width: 110 }}>
+              1個あたりの増減
+              <input
+                type="number"
+                value={fs.amountEach}
+                onChange={(e) => patchFs({ amountEach: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
+            負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)。10連打なら この値 × 10 です。
+          </div>
+
+          <label className="row" style={{ cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={fs.suppressBandFx}
+              onChange={(e) => patchFs({ suppressBandFx: e.target.checked })}
+            />
+            <span>カットイン演出を出さない(推奨)</span>
+          </label>
+          <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+            1ダイヤのギフトでも「ダイヤ数のカットイン」が出ると<b>その間カウントが止まります</b>
+            (既定で6秒)。ファンスタンプは連続で届くので、オフを強く推奨します。
+          </div>
+
+          <label className="row" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={fs.flash} onChange={(e) => patchFs({ flash: e.target.checked })} />
+            <span>照明フラッシュ</span>
+          </label>
+
+          <div className="row" style={{ marginTop: 10 }}>
+            <MonitorTestBtn
+              spec={{ kind: 'fanStamp' }}
+              onTest={onTest}
+              busy={testBusy}
+              label="▶ お助け演出をテスト"
+              title="モニターウィンドウでお助けバナーを実演再生します(giftId 未設定でも確認できます)"
+            />
+          </div>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            giftId が空のあいだは何にも一致しません(この機能はオフと同じです)。giftId は
+            ギフト一覧やビューアー詳細のギフト履歴で確認できます。モニターには
+            <b>「−N ◯◯さん がお助け!」の専用バナー</b>(緑リング)が出ます — ギフトカードは出しません。
+            効果音は「効果音」タブの<b>ギフト(小)</b>が鳴ります。なお「ギフト増減」タブの
+            「チャレンジ設定をすべて既定に戻す」を押すと、この設定も既定に戻ります。
+          </div>
+        </>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn small" onClick={() => onPatch({ fanStamp: structuredClone(DEFAULT_FAN_STAMP) })}>
+          お助け設定を既定に戻す
         </button>
       </div>
     </>
