@@ -282,6 +282,8 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   press: '🔘',
   follow: '👤',
   like: '💗',
+  // 実演専用 kind(test 付きなのでログには積まれない)— 型の網羅性のためだけの行。
+  'gauge-full': '💗',
   'stock-full': '💚',
   comment: '💬',
   gift: '🎁',
@@ -318,6 +320,9 @@ function logWhat(e: ChallengeLogEntry): string {
       const units = e.likeStep && e.likeStep > 0 ? Math.max(1, Math.round(e.amount / e.likeStep)) : 1;
       return `いいね ${num(units * e.likeEvery)}件到達`;
     }
+    // 実演専用 kind(test 付きなのでログには積まれない)— 型の網羅性のためだけの行。
+    case 'gauge-full':
+      return 'いいねゲージ満タン(妨害)';
     case 'stock-full':
       return 'いいねストック満杯(妨害)';
     case 'comment':

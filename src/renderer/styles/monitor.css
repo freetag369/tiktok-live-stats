@@ -143,7 +143,7 @@ body {
   grid-area: title;
   text-align: center;
   color: var(--mon-pink);
-  font-size: 62px;
+  font-size: 124px;
   font-weight: 900;
   letter-spacing: 0.04em;
   line-height: 1.05;
@@ -1614,6 +1614,19 @@ body {
 }
 
 /*
+ * いいね妨害 / いいねストック満杯のバナー(MonitorView の 'bad like-float')。
+ * リングは .f-heart と同じピンク系 — フォローの赤と並んでも「いいね由来」が
+ * 色だけで読める。妨害なので数字は .bad の赤のまま(リングだけを差し替える)。
+ */
+.float.like-float {
+  background: linear-gradient(180deg, rgba(72, 18, 46, 0.94), rgba(26, 6, 18, 0.9));
+  box-shadow:
+    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 143, 191, 0.75),
+    0 0 calc(26px * var(--float-scale)) rgba(255, 79, 160, 0.45),
+    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+}
+
+/*
  * お助け(ファンスタンプ): 緑リングのバナー。フォロー(妨害)の赤と対にして、
  * リングの色だけで「助けられた/戻された」が読めるようにする。コメント応援は素の
  * .float + .good で出しているので、リング付きはここだけ — ファンスタンプは
@@ -1802,41 +1815,65 @@ body {
   top: 8%;
 }
 
+/*
+ * 左=タイトル/7セグ/ランキング、右=ゲージ/配信時間。
+ * 【カラム比 1.05fr の理由】7セグの高さは幅で決まる(.seg-digit は flex-basis +
+ * height:auto、viewBox 100:180)。左カラムに ranking 行(実測 234px)が乗ったぶん
+ * count の 1fr が痩せるので、桁幅も一緒に絞らないと桁が縦にはみ出す。
+ * 実測(1280×720・何時起きON・4桁): count 行 284px に対し
+ *   1.3fr  → 桁高 301px(はみ出す) / 1.15fr → 285px(余裕ゼロ) / 1.05fr → 272px(12px 余る)
+ * 桁幅を変えたら必ず実測し直すこと。
+ */
 .stage-scale.landscape .monitor-root {
-  grid-template-columns: 1.3fr 1fr;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-columns: 1.05fr 1fr;
+  grid-template-rows: auto 1fr auto;
   grid-template-areas:
-    'title title'
-    'count bars'
-    'count ranking'
-    'count elapsed';
+    'title   title'
+    'count   bars'
+    'ranking elapsed';
   column-gap: 24px;
   padding: 8px 14px 12px;
 }
 
 /* 横長でも「何時起き」は最下段の全幅行。詳細度 (0,4,0) で上の (0,3,0) に勝つ。 */
 .stage-scale.landscape .monitor-root.has-wake {
-  grid-template-rows: auto auto 1fr auto auto;
+  grid-template-rows: auto 1fr auto auto;
   grid-template-areas:
-    'title title'
-    'count bars'
-    'count ranking'
-    'count elapsed'
-    'wake  wake';
+    'title   title'
+    'count   bars'
+    'ranking elapsed'
+    'wake    wake';
 }
 
+/*
+ * 1280px 幅では 116px の全角 10 文字強まで(例「0時まで寝れないっす」)が 1 行。
+ * これより長いタイトルは折り返し、そのぶん count の 1fr が痩せて 7セグが小さくなる
+ * (欠けはしない — 下の .seg-row / .seg-digit を参照)。数字の大きさを優先したい
+ * 場合はここの font-size を下げる。
+ */
 .stage-scale.landscape .title-banner {
   grid-area: title;
-  font-size: 58px;
+  font-size: 116px;
 }
 
 .stage-scale.landscape .countdown {
   grid-area: count;
 }
 
+/*
+ * 桁の縦あふれ対策。.seg-row に確定高(=count セルの高さ)を与えると
+ * .seg-digit の max-height:100% が解決でき、SVG は preserveAspectRatio の既定(meet)で
+ * 枠内に縮んで収まる。これが無いと、タイトルが 2 行に折り返した瞬間に
+ * .countdown の overflow:hidden で数字の上下が丸ごと切れる(実測で上下 61px ずつ欠けた)。
+ * .clear-banner / .idle-note はどちらも position:absolute なので押し出されない。
+ */
+.stage-scale.landscape .seg-row {
+  height: 100%;
+}
+
 .stage-scale.landscape .seg-digit {
   flex: 0 1 168px;
-  max-height: 460px;
+  max-height: 100%;
 }
 
 .stage-scale.landscape .bars {
@@ -1844,13 +1881,15 @@ body {
   align-self: start;
 }
 
+/* ranking は左カラム最下段(行は auto)なので align-self は要らない。 */
 .stage-scale.landscape .ranking {
   grid-area: ranking;
-  align-self: center;
 }
 
+/* 行の高さは隣の順位カード(実測 234px)で決まるので、縦中央に置かないと上端へ張り付く。 */
 .stage-scale.landscape .elapsed-row {
   grid-area: elapsed;
+  align-self: center;
 }
 
 /* リザルトはステージ全面を覆う独立レイアウト(グリッドエリアに乗らない)。
@@ -1968,6 +2007,62 @@ body {
  * MiniFx と同じく mix-blend-mode を使わないので .fx-layer の中で良い。
  * 配置はフロート帯より少し上の中央 — 7セグ(数字)を覆わない位置。
  */
+/*
+ * 発動中はモニター全面を使う — 半透明の暗幕を全面に張り、パネルを中央に拡大表示。
+ * 暗幕を半透明に留めるのは、据え置き中の7セグが薄く透けて「数字はまだ動いて
+ * いない」文脈を保つため。.fx-layer 内の DOM 順により、ギフト mini/flash は
+ * 暗幕の裏に沈み、確定バナー(.floats)は手前に残る。
+ */
+.roulette-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(5, 3, 10, 0.78);
+  animation: rl-screen-in 220ms ease-out both;
+  /* パネル実幅 約486px(窓450 + パディング36)。縦 540: 486×1.06 ≈ 515px */
+  --rl-fs: 1.06;
+}
+
+.landscape .roulette-screen {
+  /* 横 1280×720: 486×2 = 972px、高さ 約400px */
+  --rl-fs: 2;
+}
+
+/*
+ * 既存の absolute 配置(left:50%/top:14%)を解除して flex 中央に任せ、拡大する。
+ * 拡大は transform で行う — キーフレームは全て var(--rl-w) ベースなので
+ * 着地・段の幾何は壊れない(寸法定数の唯一の出所 shared/roulette-fx.ts は不変)。
+ */
+.roulette-screen .roulette-panel {
+  position: static;
+  transform: scale(var(--rl-fs));
+  /* 既存 rl-pop は translateX(-50%) を含むため全面表示用を別に持つ */
+  animation-name: rl-pop-full;
+}
+
+@keyframes rl-pop-full {
+  from {
+    opacity: 0;
+    transform: scale(calc(var(--rl-fs) * 0.8));
+  }
+  to {
+    opacity: 1;
+    transform: scale(var(--rl-fs));
+  }
+}
+
+@keyframes rl-screen-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .roulette-panel {
   position: absolute;
   left: 50%;
@@ -2574,7 +2669,8 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   /* MonitorView 側もラッチごとスキップしてバナーだけ出す(リールは描かれない)。 */
-  .roulette-panel {
+  .roulette-panel,
+  .roulette-screen {
     display: none;
   }
 }

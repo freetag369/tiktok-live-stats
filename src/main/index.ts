@@ -90,9 +90,13 @@ function openMonitor(): void {
     () => {
       notifyMonitorState();
       syncVisibility();
+      // 閉で凍結許可を落とす — 誰も再生しないカットインのために worker が
+      // カウントダウンを止め続けないように(challenge.fxCaps の対)。
+      host?.send({ t: 'monitorOpen', open: false });
     }
   );
   host?.attachRenderer(mon.webContents);
+  host?.send({ t: 'monitorOpen', open: true });
   // Re-handshake the firehose port after a reload (メイン窓と同じ流儀)。
   mon.webContents.on('did-finish-load', () => {
     const m = getMonitorWindow();
@@ -360,6 +364,10 @@ async function boot(): Promise<void> {
   host = new WorkerHost({
     onState: (s, detail) => {
       win?.webContents.send(CH_WORKER_STATE, s);
+      // worker 再起動で凍結許可(monitorOpen/fxCaps)は既定 false に戻る —
+      // 窓の開閉状態だけ main から再送する(fxCaps はモニターの 2 分ポーリングが
+      // そのうち再送するまで fail-open で、凍結が張られないだけ)。
+      if (s === 'ready') host?.send({ t: 'monitorOpen', open: getMonitorWindow() != null });
       if (s === 'dead') toast('error', `記録エンジンが停止しました。アプリを再起動してください。${detail ? `（${detail}）` : ''}`);
     },
     // Fallback path only — the firehose normally goes worker -> renderer directly.

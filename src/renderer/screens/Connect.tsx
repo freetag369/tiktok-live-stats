@@ -70,7 +70,8 @@ export function Connect(): React.JSX.Element {
               disabled={live}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !live) void start();
+                // Enter 押しっぱなしの連発を止める(ボタンと同じ「1回だけ」)。
+                if (e.key === 'Enter' && !e.repeat && !live) void start();
               }}
             />
           </label>

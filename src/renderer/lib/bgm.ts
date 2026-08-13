@@ -98,6 +98,10 @@ export function playBandBgm(id: string | null | undefined, volume: number): BgmH
 
   let stopped = false;
   let fadeTimer: number | null = null;
+  // 現在フェードの終了予定時刻。stop の再入で「より短いフェード」だけを受け付ける
+  // 判定に使う(長くする再入を許すと、先行の stop(0) 即断が後続の stop(400) で
+  // 生き返ったように見える)。
+  let fadeEndsAt = 0;
 
   const kill = (): void => {
     if (fadeTimer !== null) {
@@ -110,25 +114,45 @@ export function playBandBgm(id: string | null | undefined, volume: number): BgmH
     a.load();
   };
 
+  const beginFade = (fadeMs: number): void => {
+    if (fadeTimer !== null) window.clearInterval(fadeTimer);
+    fadeEndsAt = performance.now() + fadeMs;
+    const startVol = a.volume;
+    const steps = Math.max(1, Math.round(fadeMs / FADE_STEP_MS));
+    let i = 0;
+    fadeTimer = window.setInterval(() => {
+      i++;
+      if (i >= steps) {
+        kill();
+        return;
+      }
+      a.volume = Math.max(0, startVol * (1 - i / steps));
+    }, FADE_STEP_MS);
+  };
+
   return {
     stop(fadeMs = 400): void {
-      if (stopped) return;
+      // 再入対応: 「フェード中に stop(0) で即断する」を必ず通す。
+      // 以前は stopped フラグで2回目以降が丸ごと no-op になり、finishBandFx の
+      // stop(0) やアンマウント時の停止が効かず、BGM とフェード interval が
+      // 最大 400ms 残留していた。
+      if (stopped) {
+        if (fadeTimer === null) return; // kill 済み
+        if (fadeMs <= 0) {
+          kill();
+          return;
+        }
+        // 現在のフェードより長くする再入は無視(冪等な重複呼び出しがこれ)。
+        if (performance.now() + fadeMs >= fadeEndsAt) return;
+        beginFade(fadeMs); // 現在音量から短く畳み直す
+        return;
+      }
       stopped = true;
       if (fadeMs <= 0 || a.paused) {
         kill();
         return;
       }
-      const startVol = a.volume;
-      const steps = Math.max(1, Math.round(fadeMs / FADE_STEP_MS));
-      let i = 0;
-      fadeTimer = window.setInterval(() => {
-        i++;
-        if (i >= steps) {
-          kill();
-          return;
-        }
-        a.volume = Math.max(0, startVol * (1 - i / steps));
-      }, FADE_STEP_MS);
+      beginFade(fadeMs);
     },
   };
 }

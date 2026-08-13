@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_MONITOR_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftRule, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, ROULETTE_LABEL_MAX, ROULETTE_QUEUE_MAX, ROULETTE_SEGMENTS_MAX, rouletteHeadline, ROULETTES_MAX, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { describe, expect, it, vi } from 'vitest';
+import { CHALLENGE_EFFECTS_MAX, CHALLENGE_MONITOR_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, ROULETTE_LABEL_MAX, ROULETTE_QUEUE_MAX, ROULETTE_SEGMENTS_MAX, rouletteHeadline, ROULETTES_MAX, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type { ChallengeConfig, ChallengeResult, ChallengeRouletteConfig } from '@shared/dto';
 import type { CommentEvent, GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
@@ -12,12 +12,25 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   // 始まり、時間を進めない既存テストのイベントが保留キューへ乗ってしまう。
   // ここでは無効にし、凍結を検査するテストだけが bandCfg() で明示的に有効化する。
   base.giftBandFx.enabled = false;
+  // 全面カット(giftFullCut)も同じ理由で無効にする — 既定行はギフト名「バラ」
+  // 「ローザ」に一致した瞬間に 5 秒の凍結を張るので、時間を進めない既存テストの
+  // イベントが保留キューへ乗ってしまう。検査するテストだけ fullCutCfg() で有効化する。
+  base.giftFullCut.enabled = false;
   return { ...base, enabled: true, ...over };
 }
 
 /** バンド演出(カットイン+凍結)を既定バンドで有効にした設定。 */
 function bandCfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   return cfg({ giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX), ...over });
+}
+
+/** 全面カット(最優先カットイン)を既定行で有効にした設定。バンドも既定で有効。 */
+function fullCutCfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
+  return cfg({
+    giftFullCut: structuredClone(DEFAULT_GIFT_FULL_CUT),
+    giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX),
+    ...over,
+  });
 }
 
 let seq = 0;
@@ -81,7 +94,13 @@ function comment(userId = 'c1', over: Partial<CommentEvent> = {}): CommentEvent 
 }
 
 function engine(c: ChallengeConfig = cfg(), now: () => number = () => NOW): ChallengeEngine {
-  return new ChallengeEngine(() => c, now);
+  const e = new ChallengeEngine(() => c, now);
+  // テスト既定は「モニター窓が開いていてカットインを再生できる」状態 —
+  // 凍結はこの許可(monitorOpen && fxCaps)が立つときだけ張られる。
+  // 許可なしの挙動は専用の describe(カットイン凍結の許可ゲート)で検証する。
+  e.setMonitorOpen(true);
+  e.setFxCaps(true);
+  return e;
 }
 
 describe('validateChallengeConfig — 壊れた settings.json でも落ちない', () => {
@@ -1577,7 +1596,10 @@ describe('ChallengeEngine — ギフトルーレット', () => {
     rand: () => number = () => 0,
     fxRand: () => number = () => 0
   ): ChallengeEngine {
-    return new ChallengeEngine(() => c, () => NOW, rand, fxRand);
+    const e = new ChallengeEngine(() => c, () => NOW, rand, fxRand);
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
+    return e;
   }
 
   it('トリガーで出目ちょうどが即時加算される(giftDefault の perDiamond +1 は併用されない)', () => {
@@ -2026,6 +2048,243 @@ describe('ChallengeEngine — カットイン凍結(fxFreeze)', () => {
   });
 });
 
+describe('ChallengeEngine — カットイン凍結の許可ゲート(モニターの再生能力)', () => {
+  it('許可なし(既定)ではバンド一致でも凍結しない — effect の焼き込みは変わらない', () => {
+    // engine() ヘルパーを使わず素で作る = monitorOpen/fxCaps とも false。
+    const c = bandCfg({ initialValue: 1000 });
+    const e = new ChallengeEngine(() => c, () => NOW);
+    e.start();
+    expect(e.handleEvent(gift({ diamonds: 30 }))).toBe(true);
+    const s = e.get();
+    expect(s.value).toBe(1030);
+    expect(s.recentEffects[0]).toMatchObject({ kind: 'gift', fxBandClip: 'gift-band1' });
+    expect(s.fxFreezeUntilMs).toBeNull();
+  });
+
+  it('片翼だけ(窓は開いたが reduced-motion 等で再生不可)でも凍結しない', () => {
+    const c = bandCfg({ initialValue: 1000 });
+    const e = new ChallengeEngine(() => c, () => NOW);
+    e.setMonitorOpen(true); // fxCaps は false のまま
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 }));
+    expect(e.get().fxFreezeUntilMs).toBeNull();
+  });
+
+  it('凍結中にモニターが閉じたら即時解除され、保留分が適用される', () => {
+    const t = NOW;
+    const e = engine(bandCfg({ initialValue: 1000, followStep: 10 }), () => t);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // band1 凍結
+    e.handleEvent(follow('f1')); // 保留
+    expect(e.get().value).toBe(1030);
+    expect(e.setMonitorOpen(false)).toBe(true); // 状態が変わった → nudge の合図
+    const s = e.get();
+    expect(s.fxFreezeUntilMs).toBeNull();
+    expect(s.value).toBe(1040);
+    expect(s.stats.follows).toBe(1);
+  });
+
+  it('凍結中に fxCaps が落ちても同様に即時解除される。変化なしの再申告は false', () => {
+    const e = engine(bandCfg({ initialValue: 1000 }), () => NOW);
+    e.start();
+    expect(e.setFxCaps(true)).toBe(false); // engine() で確立済み → 変化なし
+    e.handleEvent(gift({ diamonds: 30 }));
+    expect(e.get().fxFreezeUntilMs).not.toBeNull();
+    expect(e.setFxCaps(false)).toBe(true);
+    expect(e.get().fxFreezeUntilMs).toBeNull();
+  });
+});
+
+describe('ChallengeEngine — 凍結ドレインの演出合算(coalesce)', () => {
+  it('凍結中の press×20 は1件に畳まれ、履歴が押し流されない', () => {
+    let t = NOW;
+    const e = engine(bandCfg({ initialValue: 1000, pressStep: 1 }), () => t);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // band1 凍結
+    for (let i = 0; i < 20; i++) e.press(); // 全部保留
+    expect(e.get().value).toBe(1030);
+    t = NOW + 30_000;
+    e.drainIfChanged();
+    const s = e.get();
+    expect(s.value).toBe(1030 - 20);
+    const presses = s.recentEffects.filter((x) => x.kind === 'press');
+    expect(presses).toHaveLength(1);
+    expect(presses[0]).toMatchObject({ amount: -20, coalesced: 20, valueAfter: 1010 });
+    // ring(12件)から他の演出が押し流されていない
+    expect(s.recentEffects.some((x) => x.kind === 'gift')).toBe(true);
+  });
+
+  it('同じギフトの連投は canonical 単位で1件に畳まれ、diamonds/giftCount が合算される', () => {
+    let t = NOW;
+    // roulettes: [] — 既定のハートミー・ルーレットに食われないように。
+    // Heart Me は既定でバンド除外なので、ドレインを中断させず畳まれる側になる。
+    const e = engine(bandCfg({ initialValue: 1000, roulettes: [] }), () => t);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // band1 凍結
+    for (let i = 0; i < 5; i++) {
+      e.handleEvent(gift({ giftId: '7934', giftName: 'Heart Me', diamonds: 1, repeatCount: 2 }));
+    }
+    t = NOW + 30_000;
+    e.drainIfChanged();
+    const s = e.get();
+    const hearts = s.recentEffects.filter((x) => x.kind === 'gift' && x.giftName === 'Heart Me');
+    expect(hearts).toHaveLength(1);
+    expect(hearts[0]).toMatchObject({ amount: 5, coalesced: 5, diamonds: 5, giftCount: 10 });
+    expect(hearts[0]).not.toHaveProperty('fxBandClip');
+    expect(s.value).toBe(1030 + 5);
+  });
+
+  it('コメントは keyword 単位で畳まれる', () => {
+    let t = NOW;
+    const e = engine(
+      bandCfg({
+        initialValue: 1000,
+        commentRules: [
+          { id: 'c1', keyword: 'おやすみ', amount: 5 },
+          { id: 'c2', keyword: 'ねむい', amount: 3 },
+        ],
+      }),
+      () => t
+    );
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // 凍結
+    e.handleEvent(comment('u1', { content: 'おやすみ〜' }));
+    e.handleEvent(comment('u2', { content: 'もうねむい' }));
+    e.handleEvent(comment('u3', { content: 'おやすみなさい' }));
+    t = NOW + 30_000;
+    e.drainIfChanged();
+    const s = e.get();
+    const comments = s.recentEffects.filter((x) => x.kind === 'comment');
+    expect(comments).toHaveLength(2);
+    const oyasumi = comments.find((x) => x.commentKeyword === 'おやすみ')!;
+    expect(oyasumi).toMatchObject({ amount: 10, coalesced: 2 });
+    const nemui = comments.find((x) => x.commentKeyword === 'ねむい')!;
+    expect(nemui.amount).toBe(3);
+    expect(nemui).not.toHaveProperty('coalesced'); // 1件グループは原型のまま
+  });
+
+  it('1件だけのグループには coalesced が付かない(既存挙動の互換)', () => {
+    let t = NOW;
+    const e = engine(bandCfg({ initialValue: 1000, followStep: 10 }), () => t);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 }));
+    e.handleEvent(follow('f1'));
+    t = NOW + 30_000;
+    e.drainIfChanged();
+    const f = e.get().recentEffects.find((x) => x.kind === 'follow')!;
+    expect(f.amount).toBe(10);
+    expect(f).not.toHaveProperty('coalesced');
+  });
+
+  it('ドレインが再凍結で中断しても、そこまでの分は畳まれて出る', () => {
+    let t = NOW;
+    const e = engine(bandCfg({ initialValue: 1000, pressStep: 1 }), () => t);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // band1 凍結
+    e.press();
+    e.press();
+    e.press();
+    e.handleEvent(gift({ giftId: '8888', diamonds: 80 })); // band2 — ドレイン中断役
+    e.press();
+    e.press();
+    t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS;
+    e.drainIfChanged();
+    let s = e.get();
+    const press1 = s.recentEffects.find((x) => x.kind === 'press')!;
+    expect(press1).toMatchObject({ amount: -3, coalesced: 3 });
+    expect(s.recentEffects[0]).toMatchObject({ kind: 'gift', fxBandClip: 'gift-band2' });
+    expect(s.fxFreezeUntilMs).not.toBeNull(); // 再凍結中
+    t += 30_000;
+    e.drainIfChanged();
+    s = e.get();
+    expect(s.recentEffects[0]).toMatchObject({ kind: 'press', amount: -2, coalesced: 2 });
+    expect(s.value).toBe(1030 + 80 - 5);
+  });
+
+  it('凍結中は like 合算(flushLikeFx)も保留される', () => {
+    let t = NOW;
+    const e = engine(bandCfg({ initialValue: 1000, likeEvery: 1, likeStep: 2 }), () => t);
+    e.start();
+    const likeCount = (): number => e.get().recentEffects.filter((x) => x.kind === 'like').length;
+    e.handleEvent(like(1)); // 窓の起点 — 即時 push
+    expect(likeCount()).toBe(1);
+    t += 100;
+    e.handleEvent(like(1, { viewer: { userId: 'l2', nickname: 'liker2' } })); // 窓内 → pending
+    e.handleEvent(gift({ diamonds: 30 })); // band1 凍結
+    t = NOW + 2000; // 合算窓は明けたがまだ凍結中
+    e.drainIfChanged();
+    expect(likeCount()).toBe(1); // 凍結中は出ない
+    t = NOW + 100 + 6000 + GIFT_FX_FREEZE_MARGIN_MS; // ギフト到着(NOW+100)基準の期限
+    e.drainIfChanged(); // 解除 → flushLikeFx
+    expect(likeCount()).toBe(2);
+    expect(e.get().value).toBe(1000 + 2 + 2 + 30);
+  });
+});
+
+describe('ChallengeEngine — stop は達成させない(一時停止の意味論)', () => {
+  it('凍結中の保留分に 0 到達が含まれても、stop 後は idle・リザルト無し・achieved 演出無し', () => {
+    const c = bandCfg({
+      initialValue: 100,
+      giftRules: [{ id: 'r', minDiamonds: 0, mode: 'perDiamond', amount: -1 }],
+    });
+    const e = engine(c, () => NOW);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // -30 → 70、band1 凍結
+    e.handleEvent(gift({ giftId: '8888', diamonds: 200 })); // 保留(適用で 0 到達)
+    const s = e.stop();
+    expect(s.status).toBe('idle');
+    expect(s.value).toBe(0); // 値は全量適用済み
+    expect(s.achievedMs).toBeNull();
+    expect(s.result).toBeNull();
+    expect(s.recentEffects.some((x) => x.kind === 'achieved')).toBe(false);
+    // 再開は普通にできる
+    expect(e.start().status).toBe('running');
+  });
+});
+
+describe('ChallengeEngine — 凍結期限のワンショットタイマー', () => {
+  it('イベントも 2Hz tick も止まっていても、期限タイマーが解除して通知する', () => {
+    vi.useFakeTimers();
+    try {
+      let t = NOW;
+      const e = engine(bandCfg({ initialValue: 1000, followStep: 10 }), () => t);
+      let nudged = 0;
+      e.setOnFreezeExpired(() => nudged++);
+      e.start();
+      e.handleEvent(gift({ diamonds: 30 })); // band1: 6.5 秒凍結
+      e.handleEvent(follow('f1')); // 保留
+      // drainIfChanged もイベントも呼ばずに実時間だけ進める(配信終了後の状況)。
+      t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS + 25;
+      vi.advanceTimersByTime(6000 + GIFT_FX_FREEZE_MARGIN_MS + 25);
+      expect(e.get().fxFreezeUntilMs).toBeNull();
+      expect(e.get().value).toBe(1040);
+      expect(nudged).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reset で保留とタイマーごと片付く(発火しても何も起きない)', () => {
+    vi.useFakeTimers();
+    try {
+      let t = NOW;
+      const e = engine(bandCfg({ initialValue: 1000, followStep: 10 }), () => t);
+      let nudged = 0;
+      e.setOnFreezeExpired(() => nudged++);
+      e.start();
+      e.handleEvent(gift({ diamonds: 30 }));
+      e.handleEvent(follow('f1'));
+      e.reset();
+      t = NOW + 60_000;
+      vi.advanceTimersByTime(60_000);
+      expect(nudged).toBe(0);
+      expect(e.get().value).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('カットインBGM — effect への添付と validate', () => {
   it('バンド一致で effect に fxBandBgm が載る(既定は帯域対応の bgm-bandN)', () => {
     const e = engine(bandCfg({ initialValue: 1000 }));
@@ -2298,6 +2557,8 @@ describe('ChallengeEngine — お助け機能(ファンスタンプ)', () => {
       () => NOW,
       () => 0
     );
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
     e.start();
     e.handleEvent(fanStamp());
     const s = e.get();
@@ -2507,7 +2768,10 @@ describe('ChallengeEngine — 連打ギフトの反復スピン(rouletteEnabled)
   function rlRepEngine(over: Partial<ChallengeConfig['giftRepeatFx']> = {}, rand: () => number = () => 0) {
     const base = cfg();
     const c: ChallengeConfig = { ...base, giftRepeatFx: { ...base.giftRepeatFx, ...over } };
-    return new ChallengeEngine(() => c, () => NOW, rand);
+    const e = new ChallengeEngine(() => c, () => NOW, rand);
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
+    return e;
   }
 
   it('連打ぶん回り、**値の増減も回数ぶんになる**(ルーレットだけの例外)', () => {
@@ -2715,5 +2979,200 @@ describe('指定コメント妨害(commentRules — キーワード部分一致�
       commentRules: Array.from({ length: 30 }, (_, i) => ({ id: `r${i}`, keyword: 'k', amount: 1 })),
     }).commentRules;
     expect(many).toHaveLength(COMMENT_RULES_MAX);
+  });
+});
+
+// ── ダイヤの全面カット(最優先カットイン)─────────────────────────────────
+
+describe('matchGiftFullCut — ギフト名/ID による最優先カットインの写像', () => {
+  const g = (giftName: string, giftId = '5655', canonical?: string) => ({ giftId, giftName, canonical });
+
+  it('既定行はギフト名の部分一致で当たる(バラ / ローザ)', () => {
+    const c = fullCutCfg();
+    expect(matchGiftFullCut(c, g('バラ'))?.clip).toBe('cut-rose');
+    expect(matchGiftFullCut(c, g('ローザ'))?.clip).toBe('cut-rosa');
+    // 部分一致なので前後に文字があっても当たる
+    expect(matchGiftFullCut(c, g('赤いバラの花束'))?.clip).toBe('cut-rose');
+  });
+
+  it('canonical でも当たる(リプレイ/テスト経路の保険)', () => {
+    const c = fullCutCfg();
+    expect(matchGiftFullCut(c, g('Rose', '5655', 'rose'))?.clip).toBe('cut-rose');
+    expect(matchGiftFullCut(c, g('Rose', '5655', 'ROSE'))?.clip).toBe('cut-rose'); // 大文字でも
+  });
+
+  it('giftId 完全一致が使える', () => {
+    const c = fullCutCfg();
+    c.giftFullCut.rules[0]!.giftId = '9001';
+    c.giftFullCut.rules[0]!.giftName = '';
+    c.giftFullCut.rules[0]!.canonical = '';
+    expect(matchGiftFullCut(c, g('なにか', '9001'))?.clip).toBe('cut-rose');
+    expect(matchGiftFullCut(c, g('なにか', '9002'))).toBeNull();
+  });
+
+  it('無関係なギフトには当たらない', () => {
+    const c = fullCutCfg();
+    expect(matchGiftFullCut(c, g('ドラゴン', '1234'))).toBeNull();
+  });
+
+  it('上から先勝ち(最初に一致した1行だけ)', () => {
+    const c = fullCutCfg();
+    c.giftFullCut.rules[0]!.giftName = 'ば';
+    c.giftFullCut.rules[1]!.giftName = 'ば';
+    expect(matchGiftFullCut(c, g('ばら'))?.id).toBe('fullcut-rose');
+  });
+
+  it('無効行・clip=off の行は飛ばす', () => {
+    const c = fullCutCfg();
+    c.giftFullCut.rules[0]!.enabled = false;
+    expect(matchGiftFullCut(c, g('バラ'))).toBeNull();
+    const c2 = fullCutCfg();
+    c2.giftFullCut.rules[0]!.clip = 'off';
+    expect(matchGiftFullCut(c2, g('バラ'))).toBeNull();
+  });
+
+  it('トリガーが3つとも空の行はどのギフトにも一致しない(空文字 includes 罠)', () => {
+    const c = fullCutCfg();
+    c.giftFullCut.rules[0]!.giftId = '';
+    c.giftFullCut.rules[0]!.giftName = '';
+    c.giftFullCut.rules[0]!.canonical = '';
+    c.giftFullCut.rules[1]!.enabled = false;
+    expect(matchGiftFullCut(c, g('なんでも'))).toBeNull();
+  });
+
+  it('giftFullCut.enabled / fxClipsEnabled のどちらかが false なら出さない', () => {
+    expect(matchGiftFullCut(cfg(), g('バラ'))).toBeNull(); // cfg() は全面カット無効
+    const c = fullCutCfg();
+    c.giftFullCut.enabled = false;
+    expect(matchGiftFullCut(c, g('バラ'))).toBeNull();
+    const c2 = fullCutCfg({ fxClipsEnabled: false });
+    expect(matchGiftFullCut(c2, g('バラ'))).toBeNull();
+  });
+});
+
+describe('ChallengeEngine — 全面カットはダイヤ数帯より優先される', () => {
+  it('1💎のバラは band1 ではなく cut-rose を再生し、fxFullCut の印が載る', () => {
+    const e = engine(fullCutCfg({ initialValue: 1000 }), () => NOW);
+    e.start();
+    expect(e.handleEvent(gift({ diamonds: 1, giftName: 'バラ' }))).toBe(true);
+    const s = e.get();
+    expect(s.recentEffects[0]).toMatchObject({
+      kind: 'gift',
+      fxBandClip: 'cut-rose',
+      fxDurationMs: 5000,
+      fxFullCut: true,
+    });
+    // 帯域の BGM は載らない(音声は素材に焼き込み済み — 二重に鳴らさない)
+    expect(s.recentEffects[0]!.fxBandBgm).toBeUndefined();
+    // 凍結は全面カットの尺で張る
+    expect(s.fxFreezeUntilMs).toBe(NOW + 5000 + GIFT_FX_FREEZE_MARGIN_MS);
+  });
+
+  it('高額ギフトでもギフト名が一致すれば帯域(band4)より全面カットが勝つ', () => {
+    const e = engine(fullCutCfg({ initialValue: 100_000 }), () => NOW);
+    e.start();
+    e.handleEvent(gift({ diamonds: 700, giftName: 'ローザ' }));
+    expect(e.get().recentEffects[0]).toMatchObject({ fxBandClip: 'cut-rosa', fxFullCut: true });
+  });
+
+  it('一致しないギフトは従来どおり帯域カットインへ落ちる(fxFullCut は載らない)', () => {
+    const e = engine(fullCutCfg({ initialValue: 1000 }), () => NOW);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30, giftName: 'ドラゴン' }));
+    const first = e.get().recentEffects[0]!;
+    expect(first).toMatchObject({ fxBandClip: 'gift-band1', fxDurationMs: 6000 });
+    expect(first.fxFullCut).toBeUndefined();
+    expect(first.fxBandBgm).toBe('bgm-band1'); // 帯域は従来どおり別BGM
+  });
+
+  it('お助け(suppressBandFx)は全面カットも止める', () => {
+    const c = fullCutCfg({ initialValue: 1000 });
+    c.fanStamp = { ...structuredClone(DEFAULT_FAN_STAMP), giftName: 'バラ', suppressBandFx: true };
+    const e = engine(c, () => NOW);
+    e.start();
+    e.handleEvent(gift({ diamonds: 1, giftName: 'バラ' }));
+    const s = e.get();
+    expect(s.recentEffects[0]!.fxBandClip).toBeUndefined();
+    expect(s.recentEffects[0]!.fxFullCut).toBeUndefined();
+    expect(s.fxFreezeUntilMs).toBeNull(); // 凍結も張られない
+  });
+
+  it('増減規則に一致しないギフトでも全面カットだけは出る', () => {
+    const c = fullCutCfg({ initialValue: 1000, giftRules: [], giftDefault: null });
+    const e = engine(c, () => NOW);
+    e.start();
+    expect(e.handleEvent(gift({ diamonds: 1, giftName: 'バラ' }))).toBe(true);
+    const s = e.get();
+    expect(s.value).toBe(1000); // 値は動かない
+    expect(s.recentEffects[0]).toMatchObject({ amount: 0, fxBandClip: 'cut-rose', fxFullCut: true });
+  });
+});
+
+describe('validateChallengeConfig — giftFullCut(新フィールドが黙って消えないこと)', () => {
+  it('キーが無い旧 settings.json は既定(有効・バラ/ローザ)へ倒れる', () => {
+    const c = validateChallengeConfig({ enabled: true });
+    expect(c.giftFullCut).toEqual(DEFAULT_GIFT_FULL_CUT);
+  });
+
+  it('giftName / canonical は小文字化して保存する(label は原文のまま)', () => {
+    const c = validateChallengeConfig({
+      giftFullCut: {
+        enabled: true,
+        volume: 70,
+        rules: [
+          {
+            id: 'fullcut-rose',
+            label: 'バラ ',
+            giftId: ' 5655 ',
+            giftName: ' ROSE ',
+            canonical: ' ROSE ',
+            clip: 'cut-rose',
+            durationSec: 5,
+            enabled: true,
+          },
+        ],
+      },
+    });
+    expect(c.giftFullCut.rules[0]).toMatchObject({
+      label: 'バラ',
+      giftId: '5655',
+      giftName: 'rose',
+      canonical: 'rose',
+    });
+  });
+
+  it('未知のクリップ id は同じ id の既定行のクリップへ倒れる', () => {
+    const c = validateChallengeConfig({
+      giftFullCut: {
+        rules: [{ id: 'fullcut-rose', clip: 'no-such-clip', durationSec: 5, enabled: true }],
+      },
+    });
+    expect(c.giftFullCut.rules[0]!.clip).toBe('cut-rose');
+  });
+
+  it('id が既定に無い行の未知クリップは off、durationSec は 1〜30 に丸める', () => {
+    const c = validateChallengeConfig({
+      giftFullCut: {
+        rules: [
+          { id: 'custom', clip: 'zzz', durationSec: 999, enabled: true },
+          { id: 'custom2', clip: 'cut-rosa', durationSec: 0, enabled: true },
+        ],
+      },
+    });
+    expect(c.giftFullCut.rules[0]).toMatchObject({ clip: 'off', durationSec: 30 });
+    expect(c.giftFullCut.rules[1]).toMatchObject({ clip: 'cut-rosa', durationSec: 1 });
+  });
+
+  it('volume は 0〜100 に丸め、壊れた値は既定へ', () => {
+    expect(validateChallengeConfig({ giftFullCut: { volume: 999 } }).giftFullCut.volume).toBe(100);
+    expect(validateChallengeConfig({ giftFullCut: { volume: -5 } }).giftFullCut.volume).toBe(0);
+    expect(validateChallengeConfig({ giftFullCut: { volume: 'x' } }).giftFullCut.volume).toBe(
+      DEFAULT_GIFT_FULL_CUT.volume
+    );
+  });
+
+  it('rules が配列でなければ既定の行へ倒れる(行が黙って消えない)', () => {
+    const c = validateChallengeConfig({ giftFullCut: { enabled: true, rules: 'broken' } });
+    expect(c.giftFullCut.rules).toEqual(DEFAULT_GIFT_FULL_CUT.rules);
   });
 });

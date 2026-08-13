@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { wakeElapsedMs } from '@shared/time';
 
 /**
- * 「何時起き」— 起床時刻と、そこからの経過(モニター左下)。
+ * 「何時起き」— 起床時刻からの経過=起きている時間(モニター左下)。
  *
  * MonitorView から切り出しているのは再描画の頻度が違うため。表示の粒度は「分」なので
  * ここだけ 10 秒で回し、2Hz の delta で回る親を毎秒巻き込まないようにする。
@@ -32,14 +32,10 @@ export function WakeRow({
   const totalMin = Math.floor(ms / 60_000);
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
-  // 時は 0 詰めしない(設定値 '05:30' → 表示 '5:30')。分は 0 詰めのまま。
-  const wakeH = Number(wakeTime.slice(0, 2));
-  const wakeM = wakeTime.slice(3, 5);
 
   return (
     <div className="wake-row">
-      起床{' '}
-      <span className="wake-num">{wakeH}</span>:<span className="wake-num">{wakeM}</span> /{' '}
+      起きている時間{' '}
       <span className="wake-num">{h}</span>時間<span className="wake-num">{m}</span>分
     </div>
   );

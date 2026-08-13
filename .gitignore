@@ -8,3 +8,4 @@ captures/
 Thumbs.db
 tsconfig*.tsbuildinfo
 THIRD-PARTY-NOTICES.md
+build/source-archive/*.zip

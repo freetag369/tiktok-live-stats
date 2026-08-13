@@ -35,6 +35,8 @@ type InMessage =
   | { t: 'rpc'; req: RpcRequest }
   | { t: 'settings'; settings: AppSettings }
   | { t: 'visibility'; hidden: boolean }
+  /** モニター窓の開閉(main 発)。カットイン凍結の許可条件の片翼。 */
+  | { t: 'monitorOpen'; open: boolean }
   | { t: 'shutdown' };
 
 let store: Store | null = null;
@@ -109,6 +111,9 @@ function boot(m: BootMessage): void {
     missions
   ) as unknown as (req: RpcRequest) => Promise<unknown>;
 
+  // 配信終了後(2Hz tick 停止中)でも凍結期限の解除を delta としてモニターへ配る。
+  challenge.setOnFreezeExpired(() => session?.nudgeChallenge());
+
   post({ t: 'ready', caps, missionError: missions.lastError });
 }
 
@@ -165,6 +170,11 @@ process.parentPort?.on('message', (e) => {
         case 'visibility':
           session?.setHidden(msg.hidden);
           return;
+        case 'monitorOpen':
+          // 閉→開はモニター側の fxCaps RPC が続けて届く。開→閉で凍結中なら
+          // setMonitorOpen が即時解除して true を返すので delta を配る。
+          if (challenge?.setMonitorOpen(msg.open)) session?.nudgeChallenge();
+          return;
         case 'shutdown':
           await session?.stop('userStopped', false);
           store?.close();
@@ -179,14 +189,22 @@ process.parentPort?.on('message', (e) => {
 
 // A crash here must not take the record with it: close the session cleanly so the
 // next run does not have to guess at an orphan.
+// close 後は必ず exit する — 以前は close だけしてプロセスが生き残り、以後の
+// 全 DB 書き込みが失敗する半死状態になっていた(RPC は通るが何も保存されない
+// 最悪の壊れ方)。exit すれば worker-host の自動再起動(最大5回)に乗る。
+let crashing = false;
 for (const sig of ['uncaughtException', 'unhandledRejection'] as const) {
   process.on(sig, (err: unknown) => {
+    if (crashing) return; // 連鎖 fatal(uncaught→rejection)は1回に抑える
+    crashing = true;
     post({ t: 'fatal', message: (err as Error)?.message ?? String(err) });
     try {
       store?.close();
     } catch {
       /* best effort */
     }
+    // parentPort への post を flush してから死ぬ。
+    setImmediate(() => process.exit(1));
   });
 }
 

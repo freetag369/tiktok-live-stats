@@ -29,6 +29,12 @@ export type RpcMap = {
   'challenge.press': { p: void; r: D.ChallengeState };
   /** モニター演出のテスト再生(値・統計は変えない)。設定画面の「▶ モニター」用。 */
   'challenge.testEffect': { p: D.ChallengeTestEffectSpec; r: void };
+  /**
+   * モニターの再生能力の申告(カットインを実際に再生できるか)。モニター窓が
+   * マウント時と reduced-motion の切替時に送る。worker はこれとモニター窓の
+   * 開閉(main 発の monitorOpen)の AND が立つときだけカットイン凍結を張る。
+   */
+  'challenge.fxCaps': { p: { bandFx: boolean }; r: void };
 
   // queries
   'q.viewerTable': { p: { sessionId: number | null } & D.ViewerTableQuery; r: D.Page<D.ViewerTableRow> };

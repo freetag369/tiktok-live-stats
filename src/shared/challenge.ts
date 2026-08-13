@@ -11,6 +11,8 @@ import type {
   ChallengeState,
   FanStampConfig,
   GiftBandFxConfig,
+  GiftFullCutConfig,
+  GiftFullCutRule,
   GiftFxBand,
   RouletteSoundConfig,
   GiftRepeatFxConfig,
@@ -124,13 +126,14 @@ export function appendChallengeLog(
   for (const e of fresh) {
     const head = out[0];
     // 連続 press の畳み込み。間に他の kind が挟まったら新しい行を立てる。
+    // e が凍結ドレインの合算(coalesced)なら、その件数ぶんまとめて数える。
     if (e.kind === 'press' && head?.kind === 'press') {
       out[0] = {
         ...head,
         atMs: e.atMs,
         amount: head.amount + e.amount,
         valueAfter: e.valueAfter,
-        count: (head.count ?? 1) + 1,
+        count: (head.count ?? 1) + (e.coalesced ?? 1),
       };
       continue;
     }
@@ -158,6 +161,8 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     // 過去の行が書き換わらないようにするため。
     ...(e.kind === 'like' && lg ? { likeEvery: lg.every, likeStep: lg.step } : {}),
     ...(e.commentKeyword ? { commentKeyword: e.commentKeyword } : {}),
+    // 凍結ドレインの合算件数 → 履歴の「×N」表示(press 畳み込みと同じ概念)。
+    ...(e.coalesced != null && e.coalesced > 1 ? { count: e.coalesced } : {}),
   };
 }
 
@@ -241,6 +246,8 @@ export const CHALLENGE_FX_CLIP_IDS: readonly string[] = [
   'gift-band2',
   'gift-band3',
   'gift-band4',
+  'cut-rose',
+  'cut-rosa',
 ];
 
 /**
@@ -483,6 +490,46 @@ export const DEFAULT_ROULETTE_SOUND: RouletteSoundConfig = {
 };
 
 /**
+ * ダイヤの全面カットの既定。バラ(1💎)とローザ(10💎)に専用のフルスクリーン
+ * カットインを割り当てる。**帯域(DEFAULT_GIFT_BAND_FX)より先に評価される**ので、
+ * この2つのギフトでは band1(びっくりした魚)は再生されない。
+ *
+ * トリガーはギフト名(部分一致)を本線にする — ライブ経路では NormalizedEvent の
+ * canonical が未代入なため(matchRouletteTrigger / matchFanStamp と同じ制約)。
+ * バラには保険で canonical 'rose' も入れてある(gift-aliases.default.json の
+ * nameRules に実在する)。ローザは名寄せ規則が無いので canonical は空。
+ *
+ * giftName は**小文字で保存**する規約(matchGiftTrigger が設定値を小文字前提で
+ * 比較する)。日本語なので実質そのままだが、英語名を足すときは小文字にすること。
+ */
+export const DEFAULT_GIFT_FULL_CUT: GiftFullCutConfig = {
+  enabled: true,
+  volume: 70,
+  rules: [
+    {
+      id: 'fullcut-rose',
+      label: 'バラ',
+      giftId: '',
+      giftName: 'バラ',
+      canonical: 'rose',
+      clip: 'cut-rose',
+      durationSec: 5,
+      enabled: true,
+    },
+    {
+      id: 'fullcut-rosa',
+      label: 'ローザ',
+      giftId: '',
+      giftName: 'ローザ',
+      canonical: '',
+      clip: 'cut-rosa',
+      durationSec: 5,
+      enabled: true,
+    },
+  ],
+};
+
+/**
  * ダイヤ帯域カットインの既定バンド。要件どおり 1〜50 / 51〜100 / 101〜600 /
  * 601〜1000(6/6/8/10秒)。1000 超は overflow:'top' で band4 を適用する。
  * bgm は帯域が上がるほど盛り上がるパチンコ風BGM(renderer/lib/bgm.ts)。
@@ -572,6 +619,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   giftClips: DEFAULT_GIFT_CLIPS.map((c) => ({ ...c })),
   miniFxEnabled: true,
   miniFx: { ...DEFAULT_MINI_FX },
+  giftFullCut: structuredClone(DEFAULT_GIFT_FULL_CUT),
   giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX),
   giftRepeatFx: structuredClone(DEFAULT_GIFT_REPEAT_FX),
   fanStamp: structuredClone(DEFAULT_FAN_STAMP),
@@ -639,6 +687,30 @@ export function matchGiftMini(
     }
   }
   return miniForSlot(cfg, `gift-t${tierForDiamonds(g.diamonds)}` as ChallengeSeSlot);
+}
+
+/**
+ * ギフト → 全面カットの写像。**上から順に評価し、最初に一致した1行だけ**を返す
+ * (giftRules / roulettes と同じ先勝ち)。戻り null は「全面カットは出さない」=
+ * 従来のダイヤ帯域カットイン(matchGiftBand)へ落ちる。
+ *
+ * **matchGiftBand より先に呼ぶこと**が唯一の優先度の担保 — 全面カットが一致したら
+ * 帯域は評価しない(worker/challenge.ts の giftOp)。帯域と違いダイヤ数を見ないので、
+ * 1ダイヤのギフトでも高額ギフトでも同じカットインが出る。
+ *
+ * fxClipsEnabled(演出クリップ全体のスイッチ)を尊重するのは matchGiftBand と同じ。
+ */
+export function matchGiftFullCut(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): GiftFullCutRule | null {
+  const fc = cfg.giftFullCut;
+  if (!fc.enabled || !cfg.fxClipsEnabled) return null;
+  for (const r of fc.rules) {
+    if (!r.enabled || r.clip === 'off') continue;
+    if (matchGiftTrigger(r, g)) return r;
+  }
+  return null;
 }
 
 /**
@@ -736,6 +808,63 @@ export function miniForSlot(cfg: ChallengeConfig, slot: ChallengeSeSlot): string
   if (!cfg.miniFxEnabled) return null;
   const id = cfg.miniFx[slot];
   return id && id !== 'off' ? id : null;
+}
+
+// ── 演出 watermark ───────────────────────────────────────────────────────────
+
+/** 取りこぼしの古い演出をスキップする鮮度ゲート。復帰直後の演出ストーム防止。 */
+export const EFFECT_FRESH_MS = 5000;
+/**
+ * テスト再生(effect.test)だけの緩い鮮度ゲート。設定画面の「▶ モニター」は
+ * モニターウィンドウの生成+マウントを待ってから再生されるため、5秒では
+ * ウィンドウ生成が遅い環境(別ディスプレイのフルスクリーン化等)で無言で落ちる。
+ */
+export const TEST_EFFECT_FRESH_MS = 15_000;
+
+/**
+ * 演出1件の鮮度判定。freshChallengeEffects の内部ゲートと、MonitorView の
+ * 「未再生カットインに据え置きを譲るか」(yieldToCutin)が**同じ規約**を共有する
+ * ための唯一の実装 — 別々に持つと test 演出(15秒ゲート)だけ「譲らないのに
+ * 再生はする」ズレが生まれ、飛行中の着弾チェーンが打ち切られる。
+ */
+export function isChallengeEffectFresh(e: ChallengeEffect, nowMs: number): boolean {
+  return nowMs - e.atMs <= (e.test === true ? TEST_EFFECT_FRESH_MS : EFFECT_FRESH_MS);
+}
+
+/**
+ * recentEffects の watermark 進行を1箇所に集約する(MonitorView の視覚再生と
+ * useChallengeSe の効果音が同じ規約を共有する唯一の担保)。
+ *
+ * - lastPlayed === null(マウント直後)は全件を再生済みに倒す — リロード/再接続の
+ *   たびに過去演出が一斉再生される事故を防ぐ。ただし mountPlaysTest のときは
+ *   test 演出(▶ 実演再生)だけ鮮度ゲート内なら再生対象に含める — モニターの
+ *   マウントが実演の push より遅れると、最初のスナップショットに含まれた実演が
+ *   無言で「再生済み」扱いになり consumed される(「▶ を押しても何も起きない、
+ *   2回目は出る」の原因)。
+ * - lastPlayed > maxId は worker 再起動で id が振り直された合図。0 に倒して追従する。
+ * - 鮮度ゲートを過ぎた演出は無言でスキップ(watermark は進める)。
+ *
+ * 戻り値: next = 新しい watermark、play = 再生すべき演出(id 昇順)。
+ */
+export function freshChallengeEffects(
+  effects: readonly ChallengeEffect[],
+  lastPlayed: number | null,
+  nowMs: number,
+  opts?: { mountPlaysTest?: boolean }
+): { next: number; play: ChallengeEffect[] } {
+  const maxId = effects.reduce((m, e) => Math.max(m, e.id), 0);
+  const freshEnough = (e: ChallengeEffect): boolean => isChallengeEffectFresh(e, nowMs);
+  if (lastPlayed === null) {
+    const play = opts?.mountPlaysTest
+      ? effects.filter((e) => e.test === true && freshEnough(e)).sort((a, b) => a.id - b.id)
+      : [];
+    return { next: maxId, play };
+  }
+  const from = lastPlayed > maxId ? 0 : lastPlayed;
+  const play = effects
+    .filter((e) => e.id > from && freshEnough(e))
+    .sort((a, b) => a.id - b.id);
+  return { next: Math.max(from, maxId), play };
 }
 
 /**
@@ -863,6 +992,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     giftClips: validateGiftClips(c.giftClips),
     miniFxEnabled: c.miniFxEnabled !== false,
     miniFx: validateMiniFx(c.miniFx),
+    giftFullCut: validateGiftFullCut(c.giftFullCut),
     giftBandFx: validateGiftBandFx(c.giftBandFx),
     giftRepeatFx: validateGiftRepeatFx(c.giftRepeatFx),
     fanStamp: validateFanStamp(c.fanStamp),
@@ -915,6 +1045,58 @@ function validateRouletteSound(raw: unknown): RouletteSoundConfig {
     bgmVolume: vol(c.bgmVolume, d.bgmVolume),
     spinSe: id(c.spinSe, CHALLENGE_ROULETTE_SPIN_SE_IDS, d.spinSe),
     spinSeVolume: vol(c.spinSeVolume, d.spinSeVolume),
+  };
+}
+
+/**
+ * 全面カット設定の検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(giftFullCut キー無し)は既定(有効・バラ/ローザの2行)へ倒す。
+ *
+ * giftName / canonical は**小文字化して保存**する — matchGiftTrigger が設定値を
+ * 小文字前提で比較するため(validateFanStamp / validateRoulettes と同じ規約)。
+ * label だけは小文字化しない(日本語の表示名を原文のまま出す)。
+ * 未知のクリップ id は同じ id の既定行のクリップ、それも無ければ 'off' に倒す。
+ */
+function validateGiftFullCut(raw: unknown): GiftFullCutConfig {
+  const d = DEFAULT_GIFT_FULL_CUT;
+  const c = raw as Partial<GiftFullCutConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  const rules: GiftFullCutRule[] = [];
+  if (Array.isArray(c.rules)) {
+    for (const r of c.rules as Array<Partial<GiftFullCutRule>>) {
+      if (typeof r.id !== 'string' || r.id === '') continue;
+      const fallback = d.rules.find((x) => x.id === r.id);
+      const clip =
+        typeof r.clip === 'string' && (r.clip === 'off' || CHALLENGE_FX_CLIP_IDS.includes(r.clip))
+          ? r.clip
+          : (fallback?.clip ?? 'off');
+      const durationSec =
+        typeof r.durationSec === 'number' && Number.isFinite(r.durationSec)
+          ? Math.min(30, Math.max(1, Math.round(r.durationSec)))
+          : (fallback?.durationSec ?? 5);
+      const low = (v: unknown, fb: string): string =>
+        typeof v === 'string' ? v.trim().toLowerCase() : fb;
+      rules.push({
+        id: r.id,
+        label: typeof r.label === 'string' ? r.label.trim() : (fallback?.label ?? ''),
+        giftId: typeof r.giftId === 'string' ? r.giftId.trim() : (fallback?.giftId ?? ''),
+        giftName: low(r.giftName, fallback?.giftName ?? ''),
+        canonical: low(r.canonical, fallback?.canonical ?? ''),
+        clip,
+        durationSec,
+        enabled: r.enabled !== false,
+      });
+    }
+  } else {
+    rules.push(...structuredClone(d.rules));
+  }
+  return {
+    enabled: c.enabled !== false,
+    volume:
+      typeof c.volume === 'number' && Number.isFinite(c.volume)
+        ? Math.min(100, Math.max(0, Math.round(c.volume)))
+        : d.volume,
+    rules,
   };
 }
 

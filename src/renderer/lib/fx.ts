@@ -22,6 +22,8 @@ import giftBand1Url from '../assets/fx/band/gift-band1.mp4';
 import giftBand2Url from '../assets/fx/band/gift-band2.mp4';
 import giftBand3Url from '../assets/fx/band/gift-band3.mp4';
 import giftBand4Url from '../assets/fx/band/gift-band4.mp4';
+import cutRoseUrl from '../assets/fx/cut/cut-rose.mp4';
+import cutRosaUrl from '../assets/fx/cut/cut-rosa.mp4';
 import achievedUrl from '../assets/fx/achieved.mp4';
 import gaugeFullUrl from '../assets/fx/gauge-full.mp4';
 import strikeUrl from '../assets/fx/gauge-strike.mp4';
@@ -69,18 +71,41 @@ export const FX_CLIPS: readonly FxClip[] = [
   { id: 'gift-band2', label: 'カットイン: ハートポーズ(51〜100💎・6秒)', url: giftBand2Url },
   { id: 'gift-band3', label: 'カットイン: マネーガン(101〜600💎・8秒)', url: giftBand3Url },
   { id: 'gift-band4', label: 'カットイン: 銀河(601💎〜・10秒)', url: giftBand4Url },
+  { id: 'cut-rose', label: '全面カット: バラ(5秒・音声あり)', url: cutRoseUrl },
+  { id: 'cut-rosa', label: '全面カット: ローザ(5秒・音声あり)', url: cutRosaUrl },
 ];
 
 /**
- * 不透明フルフレームのカットイン素材(assets/fx/band/*.mp4)。他の全クリップと
- * 違い「純黒背景に発光体」ではないので、screen 合成ではなく .fx-clip-opaque
- * (mix-blend-mode: normal)で最前面へ重ねる — MonitorView のバンド演出専用。
+ * 不透明フルフレームのカットイン素材(assets/fx/band/*.mp4 と assets/fx/cut/*.mp4)。
+ * 他の全クリップと違い「純黒背景に発光体」ではないので、screen 合成ではなく
+ * .fx-clip-opaque(mix-blend-mode: normal)で最前面へ重ねる — MonitorView の
+ * カットイン演出専用。screen を掛けると中間調が UI と混ざって濁るだけ。
  */
-export const BAND_CLIP_IDS: readonly string[] = ['gift-band1', 'gift-band2', 'gift-band3', 'gift-band4'];
+export const BAND_CLIP_IDS: readonly string[] = [
+  'gift-band1',
+  'gift-band2',
+  'gift-band3',
+  'gift-band4',
+  'cut-rose',
+  'cut-rosa',
+];
 
-/** バンド(不透明カットイン)素材かどうか。screen 合成か normal 合成かの分岐に使う。 */
+/** 不透明カットイン素材かどうか。screen 合成か normal 合成かの分岐に使う。 */
 export function isBandClip(id: string | null | undefined): boolean {
   return id != null && BAND_CLIP_IDS.includes(id);
+}
+
+/**
+ * 全面カット(assets/fx/cut/*.mp4)の id。band/*.mp4 と同じ不透明素材だが、
+ * **音声が焼き込んである**点だけが違う(band は無音で別ファイルの BGM を重ねる)。
+ * 設定画面の試写がミュートを外すかどうかの分岐に使う — モニター側は effect の
+ * fxFullCut を見るのでこのリストは参照しない(cfg を引き直させない流儀)。
+ */
+export const FULL_CUT_CLIP_IDS: readonly string[] = ['cut-rose', 'cut-rosa'];
+
+/** 全面カット(音声焼き込み)素材かどうか。 */
+export function isFullCutClip(id: string | null | undefined): boolean {
+  return id != null && FULL_CUT_CLIP_IDS.includes(id);
 }
 
 /** 達成(CLEAR)専用。ギフトには割り当てない固定クリップ。 */

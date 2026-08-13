@@ -568,6 +568,46 @@ export interface GiftBandFxConfig {
 }
 
 /**
+ * 全面カットの1行。**ダイヤ数ではなくギフトそのもの**(giftId / giftName / canonical)で
+ * 一致させるのが帯域(GiftFxBand)との違い。一致したギフトは帯域カットインを再生しない。
+ *
+ * トリガー3つの意味は matchGiftTrigger の規約に従う(giftId は完全一致、giftName は
+ * 部分一致、canonical は完全一致。3つとも '' の行はどのギフトにも一致しない)。
+ */
+export interface GiftFullCutRule {
+  id: string;
+  /** 設定画面の行見出し。表示専用でマッチには一切使わない。 */
+  label: string;
+  /** giftId 完全一致。'' で無視。ライブ経路で最も確実。 */
+  giftId: string;
+  /** ギフト名の部分一致(小文字で保存)。'' で無視。 */
+  giftName: string;
+  /** canonical 完全一致(小文字で保存)。'' で無視。 */
+  canonical: string;
+  /** クリップ id(CHALLENGE_FX_CLIP_IDS)または 'off'(この行では出さない)。 */
+  clip: string;
+  /** 演出とカウンタ凍結の秒数(1〜30)。動画が短ければループで持たせる。 */
+  durationSec: number;
+  enabled: boolean;
+}
+
+/**
+ * ダイヤの全面カット。**ダイヤ数帯(giftBandFx)より先に評価し、一致したら帯域は
+ * 一切評価しない**(matchGiftFullCut)。
+ *
+ * 帯域と違い BGM 選択を持たない — 素材(assets/fx/cut/*.mp4)に音声が焼き込んで
+ * あるため。音量だけをここで持ち、モニターは stock-cutin と同じ方式で
+ * <video> の muted を外して鳴らす。
+ */
+export interface GiftFullCutConfig {
+  enabled: boolean;
+  /** 焼き込み音声の音量 0-100。seEnabled=false のときは映像ごと無音になる。 */
+  volume: number;
+  /** 上から順に評価し、最初に一致した1行だけを使う(giftRules と同じ先勝ち)。 */
+  rules: GiftFullCutRule[];
+}
+
+/**
  * 連打ギフト(コンボ)の演出反復。TikTok の streakable ギフト(gift.type === 1)は
  * 「連打中は repeatEnd=0、最後の1件だけ repeatEnd=1 + 合計 repeatCount」で届き、
  * normalize.ts がそれを1件の NormalizedEvent へ畳む(diamonds はそこで確定 —
@@ -703,6 +743,11 @@ export interface ChallengeConfig {
    * または 'off'(出さない)。ギフトは giftClips 側の mini が優先される。
    */
   miniFx: Record<ChallengeSeSlot, string>;
+  /**
+   * ダイヤの全面カット。**giftBandFx(ダイヤ数帯)より先に評価**され、一致した
+   * ギフトは帯域カットインを一切再生しない(matchGiftFullCut)。
+   */
+  giftFullCut: GiftFullCutConfig;
   /** ダイヤ帯域カットイン。一致時は giftClips より優先(matchGiftBand)。 */
   giftBandFx: GiftBandFxConfig;
   /** 連打ギフトの演出反復。値は動かさず見た目だけ回数ぶん撃つ(rouletteEnabled を除く)。 */
@@ -751,8 +796,12 @@ export type ChallengeStatus = 'idle' | 'running' | 'achieved';
  */
 export interface ChallengeEffect {
   id: number;
-  /** 'like' は1秒窓で合算して1件にまとめるため nickname を持たない。 */
-  kind: 'press' | 'follow' | 'like' | 'stock-full' | 'comment' | 'gift' | 'roulette' | 'achieved';
+  /**
+   * 'like' は1秒窓で合算して1件にまとめるため nickname を持たない。
+   * 'gauge-full' はテスト再生(challenge.testEffect)専用 — ライブ経路の着弾演出は
+   * likeGauge.fills の差分駆動で effect を持たないため、実演用にだけ effect を作る。
+   */
+  kind: 'press' | 'follow' | 'like' | 'gauge-full' | 'stock-full' | 'comment' | 'gift' | 'roulette' | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
   /**
@@ -821,6 +870,14 @@ export interface ChallengeEffect {
    */
   fxBandBgm?: string;
   /**
+   * kind='gift': このカットインが全面カット(giftFullCut)由来である印。
+   * モニターはこれを見て mp4 の焼き込み音声を鳴らす(帯域カットインは muted で、
+   * 音は別ファイルの fxBandBgm 側)。fxBandClip と同じ「effect 1件で自己完結」の
+   * 流儀 — モニターの cfg は 30 秒ポーリングで古くなりうるので判定し直させない。
+   * 音量だけは cfg の giftFullCut.volume から読む(fxBandBgm の前例と同じ)。
+   */
+  fxFullCut?: true;
+  /**
    * kind='gift': 同じ見た目をモニターが何回撃つか(連打ギフト)。省略/1 = 1回。
    * **値には一切影響しない** — amount/valueAfter/diamonds は連打全体を1回だけ表す。
    * worker が権威(設定の上限と凍結尺の上限で clamp 済み)。giftCount とは別物で、
@@ -833,6 +890,12 @@ export interface ChallengeEffect {
    * fxDurationMs と同じく、凍結尺との同期のため effect 側に焼き込む。
    */
   fxRepeatIntervalMs?: number;
+  /**
+   * カットイン凍結の解除ドレインで同種の保留演出を1件に畳んだとき、元の件数
+   * (2以上のときだけ載る)。amount 等は合算済み。ダッシュボードの履歴ログは
+   * これを「×N」として1行にまとめる。省略 = 畳んでいない(1件そのまま)。
+   */
+  coalesced?: number;
   /**
    * テスト再生(challenge.testEffect)由来。値・統計には影響しない演出だけの
    * effect — ダッシュボードの履歴ログはこれを積まない(演出とSEは再生する)。
@@ -851,6 +914,8 @@ export type ChallengeTestEffectSpec =
   | { kind: 'press' }
   | { kind: 'follow' }
   | { kind: 'like' }
+  /** ゲージ満タンの着弾演出(弾→7セグ)の実演。値は変えず着弾チェーンだけ試写する。 */
+  | { kind: 'gauge-full' }
   | { kind: 'stock-full' }
   /** ruleId は設定UIの行ごとの ▶ 用。未指定なら最初の keyword 非空の規則で実演する。 */
   | { kind: 'comment'; ruleId?: string }
@@ -868,6 +933,8 @@ export type ChallengeTestEffectSpec =
       canonical?: string;
       /** 帯演出行のテスト用。指定時はこのバンドのカットインを強制する(帯域一致は評価しない)。 */
       bandId?: string;
+      /** 全面カット行のテスト用。指定時はこの行のカットインを強制する(トリガー一致は評価しない)。 */
+      fullCutId?: string;
       /** 連打反復のテスト用。未指定は1回。bandId 併用時は 1 に倒す(testEffect は凍結を張らないため)。 */
       repeat?: number;
     }

@@ -11,6 +11,8 @@ import type {
   ChallengeTestEffectSpec,
   FanStampConfig,
   GiftBandFxConfig,
+  GiftFullCutConfig,
+  GiftFullCutRule,
   GiftFxBand,
   GiftRepeatFxConfig,
 } from '@shared/dto';
@@ -21,6 +23,7 @@ import {
   DEFAULT_CHALLENGE,
   DEFAULT_FAN_STAMP,
   DEFAULT_GIFT_BAND_FX,
+  DEFAULT_GIFT_FULL_CUT,
   DEFAULT_GIFT_REPEAT_FX,
   GIFT_FX_FREEZE_MAX_TOTAL_MS,
   GIFT_FX_REPEAT_MAX,
@@ -39,7 +42,7 @@ import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { setSettings, toast } from '../state/uiStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
 import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
-import { FX_CLIPS } from '../lib/fx';
+import { FX_CLIPS, isFullCutClip } from '../lib/fx';
 
 /** 効果音スロットの表示名(設定画面の行ラベル)。 */
 const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
@@ -150,8 +153,7 @@ const GIFT_CANONICAL_LABELS: Record<string, string> = {
 type OnTest = (spec: ChallengeTestEffectSpec) => void;
 
 /**
- * 演出スロット → テスト再生 spec。gauge-full だけは null — 着弾演出がゲージの
- * fills 差分駆動(effect ではない)のため、状態を汚さずに再現できない。
+ * 演出スロット → テスト再生 spec。
  * ダイヤ数は tier 境界(shared/challenge.ts の tierForDiamonds)の代表値。
  */
 function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
@@ -163,7 +165,8 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
     case 'like':
       return { kind: 'like' };
     case 'gauge-full':
-      return null;
+      // 実演専用の kind。モニターが現在値のまま着弾チェーン(弾→7セグ)を試写する。
+      return { kind: 'gauge-full' };
     case 'stock-full':
       return { kind: 'stock-full' };
     case 'comment':
@@ -194,6 +197,7 @@ function MonitorTestBtn({
   spec,
   onTest,
   busy,
+  disabled,
   label,
   title,
   style,
@@ -201,6 +205,8 @@ function MonitorTestBtn({
   spec: ChallengeTestEffectSpec | null;
   onTest: OnTest;
   busy: boolean;
+  /** 追加の無効化条件(例: 簡易演出スロットが「出さない」)。title で理由を添えること。 */
+  disabled?: boolean;
   label?: string;
   title?: string;
   style?: React.CSSProperties;
@@ -208,10 +214,10 @@ function MonitorTestBtn({
   return (
     <button
       className="btn small"
-      disabled={spec === null || busy}
+      disabled={spec === null || busy || disabled}
       title={
         spec === null
-          ? (title ?? 'いいねゲージ連動のため実演再生はできません(♪で試聴できます)')
+          ? (title ?? 'この演出は実演再生に対応していません(♪で試聴できます)')
           : (title ?? 'モニターウィンドウでこの演出を実演再生(未保存の変更は先に保存されます)')
       }
       style={style}
@@ -303,9 +309,10 @@ export function Challenge(): React.JSX.Element {
       if (dirty && !(await save())) return;
       if (!monitorOpen) {
         await rpc('monitor.open', undefined);
-        // モニターの演出 watermark はマウント時に「それ以前は再生済み」で確立
-        // される。開いた直後に push すると捨てられるため、マウント完了を待つ。
-        await new Promise((r) => setTimeout(r, 1500));
+        // マウント完了は待たない — モニターの watermark はマウント時、最初の
+        // スナップショットに含まれる test 演出を再生する(freshChallengeEffects の
+        // mountPlaysTest)ので、push が先でも捨てられない。以前の固定 1500ms 待ちは
+        // ウィンドウ生成が遅い環境で足りず「▶ が無言で消える」原因だった。
       }
       await rpc('challenge.testEffect', spec);
     } catch (e) {
@@ -355,8 +362,26 @@ export function Challenge(): React.JSX.Element {
         {tab === 'se' ? <SoundSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} /> : null}
         {tab === 'fx' ? (
           <>
+            {window.matchMedia('(prefers-reduced-motion: reduce)').matches ? (
+              <div
+                className="row"
+                style={{
+                  background: 'rgba(255, 180, 0, 0.12)',
+                  border: '1px solid rgba(255, 180, 0, 0.4)',
+                  borderRadius: 6,
+                  padding: '6px 10px',
+                  marginBottom: 10,
+                  fontSize: 12,
+                }}
+              >
+                ⚠ OS の「アニメーション効果(視覚効果を減らす)」が有効のため、着弾・ルーレット・
+                カットインなどの動きのある演出はモニターに表示されません。Windows 設定 →
+                アクセシビリティ → 視覚効果 で「アニメーション効果」をオンにすると表示されます。
+              </div>
+            ) : null}
             <MiniFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftClipsSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+            <GiftFullCutSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftBandFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftRepeatFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
           </>
@@ -685,26 +710,39 @@ function MiniFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
       {cfg.miniFxEnabled ? (
         <>
           <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', marginLeft: 22 }}>
-            {CHALLENGE_SE_SLOTS.map((slot) => (
-              <div key={slot} className="row" style={{ gap: 6, alignItems: 'center' }}>
-                <span className="faint" style={{ fontSize: 11, minWidth: 88 }}>
-                  {SE_SLOT_LABELS[slot]}
-                </span>
-                <select
-                  style={{ flex: 1 }}
-                  value={cfg.miniFx[slot]}
-                  onChange={(e) => onPatch({ miniFx: { ...cfg.miniFx, [slot]: e.target.value } })}
-                >
-                  <option value="off">出さない</option>
-                  {CHALLENGE_MINI_IDS.map((m) => (
-                    <option key={m} value={m}>
-                      {MINI_LABELS[m] ?? m}
-                    </option>
-                  ))}
-                </select>
-                <MonitorTestBtn spec={specForSlot(slot)} onTest={onTest} busy={testBusy} />
-              </div>
-            ))}
+            {CHALLENGE_SE_SLOTS.map((slot) => {
+              const off = cfg.miniFx[slot] === 'off';
+              return (
+                <div key={slot} className="row" style={{ gap: 6, alignItems: 'center' }}>
+                  <span className="faint" style={{ fontSize: 11, minWidth: 88 }}>
+                    {SE_SLOT_LABELS[slot]}
+                  </span>
+                  <select
+                    style={{ flex: 1 }}
+                    value={cfg.miniFx[slot]}
+                    onChange={(e) => onPatch({ miniFx: { ...cfg.miniFx, [slot]: e.target.value } })}
+                  >
+                    <option value="off">出さない</option>
+                    {CHALLENGE_MINI_IDS.map((m) => (
+                      <option key={m} value={m}>
+                        {MINI_LABELS[m] ?? m}
+                      </option>
+                    ))}
+                  </select>
+                  <MonitorTestBtn
+                    spec={specForSlot(slot)}
+                    onTest={onTest}
+                    busy={testBusy}
+                    disabled={off}
+                    title={
+                      off
+                        ? 'このスロットは「出さない」です。簡易演出を選ぶと実演できます'
+                        : undefined
+                    }
+                  />
+                </div>
+              );
+            })}
           </div>
           <div className="row" style={{ marginTop: 8, marginLeft: 22 }}>
             <button className="btn small" onClick={() => onPatch({ miniFx: { ...DEFAULT_MINI_FX } })}>
@@ -973,6 +1011,205 @@ function GiftRepeatFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
           既定に戻す
         </button>
       </div>
+    </>
+  );
+}
+
+/**
+ * ダイヤの全面カットの設定セクション。**ダイヤ数帯(GiftBandFxSection)より優先**
+ * されるので、画面上でも帯域より上に置いて評価順と並び順を一致させている。
+ *
+ * 帯域との違いは2点だけ: (1) ダイヤ数ではなくギフト(名前/ID/canonical)で一致させる、
+ * (2) BGM 選択を持たない — 素材(assets/fx/cut/*.mp4)に音声が焼き込んであるので
+ * 音量スライダーだけを持つ。
+ */
+function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const fc = cfg.giftFullCut;
+  // 試写。全面カットは音声入りなので muted を外す(帯域の試写は無音のまま)。
+  const [preview, setPreview] = useState<{ key: number; url: string; sound: boolean } | null>(null);
+
+  const patchFc = (p: Partial<GiftFullCutConfig>): void => {
+    onPatch({ giftFullCut: { ...fc, ...p } });
+  };
+  const patchRule = (i: number, p: Partial<GiftFullCutRule>): void => {
+    patchFc({ rules: fc.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+
+  return (
+    <>
+      <h3 style={{ marginTop: 14 }}>ダイヤの全面カット(最優先・カウント一時停止)</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={fc.enabled} onChange={(e) => patchFc({ enabled: e.target.checked })} />
+        <span>指定したギフトで全面カットを再生する</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
+        指定したギフトが届いたら画面全体にカットイン動画を再生し、<b>再生中はカウントを一時停止</b>します
+        (その間のギフト・いいね・フォローは捨てられず、演出後に順番に反映されます)。
+        <b>下の「ダイヤ数のカットイン演出」より優先</b>され、ここで一致したギフトは帯域のカットインを再生しません。
+        BGM は動画に入っているので選択欄はありません(音量だけ下で調整)。
+      </div>
+
+      {fc.enabled ? (
+        <>
+          {fc.rules.map((r, i) => (
+            <div className="challenge-rule" key={r.id}>
+              <label className="field" style={{ width: 110 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="バラ"
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ width: 130 }}>
+                ギフト名(部分一致)
+                <input
+                  type="text"
+                  value={r.giftName}
+                  placeholder="バラ"
+                  onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                />
+              </label>
+              <label className="field" style={{ width: 100 }}>
+                giftId(任意)
+                <input
+                  type="text"
+                  value={r.giftId}
+                  placeholder="5655"
+                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
+                />
+              </label>
+              <div className="row" style={{ gap: 6, flex: 1 }}>
+                <label className="field" style={{ flex: 1 }}>
+                  カットイン動画
+                  <select value={r.clip} onChange={(e) => patchRule(i, { clip: e.target.value })}>
+                    <option value="off">出さない</option>
+                    {FX_CLIPS.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="btn small"
+                  disabled={r.clip === 'off'}
+                  title="このクリップを試写(音あり)"
+                  style={{ alignSelf: 'flex-end' }}
+                  onClick={() => {
+                    const url = FX_CLIPS.find((f) => f.id === r.clip)?.url;
+                    if (url) setPreview({ key: clipSeq++, url, sound: isFullCutClip(r.clip) });
+                  }}
+                >
+                  ▶
+                </button>
+                <label className="field" style={{ width: 84 }}>
+                  秒数
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={r.durationSec}
+                    onChange={(e) => patchRule(i, { durationSec: Number(e.target.value) })}
+                  />
+                </label>
+                <MonitorTestBtn
+                  spec={r.clip !== 'off' ? { kind: 'gift', fullCutId: r.id, diamonds: 1 } : null}
+                  onTest={onTest}
+                  busy={testBusy}
+                  label="▶ モニター"
+                  title={
+                    r.clip !== 'off'
+                      ? 'この行の全面カット(動画+音声)をモニターで実演再生。テスト中はカウントを止めません。'
+                      : 'カットイン動画を選ぶと実演再生できます'
+                  }
+                  style={{ alignSelf: 'flex-end' }}
+                />
+                <label className="row" style={{ cursor: 'pointer', alignSelf: 'flex-end', paddingBottom: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={r.enabled}
+                    onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    有効
+                  </span>
+                </label>
+                <button
+                  className="btn small danger"
+                  style={{ alignSelf: 'flex-end' }}
+                  onClick={() => patchFc({ rules: fc.rules.filter((_, j) => j !== i) })}
+                >
+                  削除
+                </button>
+              </div>
+            </div>
+          ))}
+          <div className="row" style={{ gap: 10, marginTop: 8, alignItems: 'center' }}>
+            <button
+              className="btn small"
+              onClick={() =>
+                patchFc({
+                  rules: [
+                    ...fc.rules,
+                    {
+                      id: `fullcut-${Date.now().toString(36)}-${clipSeq++}`,
+                      label: '',
+                      giftId: '',
+                      giftName: '',
+                      canonical: '',
+                      clip: 'off',
+                      durationSec: 5,
+                      enabled: true,
+                    },
+                  ],
+                })
+              }
+            >
+              行を追加
+            </button>
+            <label className="field" style={{ width: 220 }}>
+              音量 {fc.volume}
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={fc.volume}
+                onChange={(e) => patchFc({ volume: Number(e.target.value) })}
+              />
+            </label>
+            <button
+              className="btn small"
+              onClick={() => onPatch({ giftFullCut: structuredClone(DEFAULT_GIFT_FULL_CUT) })}
+            >
+              全面カット設定を既定に戻す
+            </button>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            ギフト名は<b>部分一致</b>・大文字小文字は無視します(「バラ」は「バラ」を含むギフト名すべてに一致)。
+            giftId を入れるとそちらが優先され、確実に1つのギフトだけに絞れます(ライブのギフト履歴で確認できます)。
+            ギフト名・giftId・canonical がすべて空の行はどのギフトにも一致しません。音量は<b>効果音がオフのときは無音</b>になります。
+          </div>
+
+          {preview ? (
+            <div className={`fx-preview${preview.sound ? ' opaque' : ''}`}>
+              <video
+                key={preview.key}
+                src={preview.url}
+                autoPlay
+                muted={!preview.sound}
+                playsInline
+                onEnded={() => setPreview(null)}
+                onError={() => setPreview(null)}
+              />
+              <button className="btn small" onClick={() => setPreview(null)}>
+                閉じる
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
     </>
   );
 }

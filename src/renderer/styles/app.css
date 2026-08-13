@@ -908,6 +908,14 @@ pre.doc {
   object-fit: cover;
   mix-blend-mode: screen;
 }
+/**
+ * 全面カット(assets/fx/cut/*.mp4)の試写。band/*.mp4 と同じ不透明フルフレーム素材で、
+ * モニターでは .fx-clip-opaque(mix-blend-mode: normal)で重ねる — screen のままだと
+ * 中間調が黒地と混ざって本番より白く見えるので、試写でも normal に戻す。
+ */
+.fx-preview.opaque video {
+  mix-blend-mode: normal;
+}
 .fx-preview .btn {
   position: absolute;
   top: 6px;

@@ -24,6 +24,7 @@ import {
   matchCommentRule,
   matchFanStamp,
   matchGiftBand,
+  matchGiftFullCut,
   matchGiftRule,
   matchRoulette,
 } from '@shared/challenge';
@@ -138,6 +139,31 @@ export class ChallengeEngine {
    * 1本ずつ順に演出される)。
    */
   private pendingOps: Array<() => void> = [];
+  /**
+   * ドレイン(凍結解除)中の演出の迂回バッファ。非 null の間、pushEffect は
+   * ring ではなくここへ積み、finishDrain が同種を1件に畳んでから ring へ移す。
+   * 迂回しないと最大 GIFT_FX_PENDING_OPS_MAX 件の演出が一気に ring(12件)へ
+   * 流れ、超過分が黙って消える(履歴ログからも欠落)うえ、生き残った12件は
+   * atMs が解除時点に揃って鮮度ゲートを全通過し、同時再生ストームになる。
+   */
+  private drainFx: ChallengeEffect[] | null = null;
+  /** stop() の強制適用中。maybeAchieve を抑止する(stop = 一時停止の意味論)。 */
+  private stopping = false;
+  /**
+   * 凍結期限のワンショットタイマー。イベントも 2Hz tick も止まった状態
+   * (配信終了後など)でも凍結が自然解除されるようにする最後の安全弁。
+   * 発火で dirty になったら onFreezeExpired(session.nudgeChallenge)を呼ぶ。
+   */
+  private freezeTimer: ReturnType<typeof setTimeout> | null = null;
+  private onFreezeExpired: (() => void) | null = null;
+  /**
+   * モニターの再生能力(A2)。両方 true のときだけカットイン凍結を張る —
+   * モニター窓が閉じている・OS の「動きを減らす」が有効などでカットインが
+   * 実際には再生されないのに、カウントダウンだけ 6〜45 秒止まる事故を防ぐ。
+   * 既定 false = モニターが名乗り出るまで凍結しない(fail-open)。
+   */
+  private monitorOpen = false;
+  private monitorBandFx = false;
   /** 生成直後は true — 起動後の最初の delta で初期状態をモニターへ配るため。 */
   private dirty = true;
 
@@ -175,6 +201,7 @@ export class ChallengeEngine {
     // 前ラン由来の保留分を新ランへ持ち込まない(値は initialValue で始める規約)。
     this.pendingOps = [];
     this.fxFreezeUntilMs = null;
+    this.armFreezeTimer();
     this.dirty = true;
     return this.get();
   }
@@ -187,7 +214,17 @@ export class ChallengeEngine {
   stop(): ChallengeState {
     // 凍結中の保留分は捨てず強制適用する — stop は「値を残す」規約のため、
     // 受け取り済みのギフト/いいねが闇に消えると集計と値が食い違う。
-    this.forceApplyPendingOps();
+    // stopping フラグで maybeAchieve を抑止する — 以前は保留分に 0 到達が
+    // 含まれると achieved effect を push した直後に idle で上書きし、
+    // 「値0・idle・リザルト無しでクラッカーだけ鳴る」半端な絵になっていた。
+    // stop は一時停止の意味論なので、達成判定ごと保留にする(残 op の適用も
+    // status 遷移で break しなくなり、取りこぼしが消える)。
+    this.stopping = true;
+    try {
+      this.forceApplyPendingOps();
+    } finally {
+      this.stopping = false;
+    }
     this.status = 'idle';
     // 停止後に合算待ちの演出が漏れないように捨てる(値には適用済み)。
     this.likeFxPending = 0;
@@ -199,6 +236,7 @@ export class ChallengeEngine {
     // 直後に initialValue で上書きするので保留分は適用せず捨てる。
     this.pendingOps = [];
     this.fxFreezeUntilMs = null;
+    this.armFreezeTimer();
     this.status = 'idle';
     this.value = this.getConfig().initialValue;
     this.startedMs = null;
@@ -254,6 +292,12 @@ export class ChallengeEngine {
       case 'like':
         e = { kind: 'like', amount: Math.max(1, cfg.likeStep) };
         break;
+      case 'gauge-full':
+        // 着弾演出(弾→7セグ)の実演。ライブ経路では likeGauge.fills の差分駆動で
+        // effect を持たないため、実演専用の kind を流す — モニターは e.test のときだけ
+        // 現在値のまま着弾チェーン(弾・segフラッシュ・SE・簡易演出)を試写する。
+        e = { kind: 'gauge-full', amount: Math.max(1, cfg.likeStep) };
+        break;
       case 'stock-full':
         e = { kind: 'stock-full', amount: Math.max(1, cfg.likeStockStep) };
         break;
@@ -291,8 +335,17 @@ export class ChallengeEngine {
         const m = matchGiftRule(cfg, { canonical: spec.canonical, giftId: 'test', diamonds: spec.diamonds });
         const band = spec.bandId ? (cfg.giftBandFx.bands.find((b) => b.id === spec.bandId) ?? null) : null;
         const usableBand = band && band.clip !== 'off' ? band : null;
-        const fxDurationMs = usableBand ? Math.min(usableBand.durationSec * 1000, GIFT_FX_FREEZE_MAX_MS) : 0;
-        const testRep = usableBand
+        // 全面カット行の実演。bandId と同じ流儀で「行を名指ししたら一致判定は
+        // 評価しない」— トリガー(ギフト名)が未設定でも見た目を確認できるのが目的。
+        // 指定時は帯域より優先する(本番の giftOp と同じ順序)。
+        const fullCut = spec.fullCutId
+          ? (cfg.giftFullCut.rules.find((r) => r.id === spec.fullCutId) ?? null)
+          : null;
+        const usableFullCut = fullCut && fullCut.clip !== 'off' ? fullCut : null;
+        const cutClip = usableFullCut ? usableFullCut.clip : (usableBand?.clip ?? null);
+        const cutDurationSec = usableFullCut ? usableFullCut.durationSec : (usableBand?.durationSec ?? 0);
+        const fxDurationMs = cutClip ? Math.min(cutDurationSec * 1000, GIFT_FX_FREEZE_MAX_MS) : 0;
+        const testRep = cutClip
           ? 1
           : giftFxRepeat(cfg, spec.repeat ?? 1, { banded: false, fxDurationMs: 0 });
         e = {
@@ -304,8 +357,9 @@ export class ChallengeEngine {
           ...(spec.canonical ? { canonical: spec.canonical } : {}),
           // カットインは effect 1件で自己完結の流儀(handleEvent と同じ)。
           // fxFreezeUntilMs は張らない — テストで実イベントの適用を止めない。
-          ...(usableBand ? { fxBandClip: usableBand.clip, fxDurationMs } : {}),
-          ...(usableBand && usableBand.bgm !== 'off' && cfg.giftBandFx.bgmEnabled
+          ...(cutClip ? { fxBandClip: cutClip, fxDurationMs } : {}),
+          ...(usableFullCut ? { fxFullCut: true as const } : {}),
+          ...(!usableFullCut && usableBand && usableBand.bgm !== 'off' && cfg.giftBandFx.bgmEnabled
             ? { fxBandBgm: usableBand.bgm }
             : {}),
           // 連打反復の実演。カットイン併用時は 1 に倒す — testEffect は凍結を
@@ -589,14 +643,25 @@ export class ChallengeEngine {
           }
         : matchGiftRule(cfg, { canonical: e.canonical, giftId: e.giftId, diamonds: e.diamonds });
       // カットイン抑止。giftBandFx.excludeGiftIds は書き換えない(設定の二重管理を作らない)。
-      // band が null なら fxDurationMs は 0 になり、下の `if (b)` を通らないので
+      // 両方 null なら fxDurationMs は 0 になり、下の `if (cutClip)` を通らないので
       // **凍結も張られない** — 1ダイヤのファンスタンプが届くたびに 6 秒カウントが
       // 止まる事故を、専用フラグを増やさずに塞ぐ。
-      const band =
+      //
+      // 全面カット(giftFullCut)は**ダイヤ数帯(giftBandFx)より先に評価**する。
+      // 一致したら帯域は評価すらしない — 「バラなら必ずバラのカットイン」を、
+      // ダイヤ数がどの帯に入るかと無関係に成立させるため(ユーザー要件の優先度)。
+      // suppressBandFx は全面カットにも効かせる。この印は「このギフトではカット
+      // インを一切出さない」という意味で付いており、1ダイヤ高頻度のファンスタンプが
+      // 5 秒カウントを止める事故は帯域と全面カットのどちらでも同じだから。
+      const fullCut =
         fs?.suppressBandFx === true
           ? null
+          : matchGiftFullCut(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+      const band =
+        fs?.suppressBandFx === true || fullCut
+          ? null
           : matchGiftBand(cfg, { canonical: e.canonical, giftId: e.giftId, diamonds: e.diamonds });
-      if (!m && !band) return false;
+      if (!m && !band && !fullCut) return false;
       const giftOp = (allowBand: boolean): void => {
         const amount = m?.amount ?? 0;
         if (amount < 0) this.stats.giftDown += -amount;
@@ -604,13 +669,19 @@ export class ChallengeEngine {
         this.value = Math.max(0, this.value + amount);
         const atMs = this.now();
         const b = allowBand ? band : null;
+        const fc = allowBand ? fullCut : null;
+        // 全面カットと帯域カットインはモニターから見ると同じ1本のカットイン
+        // (同じ <video> 枠・同じ据え置き・同じ凍結)。違うのは「誰が選んだか」と
+        // 音の出どころだけなので、ここで1組に畳んでから effect へ焼き込む。
+        const cutClip = fc ? fc.clip : b ? b.clip : null;
+        const cutDurationSec = fc ? fc.durationSec : (b?.durationSec ?? 0);
         // 動画長ではなく設定の秒数が権威(モニターは loop + タイマーで合わせる)。
-        const fxDurationMs = b ? Math.min(b.durationSec * 1000, GIFT_FX_FREEZE_MAX_MS) : 0;
+        const fxDurationMs = cutClip ? Math.min(cutDurationSec * 1000, GIFT_FX_FREEZE_MAX_MS) : 0;
         // 連打ギフトの演出反復。**値は1回ぶんのまま** — amount/valueAfter/diamonds/
         // stats/ランキング/履歴ログは連打全体を1件で表す規約を維持し、反復するのは
         // モニターの見た目だけ。回数はここ(到着時点の cfg)で確定させ effect に
         // 焼き込む — fxBandClip と同じ「effect 1件で自己完結」の流儀。
-        const rep = giftFxRepeat(cfg, e.repeatCount, { banded: b != null, fxDurationMs });
+        const rep = giftFxRepeat(cfg, e.repeatCount, { banded: cutClip != null, fxDurationMs });
         this.pushEffect({
           kind: 'gift',
           amount,
@@ -627,9 +698,14 @@ export class ChallengeEngine {
           // モニターが演出クリップを選ぶのに使う(増減量の判定とは別経路)。
           ...(e.canonical ? { canonical: e.canonical } : {}),
           // カットインは effect 1件で自己完結させる(rouletteSegments と同じ流儀)。
-          ...(b ? { fxBandClip: b.clip, fxDurationMs } : {}),
+          ...(cutClip ? { fxBandClip: cutClip, fxDurationMs } : {}),
+          // 全面カットの印。モニターはこれを見て mp4 の焼き込み音声を鳴らす
+          //(帯域カットインは muted のままで、音は下の fxBandBgm 側)。
+          ...(fc ? { fxFullCut: true as const } : {}),
           // BGM も同じ流儀で id を effect に載せる(音量だけは cfg から読む)。
           // 判定は到着時点の cfg — fxBandClip と同じタイミングで確定させる。
+          // 全面カット(fc)には載せない — 音声は素材に焼き込んであるので、
+          // 別BGMを重ねると二重に鳴る。
           ...(b && b.bgm !== 'off' && cfg.giftBandFx.bgmEnabled ? { fxBandBgm: b.bgm } : {}),
           ...(rep > 1 ? { fxRepeat: rep, fxRepeatIntervalMs: cfg.giftRepeatFx.intervalMs } : {}),
           diamonds: e.diamonds,
@@ -639,7 +715,14 @@ export class ChallengeEngine {
         // 守りつつ、以降のイベントを演出明けまで保留する。
         // カットインを反復する場合はモニターが尺ぶん直列で流すので、総尺で凍結する
         // (giftFxRepeat が GIFT_FX_FREEZE_MAX_TOTAL_MS で回数を削り済み)。
-        if (b) this.fxFreezeUntilMs = atMs + fxDurationMs * rep + GIFT_FX_FREEZE_MARGIN_MS;
+        // fxAllowed: モニターが実際にカットインを再生できる(窓が開いていて
+        // reduced-motion でない)と名乗り出ているときだけ凍結する — 再生されない
+        // カットインのためにカウントダウンだけ止まる事故を防ぐ(effect への
+        // fxBandClip 焼き込みは無条件のまま: 履歴・後から開いたモニターのため)。
+        if (cutClip && this.fxAllowed()) {
+          this.fxFreezeUntilMs = atMs + fxDurationMs * rep + GIFT_FX_FREEZE_MARGIN_MS;
+          this.armFreezeTimer();
+        }
         this.maybeAchieve(atMs);
         this.dirty = true;
       };
@@ -731,6 +814,65 @@ export class ChallengeEngine {
     return this.fxFreezeUntilMs !== null;
   }
 
+  /** 凍結期限に合わせてワンショットタイマーを張り直す(null なら外すだけ)。 */
+  private armFreezeTimer(): void {
+    if (this.freezeTimer !== null) {
+      clearTimeout(this.freezeTimer);
+      this.freezeTimer = null;
+    }
+    if (this.fxFreezeUntilMs === null) return;
+    // +25ms: flushFxFreeze の「期限ちょうど」比較を確実に越えてから発火する。
+    const delay = Math.max(0, this.fxFreezeUntilMs - this.now()) + 25;
+    const t = setTimeout(() => {
+      this.freezeTimer = null;
+      this.flushFxFreeze(this.now());
+      if (this.dirty) this.onFreezeExpired?.();
+    }, delay);
+    // worker の shutdown をこのタイマーが引き留めない(テストの後始末も同様)。
+    (t as { unref?: () => void }).unref?.();
+    this.freezeTimer = t;
+  }
+
+  /**
+   * 凍結期限タイマー発火時の通知先(session.nudgeChallenge)。配信終了後は
+   * 2Hz tick が止まり drainIfChanged が呼ばれない — このコールバックが無いと
+   * 「カットイン中に配信が切れる」と凍結と保留 op が次の RPC まで無期限残留する。
+   */
+  setOnFreezeExpired(cb: (() => void) | null): void {
+    this.onFreezeExpired = cb;
+  }
+
+  /** モニターの実効再生能力。両方 true のときだけカットイン凍結を張る。 */
+  private fxAllowed(): boolean {
+    return this.monitorOpen && this.monitorBandFx;
+  }
+
+  /**
+   * 能力が失われた瞬間に凍結中なら即時解除する共通処理。
+   * 戻り値 = 状態が変わった(呼び出し側は nudge して delta を配ること)。
+   */
+  private applyFxCapsChange(): boolean {
+    if (this.fxAllowed() || !this.isFxFrozen()) return false;
+    this.fxFreezeUntilMs = this.now();
+    this.flushFxFreeze(this.now());
+    this.armFreezeTimer();
+    return this.dirty;
+  }
+
+  /** main から: モニター窓の開閉。閉じたら進行中の凍結を即時解除する。 */
+  setMonitorOpen(open: boolean): boolean {
+    if (this.monitorOpen === open) return false;
+    this.monitorOpen = open;
+    return this.applyFxCapsChange();
+  }
+
+  /** モニターの RPC(challenge.fxCaps)から: カットインを再生できるか。 */
+  setFxCaps(bandFx: boolean): boolean {
+    if (this.monitorBandFx === bandFx) return false;
+    this.monitorBandFx = bandFx;
+    return this.applyFxCapsChange();
+  }
+
   /**
    * 凍結中なら保留キューへ、そうでなければ即時実行する。
    * 戻り値は「状態が変わったか」(op が false を返したら変わっていない)。
@@ -756,29 +898,138 @@ export class ChallengeEngine {
     if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) return;
     this.fxFreezeUntilMs = null;
     this.dirty = true;
-    while (this.pendingOps.length > 0) {
-      if (this.status !== 'running') {
-        this.pendingOps = [];
-        break;
+    // ドレイン中の演出は迂回バッファへ(finishDrain が同種を畳んで ring へ移す)。
+    this.drainFx = [];
+    try {
+      while (this.pendingOps.length > 0) {
+        if (this.status !== 'running') {
+          this.pendingOps = [];
+          break;
+        }
+        this.pendingOps.shift()!();
+        if (this.fxFreezeUntilMs !== null) break;
       }
-      this.pendingOps.shift()!();
-      if (this.fxFreezeUntilMs !== null) break;
+    } finally {
+      this.finishDrain();
     }
+    // 再凍結(ドレイン中断)なら次の期限で張り直し、解除完了なら外す。
+    this.armFreezeTimer();
   }
 
   /** stop 用の強制適用。保留分を残さず適用する(ドレイン中の再凍結は無視)。 */
   private forceApplyPendingOps(): void {
     this.fxFreezeUntilMs = null;
-    while (this.pendingOps.length > 0) {
-      if (this.status !== 'running') break;
-      this.pendingOps.shift()!();
-      this.fxFreezeUntilMs = null;
+    this.drainFx = [];
+    try {
+      while (this.pendingOps.length > 0) {
+        if (this.status !== 'running') break;
+        this.pendingOps.shift()!();
+        this.fxFreezeUntilMs = null;
+      }
+      this.pendingOps = [];
+    } finally {
+      this.finishDrain();
     }
-    this.pendingOps = [];
+    this.armFreezeTimer();
+  }
+
+  /**
+   * ドレイン迂回バッファを閉じ、同種の演出を1件に畳んで ring へ移す。
+   * 値・統計は各 op で適用済み — ここで畳むのは**見た目と履歴の行**だけ。
+   * 畳み規則: press/like/follow/stock-full は全件→1件(amount 合算+coalesced)、
+   * comment は keyword 単位、gift は canonical 単位(カットイン付きは畳まない —
+   * ドレインを中断させた再凍結ギフトで、カットインは effect 1件で自己完結する
+   * 契約)、roulette は新しい3件を盤面つきで残し古い分を1件に(盤面なしは
+   * モニターがバナーのみ再生する既存フォールバックに乗る)、achieved は単独。
+   * 1件だけのグループは原型のまま(coalesced を付けない)。
+   */
+  private finishDrain(): void {
+    const buf = this.drainFx;
+    this.drainFx = null;
+    if (!buf || buf.length === 0) return;
+    const out: ChallengeEffect[] = [];
+    const merge = (group: ChallengeEffect[]): void => {
+      if (group.length === 0) return;
+      if (group.length === 1) {
+        out.push(group[0]!);
+        return;
+      }
+      const last = group[group.length - 1]!;
+      const sum = (k: 'amount' | 'giftCount' | 'diamonds'): number =>
+        group.reduce((a, e) => a + (e[k] ?? 0), 0);
+      const merged: ChallengeEffect = {
+        ...last,
+        id: Math.max(...group.map((e) => e.id)),
+        amount: sum('amount'),
+        // 直近の値が正 — op は到着順に適用済みなので最後の valueAfter が現在値。
+        valueAfter: last.valueAfter,
+        coalesced: group.length,
+        ...(group.some((e) => e.flash) ? { flash: true } : {}),
+      };
+      if (last.kind === 'gift') {
+        if (group.some((e) => e.giftCount != null)) merged.giftCount = sum('giftCount');
+        if (group.some((e) => e.diamonds != null)) merged.diamonds = sum('diamonds');
+        // 反復演出は畳んだら意味を失う(1件ぶんの見た目で十分)。
+        delete merged.fxRepeat;
+        delete merged.fxRepeatIntervalMs;
+      }
+      if (last.kind === 'roulette') {
+        // 盤面を落としてバナーのみのフォールバックへ(リールを N 回逆再生しない)。
+        delete merged.rouletteSegments;
+        delete merged.rouletteIndex;
+        delete merged.roulettePattern;
+      }
+      out.push(merged);
+    };
+    // グループ分け(到着順を保つ)。
+    const groups = new Map<string, ChallengeEffect[]>();
+    const singles: ChallengeEffect[] = [];
+    const ROULETTE_KEEP = 3;
+    const rouletteAll = buf.filter((e) => e.kind === 'roulette');
+    const rouletteOld = new Set(rouletteAll.slice(0, Math.max(0, rouletteAll.length - ROULETTE_KEEP)));
+    for (const e of buf) {
+      let key: string | null;
+      switch (e.kind) {
+        case 'press':
+        case 'like':
+        case 'follow':
+        case 'stock-full':
+          key = e.kind;
+          break;
+        case 'comment':
+          key = `comment:${e.commentKeyword ?? ''}`;
+          break;
+        case 'gift':
+          // カットイン付きは畳まない(再凍結でドレインを中断させた主役)。
+          key = e.fxBandClip != null ? null : `gift:${e.canonical ?? e.giftName ?? ''}`;
+          break;
+        case 'roulette':
+          key = rouletteOld.has(e) ? 'roulette:old' : null;
+          break;
+        default:
+          key = null; // achieved / gauge-full 等は単独
+      }
+      if (key === null) {
+        singles.push(e);
+        continue;
+      }
+      const g = groups.get(key);
+      if (g) g.push(e);
+      else groups.set(key, [e]);
+    }
+    for (const g of groups.values()) merge(g);
+    out.push(...singles);
+    // id 昇順に整列してから ring へ(unshift の繰り返しで新しい順を維持)。
+    out.sort((a, b) => a.id - b.id);
+    for (const e of out) this.recentEffects.unshift(e);
+    while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
   }
 
   /** 達成演出は1回だけ。達成後は press/follow/gift すべて無効(status ガード)。 */
   private maybeAchieve(atMs: number): void {
+    // stop() の強制適用中は達成させない — 直後に idle で上書きされるため、
+    // achieved effect とリザルトだけが半端に生成されて配信されてしまう。
+    if (this.stopping) return;
     if (this.value > 0 || this.status !== 'running') return;
     this.status = 'achieved';
     this.achievedMs = atMs;
@@ -915,7 +1166,10 @@ export class ChallengeEngine {
    * いいねが止まった後の残りも 2Hz tick 側から最大約1.5秒で表示される。
    */
   private flushLikeFx(): void {
-    if (this.likeFxPending <= 0 || this.status !== 'running') return;
+    // 凍結中は出さない — 「凍結中のイベントは演出も保留する」契約から
+    // like 合算だけが漏れて、カットイン再生中にバナーが割り込んでいた。
+    // 解除後の次の tick(最大500ms)で出る。
+    if (this.likeFxPending <= 0 || this.status !== 'running' || this.isFxFrozen()) return;
     const nowMs = this.now();
     if (nowMs - this.likeFxLastMs < LIKE_FX_WINDOW_MS) return;
     this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
@@ -931,7 +1185,14 @@ export class ChallengeEngine {
    * 「いま何になっているか」として正しい)。
    */
   private pushEffect(e: Omit<ChallengeEffect, 'id' | 'valueAfter'>): void {
-    this.recentEffects.unshift({ id: this.nextEffectId++, valueAfter: this.value, ...e });
+    const effect: ChallengeEffect = { id: this.nextEffectId++, valueAfter: this.value, ...e };
+    // ドレイン中は迂回バッファへ(id 採番と valueAfter は通常どおり済ませてから —
+    // id の単調性は watermark 冪等再生の生命線)。finishDrain が ring へ移す。
+    if (this.drainFx !== null) {
+      this.drainFx.push(effect);
+      return;
+    }
+    this.recentEffects.unshift(effect);
     while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
   }
 }

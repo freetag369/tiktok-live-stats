@@ -4,6 +4,7 @@ import {
   DEFAULT_SE_SOUNDS,
   GIFT_FX_REPEAT_TIMERS_MAX,
   effectiveSeVolume,
+  freshChallengeEffects,
   giftFxShots,
   tierForDiamonds,
 } from '@shared/challenge';
@@ -18,6 +19,9 @@ function slotFor(e: ChallengeEffect): ChallengeSeSlot | null {
       return 'follow';
     case 'like':
       return 'like';
+    // 'gauge-full'(実演専用)の音は着弾の瞬間にモニターが直接鳴らす(impactStrikeVisuals)。
+    case 'gauge-full':
+      return null;
     // 'stock-full' の音は2段目着弾の瞬間にモニターが直接鳴らす(impactStock —
     // roulette-hit と同型)。ここで鳴らすと着弾より約1秒早く鳴ってしまう。
     case 'stock-full':
@@ -59,6 +63,13 @@ export function useChallengeSe(
     sounds?: Record<ChallengeSeSlot, string>;
     /** スロット→個別音量 0-100(%)。未指定・欠損スロットは 100(= volume そのまま)。 */
     volumes?: Record<ChallengeSeSlot, number>;
+    /**
+     * マウント直後の最初のスナップショットに含まれる test 演出(▶ 実演再生)を
+     * 鳴らす。モニターだけ true — 実演がモニターのマウントより先に push されると
+     * 無言で「再生済み」扱いになるため。ダッシュボードは false のまま(画面切替の
+     * 直後に直前の実演ジングルが鳴り直る事故を避ける)。
+     */
+    mountPlaysTest?: boolean;
   }
 ): void {
   const lastPlayed = useRef<number | null>(null);
@@ -75,19 +86,18 @@ export function useChallengeSe(
 
   useEffect(() => {
     if (!challenge) return;
-    const effects = challenge.recentEffects;
-    const maxId = effects.reduce((m, e) => Math.max(m, e.id), 0);
-    if (lastPlayed.current === null) {
-      lastPlayed.current = maxId;
-      return;
-    }
-    if (lastPlayed.current > maxId) lastPlayed.current = 0;
-    const fresh = effects.filter((e) => e.id > lastPlayed.current!).sort((a, b) => a.id - b.id);
     const o = optsRef.current;
+    // watermark の進行規約(マウント倒し / id 巻き戻り追従 / 鮮度ゲート)は
+    // shared の freshChallengeEffects に集約 — MonitorView の視覚再生と同じ実装。
+    const { next, play } = freshChallengeEffects(
+      challenge.recentEffects,
+      lastPlayed.current,
+      Date.now(),
+      { mountPlaysTest: o.mountPlaysTest ?? false }
+    );
+    lastPlayed.current = next;
     const sounds = o.sounds ?? DEFAULT_SE_SOUNDS;
-    for (const e of fresh) {
-      lastPlayed.current = Math.max(lastPlayed.current, e.id);
-      if (Date.now() - e.atMs > 5000) continue;
+    for (const e of play) {
       if (!o.active || !o.enabled) continue; // watermark は進めるが音は出さない
       const slot = slotFor(e);
       if (slot === null) continue; // 着弾側(モニター)が直接鳴らすスロット
@@ -123,6 +133,15 @@ export function useChallengeSe(
     for (const t of repeatTimers.current) window.clearTimeout(t);
     repeatTimers.current = [];
   }, [opts.active]);
+
+  // 停止/リセット(idle)で予約済みの反復ジングルを捨てる — モニター視覚側の
+  // 「idle でのみ演出を打ち切る」(MonitorView の status effect)と対称。
+  // achieved では止めない: CLEAR 直前のコンボ音は鳴り切ってよい。
+  useEffect(() => {
+    if (challenge?.status !== 'idle') return;
+    for (const t of repeatTimers.current) window.clearTimeout(t);
+    repeatTimers.current = [];
+  }, [challenge?.status]);
 
   useEffect(
     () => () => {

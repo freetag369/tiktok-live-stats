@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AppSettings, ChallengeEffect, ChallengeRankRow } from '@shared/dto';
 import {
+  CHALLENGE_MINI_IDS,
   CHALLENGE_MONITOR_TOP_N,
   CHALLENGE_RESULT_TOP_N,
   CLIP_ABORT_MS,
@@ -12,7 +13,9 @@ import {
   ROULETTE_QUEUE_MAX,
   rouletteAbortMs,
   effectiveSeVolume,
+  freshChallengeEffects,
   giftFxShots,
+  isChallengeEffectFresh,
   matchGiftClip,
   matchGiftMini,
   miniForSlot,
@@ -79,6 +82,12 @@ interface BandClipItem {
   durationMs: number;
   /** 終端フェード(.out)。フラグを分けるのは video の key を保ったまま付けるため。 */
   out: boolean;
+  /**
+   * 全面カット(assets/fx/cut/*.mp4)である印。true のときだけ <video> の muted を
+   * 外して素材に焼き込まれた音声を鳴らす — 帯域カットインは無音素材 + 別ファイルの
+   * BGM(bandBgm)なので常に muted。effect の fxFullCut をそのまま写す。
+   */
+  fullCut: boolean;
 }
 /** 再生中の簡易演出。クリップとは独立に1つだけ持つ(併用できる)。 */
 interface MiniItem {
@@ -111,6 +120,13 @@ interface StrikeClipItem {
   y: number;
   size: number;
 }
+
+/**
+ * 着弾クリップの安全弁。onEnded/onError だけだと、autoplay の reject や
+ * デコード停止(loadedmetadata 止まり)で静止フレームが7セグの上に screen 合成で
+ * 貼りついたまま残る — ビート(0.75s)+フェード余白で必ず畳む。
+ */
+const STRIKE_CLIP_ABORT_MS = 2500;
 
 let fxKey = 0;
 
@@ -190,6 +206,33 @@ function prefersReducedMotion() {
 }
 
 /**
+ * 演出を出さなかった理由をコンソールへ残す(モニターは Ctrl+Shift+I で確認)。
+ * 演出系の失敗経路はすべて無言スキップの設計なので、「なぜ出なかったか」を
+ * 追える唯一の手がかりをここに集める。
+ */
+function fxWarn(reason: string, detail?: unknown): void {
+  console.warn('[fx-skip]', reason, detail ?? '');
+}
+
+/**
+ * このルーレット effect でリールが実際に回るか。回らない(バナーのみに退避する)
+ * 効果に着弾ラッチ/パンチを譲ると、譲った先が何も出さず「数字だけ黙って動く」
+ * になる — 譲る判定と playEffect のフォールバック判定は必ずこれを共有する。
+ */
+function rouletteWillSpin(e: ChallengeEffect): boolean {
+  return (e.rouletteSegments?.length ?? 0) > 0 && e.rouletteIndex != null && !prefersReducedMotion();
+}
+
+/**
+ * このギフト effect でダイヤ帯域カットインが実際に始まるか。クリップ id が
+ * 未知(素材の削除/設定の巻き戻り)や尺不足だと startBandFx は無言で断る —
+ * 譲る判定と startBandFx の入口ガードは必ずこれを共有する。
+ */
+function bandWillStart(e: ChallengeEffect): boolean {
+  return fxClipUrl(e.fxBandClip) != null && (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
+}
+
+/**
  * 固定ステージの設計解像度。レイアウトは全てこの座標系の px で組み、
  * ウィンドウには transform: scale() で丸ごと収める(OBS のキャンバスと同じ方式)。
  * ビューポート単位で組むと横長ディスプレイや小窓で 7 セグがはみ出すため。
@@ -255,6 +298,13 @@ export function MonitorView(): React.JSX.Element {
   const totals = useLive((s) => s.totals);
   const sessionId = useLive((s) => s.sessionId);
   const [cfg, setCfg] = useState<AppSettings | null>(null);
+  /**
+   * cfg.get の初回試行が完了した印(成功・失敗を問わない)。演出の watermark は
+   * これが立つまで開始しない — cfg が null のまま最初の演出を処理すると、
+   * playMini / playClip / SE が全部無言でスキップされる(▶ 実演再生の「押下」は
+   * 簡易演出が唯一の視覚なので、丸ごと消えて見える)。
+   */
+  const [cfgTried, setCfgTried] = useState(false);
   const [scale, setScale] = useState(1);
   const [landscape, setLandscape] = useState(false);
 
@@ -287,6 +337,8 @@ export function MonitorView(): React.JSX.Element {
   const clipQueue = useRef<string[]>([]);
   const clipTimer = useRef<number | null>(null);
   const [strikeClip, setStrikeClip] = useState<StrikeClipItem | null>(null);
+  /** 着弾クリップの安全弁タイマー(STRIKE_CLIP_ABORT_MS)。 */
+  const strikeClipTimer = useRef<number | null>(null);
   /** 簡易演出は floats/flashes と同じ「積む」層(上限 MINI_MAX)。 */
   const [minis, setMinis] = useState<MiniItem[]>([]);
   const miniTimers = useRef<number[]>([]);
@@ -302,23 +354,16 @@ export function MonitorView(): React.JSX.Element {
 
   // CLEAR リザルト。演出を見せてから切り替えるので state で遅らせる。
   const [showResult, setShowResult] = useState(false);
+  /**
+   * achieved 演出を実際に再生した時刻(playEffect の非持ち越し分岐でセット)。
+   * リザルトのタイマー基準はこちらを優先する — achievedMs(worker 時刻)だけだと、
+   * バンドカットイン中に CLEAR したとき 2.5 秒でリザルトが不透明動画の裏に出て、
+   * カットイン → CLEAR 演出 → リザルトの順序が壊れる。
+   */
+  const [achievedFxAt, setAchievedFxAt] = useState<number | null>(null);
   const hasResult = challenge?.status === 'achieved' && challenge.result != null;
-
-  useEffect(() => {
-    if (!hasResult) {
-      setShowResult(false);
-      return;
-    }
-    // 達成後に開き直したモニターは待たずに出す(achievedMs が過去なので残り 0)。
-    const wait = Math.max(0, RESULT_DELAY_MS - (Date.now() - (challenge?.achievedMs ?? 0)));
-    if (wait === 0) {
-      setShowResult(true);
-      return;
-    }
-    const t = setTimeout(() => setShowResult(true), wait);
-    return () => clearTimeout(t);
-    // 依存は boolean と数値だけ — 2Hz で同じ result が再配信されてもタイマーは再起動しない。
-  }, [hasResult, challenge?.achievedMs]);
+  // ※ showResult のタイマー effect は roulette / bandClip / stockCutin の宣言後
+  //   (下)にある — 宣言前に deps へ書くと TDZ で落ちる。
 
   // 数字パンチ: 値が変わるたびに key を進めてアニメーションを再生する。
   // 方向(減=進捗/増=妨害)でグローの色と動きを変える。
@@ -342,6 +387,13 @@ export function MonitorView(): React.JSX.Element {
    */
   const pendingLikeFloats = useRef<{ node: React.ReactNode; cls: string }[]>([]);
   const pendingStockFloats = useRef<{ node: React.ReactNode; cls: string }[]>([]);
+  /**
+   * ルーレット/カットインに譲ったいいね着弾の持ち越し。据え置き(heldValue)の
+   * 持ち主は常に1人という規約があるので着弾チェーンは張れないが、演出ごと
+   * 捨てるとゲージだけ 0 に戻って音も光もバナーも出ない。解除の瞬間に
+   * drainPendingStrikeFx が1回だけ出す(finish* の持ち越しドレインと同じ流儀)。
+   */
+  const pendingStrikeFx = useRef(false);
 
   // ── ギフトルーレット ─────────────────────────────────────────────────────
   // 再生は同時に1件(並行するとリールが読めない)。演出中の再トリガーはキューへ。
@@ -399,24 +451,65 @@ export function MonitorView(): React.JSX.Element {
    */
   const stockCutinDelta = useRef(0);
 
+  // CLEAR リザルトへの切り替えタイマー。演出ホールド中は張らない —
+  // achieved は pendingAchieved で持ち越され、finish* が再生した時点で
+  // achievedFxAt が更新されて再実行される(state 依存)。これが無いと、
+  // バンドカットイン中の CLEAR で 2.5 秒後に不透明動画の裏でリザルトへ
+  // 切り替わり、「カットイン → CLEAR 演出 → リザルト」の順序が壊れる。
+  useEffect(() => {
+    if (!hasResult) {
+      setShowResult(false);
+      setAchievedFxAt(null);
+      return;
+    }
+    if (roulette || bandClip || stockCutin) return;
+    // 達成後に開き直したモニターは待たずに出す(achievedMs が過去なので残り 0)。
+    const base = achievedFxAt ?? challenge?.achievedMs ?? 0;
+    const wait = Math.max(0, RESULT_DELAY_MS - (Date.now() - base));
+    if (wait === 0) {
+      setShowResult(true);
+      return;
+    }
+    const t = setTimeout(() => setShowResult(true), wait);
+    return () => clearTimeout(t);
+    // 依存は boolean と数値・軽い state だけ — 2Hz で同じ result が再配信されても
+    // タイマーは再起動しない。
+  }, [hasResult, challenge?.achievedMs, achievedFxAt, roulette, bandClip, stockCutin]);
+
   useEffect(() => {
     // ワーカー再起動中は rpc が throw する — この窓にはトーストが無いので握って
     // ポーリング/delta での回復に任せる(catch しないと unhandled rejection)。
-    const safeCfg = () => void rpc('cfg.get', undefined).then(setCfg).catch(() => undefined);
+    const safeCfg = () => rpc('cfg.get', undefined).then(setCfg).catch(() => undefined);
     const safeChallenge = () => void rpc('challenge.get', undefined).then(setChallenge).catch(() => undefined);
-    safeCfg();
+    // 初回試行の完了(失敗込み)で watermark を解禁する。失敗時も解禁するのは、
+    // ポーリング復旧(下の 120 秒)まで演出を全停止させないため — cfg 依存の
+    // 演出だけが欠け、数字とバナーは動き続ける(従来の縮退と同じ)。
+    void safeCfg().finally(() => setCfgTried(true));
     safeChallenge();
+    // カットインを実際に再生できるか(reduced-motion でないか)を worker へ申告する。
+    // worker はこれとモニター窓の開閉(main 発)の AND が立つときだけカットイン
+    // 凍結を張る — 再生されないカットインのためにカウントダウンだけ止まる事故を防ぐ。
+    // OS 設定の切替は matchMedia の change で即時追従、worker 再起動は 120 秒
+    // ポーリングへの相乗りが保険(それまでは凍結が張られないだけの fail-open)。
+    const sendCaps = (): void => {
+      void rpc('challenge.fxCaps', { bandFx: !prefersReducedMotion() }).catch(() => undefined);
+    };
+    sendCaps();
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    mq.addEventListener('change', sendCaps);
     // 保存(cfg.set)は即時プッシュで受け、ポーリングは取りこぼしの保険なので
     // 120秒で十分(この窓は backgroundThrottling 無効で常時フル稼働のため、
     // 保険の RPC を刻むほど長時間配信の負荷になる)。challenge も同じ保険に
     // 相乗りさせ、初回取得の失敗(=「読み込み中…」固着)から復帰できるようにする。
     const offSettings = window.api.onSettings(setCfg);
     const t2 = setInterval(() => {
-      safeCfg();
+      void safeCfg();
       safeChallenge();
+      sendCaps();
     }, 120_000);
     return () => {
       offSettings();
+      mq.removeEventListener('change', sendCaps);
       clearInterval(t2);
     };
   }, []);
@@ -424,6 +517,11 @@ export function MonitorView(): React.JSX.Element {
   useEffect(() => {
     if (!challenge) return;
     document.title = challenge.title || 'チャレンジモニター';
+    // watermark(playEffect)と同じく cfg の初回試行を待つ — ここが先に走って
+    // pendingStrikeFx を立てると、譲った先の演出は watermark 初期化
+    // (mountPlaysTest が非 test を全部「再生済み」に倒す)で誰も再生せず、
+    // フラグだけ残留して数分後の finish* で因果不明の着弾演出が突然出る。
+    if (!cfgTried) return;
 
     const fills = challenge.likeGauge?.fills ?? null;
     const step = challenge.likeGauge?.step ?? 0;
@@ -437,31 +535,10 @@ export function MonitorView(): React.JSX.Element {
     prevValue.current = challenge.value;
 
     if (prevV === null) return; // マウント直後はアダプト(過去の変化で光らせない)
-    if (prevV === challenge.value) return;
-
-    // ルーレット演出中は据え置きを守る — 着弾ラッチや通常パンチで上書きすると
-    // リールが止まる前に数字がネタバレする。反映は finishRoulette が行い、
-    // 解除は常に null 代入なので worker 値へ必ず収束する。
-    // カットイン(バンド演出)中も同じ理由で守る — 反映は finishBandFx が行う。
-    // ストック着弾カットイン中も同様(再満杯は reveal 時に worker 値へ一括収束)。
-    if (rouletteHold.current || bandHold.current || stockCutinHold.current) return;
-    // 同一デルタの場合: この effect は演出再生(playEffect)より先に走るので、
-    // これから再生される未再生ルーレット/カットインがあればパンチを譲る(直後に
-    // startRoulette / startBandFx がラッチする)。5秒超の取りこぼしは演出側も
-    // スキップするので通常どおり punch。
-    if (
-      challenge.recentEffects.some(
-        (e) =>
-          (e.kind === 'roulette' || (e.kind === 'gift' && e.fxBandClip != null)) &&
-          e.id > (lastPlayed.current ?? 0) &&
-          Date.now() - e.atMs <= 5000
-      )
-    ) {
-      return;
-    }
 
     // ゲージ満タン由来かは fills の単調増加で判定する。recentEffects を見ないのは、
     // watermark の 5 秒ゲートで落ちた古い演出とラッチがズレるのを避けるため。
+    // 譲る判定より前に出しておく — 譲るときも「満タンが起きた」事実は要る。
     const units = fills !== null && prevF !== null ? fills - prevF : 0;
     const likeDelta = units > 0 ? units * step : 0;
     // ストック満杯はゲージ満タンと同じ tick でしか起きない(worker の従属関係)。
@@ -469,16 +546,72 @@ export function MonitorView(): React.JSX.Element {
     // ゲージ演出より先に7セグへ出る(因果逆転)。
     const stockUnits = sFills !== null && prevSF !== null ? sFills - prevSF : 0;
     const stockDelta = stockUnits > 0 ? stockUnits * (stock?.step ?? 0) : 0;
+
+    // 「値が変わっていない」だけでは帰れない — 押下(−1)といいね満タン(+1)が
+    // 同一デルタで相殺すると value は不変のまま fills だけ進む。ここで帰ると
+    // prevFills は上で前進済みなので、着弾チェーン(音・光・バナー)が恒久的に
+    // 1回ぶん消える。fills/stock の進みがあれば下の着弾判定まで進む。
+    if (prevV === challenge.value && likeDelta <= 0 && stockDelta <= 0) return;
+
     // 2Hz のデルタはボタン押下といいね満タンを1スナップショットに相乗りさせうる。
     // 丸ごと据え置くと押下の手応えが 0.72 秒遅れるので、いいね分だけを持ち越す。
     const held = challenge.value - likeDelta - stockDelta;
 
+    // ルーレット演出中は据え置きを守る — 着弾ラッチや通常パンチで上書きすると
+    // リールが止まる前に数字がネタバレする。反映は finishRoulette が行い、
+    // 解除は常に null 代入なので worker 値へ必ず収束する。
+    // カットイン(バンド演出)中も同じ理由で守る — 反映は finishBandFx が行う。
+    // ストック着弾カットイン中も同様(再満杯は reveal 時に worker 値へ一括収束)。
+    //
+    // 同一デルタの場合: この effect は演出再生(playEffect)より先に走るので、
+    // これから再生される未再生ルーレット/カットインがあればラッチを譲る(直後に
+    // startRoulette / startBandFx が張る)。5秒超の取りこぼしは演出側もスキップ
+    // するので、そのときは譲らず通常どおり着弾/パンチへ進む。
+    // 未再生 effect に譲るのは「本当にリール/カットインが始まる」ものだけ —
+    // 盤面欠損・未知クリップ id・動きの抑制で始まらない effect に譲ると、
+    // 譲った先が何も出さず、着弾もパンチも丸ごと消える(誰も再生しない)。
+    const yieldToCutin =
+      rouletteHold.current ||
+      bandHold.current ||
+      stockCutinHold.current ||
+      // watermark 未確立(lastPlayed=null)では譲らない — 直後の watermark 初期化が
+      // 全件を「再生済み」に倒すので、譲った先は誰も再生しない。鮮度は playEffect と
+      // 同じ isChallengeEffectFresh(test 演出は 15 秒)— 生の 5000 を置くと、
+      // 5〜15 秒経った test ルーレットで「譲らないのに再生はする」ズレが生まれ、
+      // startRoulette の flushStrike が飛行中の着弾チェーンを打ち切る。
+      (lastPlayed.current !== null &&
+        challenge.recentEffects.some(
+          (e) =>
+            e.id > lastPlayed.current! &&
+            isChallengeEffectFresh(e, Date.now()) &&
+            (e.kind === 'roulette'
+              ? rouletteWillSpin(e)
+              : e.kind === 'gift' && e.fxBandClip != null && bandWillStart(e))
+        ));
+
+    if (yieldToCutin) {
+      // 譲るのは「数字の据え置き」だけ。着弾した事実まで捨てると、ゲージが 0 に
+      // 戻ったのに音も光もバナーも出ない(演出が丸ごと消える最大の経路だった)。
+      // 実際の再生は解除の瞬間に drainPendingStrikeFx がまとめて1回行う。
+      if (likeDelta > 0 && challenge.status === 'running') pendingStrikeFx.current = true;
+      return;
+    }
+
     const canStrike =
       likeDelta > 0 &&
       challenge.status === 'running' &&
-      held >= prevV && // 逆行するラッチは張らない(step が窓中に変わった場合の保険)
+      // 据え置き値が壊れていないことだけを見る。以前は held >= prevV を課していたが、
+      // カットイン凍結(worker の fxFreeze)が明けると凍結中の押下といいね満タンが
+      // 1デルタに合流して held < prevV になり、実配信ではほぼ毎回この条件で着弾演出
+      // (gauge-full の効果音・クリップ・粒子)が丸ごと落ちていた。押下ぶんの手応えは
+      // startStrike が据え置きを張る前に通常パンチとして見せるので失われない。
+      held >= 0 &&
       held < challenge.value &&
       !prefersReducedMotion();
+
+    if (likeDelta > 0 && challenge.status === 'running' && !canStrike && prefersReducedMotion()) {
+      fxWarn('reduced-motion: ゲージ満タンの着弾演出をスキップ(数字は即時更新)');
+    }
 
     if (canStrike) {
       startStrike(held, prevV, likeDelta, stockDelta);
@@ -486,10 +619,13 @@ export function MonitorView(): React.JSX.Element {
     }
 
     flushStrike(); // 保留があれば畳んでから通常のパンチへ
-    setPunchDir(challenge.value < prevV ? 'down' : 'up');
-    setPunchKey((k) => k + 1);
+    // 相殺デルタ(値不変・着弾だけ不成立)ではパンチしない — 方向が決められない。
+    if (prevV !== challenge.value) {
+      setPunchDir(challenge.value < prevV ? 'down' : 'up');
+      setPunchKey((k) => k + 1);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [challenge?.value, challenge?.title, challenge?.likeGauge?.fills, challenge?.likeGauge?.stock?.fills, challenge?.status]);
+  }, [challenge?.value, challenge?.title, challenge?.likeGauge?.fills, challenge?.likeGauge?.stock?.fills, challenge?.status, cfgTried]);
 
   // タイマーをアンマウント跨ぎで生き残らせない(BGM も止め忘れない)。
   useEffect(
@@ -500,6 +636,7 @@ export function MonitorView(): React.JSX.Element {
       clearRepeatTimers();
       clearMiniTimers();
       clearClipTimer();
+      clearStrikeClipTimer();
       bandBgm.current?.stop(0);
       bandBgm.current = null;
       stopRouletteSound(0);
@@ -518,6 +655,19 @@ export function MonitorView(): React.JSX.Element {
       // 着弾待ちのバナーも捨てる — 停止/リセット後に古い通知を出さない。
       pendingLikeFloats.current = [];
       pendingStockFloats.current = [];
+      // 譲った着弾の持ち越しも同様(flushStrike は倒さないのでここで明示的に)。
+      pendingStrikeFx.current = false;
+      // 再生中のギフトクリップ・着弾クリップ・簡易演出・フラッシュも片付ける —
+      // clipQueue だけ空にして再生中の1本を残すのは非対称だった(リセット直後に
+      // 前ランの演出が流れ続ける)。floats は自アニメ終了で消えるので触らない。
+      clearClipTimer();
+      clipKey.current = null;
+      setClip(null);
+      clearStrikeClipTimer();
+      setStrikeClip(null);
+      clearMiniTimers();
+      setMinis([]);
+      setFlashes([]);
       // ストック着弾カットインも打ち切る(約5秒あるので明示的に)。保留バナーは
       // 直前で空にしてあるので flushStrike のバナー出力は no-op。
       flushStrike();
@@ -528,38 +678,42 @@ export function MonitorView(): React.JSX.Element {
   // 効果音(視覚とは独立の watermark)。モニターが開いている間はここが鳴らし、
   // ダッシュボード側は monitorOpen ゲートで黙る。設定は 30 秒ポーリング(上の
   // cfg 再取得)経由なので、音量変更の反映は最大 30 秒遅れる。
-  useChallengeSe(challenge, {
+  // challenge を cfgTried でゲートするのは視覚側の watermark と同じ理由 —
+  // cfg 前に watermark が確立すると、実演の音が既定割り当てで鳴ってしまう。
+  useChallengeSe(cfgTried ? challenge : null, {
     active: true,
     enabled: cfg?.challenge.seEnabled ?? true,
     volume: cfg?.challenge.seVolume ?? 70,
     sounds: cfg?.challenge.seSounds,
     volumes: cfg?.challenge.seVolumes,
+    mountPlaysTest: true,
   });
 
   // ── 演出再生(冪等) ─────────────────────────────────────────────────────
+  // watermark の規約(マウント倒し / id 巻き戻り追従 / 鮮度ゲート)は shared の
+  // freshChallengeEffects に集約。mountPlaysTest: マウント直後の最初のスナップ
+  // ショットに test 演出(設定画面の ▶ 実演再生)が含まれていたら再生する —
+  // ウィンドウ生成が実演の push より遅いと、従来は無言で「再生済み」に倒れて
+  // 「▶ を押しても何も起きない、2回目は出る」になっていた。
+  // cfgTried まで開始を遅らせるのは、cfg null のまま再生すると簡易演出/クリップ/SE
+  // が全部スキップされるため(cfg.get と challenge.get は並走している)。
   useEffect(() => {
-    if (!challenge) return;
-    const effects = challenge.recentEffects;
-    const maxId = effects.reduce((m, e) => Math.max(m, e.id), 0);
-    if (lastPlayed.current === null) {
-      lastPlayed.current = maxId;
-      return;
+    if (!challenge || !cfgTried) return;
+    const { next, play } = freshChallengeEffects(
+      challenge.recentEffects,
+      lastPlayed.current,
+      Date.now(),
+      { mountPlaysTest: true }
+    );
+    if (lastPlayed.current !== null) {
+      const stale =
+        challenge.recentEffects.filter((e) => e.id > lastPlayed.current!).length - play.length;
+      if (stale > 0) fxWarn(`鮮度ゲート超過の演出を${stale}件スキップ(復帰直後の演出ストーム防止)`);
     }
-    // worker 再起動で effect id が 1 から振り直されると watermark が天井に残り、
-    // 以後の演出が全て「再生済み」扱いで死ぬ。巻き戻りを検知したら追従させる
-    // (古すぎる演出は下の 5 秒ゲートが落とす)。
-    if (lastPlayed.current > maxId) lastPlayed.current = 0;
-    const fresh = effects
-      .filter((e) => e.id > lastPlayed.current!)
-      .sort((a, b) => a.id - b.id);
-    for (const e of fresh) {
-      lastPlayed.current = Math.max(lastPlayed.current, e.id);
-      // 取りこぼしの古い演出は無音でスキップ(復帰直後の演出ストーム防止)。
-      if (Date.now() - e.atMs > 5000) continue;
-      playEffect(e);
-    }
+    lastPlayed.current = next;
+    for (const e of play) playEffect(e);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [challenge?.recentEffects]);
+  }, [challenge?.recentEffects, cfgTried]);
 
   function pushFloat(node: React.ReactNode, cls: string): void {
     setFloats((f) => [...f.slice(-(FLOAT_MAX - 1)), { key: ++fxKey, node, cls }]);
@@ -573,6 +727,35 @@ export function MonitorView(): React.JSX.Element {
   function clearClipTimer(): void {
     if (clipTimer.current !== null) window.clearTimeout(clipTimer.current);
     clipTimer.current = null;
+  }
+  function clearStrikeClipTimer(): void {
+    if (strikeClipTimer.current !== null) window.clearTimeout(strikeClipTimer.current);
+    strikeClipTimer.current = null;
+  }
+  /** 着弾クリップを安全弁つきで出す(impactStrikeVisuals / revealStock の共通経路)。 */
+  function showStrikeClip(x: number, y: number, size: number): void {
+    const key = ++fxKey;
+    setStrikeClip({ key, x, y, size });
+    clearStrikeClipTimer();
+    strikeClipTimer.current = window.setTimeout(() => {
+      strikeClipTimer.current = null;
+      setStrikeClip((c) => (c?.key === key ? null : c));
+    }, STRIKE_CLIP_ABORT_MS);
+  }
+  /**
+   * <video> の autoplay を明示的に観測する。autoPlay 属性の再生失敗は promise の
+   * reject としてしか現れず(error イベントは出ない)、放置すると各ホルダーが
+   * 尺いっぱい黒画面のまま固着する — 失敗したら即 onFail(各層の終了経路)へ。
+   * dataset ガードで再レンダーの ref 再呼び出しでは多重 arm しない(key 変更 =
+   * 新要素でだけ再 arm される)。
+   */
+  function armVideoPlay(v: HTMLVideoElement | null, label: string, onFail: () => void): void {
+    if (!v || v.dataset.playArmed) return;
+    v.dataset.playArmed = '1';
+    v.play().catch((err: unknown) => {
+      fxWarn(`${label}: play() が拒否された`, err);
+      onFail();
+    });
   }
   function startClip(url: string): void {
     const key = ++fxKey;
@@ -626,6 +809,12 @@ export function MonitorView(): React.JSX.Element {
    */
   function playMini(id: string | null, amount: number, shot = 0): void {
     if (!id) return;
+    // validate 済みの cfg 経由なら来ないはずだが、バージョン混在(旧モニター窓 +
+    // 新設定)では起こりうる — 無言で消さず理由を残す。
+    if (!CHALLENGE_MINI_IDS.includes(id)) {
+      fxWarn('未知の簡易演出 id — スキップ', id);
+      return;
+    }
     const stageW = landscape ? STAGE_LW : STAGE_W;
     const stageH = landscape ? STAGE_LH : STAGE_H;
     const d = fxRef.current?.pointFor(countdownRef.current?.querySelector('.seg-digit') ?? null);
@@ -674,9 +863,23 @@ export function MonitorView(): React.JSX.Element {
     for (const f of q.current.splice(0)) pushFloat(f.node, f.cls);
   }
 
+  /**
+   * ルーレット/カットインに譲った着弾演出を1回だけ出す。据え置きはすでに
+   * 解除側(finishRoulette / finishBandFx)が worker 値へ収束させているので、
+   * ここで出すのは音と光とバナーだけ。
+   */
+  function drainPendingStrikeFx(): void {
+    if (!pendingStrikeFx.current) return;
+    impactStrikeVisuals(); // 先頭でフラグを倒すので二重発火しない
+  }
+
   /** 保留中の据え置きを即座に畳む。数字は常に worker の値へ収束する。 */
   function flushStrike() {
     clearStrikeTimers();
+    // pendingStrikeFx はここでは倒さない。startRoulette / startBandFx が「ラッチの
+    // 持ち主を1人にする」ために冒頭でこれを呼ぶので、倒すと譲ったばかりの着弾が
+    // その場で捨てられる。消費するのは実際に再生する impactStrikeVisuals /
+    // revealStock と、停止・リセット(下の status effect)だけ。
     // カットイン中の安全弁経路でもここに来る。stockCutin が null なら両行とも
     // no-op なので、ストックなしの従来 strike 経路の挙動は変わらない。
     stockCutinHold.current = false;
@@ -767,6 +970,10 @@ export function MonitorView(): React.JSX.Element {
     rouletteHold.current = false;
     setRoulette(null);
     setHeldValue(null);
+    // リール中に譲ったいいね着弾をここで出す(pendingAchieved と同じ持ち越し規約)。
+    // ルーレット確定のパンチより先に呼ぶ — 同一コミットでは後勝ちなので、
+    // 7セグの色と向きは主役であるルーレット側が持つ。
+    drainPendingStrikeFx();
     setPunchDir(e.amount < 0 ? 'down' : 'up');
     setPunchKey((k) => k + 1);
     const big = Math.abs(e.amount) >= 1000;
@@ -849,7 +1056,17 @@ export function MonitorView(): React.JSX.Element {
   function startBandFx(e: ChallengeEffect): boolean {
     const url = fxClipUrl(e.fxBandClip);
     const durationMs = e.fxDurationMs ?? 0;
-    if (!url || durationMs < 1000 || prefersReducedMotion()) return false;
+    // 入口ガードは譲る判定(yieldToCutin)と同じ bandWillStart を共有する —
+    // 判定がズレると「譲ったのにカットインが始まらず、どちらも出ない」に戻る。
+    if (!bandWillStart(e)) {
+      fxWarn('カットイン開始不可(未知クリップ id / 尺不足 / 動きの抑制)', {
+        clip: e.fxBandClip,
+        durationMs,
+        reducedMotion: prefersReducedMotion(),
+      });
+      return false;
+    }
+    if (!url) return false; // bandWillStart が保証するが、型のために残す
     // 連打ギフトの反復。カットインは全画面不透明なので間隔を空けず尺ぶんの直列再生。
     // 据え置き(bandHold)は総尺のあいだ維持するので、**数字が動くのは最後に1回だけ**。
     // worker 側も同じ総尺で凍結している(giftOp の fxFreezeUntilMs)。
@@ -861,7 +1078,7 @@ export function MonitorView(): React.JSX.Element {
     bandEffect.current = e;
     // 据え置き値は startRoulette と同じ「worker 確定の valueAfter から適用前へ戻す」。
     setHeldValue(Math.max(0, e.valueAfter - e.amount));
-    setBandClip({ key: ++fxKey, url, durationMs, out: false });
+    setBandClip({ key: ++fxKey, url, durationMs, out: false, fullCut: e.fxFullCut === true });
     // BGM。曲 id は effect が権威(worker が bgmEnabled/'off' を判定済み)、
     // 音量だけ cfg から読む(roulette-hit 等と同じ 30 秒ポーリング許容)。
     // 直列再生(連続バンドギフト)で前の曲が残らないよう先に止める。
@@ -873,7 +1090,7 @@ export function MonitorView(): React.JSX.Element {
       bandTimers.current.push(
         window.setTimeout(() => {
           if (!bandHold.current) return; // 途中で abort されていたら何もしない
-          setBandClip({ key: ++fxKey, url, durationMs, out: false });
+          setBandClip({ key: ++fxKey, url, durationMs, out: false, fullCut: e.fxFullCut === true });
           bandBgm.current?.stop(0);
           bandBgm.current = playBandBgm(e.fxBandBgm, cfg?.challenge.giftBandFx.bgmVolume ?? 70);
           bandBlast(durationMs);
@@ -911,6 +1128,8 @@ export function MonitorView(): React.JSX.Element {
     bandEffect.current = null;
     setBandClip(null);
     setHeldValue(null);
+    // カットイン中に譲ったいいね着弾をここで出す(finishRoulette と同じ持ち越し)。
+    drainPendingStrikeFx();
     if (e && e.amount !== 0) {
       setPunchDir(e.amount < 0 ? 'down' : 'up');
       setPunchKey((k) => k + 1);
@@ -1054,6 +1273,8 @@ export function MonitorView(): React.JSX.Element {
 
   /** ゲージ満タン着弾の共通演出(パンチ/シェイク/粒子/クリップ/SE)。 */
   function impactStrikeVisuals() {
+    // 譲った着弾の持ち越しはここで消費する(drainPendingStrikeFx の冪等性の担保)。
+    pendingStrikeFx.current = false;
     // 着弾の瞬間に「+N いいね妨害!」を出す — アニメーション → 通知の順序。
     // 2段着弾の1段目(impactStrikePartial)もここを通るので、いいね分はそこで出る。
     flushFloatQueue(pendingLikeFloats);
@@ -1076,7 +1297,7 @@ export function MonitorView(): React.JSX.Element {
       // 全画面ではなく7セグの実位置へ。ステージからはみ出さない範囲で数字を覆う。
       const base = r ? Math.min(r.w, r.h) : 320;
       const size = Math.min(Math.max(base * 1.4, 300), Math.min(stageW, stageH));
-      setStrikeClip({ key: ++fxKey, x: cx - size / 2, y: cy - size / 2, size });
+      showStrikeClip(cx - size / 2, cy - size / 2, size);
     }
     if (cfg?.challenge.seEnabled) {
       playSe(
@@ -1120,6 +1341,11 @@ export function MonitorView(): React.JSX.Element {
       startStockCutin(stockDelta);
       return;
     }
+    fxWarn('ストック着弾カットイン不可 — 即時 reveal へフォールバック', {
+      clipMissing: STOCK_CUTIN_CLIP_URL === null,
+      clipsEnabled: cfg?.challenge.fxClipsEnabled ?? false,
+      reducedMotion: prefersReducedMotion(),
+    });
     revealStock(stockDelta);
   }
 
@@ -1165,8 +1391,13 @@ export function MonitorView(): React.JSX.Element {
 
   /** ストック分の reveal — 据え置き全解除+着弾演出(パンチ/シェイク/粒子/SE)。 */
   function revealStock(stockDelta: number) {
+    pendingStrikeFx.current = false; // impactStrikeVisuals と同じく持ち越しを消費する
     setHeldValue(null);
     // 2発目(緑)の着弾(カットイン有りなら終端)と同時に「いいねストック満杯!」を出す。
+    // いいね側のバナーもここで必ず出す — ストック着弾カットイン(最長7秒)の間は
+    // strikeTimers が生きているため playEffect が保留しており、この経路で流さないと
+    // 次の着弾が起きるまでバナーが闇に消える。
+    flushFloatQueue(pendingLikeFloats);
     flushFloatQueue(pendingStockFloats);
     setPunchDir('strike');
     setPunchKey((k) => k + 1);
@@ -1186,7 +1417,7 @@ export function MonitorView(): React.JSX.Element {
     if (cfg?.challenge.fxClipsEnabled) {
       const base = r ? Math.min(r.w, r.h) : 320;
       const size = Math.min(Math.max(base * 1.4, 300), Math.min(stageW, stageH));
-      setStrikeClip({ key: ++fxKey, x: cx - size / 2, y: cy - size / 2, size });
+      showStrikeClip(cx - size / 2, cy - size / 2, size);
     }
     if (cfg?.challenge.seEnabled) {
       playSe(
@@ -1224,7 +1455,10 @@ export function MonitorView(): React.JSX.Element {
     // 解決できなければ従来経路へフォールバックする。
     // カットインの反復は startBandFx が尺ぶん直列で面倒を見るので、ここは shot 0 のみ。
     let banded = false;
-    if (shot === 0 && e.fxBandClip != null) {
+    // bandWillStart を先に判定する — 始まらないカットイン(未知クリップ id 等)を
+    // 持ち越しキューへ積むと、解除時の startBandFx が false を返してそのギフトの
+    // 演出が丸ごと消える。始まらないなら最初から通常クリップ経路へ落とす。
+    if (shot === 0 && e.fxBandClip != null && bandWillStart(e)) {
       if (rouletteHold.current || bandHold.current || stockCutinHold.current) {
         // bandHold を見ずに startBandFx を再入すると clearBandTimers が1本目の
         // finishBandFx を消し、据え置きが解けないまま数字が固まる。
@@ -1244,7 +1478,11 @@ export function MonitorView(): React.JSX.Element {
       const g = { canonical: e.canonical, diamonds: e.diamonds ?? 0 };
       // 反復の2発目以降は同じクリップを頭から撃ち直す('restart')。キューに積むと
       // 4秒クリップ×5本 = 20秒になって「連打」に見えない。
-      playClip(fxClipUrl(matchGiftClip(cfg.challenge, g)), shot === 0 ? 'queue' : 'restart');
+      const clipId = matchGiftClip(cfg.challenge, g);
+      const clipUrl = fxClipUrl(clipId);
+      // 解決できない id(素材削除・設定の巻き戻り)は無言で消えていた — 理由を残す。
+      if (clipId && !clipUrl) fxWarn('未知のクリップ id — ギフトクリップをスキップ', clipId);
+      playClip(clipUrl, shot === 0 ? 'queue' : 'restart');
       playMini(matchGiftMini(cfg.challenge, g), e.amount, shot);
     }
     // 通知(フラッシュ/シェイク/カード/粒子)。カットインが始まった(または持ち越された)
@@ -1427,6 +1665,26 @@ export function MonitorView(): React.JSX.Element {
         if (cfg) playMini(miniForSlot(cfg.challenge, 'comment'), e.amount);
         return;
       }
+      case 'gauge-full': {
+        // 実演専用(testEffect 由来のみ)。ライブ経路の着弾チェーンは likeGauge.fills
+        // の差分駆動なので、この kind の effect は作られない。stock-full の実演と
+        // 同じ条件で、現在値のまま着弾チェーンだけ試写する — held === prevV なので
+        // 数字は動かず、弾の飛翔 → segフラッシュ/ジョルト → SE → 簡易演出が出る。
+        if (
+          e.test &&
+          strikeTimers.current.length === 0 &&
+          !rouletteHold.current &&
+          !bandHold.current &&
+          !stockCutinHold.current &&
+          !prefersReducedMotion()
+        ) {
+          const held = Math.max(0, e.valueAfter - e.amount);
+          startStrike(held, held, e.amount, 0);
+        } else if (e.test) {
+          fxWarn('gauge-full の実演を開始できない(他演出の再生中 / 動きの抑制)');
+        }
+        return;
+      }
       case 'stock-full': {
         // フラッシュ/シェイク/クリップ/SE は着弾側(impactStock)が担当する
         // (gauge-full と同じ分担)。バナーも2発目(緑)の着弾まで我慢して
@@ -1487,10 +1745,15 @@ export function MonitorView(): React.JSX.Element {
         return;
       }
       case 'roulette': {
-        const segs = e.rouletteSegments;
         // 演出に必要な盤面が無い(旧 worker との混在等)/動きの抑制設定なら、
         // リールは諦めてバナーだけ出す — 値は worker が適用済みなので破綻しない。
-        if (!segs || segs.length === 0 || e.rouletteIndex == null || prefersReducedMotion()) {
+        // 判定は譲る側(yieldToCutin)と同じ rouletteWillSpin を共有する。
+        if (!rouletteWillSpin(e)) {
+          fxWarn('ルーレットのリール開始不可 — バナーのみ出す', {
+            segments: e.rouletteSegments?.length ?? 0,
+            index: e.rouletteIndex,
+            reducedMotion: prefersReducedMotion(),
+          });
           pushFloat(rouletteBanner(e), `${e.amount < 0 ? 'good' : 'bad'} banner-roulette`);
           return;
         }
@@ -1513,6 +1776,10 @@ export function MonitorView(): React.JSX.Element {
           pendingAchieved.current = e;
           return;
         }
+        // リザルト画面のタイマー基準。achievedMs(worker 時刻)ではなく「実際に
+        // CLEAR 演出を再生した瞬間」を使う — カットイン持ち越し明けでも
+        // 「CLEAR 演出 → RESULT_DELAY_MS → リザルト」の順序が保たれる。
+        setAchievedFxAt(Date.now());
         pushFlash('clear');
         pushShake('shake-strong');
         if (cfg?.challenge.fxClipsEnabled) playClip(ACHIEVED_CLIP_URL);
@@ -1703,9 +1970,13 @@ export function MonitorView(): React.JSX.Element {
             const v = ev.currentTarget;
             if (v.duration > 0 && v.duration - v.currentTime < 0.4) v.classList.add('out');
           }}
+          ref={(v) => armVideoPlay(v, 'fx-clip', () => nextClip(clip.key))}
           onEnded={() => nextClip(clip.key)}
-          // デコード失敗でも演出は canvas 側が主役なので黙って次へ送る。
-          onError={() => nextClip(clip.key)}
+          // デコード失敗でも演出は canvas 側が主役なので、理由だけ残して次へ送る。
+          onError={(ev) => {
+            fxWarn('fx-clip の再生エラー', ev.currentTarget.error);
+            nextClip(clip.key);
+          }}
         />
       ) : null}
 
@@ -1733,8 +2004,21 @@ export function MonitorView(): React.JSX.Element {
             // 素材は 4 秒だが演出のビートは 0.75 秒。残光に入る前に自分でフェードさせる。
             if (ev.currentTarget.currentTime > 0.75) ev.currentTarget.classList.add('out');
           }}
-          onEnded={() => setStrikeClip((c) => (c?.key === strikeClip.key ? null : c))}
-          onError={() => setStrikeClip((c) => (c?.key === strikeClip.key ? null : c))}
+          ref={(v) =>
+            armVideoPlay(v, 'fx-strike', () => {
+              clearStrikeClipTimer();
+              setStrikeClip((c) => (c?.key === strikeClip.key ? null : c));
+            })
+          }
+          onEnded={() => {
+            clearStrikeClipTimer();
+            setStrikeClip((c) => (c?.key === strikeClip.key ? null : c));
+          }}
+          onError={(ev) => {
+            fxWarn('fx-strike(着弾クリップ)の再生エラー', ev.currentTarget.error);
+            clearStrikeClipTimer();
+            setStrikeClip((c) => (c?.key === strikeClip.key ? null : c));
+          }}
         />
       ) : null}
 
@@ -1751,11 +2035,25 @@ export function MonitorView(): React.JSX.Element {
           className={`fx-clip fx-clip-opaque${bandClip.out ? ' out' : ''}`}
           src={bandClip.url}
           autoPlay
-          muted
           playsInline
           loop
           preload="auto"
-          onError={finishBandFx}
+          // 全面カット(assets/fx/cut/*.mp4)だけは素材に音声が焼き込んであるので
+          // muted を外す。帯域カットインは無音素材なので常に muted のままで、音は
+          // 別ファイルの bandBgm 側(二重に鳴らさないための唯一の分岐点)。
+          // 効果音オフなら映像ごと無音 — stock-cutin と同じ扱い。
+          muted={!bandClip.fullCut || !(cfg?.challenge.seEnabled ?? true)}
+          ref={(v) => {
+            // 音量だけは cfg から読む(fxBandBgm の音量と同じ 30 秒ポーリング許容)。
+            if (v && bandClip.fullCut) v.volume = (cfg?.challenge.giftFullCut?.volume ?? 70) / 100;
+            // 再生失敗の即時解除 — 放置すると bandHold が totalMs(最大45秒)まで
+            // 数字を据え置いたまま真っ黒になる(finishBandFx は hold ガードで冪等)。
+            armVideoPlay(v, 'band-cutin', finishBandFx);
+          }}
+          onError={(ev) => {
+            fxWarn('カットイン(bandClip)の再生エラー', ev.currentTarget.error);
+            finishBandFx();
+          }}
         />
       ) : null}
 
@@ -1781,8 +2079,12 @@ export function MonitorView(): React.JSX.Element {
               v.volume =
                 effectiveSeVolume(cfg?.challenge.seVolume ?? 70, cfg?.challenge.seVolumes?.['stock-full']) / 100;
             }
+            armVideoPlay(v, 'stock-cutin', finishStockCutin);
           }}
-          onError={finishStockCutin}
+          onError={(ev) => {
+            fxWarn('ストック着弾カットインの再生エラー', ev.currentTarget.error);
+            finishStockCutin();
+          }}
         />
       ) : null}
 
@@ -1817,28 +2119,33 @@ export function MonitorView(): React.JSX.Element {
           </div>
         ))}
         {roulette ? (
-          <RouletteFx
-            key={roulette.key}
-            segments={roulette.effect.rouletteSegments ?? []}
-            index={roulette.effect.rouletteIndex ?? 0}
-            amount={roulette.effect.amount}
-            fast={roulette.fast}
-            pattern={roulette.effect.roulettePattern ?? 'slow'}
-            seed={roulette.effect.id}
-            onNearStop={nearStopRoulette}
-            onKick={kickRoulette}
-            onSpinQuiet={() => {
-              // 終盤の段(保持・フェイク停止)ではリールが止まって見える —
-              // ループ音だけ先に閉じる。BGM は連鎖の終端(finishRoulette)まで流す。
-              rouletteSpinSe.current?.stop(150);
-              rouletteSpinSe.current = null;
-            }}
-            nickname={roulette.effect.nickname}
-            rouletteLabel={roulette.effect.rouletteLabel}
-            giftName={roulette.effect.giftName}
-            giftIconUrl={roulette.effect.giftIconUrl}
-            onDone={() => finishRoulette(roulette.effect, roulette.spin)}
-          />
+          // 暗幕ラッパーには key を付けない — キュー消化の連鎖では roulette が
+          // truthy のまま切り替わるため、ラッパー DOM を再利用させて暗幕の
+          // フェードインがスピンごとに再生されるチラつきを防ぐ。
+          <div className="roulette-screen">
+            <RouletteFx
+              key={roulette.key}
+              segments={roulette.effect.rouletteSegments ?? []}
+              index={roulette.effect.rouletteIndex ?? 0}
+              amount={roulette.effect.amount}
+              fast={roulette.fast}
+              pattern={roulette.effect.roulettePattern ?? 'slow'}
+              seed={roulette.effect.id}
+              onNearStop={nearStopRoulette}
+              onKick={kickRoulette}
+              onSpinQuiet={() => {
+                // 終盤の段(保持・フェイク停止)ではリールが止まって見える —
+                // ループ音だけ先に閉じる。BGM は連鎖の終端(finishRoulette)まで流す。
+                rouletteSpinSe.current?.stop(150);
+                rouletteSpinSe.current = null;
+              }}
+              nickname={roulette.effect.nickname}
+              rouletteLabel={roulette.effect.rouletteLabel}
+              giftName={roulette.effect.giftName}
+              giftIconUrl={roulette.effect.giftIconUrl}
+              onDone={() => finishRoulette(roulette.effect, roulette.spin)}
+            />
+          </div>
         ) : null}
         <div className="floats">
           {floats.map((f) => (

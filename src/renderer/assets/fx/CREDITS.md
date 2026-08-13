@@ -55,7 +55,7 @@
 
 Seedance 2.5 の出力は**アルファチャンネルを持たない**。そのため全クリップを
 **純黒(#000000)背景に発光体だけ**という構成で生成してある。黒地に加算的に重ねれば黒が抜ける。
-(例外: `band/*.mp4` と `stock-cutin.mp4` は不透明フルフレーム素材 — screen 禁止で
+(例外: `band/*.mp4`・`cut/*.mp4`・`stock-cutin.mp4` は不透明フルフレーム素材 — screen 禁止で
 `.fx-clip-opaque` を使う。各セクションの注意書きを参照。)
 
 ```css
@@ -399,3 +399,60 @@ the start, peaks, and fully decays — the frame returns to pure black and stays
 > 出典と許諾が確認できるまで、この素材を含むビルドを配布しないこと。
 > 差し替える場合は、同じパス・同じ 3:2・同じ縁のアルファ処理を施した WebP を置けば
 > コード側の変更は不要。
+
+---
+
+# ダイヤの全面カット(`cut/` サブフォルダ)
+
+**ギフトそのもの**(ギフト名 / giftId / canonical)で発火する、パチンコ大当たり風の
+全画面カットイン。**ダイヤ数帯(`band/*.mp4`)より先に評価され、一致したら帯域は
+再生しない**(`shared/challenge.ts` の `matchGiftFullCut` → `worker/challenge.ts` の
+`giftOp`)。再生中は帯域と同じく worker がカウンタを凍結する(fxFreeze)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | Higgsfield / `seedance_2_0`(mode `std`、参照画像あり `image_references`) |
+| 生成日 | 2026-08-13 |
+| 出力 | 1280×720 (16:9) / 24fps / H.264 / **AAC 音声トラックあり**(`generate_audio: true`) |
+| 尺 | 各 5.06 秒(アプリ側は設定の `giftFullCut.rules[].durationSec` = 既定 5 秒で打ち切る) |
+| 参照画像 | `IMAGE/daiya/S__108380176_0.jpg`(バラ)/ `S__108380177_0.jpg`(ローザ)— TikTok ギフト一覧アイコンのスクリーンショット |
+
+| ファイル | 既定のトリガー | モチーフ | 尺 |
+|---|---|---|---|
+| `cut-rose.mp4` | ギフト名「バラ」/ canonical `rose` | 光沢のある3Dのバラ(ポップ・可愛い系) | 5.06 秒 |
+| `cut-rosa.mp4` | ギフト名「ローザ」 | 深紅のベルベットのバラ(重厚・最高レア系) | 5.06 秒 |
+
+加工内容: **無し**(返却された mp4 をそのままリネームして格納)。
+
+> ## ⚠️ band/*.mp4・stock-cutin.mp4 と同族 — screen 禁止・`.fx-clip-opaque` 必須・音声あり
+>
+> 不透明フルフレーム素材(黒背景発光体ではない)なので `mix-blend-mode: screen` 禁止。
+> `.fx-clip-opaque` で重ねる。配置の制約(`.monitor-root` 直下・z-index なし)は同じ。
+>
+> **この2本は band/*.mp4 と同じ `<video>` 枠(`bandClip`)で再生されるが、音声だけが
+> 違う。** band は無音素材で `assets/se/band/bgm-band*.mp3` を別に重ねるのに対し、
+> こちらは音声を焼き込んである。分岐点は **`ChallengeEffect.fxFullCut`** ただ1つ:
+> worker がこの印を載せ、`MonitorView` はその印があるときだけ `<video>` の `muted` を
+> 外して音量を `giftFullCut.volume` に合わせる。**worker 側は `fxFullCut` の effect に
+> `fxBandBgm` を載せない**(載せると mp4 の音と BGM が二重に鳴る)。
+>
+> 尺の権威は素材ではなく設定(`giftFullCut.rules[].durationSec`)。`MonitorView` は
+> `loop` を付けてタイマーで打ち切る。**既定 5 秒 < 素材 5.06 秒なのでループはしない** —
+> 設定で 6 秒以上にすると頭から再生し直すので、音楽も途中で鳴り直す点に注意。
+>
+> 著作権の注意は `gift/` / `band/` と同じ — TikTok 本家のギフト演出の再現ではなく、
+> アイコンの題材(バラ)を参照した完全オリジナル。生成物の利用条件は Higgsfield の
+> 利用規約(生成時のプラン: Plus)に従う。CC0 ではない。
+
+## 生成プロンプト(全文)
+
+共通ガード(`band/*.mp4` と同じ): パチンコ大当たり風 / 冒頭から即アクション /
+終端は白金フラッシュ / 被写体は横方向の中央に維持 / 文字・ロゴ・人物禁止 /
+末尾 0.5 秒で音楽を無音へ減衰(映像の `.out` フェード 400ms と揃えるため)。
+
+- **cut-rose.mp4** — Pachinko jackpot cut-in animation, opaque full-frame, action starting immediately from the very first frame. A glossy 3D cartoon rose exactly matching the reference image — a rounded spiral pink-and-crimson rose bloom with a smooth candy-like glossy surface, a green stem and two bright green leaves — bursts up into the center of the screen and blooms open in triumph, scaling up with a punchy elastic pop. Behind it, long pink and gold light rays sweep and rotate radially from the center like a slot-machine victory starburst; waves of rose-pink and magenta light ripple outward to the edges of the frame; thousands of glowing pink petals, heart-shaped sparkles and white-gold spark particles storm upward and toward the camera around the rose. Comic speed lines, rotating lens flares, gold and pink strobe edges framing the screen. The rose spins slowly and catches specular highlights at the climax. Maximum spectacle, screen-filling, loud and celebratory jackpot energy, slight dramatic push-in. The rose and the main action stay in the horizontal center of the frame (safe for a vertical center crop). Ends with a bright white-gold flash filling the frame. No text, no letters, no numbers, no logos, no watermark, no people, no hands. Audio: a bright cheerful jingling jackpot fanfare with sparkling bell arpeggios and a soft taiko impact hit as the rose blooms, celebratory and cute, ending with the music decaying toward silence in the final half second.
+- **cut-rosa.mp4** — Pachinko jackpot cut-in animation, opaque full-frame, action starting immediately from the very first frame, top-rarity grade. A lush deep-red velvet rose exactly matching the reference image — a richly layered realistic crimson rose bloom with many soft ruffled petals and dark green leaves — erupts into the center of the screen and unfurls its petals in a slow majestic bloom, far more luxurious and premium than an ordinary rose. Behind it, enormous golden god-rays sweep and rotate radially from the center like a slot-machine grand-prize starburst; a storm of crimson and scarlet rose petals swirls outward filling the whole frame and streaming toward the camera; showers of golden sparks, glittering embers and white-hot light motes rise around the bloom. Multiple escalating explosion waves, firework volleys of red and gold, rotating lens flares, deep red and gold strobe edges framing the screen, subtle camera shake on each impact. Rich velvet texture and deep specular highlights on the petals at the climax. Maximum spectacle, screen-filling, overwhelming grand-prize energy, slow dramatic push-in. The rose and the main action stay in the horizontal center of the frame (safe for a vertical center crop). Ends with a brilliant white-gold flash filling the frame. No text, no letters, no numbers, no logos, no watermark, no people, no hands. Audio: a dramatic rising orchestral jackpot fanfare with brass swells, taiko-style impact hits as the petals burst, shimmering orchestral bells over the top, grand and luxurious, ending with the music decaying toward silence in the final half second.
+
+> Higgsfield の罠(`band/` のときと同じ): `generate_video_batch` は最初の投入で
+> **プリセット推奨("IN THE DARK")が返ってジョブが作られない**ことがある。
+> 返ってきた `declined_preset_id` を同じ params に足して再投入すれば通る。
