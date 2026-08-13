@@ -280,7 +280,9 @@ describe('P1 analytics', () => {
     const incremental = store.getViewer('1', null)!.row.score;
     store.recomputeScores({ full: true });
     const full = store.getViewer('1', null)!.row.score;
-    expect(full).toBeCloseTo(incremental, 6);
+    // 6桁だと落ちる環境がある(CI の Windows ランナーで差 5.1e-7 を実測)。
+    // 増分と全再計算は加算順が違うので、libm の丸め差がプラットフォームで揺れる。
+    expect(full).toBeCloseTo(incremental, 5);
   });
 
   it('flags an overdue regular but not a one-off first-timer', () => {
