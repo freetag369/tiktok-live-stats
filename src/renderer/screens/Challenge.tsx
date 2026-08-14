@@ -51,6 +51,7 @@ import {
 } from '@shared/challenge';
 import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
+import { useConfirm } from '../components/ConfirmDialog';
 import { setSettings, toast } from '../state/uiStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
 import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
@@ -308,6 +309,7 @@ export function Challenge(): React.JSX.Element {
   const [testBusy, setTestBusy] = useState(false);
   const [tab, setTab] = useState<Tab>('basic');
   const [monitorOpen, setMonitorOpen] = useState(false);
+  const [confirmNode, confirm] = useConfirm();
 
   useEffect(() => {
     // マウント時に必ず最新を取り直す — 設定画面での変更後でも古い draft を種にしない。
@@ -379,6 +381,39 @@ export function Challenge(): React.JSX.Element {
     }
   }
 
+  /**
+   * 同梱デフォで更新 — 自分のデフォ保存(config/challenge-default.json)を削除し、
+   * アプリ同梱の公開デフォを実効既定へ戻して画面にも反映する。自分のファイルが
+   * 常に同梱より優先されるため、公開デフォの新しい内容を受け取る唯一の道。
+   * 設定(settings.json)自体は「保存」を押すまで変わらない。
+   */
+  async function updateFromBundled(): Promise<void> {
+    if (!draft) return;
+    const ok = await confirm({
+      title: '同梱デフォで更新しますか？',
+      message:
+        'この端末の「デフォ保存」を削除し、アプリ同梱の公開デフォを既定に戻します。画面の内容も同梱デフォに置き換わります。',
+      detail: '設定そのものは「保存」を押すまで変わりません。自分のデフォが必要なら、あとでもう一度「デフォ保存」してください。',
+      confirmLabel: '更新する',
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const r = await rpc('challengeDefault.clear', undefined);
+      patch(r.cfg);
+      toast({
+        level: 'info',
+        msgJa: r.removed
+          ? 'デフォ保存を削除し、同梱デフォを画面に反映しました。「保存」を押すと確定します。'
+          : 'デフォ保存はありませんでした。同梱デフォを画面に反映しました。「保存」を押すと確定します。',
+      });
+    } catch (e) {
+      toast({ level: 'error', msgJa: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function testFx(spec: ChallengeTestEffectSpec): Promise<void> {
     if (testBusy) return;
     setTestBusy(true);
@@ -425,10 +460,23 @@ export function Challenge(): React.JSX.Element {
         >
           デフォ保存
         </button>
+        <button
+          className="btn small"
+          onClick={() => void updateFromBundled()}
+          disabled={busy}
+          title={
+            '自分の「デフォ保存」を削除して、アプリ同梱の公開デフォ(配布物に入っている challenge-default.json)を既定に戻し、' +
+            '内容をこの画面に読み込みます。自分のデフォ保存は同梱版より常に優先されるため、' +
+            '公開デフォの新しい内容を受け取るにはこの操作が必要です。'
+          }
+        >
+          同梱デフォで更新
+        </button>
         <button className="btn primary" onClick={() => void save()} disabled={busy || !dirty}>
           {dirty ? '保存' : '保存済み'}
         </button>
       </div>
+      {confirmNode}
 
       <label className="row" style={{ cursor: 'pointer' }}>
         <input type="checkbox" checked={draft.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />

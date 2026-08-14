@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_ZOOM_FACTOR, SETTINGS_VERSION, type AppSettings, type ChallengeConfig } from '@shared/dto';
 import { DEFAULT_CHALLENGE, migrateChallengeConfig, validateChallengeConfig } from '@shared/challenge';
@@ -131,6 +131,18 @@ export function loadChallengeDefault(dataDir: string): ChallengeConfig | null {
     }
   }
   return null;
+}
+
+/**
+ * ユーザーのデフォ保存を削除して、同梱の公開デフォ(無ければ組み込み既定)へ戻す。
+ * 「同梱デフォで更新」ボタンの実体 — ユーザーのファイルが常に同梱より優先されるため、
+ * 公開デフォの新しい内容を受け取るにはこの削除が唯一の道。戻り値は「実際に消したか」。
+ */
+export function clearChallengeDefault(dataDir: string): boolean {
+  const p = challengeDefaultPath(dataDir);
+  if (!existsSync(p)) return false;
+  rmSync(p);
+  return true;
 }
 
 /** 検証(clamp)してから書く。戻り値は保存先パス(トーストでユーザーに見せる)。 */

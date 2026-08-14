@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron';
 import type { AppSettings, ChallengeConfig, CsvExportSpec } from '@shared/dto';
 import { CH_MONITOR_STATE, CH_SETTINGS_PUSH, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
-import { defaultSettings, loadChallengeDefault, loadSettings, needsWorkerRestart, sanitizeSettings, saveChallengeDefault, saveSettings } from './boot-settings';
+import { clearChallengeDefault, defaultSettings, loadChallengeDefault, loadSettings, needsWorkerRestart, sanitizeSettings, saveChallengeDefault, saveSettings } from './boot-settings';
 import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
 import { closeMonitorWindow, getMonitorWindow, openMonitorWindow, repositionMonitor } from './monitor-window';
 import { configDirIn, defaultDataDir, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
@@ -207,6 +207,17 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
           id,
           ok: true,
           result: { cfg: custom ?? defaultSettings(dataDir).challenge, custom: custom != null },
+        } as RpcResponse;
+      }
+
+      // 「同梱デフォで更新」 — ユーザーのデフォ保存を消し、同梱の公開デフォ
+      // (resources/challenge-default.json、無ければ組み込み既定)を実効既定に戻す。
+      case 'challengeDefault.clear': {
+        const removed = clearChallengeDefault(dataDir);
+        return {
+          id,
+          ok: true,
+          result: { removed, cfg: defaultSettings(dataDir).challenge },
         } as RpcResponse;
       }
 

@@ -81,6 +81,11 @@ export type RpcMap = {
   'challengeDefault.save': { p: D.ChallengeConfig; r: { path: string } };
   /** 実効既定(デフォ保存があればその内容、無ければ同梱既定)。custom はファイルの有無。 */
   'challengeDefault.get': { p: void; r: { cfg: D.ChallengeConfig; custom: boolean } };
+  /**
+   * ユーザーのデフォ保存を削除して同梱の公開デフォへ戻す(「同梱デフォで更新」)。
+   * removed は「ファイルが実際にあって消したか」、cfg は削除後の実効既定。
+   */
+  'challengeDefault.clear': { p: void; r: { removed: boolean; cfg: D.ChallengeConfig } };
   'file.exportCsv': { p: D.CsvExportSpec; r: { path: string; rows: number } | null };
   'file.backup': { p: void; r: { path: string } | null };
   'file.openDataDir': { p: void; r: void };
@@ -123,6 +128,7 @@ export const MAIN_HANDLED: ReadonlySet<string> = new Set([
   'cfg.set',
   'challengeDefault.save',
   'challengeDefault.get',
+  'challengeDefault.clear',
   'file.exportCsv',
   'file.backup',
   'file.openDataDir',
