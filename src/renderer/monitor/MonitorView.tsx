@@ -24,6 +24,7 @@ import {
   tierForDiamonds,
 } from '@shared/challenge';
 import { num } from '@shared/format';
+import { CFG_POLL_MS } from '@shared/constants';
 import { drainFxQueues, type FxDrainOrder } from '@shared/fx-drain';
 import { rpc } from '../ipc/client';
 import { setChallenge, useLive } from '../state/liveStore';
@@ -565,7 +566,7 @@ export function MonitorView(): React.JSX.Element {
       void safeCfg();
       safeChallenge();
       sendCaps();
-    }, 120_000);
+    }, CFG_POLL_MS);
     return () => {
       offSettings();
       mq.removeEventListener('change', sendCaps);
@@ -788,8 +789,8 @@ export function MonitorView(): React.JSX.Element {
   }, [shownBoostTap]);
 
   // 効果音(視覚とは独立の watermark)。モニターが開いている間はここが鳴らし、
-  // ダッシュボード側は monitorOpen ゲートで黙る。設定は 30 秒ポーリング(上の
-  // cfg 再取得)経由なので、音量変更の反映は最大 30 秒遅れる。
+  // ダッシュボード側は monitorOpen ゲートで黙る。設定は 120 秒ポーリング(CFG_POLL_MS)(上の
+  // cfg 再取得)経由なので、音量変更の反映は最大 120 秒遅れる。
   // challenge を cfgTried でゲートするのは視覚側の watermark と同じ理由 —
   // cfg 前に watermark が確立すると、実演の音が既定割り当てで鳴ってしまう。
   useChallengeSe(cfgTried ? challenge : null, {
@@ -1285,7 +1286,7 @@ export function MonitorView(): React.JSX.Element {
     setHeldValue(Math.max(0, e.valueAfter - e.amount));
     setBandClip({ key: ++fxKey, url, durationMs, out: false, fullCut: e.fxFullCut === true });
     // BGM。曲 id は effect が権威(worker が bgmEnabled/'off' を判定済み)、
-    // 音量だけ cfg から読む(roulette-hit 等と同じ 30 秒ポーリング許容)。
+    // 音量だけ cfg から読む(roulette-hit 等と同じ 120 秒ポーリング(CFG_POLL_MS)許容)。
     // 直列再生(連続バンドギフト)で前の曲が残らないよう先に止める。
     bandBgm.current?.stop(0);
     bandBgm.current = playBandBgm(e.fxBandBgm, cfg?.challenge.giftBandFx.bgmVolume ?? 70);
@@ -1872,7 +1873,7 @@ export function MonitorView(): React.JSX.Element {
     // 不透明動画の前面に重なって「カットイン → 通知」の順序を壊すだけ。
     if (shot > 0 && (bandHold.current || stockCutinHold.current || boostHold.current)) return;
     // ダイヤ帯域カットイン。effect 側の fxBandClip が権威(worker が判定済み・
-    // 凍結も開始済み)なので cfg は見ない — 30 秒ポーリングの古い設定に
+    // 凍結も開始済み)なので cfg は見ない — 120 秒ポーリング(CFG_POLL_MS)の古い設定に
     // 依存しない。開始できたら通常クリップ・簡易演出は出さない(全画面を
     // 不透明動画が覆うため見えない)。リール中・カットイン中は持ち越し、
     // 解決できなければ従来経路へフォールバックする。
@@ -1896,7 +1897,7 @@ export function MonitorView(): React.JSX.Element {
       }
     }
     // 映像クリップ。canonical 一致の専用クリップ → 無ければ tier の汎用クリップ。
-    // 割り当ては設定画面で変更でき、cfg は 30 秒ポーリングで届く。
+    // 割り当ては設定画面で変更でき、cfg は 120 秒ポーリング(CFG_POLL_MS)で届く。
     if (cfg && !banded) {
       const g = { canonical: e.canonical, diamonds: e.diamonds ?? 0 };
       // 反復の2発目以降は同じクリップを頭から撃ち直す('restart')。キューに積むと
@@ -1937,8 +1938,8 @@ export function MonitorView(): React.JSX.Element {
     // 揺れない(直すには remove→reflow→add が要る。既知の制限)。
     if (shot === 0 && tier >= 2) pushShake(tier >= 4 ? 'shake-strong' : 'shake');
     // お助け(ファンスタンプ)は専用バナー。ギフトカードも tier の金色粒子も出さない —
-    // 1ダイヤ・高頻度で届くので両方出すと上限8枠を食い潰し、フォロー/いいねの行が
-    // 押し流される。判定は effect の焼き込み(cfg は 30 秒ポーリングで古くなりうる)。
+    // 1ダイヤ・高頻度で届くので両方出すと上限3枠(FLOAT_MAX)を食い潰し、フォロー/いいねの行が
+    // 押し流される。判定は effect の焼き込み(cfg は 120 秒ポーリング(CFG_POLL_MS)で古くなりうる)。
     if (e.fanStamp) {
       if (shot === 0) {
         // 既定は減算(お助け)だが amountEach は正にもできる設定なので符号で言い換える。
@@ -1968,7 +1969,7 @@ export function MonitorView(): React.JSX.Element {
       const gift = e.giftName ?? 'ギフト';
       const sign = e.amount > 0 ? `+${num(e.amount)}` : e.amount < 0 ? `${num(e.amount)}` : '±0';
       // ギフトカードは連打全体の要約(「バラ ×10 💎10 +10」)なので1枚だけ。
-      // 反復ぶん出すと上限8枠を食い潰してフォロー/いいねの行が押し流される。
+      // 反復ぶん出すと上限3枠(FLOAT_MAX)を食い潰してフォロー/いいねの行が押し流される。
       pushFloat(
         <>
           <span className="gc-icon">
@@ -2591,7 +2592,7 @@ export function MonitorView(): React.JSX.Element {
           // 効果音オフなら映像ごと無音 — stock-cutin と同じ扱い。
           muted={!bandClip.fullCut || !(cfg?.challenge.seEnabled ?? true)}
           ref={(v) => {
-            // 音量だけは cfg から読む(fxBandBgm の音量と同じ 30 秒ポーリング許容)。
+            // 音量だけは cfg から読む(fxBandBgm の音量と同じ 120 秒ポーリング(CFG_POLL_MS)許容)。
             if (v && bandClip.fullCut) v.volume = (cfg?.challenge.giftFullCut?.volume ?? 70) / 100;
             // 再生失敗の即時解除 — 放置すると bandHold が totalMs(最大45秒)まで
             // 数字を据え置いたまま真っ黒になる(finishBandFx は hold ガードで冪等)。

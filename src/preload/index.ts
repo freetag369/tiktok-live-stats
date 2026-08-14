@@ -58,7 +58,7 @@ const api = {
     return () => ipcRenderer.off(CH_MONITOR_STATE, h);
   },
 
-  /** 設定保存(cfg.set)の即時通知。モニターの30秒ポーリングを待たず反映する。 */
+  /** 設定保存(cfg.set)の即時通知。モニターの保険ポーリング(CFG_POLL_MS=120秒)を待たず反映する。 */
   onSettings(cb: (s: AppSettings) => void): () => void {
     const h = (_e: unknown, s: AppSettings) => cb(s);
     ipcRenderer.on(CH_SETTINGS_PUSH, h);

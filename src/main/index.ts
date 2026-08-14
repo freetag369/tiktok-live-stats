@@ -177,7 +177,7 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
           // クラッシュ自動再起動が古い設定に巻き戻らないようにペイロードも更新。
           host?.refreshBoot(bootPayload());
         }
-        // 保存を両ウィンドウへ即時プッシュ — モニターの30秒ポーリングを待つと
+        // 保存を両ウィンドウへ即時プッシュ — モニターの保険ポーリング(CFG_POLL_MS=120秒)を待つと
         // 「▶ モニター」の実演が保存前の割り当てで再生されうる。
         win?.webContents.send(CH_SETTINGS_PUSH, settings);
         getMonitorWindow()?.webContents.send(CH_SETTINGS_PUSH, settings);

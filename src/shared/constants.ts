@@ -92,8 +92,16 @@ export const CH_WORKER_STATE = 'app:worker-state';
 export const CH_TOAST = 'app:toast';
 export const CH_VISIBILITY = 'ui:visibility';
 export const CH_MONITOR_STATE = 'app:monitor-state';
-/** cfg.set 直後の設定全量プッシュ。モニターの30秒ポーリングを待たずに反映する。 */
+/** cfg.set 直後の設定全量プッシュ。モニターの保険ポーリング(CFG_POLL_MS)を待たずに反映する。 */
 export const CH_SETTINGS_PUSH = 'app:settings';
+
+/**
+ * モニター窓の設定/チャレンジ再取得の保険ポーリング間隔。保存(cfg.set)は
+ * CH_SETTINGS_PUSH の即時プッシュで届くので、これは取りこぼしの保険 —
+ * モニター窓は backgroundThrottling 無効で常時フル稼働のため、保険の RPC を
+ * 刻むほど長時間配信の負荷になる(30秒 → 120秒に延ばした経緯)。
+ */
+export const CFG_POLL_MS = 120_000;
 
 /**
  * 生ダッシュボードの視聴者テーブルの取得件数。

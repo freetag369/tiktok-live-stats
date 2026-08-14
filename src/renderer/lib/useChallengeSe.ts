@@ -36,7 +36,7 @@ function slotFor(e: ChallengeEffect): ChallengeSeSlot | null {
       if (e.fxBandClip != null) return null;
       // お助け(ファンスタンプ)は専用スロット。1ダイヤなので tier では gift-t1 と
       // 区別できない。判定は cfg ではなく effect の焼き込み(worker が付ける印)を
-      // 見る — モニターの 30 秒ポーリングで古い設定を読む事故を避ける規約。
+      // 見る — モニターの 120 秒ポーリング(CFG_POLL_MS)で古い設定を読む事故を避ける規約。
       // カットイン判定より後に置くこと: suppressBandFx をオフにした設定で
       // カットインが出るとき、BGM とジングルを重ねない既存規約を守る。
       if (e.fanStamp) return 'helper';

@@ -749,8 +749,8 @@ export class ChallengeEngine {
               // 終盤の演出パターンも effect に載せる。**出目を引いたあとに、出目とは
               // 無関係に引く** — 相関するとキック=大当たりが学習されて予告になる。
               roulettePattern: drawRoulettePattern(this.fxRand),
-              // 表示名も effect に載せて自己完結させる(モニターの cfg は 30秒
-              // ポーリングで古くなりうる — rouletteSegments と同じ理由)。
+              // 表示名も effect に載せて自己完結させる(モニターの cfg は 120秒
+              // ポーリング(CFG_POLL_MS)で古くなりうる — rouletteSegments と同じ理由)。
               ...(rl.label !== '' ? { rouletteLabel: rl.label } : {}),
               nickname: e.viewer.nickname ?? e.viewer.displayId,
               ...(e.giftName ? { giftName: e.giftName } : {}),

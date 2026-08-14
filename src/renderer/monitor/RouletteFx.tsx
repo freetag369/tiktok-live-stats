@@ -18,7 +18,7 @@ import { num } from '@shared/format';
  *
  * MiniFx と同じ流儀: 形(DOM)はここ、動き(@keyframes)は monitor.css。
  * 盤面と当選 index は effect に載ってきた自己完結の値を使う — モニターの設定は
- * 30秒ポーリングで古くなりうるので cfg からは読まない(dto.ts の規約)。
+ * 120秒ポーリング(CFG_POLL_MS)で古くなりうるので cfg からは読まない(dto.ts の規約)。
  * 幾何(並べ方・走行距離)は shared/roulette-fx.ts の純関数から取る(テスト可能)。
  *
  * **窓の中央で止まったブロックが確定**という見せ方 — 抽選は worker で確定済みで、
