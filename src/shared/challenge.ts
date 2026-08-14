@@ -10,6 +10,7 @@ import type {
   ChallengeSeSlot,
   ChallengeState,
   FanStampConfig,
+  TapBoostConfig,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
@@ -18,6 +19,12 @@ import type {
   GiftRepeatFxConfig,
 } from './dto';
 import { WAKE_TIME_RE } from './time';
+import {
+  FULL_CUT_CLIPS,
+  FULL_CUT_CLIPS_V3,
+  FULL_CUT_CLIP_IDS,
+  type FullCutClipDef,
+} from './fx-cut';
 
 /**
  * カウントダウンチャレンジ — 純関数のみ。状態機械は worker/challenge.ts。
@@ -161,6 +168,10 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     // 過去の行が書き換わらないようにするため。
     ...(e.kind === 'like' && lg ? { likeEvery: lg.every, likeStep: lg.step } : {}),
     ...(e.commentKeyword ? { commentKeyword: e.commentKeyword } : {}),
+    // ブーストの倍率・タップ数は effect の焼き込み値をそのまま引き継ぐ
+    // (表示時に cfg を読むと、設定変更で過去の行が書き換わる — 上と同じ規約)。
+    ...(e.boostMultiplier != null ? { boostMultiplier: e.boostMultiplier } : {}),
+    ...(e.boostTapCount != null ? { boostTapCount: e.boostTapCount } : {}),
     // 凍結ドレインの合算件数 → 履歴の「×N」表示(press 畳み込みと同じ概念)。
     ...(e.coalesced != null && e.coalesced > 1 ? { count: e.coalesced } : {}),
   };
@@ -178,10 +189,13 @@ export const CHALLENGE_SE_SLOTS: readonly ChallengeSeSlot[] = [
   'gift-t2',
   'gift-t3',
   'gift-t4',
+  'helper',
   'roulette',
   'roulette-near',
   'roulette-kick',
   'roulette-hit',
+  'boost-start',
+  'boost-end',
   'achieved',
 ];
 
@@ -246,8 +260,9 @@ export const CHALLENGE_FX_CLIP_IDS: readonly string[] = [
   'gift-band2',
   'gift-band3',
   'gift-band4',
-  'cut-rose',
-  'cut-rosa',
+  // 全面カットの id は shared/fx-cut.ts が唯一の出所。ここに手で足さないこと
+  //(足すと renderer/lib/fx.ts のカタログと静かにズレる)。
+  ...FULL_CUT_CLIP_IDS,
 ];
 
 /**
@@ -280,11 +295,17 @@ export const DEFAULT_MINI_FX: Record<ChallengeSeSlot, string> = {
   'gift-t2': 'off',
   'gift-t3': 'off',
   'gift-t4': 'off',
+  // お助け(ファンスタンプ)は専用スロットになる前は gift-t1 を流用していたので、
+  // 既定はその 'stamp' のまま — アップデートで見え方を変えない。
+  helper: 'stamp',
   // ルーレットはリール自体が主演出なので簡易演出は既定 off。
   roulette: 'off',
   'roulette-near': 'off',
   'roulette-kick': 'off',
   'roulette-hit': 'off',
+  // ブーストはカットイン+カウンタが主演出なので簡易演出は既定 off。
+  'boost-start': 'off',
+  'boost-end': 'off',
   achieved: 'off',
 };
 
@@ -330,6 +351,9 @@ export const DEFAULT_SE_SOUNDS: Record<ChallengeSeSlot, string> = {
   'gift-t2': 'confirm-2',
   'gift-t3': 'jingle-hit',
   'gift-t4': 'jingle-steel',
+  // お助けは専用スロットになる前は gift-t1 を流用していたので、既定はその
+  // 'confirm-1' のまま — アップデートで鳴る音を変えない(DEFAULT_MINI_FX と同じ理由)。
+  helper: 'confirm-1',
   // 回転開始はチクタク感のある tick。
   roulette: 'tick',
   // 「止まりそう」(当選の1つ手前に着いて溜めに入る瞬間)はスイッチのカチッ。
@@ -338,6 +362,9 @@ export const DEFAULT_SE_SOUNDS: Record<ChallengeSeSlot, string> = {
   'roulette-kick': 'bong',
   // 確定は専用の確認音。
   'roulette-hit': 'reel-confirm',
+  // ブースト開始はフィーバー突入のジングル。着弾(boost-end)は短いファンファーレ。
+  'boost-start': 'jingle-steel',
+  'boost-end': 'fanfare-8bit-short',
   achieved: 'fanfare-8bit',
 };
 
@@ -356,10 +383,13 @@ export const DEFAULT_SE_VOLUMES: Record<ChallengeSeSlot, number> = {
   'gift-t2': 100,
   'gift-t3': 100,
   'gift-t4': 100,
+  helper: 100,
   roulette: 100,
   'roulette-near': 100,
   'roulette-kick': 100,
   'roulette-hit': 100,
+  'boost-start': 100,
+  'boost-end': 100,
   achieved: 100,
 };
 
@@ -502,31 +532,38 @@ export const DEFAULT_ROULETTE_SOUND: RouletteSoundConfig = {
  * giftName は**小文字で保存**する規約(matchGiftTrigger が設定値を小文字前提で
  * 比較する)。日本語なので実質そのままだが、英語名を足すときは小文字にすること。
  */
+/**
+ * カタログ1行 → 既定行への写像。id は clip id の 'cut-' を 'fullcut-' に差し替えたもの
+ * (この対応が決まっているので、validateGiftFullCut の
+ *  `d.rules.find(x => x.id === r.id)` フォールバックがそのまま効く)。
+ */
+export function fullCutRuleFor(c: FullCutClipDef): GiftFullCutRule {
+  return {
+    id: `fullcut-${c.id.slice('cut-'.length)}`,
+    label: c.ruleLabel,
+    // giftId は既定では空 — クリエイターごとに違う値なので既定を置きようがない
+    // (ギフト名の一致で足りる。確実に1つへ絞りたい人は設定画面で入れる)。
+    giftId: '',
+    giftName: c.giftName,
+    canonical: c.canonical,
+    exactName: c.exactName,
+    clip: c.id,
+    durationSec: 5,
+    enabled: true,
+  };
+}
+
+/**
+ * 全面カットの既定。42行(v0.5.0 のバラ/ローザ + v0.6.0 の40行)。
+ * 内訳と各行のトリガーは shared/fx-cut.ts を見ること — **並び順がそのまま
+ * 評価順(上から先勝ち)** になる。
+ *
+ * 全行 enabled: true / durationSec: 5(素材の尺 5.09 秒 > 5 秒なのでループしない)。
+ */
 export const DEFAULT_GIFT_FULL_CUT: GiftFullCutConfig = {
   enabled: true,
   volume: 70,
-  rules: [
-    {
-      id: 'fullcut-rose',
-      label: 'バラ',
-      giftId: '',
-      giftName: 'バラ',
-      canonical: 'rose',
-      clip: 'cut-rose',
-      durationSec: 5,
-      enabled: true,
-    },
-    {
-      id: 'fullcut-rosa',
-      label: 'ローザ',
-      giftId: '',
-      giftName: 'ローザ',
-      canonical: '',
-      clip: 'cut-rosa',
-      durationSec: 5,
-      enabled: true,
-    },
-  ],
+  rules: FULL_CUT_CLIPS.map(fullCutRuleFor),
 };
 
 /**
@@ -566,6 +603,74 @@ export const DEFAULT_FAN_STAMP: FanStampConfig = {
   canonical: '',
   amountEach: -1,
   suppressBandFx: true,
+  flash: true,
+};
+
+/** タップブーストの倍率の clamp。1 は「溜めて一括反映」だけ欲しい人向けに許す。 */
+export const TAP_BOOST_MULT_MIN = 1;
+export const TAP_BOOST_MULT_MAX = 100;
+/**
+ * タップウィンドウ(秒)の clamp。5〜15 はユーザー要件。前置き演出(起動 5秒+
+ * カウントダウン 3秒)と合わせた総凍結は最長 23 秒で、帯域カットインの安全弁
+ * GIFT_FX_FREEZE_MAX_MS(15秒)を意図的に超える — あちらは「視聴者がただ待つ
+ * 死に時間」の上限だが、ブーストのウィンドウは配信者がタップし続けるゲーム
+ * そのものなので同じ天井を課さない(タップは凍結中も数えられている)。
+ */
+export const TAP_BOOST_DURATION_MIN_SEC = 5;
+export const TAP_BOOST_DURATION_MAX_SEC = 15;
+/**
+ * 起動カットイン(咆哮)クリップの尺(ms)。assets/fx/boost/ の intro-* 素材は
+ * すべてこの実尺で揃える(選択制なので、素材ごとに尺が違うとタップ開始が
+ * クリップ選択で動いてしまう)。
+ */
+export const TAP_BOOST_INTRO_MS = 5000;
+/**
+ * カウントダウン(3・2・1)クリップの尺(ms)。count-* 素材はすべてこの実尺で
+ * 揃える — 3・2・1 は映像焼き込みなので、ズレるとタップ開始と「1」が合わない。
+ */
+export const TAP_BOOST_COUNT_MS = 3000;
+
+/**
+ * ブースト演出クリップのカタログ(段ごとの選択肢)。実ファイルは
+ * assets/fx/boost/<id>.mp4(renderer/lib/fx.ts の boostClipUrl が解決する)。
+ * validate はこのリストで設定値を検証する — 未知の id は既定へ倒す。
+ * 素材を増やしたら「ファイル追加 + この行追加」の2点セット。
+ */
+export interface TapBoostClipDef {
+  id: string;
+  label: string;
+}
+export const TAP_BOOST_INTRO_CLIPS: readonly TapBoostClipDef[] = [
+  { id: 'intro-panther', label: '黒豹の咆哮(宇宙)' },
+];
+export const TAP_BOOST_COUNT_CLIPS: readonly TapBoostClipDef[] = [
+  // 数字はフレーム精度で焼き込み(ジャスト1.000秒刻み — タップ開始と正確に同期)。
+  { id: 'count-321', label: '3・2・1(黒豹・ジャスト1秒刻み)' },
+];
+export const TAP_BOOST_LOOP_CLIPS: readonly TapBoostClipDef[] = [
+  // 既定はコイン・スロットを含まない黒豹版(配信規約への配慮 — ユーザー要件)。
+  // intro/count/loop-panther は横 16:9(Dreamina 生成)。loop-pachinko だけ
+  // 初代の縦 9:16 素材で、横モニターでは大きくクロップされる。
+  { id: 'loop-panther', label: '黒豹コズミックFEVER(15秒・コインなし)' },
+  { id: 'loop-pachinko', label: 'ゴールドFEVER(初代・縦動画)' },
+];
+
+/**
+ * タップブースト(フィーバー)の既定。giftId は空 — クリエイター固有の値なので
+ * 既定を置きようがない(fanStamp と同じ判断)。トリガーが3つとも空の設定は
+ * どのギフトにも一致しない(matchGiftTrigger)ので、enabled: true で配っても
+ * 既存の settings.json の挙動は変わらない。
+ */
+export const DEFAULT_TAP_BOOST: TapBoostConfig = {
+  enabled: true,
+  giftId: '',
+  giftName: '',
+  canonical: '',
+  multiplier: 5,
+  durationSec: 5,
+  introClip: 'intro-panther',
+  countClip: 'count-321',
+  loopClip: 'loop-panther',
   flash: true,
 };
 
@@ -623,6 +728,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX),
   giftRepeatFx: structuredClone(DEFAULT_GIFT_REPEAT_FX),
   fanStamp: structuredClone(DEFAULT_FAN_STAMP),
+  tapBoost: structuredClone(DEFAULT_TAP_BOOST),
 };
 
 /**
@@ -878,6 +984,38 @@ export function freshChallengeEffects(
  * 新しい世代を足すときは**段を積む**こと(if で早期 return しない) — v0 の
  * settings.json は v1 と v2 の両方を順に通る必要がある。
  */
+/**
+ * 全面カットの既定行が増えた世代を、保存済み settings.json へ一度だけ配る。
+ * **追加しかしない** — 既存行の順序も内容も enabled も触らず、まだ持っていない id を
+ * 末尾へ足すだけ(先勝ちなので、ユーザーが自分で並べた優先度を壊さない)。
+ *
+ * ⚠ validateGiftFullCut / validateChallengeConfig の中に入れてはいけない。あちらは
+ *   UI の cfg.set も通るので、ユーザーが削除した行がその場で復活する。世代は
+ *   sanitize の前に raw から読む(main/boot-settings.ts の `from`)。
+ * ⚠ 配るのは FULL_CUT_CLIPS_V3 に固定する。DEFAULT_GIFT_FULL_CUT.rules を参照すると、
+ *   次の世代で既定が増えたとき v3 の段が新しい行まで配ってしまい二重適用になる。
+ * ⚠ v3 より前に存在しなかった id しか足さないので、「消したのに復活する」は
+ *   構造的に起きない(消せるようになったのが v3 以降だから)。
+ */
+export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
+  if (fromVersion >= 3) return cfg;
+  const have = new Set(cfg.giftFullCut.rules.map((r) => r.id));
+  const add = FULL_CUT_CLIPS_V3.map(fullCutRuleFor).filter((r) => !have.has(r.id));
+  if (add.length === 0) return cfg;
+  return {
+    ...cfg,
+    giftFullCut: { ...cfg.giftFullCut, rules: [...cfg.giftFullCut.rules, ...add] },
+  };
+}
+
+/**
+ * 世代移行の入口。**段は fromVersion の小さい順に積む**(世代0の設定は v1→v2→v3 を
+ * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
+ */
+export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
+  return migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion);
+}
+
 export function migrateChallengeSeSounds(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
   let out = cfg;
 
@@ -996,6 +1134,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     giftBandFx: validateGiftBandFx(c.giftBandFx),
     giftRepeatFx: validateGiftRepeatFx(c.giftRepeatFx),
     fanStamp: validateFanStamp(c.fanStamp),
+    tapBoost: validateTapBoost(c.tapBoost),
   };
 }
 
@@ -1082,6 +1221,13 @@ function validateGiftFullCut(raw: unknown): GiftFullCutConfig {
         giftId: typeof r.giftId === 'string' ? r.giftId.trim() : (fallback?.giftId ?? ''),
         giftName: low(r.giftName, fallback?.giftName ?? ''),
         canonical: low(r.canonical, fallback?.canonical ?? ''),
+        // 既定 false。ただしこの関数の流儀(同じ id の既定行へ倒す)に合わせ、
+        // **キー自体が無い**旧 settings.json は既定行の値を継ぐ — 素の `=== true` に
+        // すると、出荷時に完全一致で配った行が旧設定のユーザーだけ部分一致に
+        // 化けて上位ギフトを奪う。明示的な false(チェックを外した意思)は
+        // typeof ガードでそのまま尊重される。
+        exactName:
+          typeof r.exactName === 'boolean' ? r.exactName : (fallback?.exactName ?? false),
         clip,
         durationSec,
         enabled: r.enabled !== false,
@@ -1178,6 +1324,34 @@ function validateFanStamp(raw: unknown): FanStampConfig {
         ? Math.min(999_999, Math.max(-999_999, Math.round(c.amountEach)))
         : d.amountEach,
     suppressBandFx: c.suppressBandFx !== false,
+    flash: c.flash !== false,
+  };
+}
+
+/**
+ * タップブーストの検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(tapBoost キー無し)は既定へ。giftName/canonical の小文字化と
+ * 真偽値の向き(既定 true は `!== false`)は validateFanStamp と同じ規約。
+ */
+function validateTapBoost(raw: unknown): TapBoostConfig {
+  const d = DEFAULT_TAP_BOOST;
+  const c = raw as Partial<TapBoostConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  const n = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  // 未知の id は既定へ('off' は「この段を出さない」の明示選択として通す)。
+  const clip = (v: unknown, list: readonly TapBoostClipDef[], fb: string): string =>
+    typeof v === 'string' && (v === 'off' || list.some((x) => x.id === v)) ? v : fb;
+  return {
+    enabled: c.enabled !== false,
+    giftId: typeof c.giftId === 'string' ? c.giftId.trim() : d.giftId,
+    giftName: typeof c.giftName === 'string' ? c.giftName.trim().toLowerCase() : d.giftName,
+    canonical: typeof c.canonical === 'string' ? c.canonical.trim().toLowerCase() : d.canonical,
+    multiplier: n(c.multiplier, d.multiplier, TAP_BOOST_MULT_MIN, TAP_BOOST_MULT_MAX),
+    durationSec: n(c.durationSec, d.durationSec, TAP_BOOST_DURATION_MIN_SEC, TAP_BOOST_DURATION_MAX_SEC),
+    introClip: clip(c.introClip, TAP_BOOST_INTRO_CLIPS, d.introClip),
+    countClip: clip(c.countClip, TAP_BOOST_COUNT_CLIPS, d.countClip),
+    loopClip: clip(c.loopClip, TAP_BOOST_LOOP_CLIPS, d.loopClip),
     flash: c.flash !== false,
   };
 }
@@ -1429,14 +1603,27 @@ export function matchRouletteTrigger(
  *
  * ⚠ 3つとも '' の設定は**どのギフトにも一致しない**。''.includes() が常に true に
  * なる罠(空欄の設定が全ギフトを拾う)を塞ぐガードなので、各行の `!== ''` は外さない。
+ *
+ * `exactName` は giftName の段にだけ効く追加規約(既定 = 省略 = 従来の部分一致)。
+ * **これを持つのは giftFullCut の行だけ**で、ルーレット(ChallengeRouletteConfig)と
+ * ファンスタンプ(FanStampConfig)の型にはこのキーが無い。つまり両者では常に
+ * undefined となり部分一致のまま — 構造的に巻き込み事故が起きない。
+ * 名前判定をここに集約したままにするのが肝で、matchGiftFullCut 側に別実装を
+ * 生やすと 3段の評価順と `!== ''` ガードが2箇所に分裂する(この関数が「唯一の
+ * 出所」である理由そのもの)。
  */
 export function matchGiftTrigger(
-  t: { giftId: string; giftName: string; canonical: string },
+  t: { giftId: string; giftName: string; canonical: string; exactName?: boolean },
   g: { canonical?: string; giftId: string; giftName?: string }
 ): boolean {
   if (t.giftId !== '' && t.giftId === g.giftId) return true;
   if (t.canonical !== '' && g.canonical != null && t.canonical === g.canonical.toLowerCase()) return true;
-  if (t.giftName !== '' && g.giftName != null && g.giftName.toLowerCase().includes(t.giftName)) return true;
+  if (t.giftName !== '' && g.giftName != null) {
+    const name = g.giftName.toLowerCase();
+    // trim は完全一致の段だけ。設定値は validate で trim+小文字化済みなので、
+    // 部分一致(includes)の結果はこの分岐を足しても1ビットも変わらない。
+    if (t.exactName === true ? name.trim() === t.giftName : name.includes(t.giftName)) return true;
+  }
   return false;
 }
 
@@ -1472,6 +1659,23 @@ export function matchFanStamp(
   const fs = cfg.fanStamp;
   if (!fs.enabled) return null;
   return matchGiftTrigger(fs, g) ? fs : null;
+}
+
+/**
+ * ギフト → タップブースト行の写像。**fanStamp の次・ルーレットより先**に評価し、
+ * 一致したら増減規則(roulettes/giftRules/giftDefault)を一切評価しない —
+ * matchFanStamp と同じ「先勝ち」規約。同じ giftId を fanStamp と両方に登録した
+ * 誤設定では fanStamp が勝つ(呼び出し側が fs 一致時は評価しない)。
+ *
+ * 単一設定だが戻り値を boolean にしない(matchFanStamp と同じ将来配列化への備え)。
+ */
+export function matchTapBoost(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): TapBoostConfig | null {
+  const tb = cfg.tapBoost;
+  if (!tb.enabled) return null;
+  return matchGiftTrigger(tb, g) ? tb : null;
 }
 
 /**

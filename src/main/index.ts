@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron';
-import type { AppSettings, CsvExportSpec } from '@shared/dto';
+import type { AppSettings, ChallengeConfig, CsvExportSpec } from '@shared/dto';
 import { CH_MONITOR_STATE, CH_SETTINGS_PUSH, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
-import { loadSettings, needsWorkerRestart, sanitizeSettings, saveSettings } from './boot-settings';
+import { defaultSettings, loadChallengeDefault, loadSettings, needsWorkerRestart, sanitizeSettings, saveChallengeDefault, saveSettings } from './boot-settings';
 import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
 import { closeMonitorWindow, getMonitorWindow, openMonitorWindow, repositionMonitor } from './monitor-window';
 import { configDirIn, defaultDataDir, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
@@ -191,6 +191,23 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
           repositionMonitor(settings.challenge.monitorDisplayId, settings.challenge.monitorWindowed);
         }
         return { id, ok: true, result: { workerRestarted: restart } } as RpcResponse;
+      }
+
+      // デフォ保存 — チャレンジ設定を config/challenge-default.json へ書き出す。
+      // 以後このファイルが既定(defaultSettings / 「すべて既定に戻す」の戻り先)になり、
+      // 他PCの同じ場所へコピーすればそのPCでも同じ内容が既定になる。
+      case 'challengeDefault.save': {
+        const path = saveChallengeDefault(dataDir, req.params as ChallengeConfig);
+        return { id, ok: true, result: { path } } as RpcResponse;
+      }
+
+      case 'challengeDefault.get': {
+        const custom = loadChallengeDefault(dataDir);
+        return {
+          id,
+          ok: true,
+          result: { cfg: custom ?? defaultSettings(dataDir).challenge, custom: custom != null },
+        } as RpcResponse;
       }
 
       case 'file.exportCsv': {

@@ -27,6 +27,11 @@ export type RpcMap = {
   'challenge.stop': { p: void; r: D.ChallengeState };
   'challenge.reset': { p: void; r: D.ChallengeState };
   'challenge.press': { p: void; r: D.ChallengeState };
+  /**
+   * モニターの全画面ランキング(ギフト/イイネ TOP5)を出す/消すトグル。
+   * 表示状態は ChallengeState.rankBoard の有無がそのまま表す。
+   */
+  'challenge.toggleRank': { p: void; r: D.ChallengeState };
   /** モニター演出のテスト再生(値・統計は変えない)。設定画面の「▶ モニター」用。 */
   'challenge.testEffect': { p: D.ChallengeTestEffectSpec; r: void };
   /**
@@ -68,6 +73,14 @@ export type RpcMap = {
   // settings & files — handled in MAIN, not forwarded to the worker
   'cfg.get': { p: void; r: D.AppSettings };
   'cfg.set': { p: Partial<D.AppSettings>; r: { workerRestarted: boolean } };
+  /**
+   * デフォ保存 — チャレンジ設定を config/challenge-default.json へ書き出し、
+   * 以後このマシンの既定にする。ファイルを他PCの同じ場所へコピーすると
+   * そのPCでも同じ内容が既定になる(boot-settings.ts の loadChallengeDefault)。
+   */
+  'challengeDefault.save': { p: D.ChallengeConfig; r: { path: string } };
+  /** 実効既定(デフォ保存があればその内容、無ければ同梱既定)。custom はファイルの有無。 */
+  'challengeDefault.get': { p: void; r: { cfg: D.ChallengeConfig; custom: boolean } };
   'file.exportCsv': { p: D.CsvExportSpec; r: { path: string; rows: number } | null };
   'file.backup': { p: void; r: { path: string } | null };
   'file.openDataDir': { p: void; r: void };
@@ -106,6 +119,8 @@ export type RpcResponse<K extends RpcMethod = RpcMethod> =
 export const MAIN_HANDLED: ReadonlySet<string> = new Set([
   'cfg.get',
   'cfg.set',
+  'challengeDefault.save',
+  'challengeDefault.get',
   'file.exportCsv',
   'file.backup',
   'file.openDataDir',

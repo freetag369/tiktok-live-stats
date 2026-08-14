@@ -33,6 +33,7 @@ import {
   STOCK_CUTIN_CLIP_URL,
   STOCK_FULL_CLIP_URL,
   STRIKE_CLIP_URL,
+  boostClipUrl,
   fxClipUrl,
 } from '../lib/fx';
 import { playSe } from '../lib/se';
@@ -230,6 +231,15 @@ function rouletteWillSpin(e: ChallengeEffect): boolean {
  */
 function bandWillStart(e: ChallengeEffect): boolean {
   return fxClipUrl(e.fxBandClip) != null && (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
+}
+
+/**
+ * このブースト effect(boost-start)で演出が実際に始まるか。専用素材が無くても
+ * 暗幕+タップカウンタで成立するので、断るのは動きの抑制と尺不足だけ —
+ * 譲る判定(yieldToCutin)と startBoostFx の入口ガードは必ずこれを共有する。
+ */
+function boostWillStart(e: ChallengeEffect): boolean {
+  return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
 }
 
 /**
@@ -443,6 +453,32 @@ export function MonitorView(): React.JSX.Element {
   /** 再生中のカットインBGM。すべての出口(finish/abort/unmount)で stop する。 */
   const bandBgm = useRef<BgmHandle | null>(null);
 
+  // ── タップブースト(フィーバー) ─────────────────────────────────────────
+  // boost-start effect → 起動カットイン(咆哮・boostIntroMs)→ カウントダウン
+  // (3/2/1 焼き込み動画・boostCountMs)→ タップウィンドウ(ループ動画+BGM・
+  // タップカウンタ表示)→ boost-end effect → カウンタから7セグへ弾 → 着弾で
+  // 据え置き解除(worker の一括減算値へ収束)。各段のクリップ id と尺・期限は
+  // effect の焼き込み値が権威(worker の凍結と同期)。
+  const [boostClip, setBoostClip] = useState<{
+    key: number;
+    phase: 'intro' | 'count' | 'window';
+    url: string | null;
+    out: boolean;
+  } | null>(null);
+  /** 据え置きの持ち主がブーストである印(rouletteHold / bandHold と同じ役割)。 */
+  const boostHold = useRef(false);
+  const boostTimers = useRef<number[]>([]);
+  /** 再生中のブーストのトリガー effect(倍率バッジ・終了フォールバックに使う)。 */
+  const boostEffect = useRef<ChallengeEffect | null>(null);
+  /** テスト再生(▶)の印。据え置きを張らず、boost-end を待たず自前で締める。 */
+  const boostTest = useRef(false);
+  /** 他演出中に届いたブーストの持ち越し(pendingBands と同型・2件上限)。 */
+  const pendingBoosts = useRef<ChallengeEffect[]>([]);
+  /** タップカウンタ(着弾の発射点)。 */
+  const boostCounterRef = useRef<HTMLDivElement | null>(null);
+  /** タップ数の前回値(増加検知で press 音とカウンタのパンチを出す)。 */
+  const prevBoostTap = useRef(0);
+
   // ── ストック着弾カットイン ───────────────────────────────────────────────
   // ストック満杯の2発目(緑)が7セグに着弾した瞬間から STOCK_CUTIN_MS の間、
   // 不透明フルフレーム動画(音声焼き込み・unmute)を重ね、数字は据え置いたまま
@@ -468,7 +504,7 @@ export function MonitorView(): React.JSX.Element {
       setAchievedFxAt(null);
       return;
     }
-    if (roulette || bandClip || stockCutin) return;
+    if (roulette || bandClip || stockCutin || boostClip) return;
     // 達成後に開き直したモニターは待たずに出す(achievedMs が過去なので残り 0)。
     const base = achievedFxAt ?? challenge?.achievedMs ?? 0;
     const wait = Math.max(0, RESULT_DELAY_MS - (Date.now() - base));
@@ -480,7 +516,7 @@ export function MonitorView(): React.JSX.Element {
     return () => clearTimeout(t);
     // 依存は boolean と数値・軽い state だけ — 2Hz で同じ result が再配信されても
     // タイマーは再起動しない。
-  }, [hasResult, challenge?.achievedMs, achievedFxAt, roulette, bandClip, stockCutin]);
+  }, [hasResult, challenge?.achievedMs, achievedFxAt, roulette, bandClip, stockCutin, boostClip]);
 
   useEffect(() => {
     // ワーカー再起動中は rpc が throw する — この窓にはトーストが無いので握って
@@ -590,6 +626,7 @@ export function MonitorView(): React.JSX.Element {
       rouletteHold.current ||
       bandHold.current ||
       stockCutinHold.current ||
+      boostHold.current ||
       // watermark 未確立(lastPlayed=null)では譲らない — 直後の watermark 初期化が
       // 全件を「再生済み」に倒すので、譲った先は誰も再生しない。鮮度は playEffect と
       // 同じ isChallengeEffectFresh(test 演出は 15 秒)— 生の 5000 を置くと、
@@ -602,7 +639,9 @@ export function MonitorView(): React.JSX.Element {
             isChallengeEffectFresh(e, Date.now()) &&
             (e.kind === 'roulette'
               ? rouletteWillSpin(e)
-              : e.kind === 'gift' && e.fxBandClip != null && bandWillStart(e))
+              : e.kind === 'boost-start'
+                ? boostWillStart(e)
+                : e.kind === 'gift' && e.fxBandClip != null && bandWillStart(e))
         ));
 
     if (yieldToCutin) {
@@ -665,6 +704,7 @@ export function MonitorView(): React.JSX.Element {
       clearStrikeTimers();
       clearRouletteTimers();
       clearBandTimers();
+      clearBoostTimers();
       clearRepeatTimers();
       clearMiniTimers();
       clearClipTimer();
@@ -682,6 +722,7 @@ export function MonitorView(): React.JSX.Element {
     if (challenge?.status === 'idle') {
       abortRoulette();
       abortBandFx();
+      abortBoostFx();
       clearRepeatTimers();
       clipQueue.current = [];
       // 着弾待ちのバナーも捨てる — 停止/リセット後に古い通知を出さない。
@@ -708,6 +749,22 @@ export function MonitorView(): React.JSX.Element {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [challenge?.status]);
+
+  // ブースト中のタップ検知。press effect はブースト中は積まれない(worker は
+  // 数えるだけ)ので、タップの手応えはここが受け持つ — カウンタのパンチは
+  // key 再マウント(render 側)、音はこの effect が press スロットで鳴らす。
+  useEffect(() => {
+    const tap = challenge?.boost?.tapCount ?? 0;
+    const prev = prevBoostTap.current;
+    prevBoostTap.current = tap;
+    if (tap > prev && boostHold.current && cfg?.challenge.seEnabled) {
+      playSe(
+        cfg.challenge.seSounds['press'],
+        effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['press'])
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [challenge?.boost?.tapCount]);
 
   // 効果音(視覚とは独立の watermark)。モニターが開いている間はここが鳴らし、
   // ダッシュボード側は monitorOpen ゲートで黙る。設定は 30 秒ポーリング(上の
@@ -1079,6 +1136,14 @@ export function MonitorView(): React.JSX.Element {
       startRoulette(next, true);
       return;
     }
+    // リール中に届いたブーストをここで開始する(pendingBands より先 — ブーストは
+    // タップのゲーム性を持つので待たせない)。
+    const nb = pendingBoosts.current.shift();
+    if (nb) {
+      stopRouletteSound(0);
+      startBoostFx(nb);
+      return;
+    }
     // リール中に届いたカットインをここで開始する(worker はすでに凍結中 —
     // 見た目の開始が遅れるだけで、数字の整合は凍結側が保証している)。
     // スピンの連鎖はここで終わる。BGM は 400ms フェード(バンドBGMの終端と同じ尺)。
@@ -1216,6 +1281,13 @@ export function MonitorView(): React.JSX.Element {
     const a = pendingAchieved.current;
     pendingAchieved.current = null;
     if (a) playEffect(a);
+    // カットイン中に届いたブーストをここで開始する(pendingBands より先 —
+    // finishRoulette と同じ優先順)。
+    const nb = pendingBoosts.current.shift();
+    if (nb) {
+      startBoostFx(nb);
+      return;
+    }
     // 再生中に届いた次のカットインをここで開始する(finishRoulette と同じ持ち越し)。
     // bandHold はすでに false なので再入して問題ない。
     const b = pendingBands.current.shift();
@@ -1245,6 +1317,223 @@ export function MonitorView(): React.JSX.Element {
     bandHold.current = false;
     bandEffect.current = null;
     setBandClip(null);
+    setHeldValue(null);
+  }
+
+  // ── タップブースト(フィーバー) ─────────────────────────────────────────
+
+  function clearBoostTimers() {
+    for (const t of boostTimers.current) window.clearTimeout(t);
+    boostTimers.current = [];
+  }
+
+  /**
+   * ブースト開始。起動カットイン(3/2/1 焼き込み・boostIntroMs)→ タップ
+   * ウィンドウ(ループ動画+タップカウンタ)。数字は boost-end の着弾まで
+   * 発動時の値で据え置く。専用素材が無ければ暗幕+カウンタで縮退する。
+   * 尺は effect の焼き込み値が権威(worker の凍結と同期)。
+   * 戻り値 false = 開始不可(呼び出し側はバナーへフォールバック)。
+   */
+  function startBoostFx(e: ChallengeEffect): boolean {
+    if (!boostWillStart(e)) {
+      fxWarn('ブースト開始不可(尺不足 / 動きの抑制)', {
+        durationMs: e.fxDurationMs,
+        reducedMotion: prefersReducedMotion(),
+      });
+      return false;
+    }
+    const introMs = e.boostIntroMs ?? 0;
+    const countMs = e.boostCountMs ?? 0;
+    const preMs = introMs + countMs;
+    const totalMs = e.fxDurationMs ?? 0;
+    flushStrike(); // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)
+    clearBoostTimers();
+    boostHold.current = true;
+    boostEffect.current = e;
+    boostTest.current = e.test === true;
+    // テスト再生は据え置かない(testEffect は値を変えない契約 — 実タップで値が
+    // 動いたときに表示が固まって見えるのを避ける)。
+    if (!e.test) setHeldValue(Math.max(0, e.valueAfter - e.amount));
+    if (e.flash) pushFlash('gift-t3');
+    const push = (ms: number, fn: () => void) => {
+      boostTimers.current.push(window.setTimeout(fn, ms));
+    };
+    // 3段の直列再生。各段のクリップは effect の焼き込み id から解決し、素材が
+    // 無ければ暗幕で同じ尺を待つ(尺は worker の凍結と同期しているので詰めない。
+    // カウントダウンが暗幕でも、タップ開始は boost-start SE が合図する)。
+    const startWindow = (): void => {
+      if (!boostHold.current) return;
+      setBoostClip({ key: ++fxKey, phase: 'window', url: boostClipUrl(e.boostLoopClip), out: false });
+      boostWindowBlast();
+    };
+    const startCount = (): void => {
+      if (!boostHold.current) return;
+      setBoostClip({ key: ++fxKey, phase: 'count', url: boostClipUrl(e.boostCountClip), out: false });
+    };
+    if (introMs > 0) {
+      setBoostClip({ key: ++fxKey, phase: 'intro', url: boostClipUrl(e.boostIntroClip), out: false });
+      if (countMs > 0) push(introMs, startCount);
+      push(preMs, startWindow);
+    } else if (countMs > 0) {
+      startCount();
+      push(preMs, startWindow);
+    } else {
+      startWindow();
+    }
+    // ウィンドウ中の追い焚き(パチンコ風の粒子)。bandBlast の 2.2 秒周期と同じ。
+    for (let t = preMs + 2200; t < totalMs - 800; t += 2200) {
+      push(t, () => boostBlast());
+    }
+    // 終端 0.4 秒前にフェード。数字への反映は boost-end effect 駆動(worker が
+    // 権威)なので、尺タイマーでは finish しない — settle の遅延(最大 ~525ms)は
+    // .out フェードが繋ぐ。
+    push(Math.max(0, totalMs - 400), () => setBoostClip((c) => (c ? { ...c, out: true } : c)));
+    if (e.test) {
+      // テストは worker から boost-end が来ないので自前で締める(着弾だけ試写)。
+      push(totalMs, () => finishBoostFx(null));
+    } else {
+      // 安全弁: boost-end が届かない(worker 再起動等)なら強制解除。
+      push(totalMs + 3000, abortBoostFx);
+    }
+    return true;
+  }
+
+  /** タップウィンドウ入りの合図(SE・フラッシュ・粒子)。3/2/1 明けの一撃。 */
+  function boostWindowBlast() {
+    if (cfg?.challenge.seEnabled) {
+      playSe(
+        cfg.challenge.seSounds['boost-start'],
+        effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['boost-start'])
+      );
+    }
+    pushFlash('gift-t3');
+    pushShake('shake');
+    const fx = fxRef.current;
+    if (!fx) return;
+    const o = fxOrigin();
+    fx.rays(o.x, o.y, { count: 12, hue: 45 });
+    fx.confettiRain(160, { gold: true });
+  }
+
+  /** ウィンドウ中の追い焚き(bandBlast の弱め版・金)。 */
+  function boostBlast() {
+    const fx = fxRef.current;
+    if (!fx) return;
+    const o = fxOrigin();
+    fx.sparkBurst(o.x, o.y, 28, { hue: 45, speed: 600 });
+    fx.confettiRain(60, { gold: true });
+  }
+
+  /**
+   * ブースト終了。boost-end effect(e)またはテストの自動終了(null)から呼ばれ、
+   * タップカウンタ → 7セグの弾を飛ばし、着弾で据え置きを解除して worker の
+   * 一括減算値へ収束させる。
+   */
+  function finishBoostFx(e: ChallengeEffect | null) {
+    if (!boostHold.current) return;
+    clearBoostTimers();
+    const isTest = boostTest.current;
+    boostTest.current = false;
+    boostEffect.current = null;
+    setBoostClip((c) => (c ? { ...c, out: true } : c));
+    const tap = e?.boostTapCount ?? 0;
+    const fx = fxRef.current;
+    const from = fx?.pointFor(boostCounterRef.current);
+    const to = fx?.pointFor(countdownRef.current);
+    // タップ 0(またはテスト)は弾を飛ばす意味が薄い — 軽い着弾だけで畳む。
+    const willStrike = (isTest || tap > 0) && fx != null && from != null && to != null;
+    const travel = willStrike ? strikeTravelMs(boostCounterRef.current) : 0;
+    if (willStrike) {
+      fx.strike({ x: from.x, y: from.y }, { x: to.x, y: to.y }, { ms: travel, hue: 45 });
+    }
+    boostTimers.current.push(
+      window.setTimeout(() => {
+        boostHold.current = false;
+        setBoostClip(null);
+        setHeldValue(null); // ここで初めて数字が一括減算後の値へ動く
+        impactBoostVisuals(e);
+        // ブースト中に届いた演出の持ち越しをドレインする(finishBandFx と同順)。
+        const a = pendingAchieved.current;
+        pendingAchieved.current = null;
+        if (a) playEffect(a);
+        const nb = pendingBoosts.current.shift();
+        if (nb) {
+          startBoostFx(nb);
+          return;
+        }
+        const b = pendingBands.current.shift();
+        if (b) {
+          startBandFx(b);
+          return;
+        }
+        const r = rouletteQueue.current.shift();
+        if (r) {
+          startRoulette(r, true);
+          return;
+        }
+        drainPendingStrike();
+      }, travel)
+    );
+  }
+
+  /** ブースト着弾の共通演出(パンチ/シェイク/粒子/クリップ/SE/バナー)。 */
+  function impactBoostVisuals(e: ChallengeEffect | null) {
+    if (e && e.amount !== 0) {
+      setPunchDir('strike');
+      setPunchKey((k) => k + 1);
+      pushShake('shake-strong');
+    }
+    const fx = fxRef.current;
+    const r = fx?.pointFor(countdownRef.current);
+    const stageW = landscape ? STAGE_LW : STAGE_W;
+    const stageH = landscape ? STAGE_LH : STAGE_H;
+    const cx = r?.x ?? stageW / 2;
+    const cy = r?.y ?? stageH * 0.4;
+    if (fx && r) {
+      fx.ringWave(cx, cy, { hue: 45, radius: Math.max(r.w, r.h) * 0.7 });
+      fx.sparkBurst(cx, cy, 36, { hue: 45, speed: 680 });
+      fx.rays(cx, cy, { count: 10, hue: 45 });
+    }
+    if (cfg?.challenge.fxClipsEnabled && (e == null || e.amount !== 0)) {
+      const base = r ? Math.min(r.w, r.h) : 320;
+      const size = Math.min(Math.max(base * 1.4, 300), Math.min(stageW, stageH));
+      showStrikeClip(cx - size / 2, cy - size / 2, size);
+    }
+    if (cfg?.challenge.seEnabled) {
+      playSe(
+        cfg.challenge.seSounds['boost-end'],
+        effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['boost-end'])
+      );
+    }
+    if (e) pushBoostEndBanner(e);
+  }
+
+  /** ブースト結果バナー(「フィーバー タップ×N で −M」)。 */
+  function pushBoostEndBanner(e: ChallengeEffect): void {
+    const tap = e.boostTapCount ?? 0;
+    const mult = e.boostMultiplier ?? 1;
+    if (tap <= 0 && e.amount === 0) return; // タップ 0 は静かに終わる
+    pushFloat(
+      <>
+        <span className="f-amt">{num(e.amount)}</span>
+        <span className="f-txt">
+          フィーバー! タップ×{num(tap)}
+          {mult > 1 ? <b> {mult}倍</b> : null}
+        </span>
+      </>,
+      'good banner-boost'
+    );
+  }
+
+  /** reset/stop・安全弁用の全破棄。据え置きもタイマーも捨てて worker 値へ戻す。 */
+  function abortBoostFx() {
+    clearBoostTimers();
+    pendingBoosts.current = [];
+    if (!boostHold.current) return;
+    boostHold.current = false;
+    boostEffect.current = null;
+    boostTest.current = false;
+    setBoostClip(null);
     setHeldValue(null);
   }
 
@@ -1468,6 +1757,11 @@ export function MonitorView(): React.JSX.Element {
     const a = pendingAchieved.current;
     pendingAchieved.current = null;
     if (a) playEffect(a);
+    const nb = pendingBoosts.current.shift();
+    if (nb) {
+      startBoostFx(nb);
+      return;
+    }
     const b = pendingBands.current.shift();
     if (b) {
       startBandFx(b);
@@ -1541,7 +1835,7 @@ export function MonitorView(): React.JSX.Element {
     // カットイン再生中の反復(shot > 0)は撃たない — 反復は startBandFx が映像・BGM・
     // bandBlast の直列再生で面倒を見ており、ここ由来のフラッシュ/クリップ/粒子は
     // 不透明動画の前面に重なって「カットイン → 通知」の順序を壊すだけ。
-    if (shot > 0 && (bandHold.current || stockCutinHold.current)) return;
+    if (shot > 0 && (bandHold.current || stockCutinHold.current || boostHold.current)) return;
     // ダイヤ帯域カットイン。effect 側の fxBandClip が権威(worker が判定済み・
     // 凍結も開始済み)なので cfg は見ない — 30 秒ポーリングの古い設定に
     // 依存しない。開始できたら通常クリップ・簡易演出は出さない(全画面を
@@ -1553,7 +1847,7 @@ export function MonitorView(): React.JSX.Element {
     // 持ち越しキューへ積むと、解除時の startBandFx が false を返してそのギフトの
     // 演出が丸ごと消える。始まらないなら最初から通常クリップ経路へ落とす。
     if (shot === 0 && e.fxBandClip != null && bandWillStart(e)) {
-      if (rouletteHold.current || bandHold.current || stockCutinHold.current) {
+      if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
         // bandHold を見ずに startBandFx を再入すると clearBandTimers が1本目の
         // finishBandFx を消し、据え置きが解けないまま数字が固まる。
         // 持ち越しキューが満杯なら banded は立てない — 立てると通常クリップも
@@ -1577,7 +1871,13 @@ export function MonitorView(): React.JSX.Element {
       // 解決できない id(素材削除・設定の巻き戻り)は無言で消えていた — 理由を残す。
       if (clipId && !clipUrl) fxWarn('未知のクリップ id — ギフトクリップをスキップ', clipId);
       playClip(clipUrl, shot === 0 ? 'queue' : 'restart');
-      playMini(matchGiftMini(cfg.challenge, g), e.amount, shot);
+      // お助け(ファンスタンプ)は専用スロット。ダイヤ数で引くと gift-t1 と同じに
+      // なってしまい、お助けだけ簡易演出を変えられない(useChallengeSe の音と同じ規約)。
+      playMini(
+        e.fanStamp ? miniForSlot(cfg.challenge, 'helper') : matchGiftMini(cfg.challenge, g),
+        e.amount,
+        shot
+      );
     }
     // 通知(フラッシュ/シェイク/カード/粒子)。カットインが始まった(または持ち越された)
     // ときはここでは出さず、finishBandFx がカットイン終了時にまとめて出す —
@@ -1770,6 +2070,7 @@ export function MonitorView(): React.JSX.Element {
           !rouletteHold.current &&
           !bandHold.current &&
           !stockCutinHold.current &&
+          !boostHold.current &&
           !prefersReducedMotion()
         ) {
           const held = Math.max(0, e.valueAfter - e.amount);
@@ -1794,7 +2095,8 @@ export function MonitorView(): React.JSX.Element {
           strikeTimers.current.length === 0 &&
           !rouletteHold.current &&
           !bandHold.current &&
-          !stockCutinHold.current
+          !stockCutinHold.current &&
+          !boostHold.current
         ) {
           setHeldValue(Math.max(0, e.valueAfter - e.amount));
           startStockCutin(e.amount);
@@ -1806,7 +2108,8 @@ export function MonitorView(): React.JSX.Element {
             strikeTimers.current.length > 0 ||
             rouletteHold.current ||
             bandHold.current ||
-            stockCutinHold.current;
+            stockCutinHold.current ||
+            boostHold.current;
           fxWarn('stock-full 実演: カットイン不可 — 即時演出へフォールバック', {
             clipMissing: STOCK_CUTIN_CLIP_URL === null,
             clipsEnabled: cfg?.challenge.fxClipsEnabled ?? false,
@@ -1870,7 +2173,7 @@ export function MonitorView(): React.JSX.Element {
         // カットイン据え置き中も積む。ここで走らせると、直後に finishBandFx が
         // setHeldValue(null) を実行して回転中に数字が最終値へ飛ぶ(= 出目が先漏れ)。
         // playGiftVisual の busy 判定と同じ形に揃える。
-        if (rouletteHold.current || bandHold.current || stockCutinHold.current) {
+        if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
           // 再生中はキューへ。溢れた分は演出スキップ(数字は解除時に一括で合う)。
           if (rouletteQueue.current.length < ROULETTE_QUEUE_MAX) rouletteQueue.current.push(e);
           return;
@@ -1878,11 +2181,53 @@ export function MonitorView(): React.JSX.Element {
         startRoulette(e, false);
         return;
       }
+      case 'boost-start': {
+        // 他演出の再生中は持ち越す(pendingBands と同型・2件上限)。テストは
+        // 持ち越さずスキップ — ▶ は今すぐ見たいもので、数十秒後に因果不明の
+        // 再生が始まるほうが混乱する。
+        if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
+          if (e.test) {
+            fxWarn('tapBoost 実演: 他演出の再生中 — スキップ');
+            return;
+          }
+          if (pendingBoosts.current.length < 2) pendingBoosts.current.push(e);
+          return;
+        }
+        if (!startBoostFx(e)) {
+          // 動きの抑制等で演出を出せない — 発動の事実だけバナーで残す。
+          pushFloat(
+            <>
+              <span className="f-amt">×{num(e.boostMultiplier ?? 1)}</span>
+              <span className="f-txt">
+                <b>{e.nickname ?? ''}</b> がフィーバー発動!
+              </span>
+            </>,
+            'good banner-boost'
+          );
+        }
+        return;
+      }
+      case 'boost-end': {
+        if (boostHold.current) {
+          finishBoostFx(e);
+          return;
+        }
+        // 据え置きが無い(モニターを途中で開いた・演出が始まらなかった)—
+        // 結果のバナーと着弾音だけ出す。数字は値変化側のパンチが受け持つ。
+        pushBoostEndBanner(e);
+        if (cfg?.challenge.seEnabled && (e.boostTapCount ?? 0) > 0) {
+          playSe(
+            cfg.challenge.seSounds['boost-end'],
+            effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['boost-end'])
+          );
+        }
+        return;
+      }
       case 'achieved':
         // ルーレットのリール/カットインの再生中は持ち越す — 出目・演出を見せる前に
         // CLEAR のフラッシュが走ると何で達成したのか読めない。
-        // finishRoulette / finishBandFx が再生する。
-        if (rouletteHold.current || bandHold.current || stockCutinHold.current) {
+        // finishRoulette / finishBandFx / finishBoostFx が再生する。
+        if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
           pendingAchieved.current = e;
           return;
         }
@@ -2028,6 +2373,47 @@ export function MonitorView(): React.JSX.Element {
         - 下の 7セグ等は unmount せず覆うだけ。display:none にすると
           fxRef.pointFor(countdownRef) の矩形が潰れ、簡易演出と波紋が中央へ退避する。
       */}
+      {/*
+        手動の全画面ランキング(ダッシュボードの「ランキング表示」トグル)。
+        キーの有無がそのまま表示状態なので、ここでは真偽判定だけでよい。
+        - CLEAR リザルトと同じ .result-screen を使うので、上の z-index/DOM 順の
+          規約がそのまま効く(z-index を付けない・fx-clip より DOM 順で前)。
+        - リザルトより **前** に置く。両方出る瞬間があってもリザルトが上に来る。
+          worker は達成時に rankBoard を畳むので通常は重ならないが、念のため
+          showResult でも伏せる(オーバーレイ2枚重ねを絶対に作らない)。
+        - 中身は CLEAR と同じ ResultList。表示中は毎 delta で組み直されるので
+          順位はライブに動く。
+      */}
+      {challenge.rankBoard && !showResult ? (
+        <div className="result-screen board">
+          <div className="rs-title">ランキング</div>
+          <div className="rs-sub">{challenge.title}</div>
+          <div className="rs-lists">
+            <ResultList
+              title="ギフトランキング TOP5"
+              rows={challenge.rankBoard.gifts}
+              kind="gift"
+              showAvatars={showAvatars}
+            />
+            <ResultList
+              title="イイネランキング TOP5"
+              rows={challenge.rankBoard.likes}
+              kind="like"
+              showAvatars={showAvatars}
+            />
+          </div>
+          <div className="rs-foot">
+            {challenge.rankBoard.participants > 0
+              ? `参加 ${num(challenge.rankBoard.participants)}人 / 経過 ${
+                  challenge.rankBoard.startedMs
+                    ? elapsedText(challenge.rankBoard.atMs - challenge.rankBoard.startedMs)
+                    : '—'
+                }`
+              : 'まだ参加者がいません'}
+          </div>
+        </div>
+      ) : null}
+
       {showResult && challenge.result ? (
         <div className="result-screen">
           <div className="rs-title">CLEAR!</div>
@@ -2198,6 +2584,48 @@ export function MonitorView(): React.JSX.Element {
         />
       ) : null}
 
+      {/*
+        タップブーストのカットイン(不透明フルフレーム・音声焼き込み)。配置の
+        制約は .fx-clip-opaque と同じ — .monitor-root 直下・z-index なし。
+        起動(intro)は 3/2/1 焼き込みなので loop なし・1回再生、ウィンドウは
+        ループ動画+BGM(音声トラック側)なので loop。尺は startBoostFx の
+        タイマーが権威(onEnded は使わない)。再生失敗は映像だけ諦めて暗幕へ
+        落とす — タイマーとカウンタは生きているのでゲームは続行する。
+        素材なし(url null)は最初から暗幕。
+      */}
+      {boostClip ? (
+        boostClip.url != null ? (
+          <video
+            key={boostClip.key}
+            className={`fx-clip fx-clip-opaque${boostClip.out ? ' out' : ''}`}
+            src={boostClip.url}
+            autoPlay
+            playsInline
+            loop={boostClip.phase === 'window'}
+            preload="auto"
+            muted={!(cfg?.challenge.seEnabled ?? true)}
+            ref={(v) => {
+              if (v) {
+                v.volume =
+                  effectiveSeVolume(
+                    cfg?.challenge.seVolume ?? 70,
+                    cfg?.challenge.seVolumes?.['boost-start']
+                  ) / 100;
+              }
+              armVideoPlay(v, 'boost-cutin', () =>
+                setBoostClip((c) => (c ? { ...c, url: null } : c))
+              );
+            }}
+            onError={(ev) => {
+              fxWarn('ブーストカットインの再生エラー — 暗幕で続行', ev.currentTarget.error);
+              setBoostClip((c) => (c ? { ...c, url: null } : c));
+            }}
+          />
+        ) : (
+          <div className={`boost-screen${boostClip.out ? ' out' : ''}`} />
+        )
+      ) : null}
+
       {/* 演出レイヤ(クリックを拾わない)。重なりは 映像 < flash < 粒子 canvas < テキスト */}
       <div className="fx-layer">
         {flashes.map((f) => (
@@ -2255,6 +2683,26 @@ export function MonitorView(): React.JSX.Element {
               giftIconUrl={roulette.effect.giftIconUrl}
               onDone={() => finishRoulette(roulette.effect, roulette.spin)}
             />
+          </div>
+        ) : null}
+        {/*
+          タップウィンドウ中のタップカウンタ。fx-layer 内(z-index:50)なので
+          不透明カットイン動画より必ず手前。表示は challenge.boost(worker 権威)
+          が唯一のソースで、press RPC の nudge によりタップのたび即時更新される。
+          inner の key=tapCount で再マウントさせてパンチアニメを毎タップ再生する。
+          テスト実演(boost 状態なし)は 0 のまま倍率バッジだけ動く。
+        */}
+        {boostClip && boostClip.phase === 'window' && !boostClip.out ? (
+          <div className="boost-overlay">
+            <div className="boost-counter" ref={boostCounterRef}>
+              <div className="boost-count" key={challenge.boost?.tapCount ?? 0}>
+                {num(challenge.boost?.tapCount ?? 0)}
+              </div>
+              <div className="boost-label">TAP!</div>
+              <div className="boost-mult">
+                ×{num(challenge.boost?.multiplier ?? boostEffect.current?.boostMultiplier ?? 1)}
+              </div>
+            </div>
           </div>
         ) : null}
         <div className="floats">

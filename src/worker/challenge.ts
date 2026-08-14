@@ -9,6 +9,7 @@ import type {
   ChallengeStatus,
   ChallengeStockSlot,
   ChallengeTestEffectSpec,
+  TapBoostConfig,
 } from '@shared/dto';
 import {
   CHALLENGE_EFFECTS_MAX,
@@ -27,6 +28,9 @@ import {
   matchGiftFullCut,
   matchGiftRule,
   matchRoulette,
+  matchTapBoost,
+  TAP_BOOST_COUNT_MS,
+  TAP_BOOST_INTRO_MS,
 } from '@shared/challenge';
 import { drawRoulettePattern } from '@shared/roulette-fx';
 
@@ -91,6 +95,12 @@ export class ChallengeEngine {
   private runViewers = new Map<UserId, RunParticipant>();
   /** CLEAR 時に1度だけ組み立てて凍結する。生成後は絶対に書き換えない。 */
   private result: ChallengeResult | null = null;
+  /**
+   * ダッシュボードの「ランキング表示」トグル。true の間だけ get() が rankBoard
+   * (TOP5×2 の生スナップショット)を載せ、モニターが全画面で出す。
+   * 既定 false = delta にアバターURL 10 本を常時載せない(result と同じ理由)。
+   */
+  private rankShown = false;
   /** いいねの端数繰り越し(likeEvery 未満の余り)。 */
   private likeCounter = 0;
   /**
@@ -132,6 +142,33 @@ export class ChallengeEngine {
    * 解除する — STRIKE_ABORT_MS と同じ「必ず収束する安全弁」の流儀。
    */
   private fxFreezeUntilMs: number | null = null;
+  /**
+   * タップブースト(フィーバー)の期限。null = 非ブースト。シネマティックモード
+   * (fxAllowed)では fxFreezeUntilMs をこれより GIFT_FX_FREEZE_MARGIN_MS 遅く張る —
+   * settleBoost が必ず凍結ドレインより先に走り、boost-end effect の id が保留
+   * イベントの id より小さくなる(モニターの再生順の生命線)。
+   */
+  private boostUntilMs: number | null = null;
+  /**
+   * タップウィンドウの開始時刻。シネマティックモードでは発動 + TAP_BOOST_INTRO_MS
+   * (起動カットイン=3/2/1カウントダウン動画の尺)、プレーンモードでは発動即。
+   * ウィンドウ前(起動カットイン中)のタップは倍にならず通常の凍結キューへ落ちる。
+   */
+  private boostStartMs = 0;
+  /** ブースト中に「数えるだけ」で溜めたタップ回数(シネマティックモードのみ)。 */
+  private boostTapCount = 0;
+  /**
+   * 発動時の設定を焼き込む(凍結中の設定変更で倍率や1タップの重みが揺れない
+   * ように — effect への焼き込みと同じ「到着時点で確定」の規約)。
+   */
+  private boostMultiplier = 1;
+  private boostPressStep = 1;
+  /**
+   * fxAllowed()=false で発動した印(プレーンモード)。カットインも溜めも無しで、
+   * press が即時に pressStep × multiplier を減算する — 見えない演出のために
+   * カウントが止まる事故を作らず、5倍のゲーム性だけ残す。
+   */
+  private boostPlain = false;
   /**
    * 凍結中に届いたイベントの値適用+演出の保留キュー(dedup・ランキング集計は
    * 凍結中も即時に回る — 取りこぼしゼロの肝)。解除時に到着順で実行し、途中で
@@ -197,10 +234,15 @@ export class ChallengeEngine {
     this.seenFollowers.clear();
     this.runViewers.clear();
     this.result = null;
+    // 新ランは空のランキングから始まる。出しっぱなしのボードを引き継ぐと
+    // モニターが「全員 —」の全画面で始まってしまう。
+    this.rankShown = false;
     this.resetLikeAccumulators();
     // 前ラン由来の保留分を新ランへ持ち込まない(値は initialValue で始める規約)。
     this.pendingOps = [];
     this.fxFreezeUntilMs = null;
+    // ブーストも清算せず破棄(pendingOps と同じ判断 — 新ランは素の状態で始める)。
+    this.clearBoost();
     this.armFreezeTimer();
     this.dirty = true;
     return this.get();
@@ -221,6 +263,9 @@ export class ChallengeEngine {
     // status 遷移で break しなくなり、取りこぼしが消える)。
     this.stopping = true;
     try {
+      // 溜めたタップを闇に落とさない — stop は「値を残す」規約なので、保留 op の
+      // 強制適用より先にブーストを清算する(boost-end が保留分より先に並ぶ)。
+      this.settleBoost(this.now(), true);
       this.forceApplyPendingOps();
     } finally {
       this.stopping = false;
@@ -236,6 +281,7 @@ export class ChallengeEngine {
     // 直後に initialValue で上書きするので保留分は適用せず捨てる。
     this.pendingOps = [];
     this.fxFreezeUntilMs = null;
+    this.clearBoost();
     this.armFreezeTimer();
     this.status = 'idle';
     this.value = this.getConfig().initialValue;
@@ -246,15 +292,68 @@ export class ChallengeEngine {
     this.seenFollowers.clear();
     this.runViewers.clear();
     this.result = null;
+    this.rankShown = false;
     this.resetLikeAccumulators();
     this.dirty = true;
     return this.get();
   }
 
+  /**
+   * ダッシュボードの「ランキング表示」ボタン。モニターの全画面ランキングを
+   * 出す/消すだけで、値・統計・集計・演出には一切触らない。
+   *
+   * status を見ないのは意図的 — 一時停止中や達成後に「さっきのランは誰が
+   * 1位だったか」を出したい場面があり、runViewers は stop() では消えないため
+   * そのまま出せる(消えるのは start/reset のとき)。
+   */
+  toggleRank(): ChallengeState {
+    this.rankShown = !this.rankShown;
+    this.dirty = true;
+    return this.get();
+  }
+
+  /**
+   * 配信終了でランキングを畳む(SessionManager.stop から)。モニター下部の TOP3 が
+   * sessionId で自動的に消えるのと挙動を揃えるため。
+   *
+   * **戻り値は「実際に変化したか」** — 呼び出し側はこれが true のときだけ delta を
+   * 送る。stop() の時点で 2Hz tick はもう止まっているので、押していない配信の
+   * 終了ごとに無駄な delta を撃たないための判定。
+   *
+   * runViewers は消さない(集計は stop の規約どおり残す) — 再開せずもう一度
+   * 押せば、そのランの順位をまた出せる。
+   */
+  hideRank(): boolean {
+    if (!this.rankShown) return false;
+    this.rankShown = false;
+    this.dirty = true;
+    return true;
+  }
+
   /** idle/achieved 中のホットキーはエラーにせず無視する(配信中の誤爆対策)。 */
   press(): ChallengeState {
     if (this.status !== 'running') return this.get();
-    this.flushFxFreeze(this.now());
+    const nowMs = this.now();
+    // 期限切れブーストの清算は flushFxFreeze の冒頭(settleBoost)が行う。
+    this.flushFxFreeze(nowMs);
+    // タップウィンドウ中のタップは applyOrQueue に入れない — シネマティック
+    // モードでは「数えるだけ」(値・統計・effect は settleBoost が一括で確定する。
+    // effect を積まないので ring 12件も食い潰さない)、プレーンモードでは即時
+    // ×倍率。起動カットイン中(boostStartMs 前)はここを通らず、通常の凍結
+    // キューへ落ちる(3/2/1 の前のタップは倍にならない)。
+    if (this.boostUntilMs !== null && nowMs >= this.boostStartMs && nowMs < this.boostUntilMs) {
+      if (this.boostPlain) {
+        const step = this.boostPressStep * this.boostMultiplier;
+        this.value = Math.max(0, this.value - step);
+        this.stats.presses++;
+        this.pushEffect({ kind: 'press', amount: -step, boostMultiplier: this.boostMultiplier, atMs: nowMs });
+        this.maybeAchieve(nowMs);
+      } else {
+        this.boostTapCount++;
+      }
+      this.dirty = true;
+      return this.get();
+    }
     // 凍結中はキューへ(カウンタ一時停止の一貫性 — 数字は演出後に動く)。
     this.applyOrQueue(() => {
       const step = this.getConfig().pressStep;
@@ -366,6 +465,31 @@ export class ChallengeEngine {
           // 張らない契約なので、反復させると数字が演出中に動いてしまう。
           ...(testRep > 1 ? { fxRepeat: testRep, fxRepeatIntervalMs: cfg.giftRepeatFx.intervalMs } : {}),
           diamonds: spec.diamonds,
+        };
+        break;
+      }
+      case 'tapBoost': {
+        // 設定中の durationSec/multiplier/クリップ選択をそのまま使って実演する。
+        // トリガー一致は評価しない(fanStamp と同じ — 未設定でも見た目を確認
+        // できるのが目的)。凍結もブースト状態も作らない(testEffect の契約)—
+        // モニターは e.test を見て、据え置きなしで前置き→ウィンドウ→着弾を試写する。
+        const tb = cfg.tapBoost;
+        const durationMs = tb.durationSec * 1000;
+        const introMs = tb.introClip !== 'off' ? TAP_BOOST_INTRO_MS : 0;
+        const countMs = tb.countClip !== 'off' ? TAP_BOOST_COUNT_MS : 0;
+        e = {
+          kind: 'boost-start',
+          amount: 0,
+          boostMultiplier: tb.multiplier,
+          boostEndsAtMs: atMs + introMs + countMs + durationMs,
+          boostIntroMs: introMs,
+          boostCountMs: countMs,
+          ...(introMs > 0 ? { boostIntroClip: tb.introClip } : {}),
+          ...(countMs > 0 ? { boostCountClip: tb.countClip } : {}),
+          ...(tb.loopClip !== 'off' ? { boostLoopClip: tb.loopClip } : {}),
+          fxDurationMs: introMs + countMs + durationMs,
+          ...(tb.flash ? { flash: true } : {}),
+          nickname: 'テスト',
         };
         break;
       }
@@ -571,6 +695,17 @@ export class ChallengeEngine {
       // 同じ giftId を両方に登録された設定で「お助けのはずが数字が増える」という説明の
       // つかない挙動を作らないため。
       const fs = matchFanStamp(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+
+      // タップブースト(フィーバー)。fanStamp の**次・ルーレットより先**に評価する
+      // (matchTapBoost の規約 — 同じ giftId を両方に登録した誤設定では fanStamp が
+      // 勝つ)。一致したらこのギフトは増減規則を一切通らず「発動」だけが起きる —
+      // トリガーギフト自体は値を動かさない(減るのは溜めたタップの一括反映)。
+      // applyOrQueue 経由なので、進行中のカットイン/ブースト凍結中に届いた2本目は
+      // ドレイン(前のブーストの清算後)で直列に発動する。
+      const tb = fs ? null : matchTapBoost(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+      if (tb) {
+        return this.applyOrQueue(() => this.activateBoost(tb, e));
+      }
 
       // ギフトルーレット。複数登録できるが、回るのは上から見て最初に一致した1件だけ
       //(matchRoulette の先勝ち)。トリガー一致時は giftRules/giftDefault を評価しない —
@@ -792,7 +927,26 @@ export class ChallengeEngine {
       result: this.status === 'achieved' ? this.result : null,
       // 該当者がいなければキーごと省く(未開始・リセット直後は delta を太らせない)。
       ...(runRank.length > 0 ? { runRank } : {}),
+      // 手動の全画面ランキング。**キーの有無がそのまま表示状態**なので、
+      // 該当者ゼロでも rankShown なら必ず載せる(runRank と規約が違う点に注意) —
+      // 参加者がまだ居ないことをモニターが「—」で見せる必要があるし、
+      // ダッシュボードのボタン文言もこのキーの有無だけで決まる。
+      // 走行中も毎 delta で組み直すので順位はライブに動く(result は凍結値)。
+      ...(this.rankShown ? { rankBoard: this.buildResult(this.now()) } : {}),
       fxFreezeUntilMs: this.fxFreezeUntilMs,
+      // ブースト中だけ載せる(モニターのタップカウンタの唯一のソース)。press RPC は
+      // nudge を通るのでタップのたびに即時 delta で届く。
+      ...(this.boostUntilMs !== null
+        ? {
+            boost: {
+              tapCount: this.boostTapCount,
+              startsAtMs: this.boostStartMs,
+              endsAtMs: this.boostUntilMs,
+              multiplier: this.boostMultiplier,
+              pressStep: this.boostPressStep,
+            },
+          }
+        : {}),
     };
   }
 
@@ -853,6 +1007,10 @@ export class ChallengeEngine {
    */
   private applyFxCapsChange(): boolean {
     if (this.fxAllowed() || !this.isFxFrozen()) return false;
+    // モニターが閉じた(カットインが映らなくなった)ら、進行中のブーストも即清算
+    // する — 見えない演出のためにタップを溜め続けない。凍結の即時解除より先に
+    // 呼ぶこと(settle が保留 op のドレインより先に並ぶ)。
+    this.settleBoost(this.now(), true);
     this.fxFreezeUntilMs = this.now();
     this.flushFxFreeze(this.now());
     this.armFreezeTimer();
@@ -895,6 +1053,11 @@ export class ChallengeEngine {
    * 捨てる — 達成後のイベントは元のタイムラインでも無視されるため。
    */
   private flushFxFreeze(nowMs: number): void {
+    // ブーストの清算は凍結ドレインより**必ず先** — boostUntilMs は
+    // fxFreezeUntilMs より GIFT_FX_FREEZE_MARGIN_MS 早く切れるので、凍結解除の
+    // 時点では常に settle 済みになり、boost-end effect の id < 保留イベントの id
+    // が保証される(boostUntilMs null ガードで冪等)。
+    this.settleBoost(nowMs);
     if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) return;
     this.fxFreezeUntilMs = null;
     this.dirty = true;
@@ -914,6 +1077,100 @@ export class ChallengeEngine {
     }
     // 再凍結(ドレイン中断)なら次の期限で張り直し、解除完了なら外す。
     this.armFreezeTimer();
+  }
+
+  // ── タップブースト(フィーバー) ─────────────────────────────────────────
+
+  /**
+   * ブースト発動(applyOrQueue の op として実行される — 凍結明けの遅延発動では
+   * this.now() が実行時点を返すので、期限は常に「実際に始まった時刻 + 尺」になる)。
+   * トリガーギフト自体は値を動かさない。設定(倍率/1タップの重み)はここで
+   * 焼き込み、以後の設定変更の影響を受けない。
+   */
+  private activateBoost(tb: TapBoostConfig, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
+    const atMs = this.now();
+    // プレーンモード中の再トリガーは即実行で届く(凍結が無いので直列化されない)。
+    // 前のブーストを清算してから始める — 溜め直しではなく「延長戦」を2本に分ける。
+    this.settleBoost(atMs, true);
+    const durationMs = tb.durationSec * 1000;
+    const cinematic = this.fxAllowed();
+    // 前置き演出(咆哮 → 3/2/1)はシネマティックモードだけ。プレーンモードは
+    // 映像が無いので即ウィンドウ開始(カウントダウンなしで待たせない)。
+    // 段ごとの 'off' 選択はその段をスキップする(尺ごと詰める)。
+    const introMs = cinematic && tb.introClip !== 'off' ? TAP_BOOST_INTRO_MS : 0;
+    const countMs = cinematic && tb.countClip !== 'off' ? TAP_BOOST_COUNT_MS : 0;
+    this.boostStartMs = atMs + introMs + countMs;
+    this.boostUntilMs = this.boostStartMs + durationMs;
+    this.boostTapCount = 0;
+    this.boostMultiplier = tb.multiplier;
+    this.boostPressStep = this.getConfig().pressStep;
+    this.boostPlain = !cinematic;
+    this.pushEffect({
+      kind: 'boost-start',
+      amount: 0,
+      boostMultiplier: tb.multiplier,
+      boostEndsAtMs: this.boostUntilMs,
+      boostIntroMs: introMs,
+      boostCountMs: countMs,
+      // クリップは段ごとの選択を焼き込む(effect 1件で自己完結の流儀)。
+      ...(introMs > 0 ? { boostIntroClip: tb.introClip } : {}),
+      ...(countMs > 0 ? { boostCountClip: tb.countClip } : {}),
+      ...(tb.loopClip !== 'off' ? { boostLoopClip: tb.loopClip } : {}),
+      // 総尺(前置き+ウィンドウ)。
+      fxDurationMs: introMs + countMs + durationMs,
+      ...(tb.flash ? { flash: true } : {}),
+      nickname: e.viewer.nickname ?? e.viewer.displayId,
+      ...(e.giftName ? { giftName: e.giftName } : {}),
+      ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+      ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+      diamonds: e.diamonds,
+      atMs,
+    });
+    // 凍結はシネマティックモードだけ(giftOp の fxAllowed ガードと同じ理由)。
+    // margin ぶん遅く切れるので、解除ドレインの時点では必ず settle 済み。
+    if (cinematic) {
+      this.fxFreezeUntilMs = this.boostUntilMs + GIFT_FX_FREEZE_MARGIN_MS;
+      this.armFreezeTimer();
+    }
+    this.dirty = true;
+  }
+
+  /**
+   * ブーストの清算。溜めたタップを tapCount × pressStep × multiplier として一括
+   * 減算し、boost-end effect を積む。boostUntilMs null ガードで冪等 — stop() と
+   * flushFxFreeze の両方から呼ばれても二重適用しない。
+   * プレーンモードは press が即時適用済みなので lump は 0(boost-end はモニターへの
+   * 終了合図と履歴の区切りとして出す)。
+   */
+  private settleBoost(nowMs: number, force = false): void {
+    if (this.boostUntilMs === null) return;
+    if (!force && nowMs < this.boostUntilMs) return;
+    const tap = this.boostTapCount;
+    const mult = this.boostMultiplier;
+    const amount = this.boostPlain ? 0 : tap * this.boostPressStep * mult;
+    this.clearBoost();
+    if (amount > 0) {
+      this.value = Math.max(0, this.value - amount);
+      this.stats.presses += tap;
+    }
+    this.pushEffect({
+      kind: 'boost-end',
+      // タップ 0 は -0 を作らない(JSON/表示/テストの等値比較が割れる)。
+      amount: amount === 0 ? 0 : -amount,
+      boostTapCount: tap,
+      boostMultiplier: mult,
+      atMs: nowMs,
+    });
+    this.maybeAchieve(nowMs);
+    this.dirty = true;
+  }
+
+  /** ブースト状態の破棄(start/reset — 清算せず捨てる。pendingOps 破棄と同じ判断)。 */
+  private clearBoost(): void {
+    this.boostUntilMs = null;
+    this.boostStartMs = 0;
+    this.boostTapCount = 0;
+    this.boostPlain = false;
   }
 
   /** stop 用の強制適用。保留分を残さず適用する(ドレイン中の再凍結は無視)。 */
@@ -1033,6 +1290,9 @@ export class ChallengeEngine {
     if (this.value > 0 || this.status !== 'running') return;
     this.status = 'achieved';
     this.achievedMs = atMs;
+    // CLEAR リザルト(同じ TOP5×2)が全画面で出るので、手動のランキング表示は
+    // 畳む。両方出すとモニターでオーバーレイが二枚重なる。
+    this.rankShown = false;
     // 演出を積む前に凍結する — pushEffect の時点で state は配られうる。
     this.result = this.buildResult(atMs);
     this.pushEffect({ kind: 'achieved', amount: 0, atMs });

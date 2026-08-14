@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChallengeLogEntry, ViewerFilter, ViewerTableRow } from '@shared/dto';
 import type { FeedItem } from '@shared/ipc';
+import { VIEWER_PAGE_SIZE } from '@shared/constants';
 import { compact, diamondsToJpy, num } from '@shared/format';
 import { formatDurationJa, relativeDayJa } from '@shared/time';
 import { rpc, rpcFire, useQuery, useDebounced } from '../ipc/client';
@@ -53,7 +54,7 @@ export function LiveDashboard(): React.JSX.Element {
   }, []);
   const { data } = useQuery(
     'q.viewerTable',
-    { sessionId, sort, desc, filter, search: debouncedSearch, limit: 5000 },
+    { sessionId, sort, desc, filter, search: debouncedSearch, limit: VIEWER_PAGE_SIZE },
     [sessionId, sort, desc, filter, debouncedSearch, memoNonce, dbTick]
   );
 
@@ -288,6 +289,8 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   comment: '💬',
   gift: '🎁',
   roulette: '🎰',
+  'boost-start': '⚡',
+  'boost-end': '⚡',
   achieved: '🏁',
 };
 
@@ -340,6 +343,12 @@ function logWhat(e: ChallengeLogEntry): string {
       const name = label ? `(${label})` : '';
       return `ルーレット 出目${e.amount > 0 ? '+' : ''}${num(e.amount)}${name}`;
     }
+    case 'boost-start': {
+      const gift = e.giftName ? `(${e.giftName})` : '';
+      return `タップブースト発動 ×${num(e.boostMultiplier ?? 1)}${gift}`;
+    }
+    case 'boost-end':
+      return `ブースト終了 タップ×${num(e.boostTapCount ?? 0)}`;
     case 'achieved':
       return 'カウント 0 に到達';
   }
@@ -378,9 +387,11 @@ function ChallengeLogRow({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
         ? 'いいね'
         : e.kind === 'stock-full'
           ? 'ストック'
-          : e.kind === 'achieved'
-            ? '達成!'
-            : (e.nickname ?? '—');
+          : e.kind === 'boost-end'
+            ? 'フィーバー'
+            : e.kind === 'achieved'
+              ? '達成!'
+              : (e.nickname ?? '—');
   return (
     <div className={`clog ${dir}${e.kind === 'achieved' ? ' clear' : ''}`}>
       <div className="clog-top">
@@ -497,7 +508,9 @@ function ChallengeCard(): React.JSX.Element | null {
   const elapsedMs =
     challenge?.startedMs != null ? (challenge.achievedMs ?? Date.now()) - challenge.startedMs : null;
   // PUSH/開始/停止が無言で失敗すると配信事故になる — 必ずトーストへ落とす。
-  const call = (m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press') =>
+  const call = (
+    m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press' | 'challenge.toggleRank'
+  ) =>
     void rpc(m, undefined)
       .then(setChallenge)
       .catch((e: Error) => toast({ level: 'error', msgJa: `チャレンジ操作に失敗しました: ${e.message}` }));
@@ -509,6 +522,9 @@ function ChallengeCard(): React.JSX.Element | null {
   // 一度でも開始していれば途中の値と統計がある。reset だけが startedMs を消すので、
   // これがそのまま「失うものがあるか」の判定になる(バッジの一時停止中と同じ条件)。
   const hasRun = challenge?.startedMs != null;
+  // モニターに全画面ランキングが出ているか。worker は表示中だけ rankBoard を
+  // 載せるので、キーの有無がそのまま表示状態になる(別途フラグを持たない)。
+  const rankShown = challenge?.rankBoard != null;
 
   return (
     <div className={`card challenge-card${running || achieved ? ' stuck' : ''}${achieved ? ' cleared' : ''}`}>
@@ -657,6 +673,21 @@ function ChallengeCard(): React.JSX.Element | null {
           }
         >
           リセット
+        </button>
+        {/* モニターの全画面ランキングのトグル。表示中かどうかは worker が権威で、
+            challenge.rankBoard の有無がそのまま表す(ホットキーや他の窓から
+            切り替わってもこの文言が追従する)。値・統計には触らないので確認は不要。
+            モニターが閉じていると出しても誰にも見えないので、その場合だけ注意書き。 */}
+        <button
+          className={`btn small${rankShown ? ' primary' : ''}`}
+          onClick={() => call('challenge.toggleRank')}
+          title={
+            monitorOpen
+              ? 'モニターにギフト/イイネ TOP5 を全画面で出します'
+              : 'モニターが閉じています — 先に「モニターを開く」を押してください'
+          }
+        >
+          {rankShown ? 'ランキングを消す' : 'ランキング表示'}
         </button>
         <button
           className="btn small"

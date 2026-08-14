@@ -3,6 +3,7 @@ import type { AdapterStatus, QuotaInfo, UserId } from '@shared/events';
 import type { DeltaViewer, FeedItem, JoinAlertCard, LiveMessage, LiveTotals, WorkerState } from '@shared/ipc';
 import type { ChallengeLogEntry, ChallengeState, MissionProgress } from '@shared/dto';
 import { appendChallengeLog } from '@shared/challenge';
+import { pruneLiveRows } from '@shared/live-rows';
 
 /**
  * The live table can hold 5,000 rows updating twice a second. Putting that Map in
@@ -88,7 +89,22 @@ export const useLive = create<LiveState>(() => ({
 const FEED_CAP = 300;
 const ALERT_CAP = 12;
 
+/**
+ * 剪定の間隔と保持期間。タイマーは持たず mergeViewer のついでに償却実行する
+ * (タイマー自体がリークになるのを避ける)。
+ */
+const ROWS_PRUNE_EVERY_MS = 60_000;
+const ROWS_TTL_MS = 30 * 60_000;
+const ROWS_HARD_CAP = 20_000;
+let lastRowsPruneMs = 0;
+
 function mergeViewer(d: DeltaViewer): void {
+  // 上限が無いと耐久配信でユニーク視聴者数ぶん単調増加する。詳細は prune.ts。
+  const now = Date.now();
+  if (now - lastRowsPruneMs > ROWS_PRUNE_EVERY_MS) {
+    lastRowsPruneMs = now;
+    pruneLiveRows(rows, now, ROWS_TTL_MS, ROWS_HARD_CAP);
+  }
   let r = rows.get(d.u);
   if (!r) {
     r = {
@@ -124,6 +140,7 @@ function mergeViewer(d: DeltaViewer): void {
 
 export function resetLive(): void {
   rows.clear();
+  lastRowsPruneMs = 0;
   // 保留中のフラッシュを捨てる: 直前 delta の totals/feed が rAF でクリア直後に
   // 復活する(配信開始 = status 'live' と delta が近接する瞬間に起きる)のを防ぐ。
   for (const k of Object.keys(pendingPatch)) delete (pendingPatch as Record<string, unknown>)[k];

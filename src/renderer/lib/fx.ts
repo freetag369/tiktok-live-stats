@@ -22,8 +22,7 @@ import giftBand1Url from '../assets/fx/band/gift-band1.mp4';
 import giftBand2Url from '../assets/fx/band/gift-band2.mp4';
 import giftBand3Url from '../assets/fx/band/gift-band3.mp4';
 import giftBand4Url from '../assets/fx/band/gift-band4.mp4';
-import cutRoseUrl from '../assets/fx/cut/cut-rose.mp4';
-import cutRosaUrl from '../assets/fx/cut/cut-rosa.mp4';
+import { FULL_CUT_CLIPS, FULL_CUT_CLIP_IDS } from '@shared/fx-cut';
 import achievedUrl from '../assets/fx/achieved.mp4';
 import gaugeFullUrl from '../assets/fx/gauge-full.mp4';
 import strikeUrl from '../assets/fx/gauge-strike.mp4';
@@ -39,40 +38,74 @@ import strikeUrl from '../assets/fx/gauge-strike.mp4';
  * se.ts と同じくステートレス — 有効/割り当ての状態は持たない。
  */
 
+/**
+ * ドロップダウンの区切り。素材の性質(合成方法・音の有無)がそのまま group になる。
+ * 66 件を1枚のリストで出すと選べないので、設定画面は optgroup で束ねる。
+ */
+export type FxClipGroup = 'fullcut' | 'band' | 'gift' | 'generic';
+
+export const FX_CLIP_GROUPS: ReadonlyArray<{ key: FxClipGroup; label: string }> = [
+  { key: 'fullcut', label: '全面カット(不透明・音声あり)' },
+  { key: 'band', label: 'ダイヤ帯域カットイン(不透明・BGMは別ファイル)' },
+  { key: 'gift', label: 'ギフト専用(screen 合成)' },
+  { key: 'generic', label: '汎用(ダイヤ段階)' },
+];
+
 export interface FxClip {
   id: string;
   /** 設定画面のドロップダウンに出す表示名。 */
   label: string;
   url: string;
+  /** ドロップダウンの区切り(optgroup)。 */
+  group: FxClipGroup;
 }
 
+/**
+ * 全面カット素材(assets/fx/cut/*.mp4)。42本を1本ずつ静的 import せず eager glob で
+ * まとめて解決し、id(= ファイル名)で引く。id・ラベル・既定トリガーの出所は
+ * shared/fx-cut.ts —— shared は renderer を import できないので、依存は必ずこの向き。
+ *
+ * **0件許容**: 素材が未投入でもビルドは落とさず、その id は単に選択肢から消える
+ * (stock-full と同じ流儀)。取りこぼしは test/unit/fx-catalog.spec.ts が検出する。
+ */
+const cutGlob = import.meta.glob('../assets/fx/cut/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+const CUT_ENTRIES: FxClip[] = FULL_CUT_CLIPS.flatMap((c) => {
+  const url = cutGlob[`../assets/fx/cut/${c.id}.mp4`];
+  return url ? [{ id: c.id, label: c.label, url, group: 'fullcut' as const }] : [];
+});
+
 export const FX_CLIPS: readonly FxClip[] = [
-  { id: 'universe', label: 'ユニバース(銀河)', url: universeUrl },
-  { id: 'universe_plus', label: 'ユニバース+(二重銀河)', url: universePlusUrl },
-  { id: 'tiktok_stars', label: 'スターズ(星の渦)', url: tiktokStarsUrl },
-  { id: 'white_pegasus', label: 'ホワイトペガサス(銀の天馬)', url: whitePegasusUrl },
-  { id: 'pegasus', label: 'ペガサス(金の天馬)', url: pegasusUrl },
-  { id: 'fire_phoenix', label: 'ファイアフェニックス(炎の鳳凰)', url: firePhoenixUrl },
-  { id: 'thunder_falcon', label: 'サンダーファルコン(雷の隼)', url: thunderFalconUrl },
-  { id: 'dragon', label: 'ドラゴン(翡翠の龍)', url: dragonUrl },
-  { id: 'lion', label: 'ライオン(金の獅子)', url: lionUrl },
-  { id: 'lion_charge', label: '獅子奮迅(炎の獅子頭)', url: lionChargeUrl },
-  { id: 'leon_lion', label: 'レオンとライオン(2頭の衝突)', url: leonLionUrl },
-  { id: 'palace', label: '宮殿(黄金の建築)', url: palaceUrl },
-  { id: 'whale_mirage', label: '鯨と蜃気楼', url: whaleMirageUrl },
-  { id: 'whale_sam', label: 'クジラのサム', url: whaleSamUrl },
-  { id: 'seal_whale', label: 'アザラシとクジラ', url: sealWhaleUrl },
-  { id: 'adams_dream', label: "Adam's Dream(光雲)", url: adamsDreamUrl },
-  { id: 'gift-t1', label: '汎用: 小(金の輝き)', url: giftT1Url },
-  { id: 'gift-t2', label: '汎用: 中(金のバースト)', url: giftT2Url },
-  { id: 'gift-t3', label: '汎用: 大(金の放射光)', url: giftT3Url },
-  { id: 'gift-t4', label: '汎用: 特大(花火3連発)', url: giftT4Url },
-  { id: 'gift-band1', label: 'カットイン: びっくりした魚(1〜50💎・6秒)', url: giftBand1Url },
-  { id: 'gift-band2', label: 'カットイン: ハートポーズ(51〜100💎・6秒)', url: giftBand2Url },
-  { id: 'gift-band3', label: 'カットイン: マネーガン(101〜600💎・8秒)', url: giftBand3Url },
-  { id: 'gift-band4', label: 'カットイン: 銀河(601💎〜・10秒)', url: giftBand4Url },
-  { id: 'cut-rose', label: '全面カット: バラ(5秒・音声あり)', url: cutRoseUrl },
-  { id: 'cut-rosa', label: '全面カット: ローザ(5秒・音声あり)', url: cutRosaUrl },
+  // 全面カット(音声焼き込み)。並びは shared/fx-cut.ts の定義順。
+  ...CUT_ENTRIES,
+  { id: 'gift-band1', label: 'びっくりした魚(1〜50💎・6秒)', url: giftBand1Url, group: 'band' },
+  { id: 'gift-band2', label: 'ハートポーズ(51〜100💎・6秒)', url: giftBand2Url, group: 'band' },
+  { id: 'gift-band3', label: 'マネーガン(101〜600💎・8秒)', url: giftBand3Url, group: 'band' },
+  { id: 'gift-band4', label: '銀河(601💎〜・10秒)', url: giftBand4Url, group: 'band' },
+  { id: 'universe', label: 'ユニバース(銀河)', url: universeUrl, group: 'gift' },
+  { id: 'universe_plus', label: 'ユニバース+(二重銀河)', url: universePlusUrl, group: 'gift' },
+  { id: 'tiktok_stars', label: 'スターズ(星の渦)', url: tiktokStarsUrl, group: 'gift' },
+  { id: 'white_pegasus', label: 'ホワイトペガサス(銀の天馬)', url: whitePegasusUrl, group: 'gift' },
+  { id: 'pegasus', label: 'ペガサス(金の天馬)', url: pegasusUrl, group: 'gift' },
+  { id: 'fire_phoenix', label: 'ファイアフェニックス(炎の鳳凰)', url: firePhoenixUrl, group: 'gift' },
+  { id: 'thunder_falcon', label: 'サンダーファルコン(雷の隼)', url: thunderFalconUrl, group: 'gift' },
+  { id: 'dragon', label: 'ドラゴン(翡翠の龍)', url: dragonUrl, group: 'gift' },
+  { id: 'lion', label: 'ライオン(金の獅子)', url: lionUrl, group: 'gift' },
+  { id: 'lion_charge', label: '獅子奮迅(炎の獅子頭)', url: lionChargeUrl, group: 'gift' },
+  { id: 'leon_lion', label: 'レオンとライオン(2頭の衝突)', url: leonLionUrl, group: 'gift' },
+  { id: 'palace', label: '宮殿(黄金の建築)', url: palaceUrl, group: 'gift' },
+  { id: 'whale_mirage', label: '鯨と蜃気楼', url: whaleMirageUrl, group: 'gift' },
+  { id: 'whale_sam', label: 'クジラのサム', url: whaleSamUrl, group: 'gift' },
+  { id: 'seal_whale', label: 'アザラシとクジラ', url: sealWhaleUrl, group: 'gift' },
+  { id: 'adams_dream', label: "Adam's Dream(光雲)", url: adamsDreamUrl, group: 'gift' },
+  { id: 'gift-t1', label: '小(金の輝き)', url: giftT1Url, group: 'generic' },
+  { id: 'gift-t2', label: '中(金のバースト)', url: giftT2Url, group: 'generic' },
+  { id: 'gift-t3', label: '大(金の放射光)', url: giftT3Url, group: 'generic' },
+  { id: 'gift-t4', label: '特大(花火3連発)', url: giftT4Url, group: 'generic' },
 ];
 
 /**
@@ -86,8 +119,8 @@ export const BAND_CLIP_IDS: readonly string[] = [
   'gift-band2',
   'gift-band3',
   'gift-band4',
-  'cut-rose',
-  'cut-rosa',
+  // 全面カットも同じ不透明素材。出所は shared/fx-cut.ts(手で足さない)。
+  ...FULL_CUT_CLIP_IDS,
 ];
 
 /** 不透明カットイン素材かどうか。screen 合成か normal 合成かの分岐に使う。 */
@@ -101,7 +134,7 @@ export function isBandClip(id: string | null | undefined): boolean {
  * 設定画面の試写がミュートを外すかどうかの分岐に使う — モニター側は effect の
  * fxFullCut を見るのでこのリストは参照しない(cfg を引き直させない流儀)。
  */
-export const FULL_CUT_CLIP_IDS: readonly string[] = ['cut-rose', 'cut-rosa'];
+export { FULL_CUT_CLIP_IDS };
 
 /** 全面カット(音声焼き込み)素材かどうか。 */
 export function isFullCutClip(id: string | null | undefined): boolean {
@@ -147,6 +180,28 @@ const stockCutinGlob = import.meta.glob('../assets/fx/stock-cutin.mp4', {
 }) as Record<string, string>;
 export const STOCK_CUTIN_CLIP_URL: string | null =
   stockCutinGlob['../assets/fx/stock-cutin.mp4'] ?? null;
+
+/**
+ * タップブースト(フィーバー)の専用素材(不透明・音声焼き込み)。段ごとに
+ * 選択制で、id の一覧とラベルは shared/challenge.ts の TAP_BOOST_*_CLIPS が
+ * 唯一の出所(実ファイルは assets/fx/boost/<id>.mp4)。intro-* は
+ * TAP_BOOST_INTRO_MS、count-* は TAP_BOOST_COUNT_MS の実尺で揃える —
+ * カウントダウンは映像焼き込みなので、ズレるとタップ開始と「1」が合わない。
+ * 無ければ null — モニターは暗幕+タップカウンタのみで縮退する
+ * (STOCK_CUTIN_CLIP_URL と同じ 0 件許容の流儀。CHALLENGE_FX_CLIP_IDS には
+ * 入れない: ユーザーがギフトへ割り当てる対象ではないため)。
+ */
+const boostGlob = import.meta.glob('../assets/fx/boost/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+/** ブーストクリップ id → URL。'off'・未知 id・素材未投入は null。 */
+export function boostClipUrl(id: string | null | undefined): string | null {
+  if (!id || id === 'off') return null;
+  return boostGlob[`../assets/fx/boost/${id}.mp4`] ?? null;
+}
 
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 

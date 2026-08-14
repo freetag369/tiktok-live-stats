@@ -10,6 +10,7 @@ import type {
   ChallengeSeSlot,
   ChallengeTestEffectSpec,
   FanStampConfig,
+  TapBoostConfig,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
@@ -20,8 +21,8 @@ import {
   CHALLENGE_MINI_IDS,
   CHALLENGE_SE_SLOTS,
   COMMENT_RULES_MAX,
-  DEFAULT_CHALLENGE,
   DEFAULT_FAN_STAMP,
+  DEFAULT_TAP_BOOST,
   DEFAULT_GIFT_BAND_FX,
   DEFAULT_GIFT_FULL_CUT,
   DEFAULT_GIFT_REPEAT_FX,
@@ -36,13 +37,49 @@ import {
   ROULETTE_LABEL_MAX,
   ROULETTE_SEGMENTS_MAX,
   ROULETTES_MAX,
+  TAP_BOOST_COUNT_CLIPS,
+  TAP_BOOST_COUNT_MS,
+  TAP_BOOST_DURATION_MAX_SEC,
+  TAP_BOOST_DURATION_MIN_SEC,
+  TAP_BOOST_INTRO_CLIPS,
+  TAP_BOOST_INTRO_MS,
+  TAP_BOOST_LOOP_CLIPS,
+  TAP_BOOST_MULT_MAX,
+  TAP_BOOST_MULT_MIN,
   effectiveSeVolume,
 } from '@shared/challenge';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { setSettings, toast } from '../state/uiStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
 import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
-import { FX_CLIPS, isFullCutClip } from '../lib/fx';
+import { FX_CLIPS, FX_CLIP_GROUPS, isFullCutClip } from '../lib/fx';
+
+/**
+ * クリップ選択の <option> 群。**3箇所(ギフトごとの演出クリップ / 全面カット /
+ * ダイヤ数帯)で共有**する — 素材が42本増えて全66件になったので、素で並べると
+ * 選べない。optgroup で「全面カット / 帯域 / ギフト専用 / 汎用」に束ねる。
+ * 区切りと並び順の出所は lib/fx.ts の FX_CLIP_GROUPS。
+ */
+function FxClipOptions(): React.JSX.Element {
+  return (
+    <>
+      {FX_CLIP_GROUPS.map((g) => {
+        const items = FX_CLIPS.filter((f) => f.group === g.key);
+        // 素材が未投入のグループ(0件)は optgroup ごと出さない。
+        if (items.length === 0) return null;
+        return (
+          <optgroup key={g.key} label={g.label}>
+            {items.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.label}
+              </option>
+            ))}
+          </optgroup>
+        );
+      })}
+    </>
+  );
+}
 
 /** 効果音スロットの表示名(設定画面の行ラベル)。 */
 const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
@@ -56,10 +93,13 @@ const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   'gift-t2': 'ギフト(中)',
   'gift-t3': 'ギフト(大)',
   'gift-t4': 'ギフト(特大)',
+  helper: 'お助け(ファンスタンプ)',
   roulette: 'ルーレット回転',
   'roulette-near': 'ルーレット 止まりそう(あと1個の溜め)',
   'roulette-kick': 'ルーレット キック(フェイク停止からの一撃)',
   'roulette-hit': 'ルーレット確定',
+  'boost-start': 'ブースト タップ開始',
+  'boost-end': 'ブースト着弾(一括減算)',
   achieved: '達成',
 };
 
@@ -84,10 +124,14 @@ const SE_SLOT_HINTS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   'gift-t2': 'ダイヤ 100〜999 のギフトを受け取った瞬間',
   'gift-t3': 'ダイヤ 1000〜4999 のギフトを受け取った瞬間',
   'gift-t4': 'ダイヤ 5000〜 のギフトを受け取った瞬間',
+  helper: 'お助けギフト(ファンスタンプ)を受け取った瞬間。「お助け」タブでも同じ設定を変えられます',
   roulette: 'リールが回り始める瞬間',
   'roulette-near': '当たりの1つ手前に着いて溜めに入る瞬間(モニター表示中のみ)',
   'roulette-kick': 'フェイク停止から蹴り出される瞬間。この演出が出たときだけ(モニター表示中のみ)',
   'roulette-hit': 'リールが止まって出目が確定する瞬間(モニター表示中のみ)',
+  'boost-start':
+    'ブーストの 3・2・1 カウントダウンが明けてタップウィンドウに入る瞬間(モニター表示中のみ)',
+  'boost-end': '溜めたタップ数が7セグに着弾して一括減算される瞬間(モニター表示中のみ)',
   achieved: '目標を達成して CLEAR が出る瞬間',
 };
 
@@ -179,6 +223,9 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
       return { kind: 'gift', diamonds: 1000 };
     case 'gift-t4':
       return { kind: 'gift', diamonds: 5000 };
+    case 'helper':
+      // お助けは giftId 未設定でも確認できる専用の実演 kind(HelperSection と同じ)。
+      return { kind: 'fanStamp' };
     case 'roulette':
     case 'roulette-near':
     case 'roulette-hit':
@@ -187,6 +234,10 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
     case 'roulette-kick':
       // キック音はパターン3でしか鳴らないので、演出を狙い撃ちで再生する。
       return { kind: 'roulette', pattern: 'kick' };
+    case 'boost-start':
+    case 'boost-end':
+      // 1回の実演で起動カットイン → タップ開始 → 着弾までまとめて確認できる。
+      return { kind: 'tapBoost' };
     case 'achieved':
       return { kind: 'achieved' };
   }
@@ -228,7 +279,7 @@ function MonitorTestBtn({
   );
 }
 
-type Tab = 'basic' | 'se' | 'fx' | 'roulette' | 'gifts' | 'comment' | 'helper';
+type Tab = 'basic' | 'se' | 'fx' | 'roulette' | 'gifts' | 'comment' | 'helper' | 'boost';
 
 const TABS: Array<[Tab, string]> = [
   ['basic', '基本設定'],
@@ -238,6 +289,7 @@ const TABS: Array<[Tab, string]> = [
   ['gifts', 'ギフト増減'],
   ['comment', 'コメント'],
   ['helper', 'お助け'],
+  ['boost', 'ブースト'],
 ];
 
 /**
@@ -301,6 +353,30 @@ export function Challenge(): React.JSX.Element {
     }
   }
 
+  /**
+   * デフォ保存 — 現在の内容を「既定値」として challenge-default.json へ書き出す。
+   * 未保存の編集があれば先に通常保存する(画面の内容がそのままデフォになる約束)。
+   * 書き出すのは cfg.get で取り直した保存(clamp)後の値 — save() 直後の draft は
+   * setDraft の反映前で古いことがある。
+   */
+  async function saveDefault(): Promise<void> {
+    if (!draft) return;
+    if (dirty && !(await save())) return;
+    setBusy(true);
+    try {
+      const s = await rpc('cfg.get', undefined);
+      const r = await rpc('challengeDefault.save', s.challenge);
+      toast({
+        level: 'info',
+        msgJa: `デフォ保存しました。このファイルを他のPCの同じ場所にコピーすると、そのPCでも既定になります: ${r.path}`,
+      });
+    } catch (e) {
+      toast({ level: 'error', msgJa: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function testFx(spec: ChallengeTestEffectSpec): Promise<void> {
     if (testBusy) return;
     setTestBusy(true);
@@ -334,6 +410,18 @@ export function Challenge(): React.JSX.Element {
           onClick={() => rpcFire(monitorOpen ? 'monitor.close' : 'monitor.open', undefined, 'モニターの開閉')}
         >
           {monitorOpen ? 'モニターを閉じる' : 'モニターを開く'}
+        </button>
+        <button
+          className="btn small"
+          onClick={() => void saveDefault()}
+          disabled={busy}
+          title={
+            '現在の内容をデフォ(既定値)として challenge-default.json に書き出します。' +
+            '「チャレンジ設定をすべて既定に戻す」の戻り先になり、' +
+            'このファイルを他のPCのデータフォルダ内 config\\ にコピーすると、そのPCでも同じ内容がデフォになります。'
+          }
+        >
+          デフォ保存
         </button>
         <button className="btn primary" onClick={() => void save()} disabled={busy || !dirty}>
           {dirty ? '保存' : '保存済み'}
@@ -393,6 +481,9 @@ export function Challenge(): React.JSX.Element {
         ) : null}
         {tab === 'helper' ? (
           <HelperSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+        ) : null}
+        {tab === 'boost' ? (
+          <BoostSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
         ) : null}
       </div>
     </div>
@@ -751,7 +842,8 @@ function MiniFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
           </div>
           <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
             ギフトは下の「ギフトごとの演出クリップ」で個別に上書きできます(ハートミーは既定でハンマー)。
-            ここのギフト(小)〜(特大)は、個別指定の無いギフトに効きます。
+            ここのギフト(小)〜(特大)は、個別指定の無いギフトに効きます。お助け(ファンスタンプ)は
+            専用スロットなので、ギフト(小)を変えても影響しません(「お助け」タブでも同じ設定を変えられます)。
           </div>
         </>
       ) : null}
@@ -807,11 +899,7 @@ function GiftClipsSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
                   {GIFT_CANONICAL_LABELS[c.canonical] ?? '流す映像'}
                   <select value={c.clip} onChange={(e) => patchClip(i, { clip: e.target.value })}>
                     <option value="off">出さない</option>
-                    {FX_CLIPS.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.label}
-                      </option>
-                    ))}
+                    <FxClipOptions />
                   </select>
                 </label>
                 <button
@@ -1062,15 +1150,31 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <label className="field" style={{ width: 130 }}>
-                ギフト名(部分一致)
-                <input
-                  type="text"
-                  value={r.giftName}
-                  placeholder="バラ"
-                  onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
-                />
-              </label>
+              <div style={{ width: 150 }}>
+                <label className="field">
+                  ギフト名
+                  <input
+                    type="text"
+                    value={r.giftName}
+                    placeholder="バラ"
+                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                  />
+                </label>
+                <label
+                  className="row"
+                  style={{ cursor: 'pointer', marginTop: 2 }}
+                  title="オンにするとギフト名が完全に一致したときだけ再生します。オフ(既定)は部分一致で、たとえば「tiktok」は「TikTok Universe」にも当たります。"
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.exactName}
+                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    完全一致
+                  </span>
+                </label>
+              </div>
               <label className="field" style={{ width: 100 }}>
                 giftId(任意)
                 <input
@@ -1085,11 +1189,7 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                   カットイン動画
                   <select value={r.clip} onChange={(e) => patchRule(i, { clip: e.target.value })}>
                     <option value="off">出さない</option>
-                    {FX_CLIPS.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.label}
-                      </option>
-                    ))}
+                    <FxClipOptions />
                   </select>
                 </label>
                 <button
@@ -1159,6 +1259,8 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                       giftId: '',
                       giftName: '',
                       canonical: '',
+                      // 手で足した行は従来どおり部分一致から始める。
+                      exactName: false,
                       clip: 'off',
                       durationSec: 5,
                       enabled: true,
@@ -1187,9 +1289,11 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
             </button>
           </div>
           <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
-            ギフト名は<b>部分一致</b>・大文字小文字は無視します(「バラ」は「バラ」を含むギフト名すべてに一致)。
+            ギフト名は既定で<b>部分一致</b>・大文字小文字は無視します(「バラ」は「バラ」を含むギフト名すべてに一致)。
+            短い名前は他のギフトを巻き込みます — たとえば「tiktok」は<b>「TikTok Universe」(44,999💎)にも一致</b>してしまうので、
+            そういう行は<b>完全一致</b>にチェックを入れてください(既定では TikTok と GG の2行だけ入っています)。
             giftId を入れるとそちらが優先され、確実に1つのギフトだけに絞れます(ライブのギフト履歴で確認できます)。
-            ギフト名・giftId・canonical がすべて空の行はどのギフトにも一致しません。音量は<b>効果音がオフのときは無音</b>になります。
+            ギフト名・giftId がどちらも空の行はどのギフトにも一致しません。音量は<b>効果音がオフのときは無音</b>になります。
           </div>
 
           {preview ? (
@@ -1284,11 +1388,7 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
                   カットイン動画
                   <select value={b.clip} onChange={(e) => patchBand(i, { clip: e.target.value })}>
                     <option value="off">出さない</option>
-                    {FX_CLIPS.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.label}
-                      </option>
-                    ))}
+                    <FxClipOptions />
                   </select>
                 </label>
                 <button
@@ -1857,7 +1957,15 @@ function GiftRulesSection({
         >
           ギフト規則を追加
         </button>
-        <button className="btn small" onClick={() => onPatch(structuredClone(DEFAULT_CHALLENGE))}>
+        <button
+          className="btn small"
+          onClick={() =>
+            // 「既定」= デフォ保存(challenge-default.json)があればその内容、無ければ同梱既定。
+            void rpc('challengeDefault.get', undefined)
+              .then((r) => onPatch(r.cfg))
+              .catch((e: Error) => toast({ level: 'error', msgJa: e.message }))
+          }
+        >
           チャレンジ設定をすべて既定に戻す
         </button>
       </div>
@@ -1969,6 +2077,9 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
   const patchFs = (p: Partial<FanStampConfig>): void => {
     onPatch({ fanStamp: { ...fs, ...p } });
   };
+  // 効果音・簡易演出はお助け専用スロット('helper')。設定の実体は seSounds /
+  // seVolumes / miniFx なので、「効果音」タブ・「演出」タブと同じ値を映す。
+  const seOff = cfg.seSounds.helper === 'off';
 
   return (
     <>
@@ -2034,6 +2145,80 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
             <span>照明フラッシュ</span>
           </label>
 
+          <h4 style={{ margin: '14px 0 6px' }}>お助け専用の効果音・簡易演出</h4>
+          <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+            <span style={{ flex: '0 0 72px', fontSize: 11 }}>効果音</span>
+            <select
+              style={{ flex: 1, minWidth: 0 }}
+              disabled={!cfg.seEnabled}
+              value={cfg.seSounds.helper}
+              onChange={(e) => onPatch({ seSounds: { ...cfg.seSounds, helper: e.target.value } })}
+            >
+              <option value="off">鳴らさない</option>
+              {SE_SOUNDS.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              style={{ width: 84 }}
+              value={cfg.seVolumes.helper}
+              disabled={!cfg.seEnabled || seOff}
+              title="この音だけの音量(全体音量に対する割合)"
+              onChange={(e) =>
+                onPatch({ seVolumes: { ...cfg.seVolumes, helper: Number(e.target.value) } })
+              }
+            />
+            <span className="faint" style={{ fontSize: 11, minWidth: 32, textAlign: 'right' }}>
+              {cfg.seVolumes.helper}%
+            </span>
+            <button
+              className="btn small"
+              disabled={!cfg.seEnabled || seOff}
+              title="この音を試聴(全体×個別の実際の音量で鳴ります)"
+              onClick={() =>
+                playSe(cfg.seSounds.helper, effectiveSeVolume(cfg.seVolume, cfg.seVolumes.helper))
+              }
+            >
+              ♪
+            </button>
+          </div>
+          {!cfg.seEnabled ? (
+            <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+              「効果音」タブの<b>「演出の効果音を鳴らす」がオフ</b>なので、いまは鳴りません。
+            </div>
+          ) : null}
+
+          <div className="row" style={{ gap: 6, alignItems: 'center', marginTop: 6 }}>
+            <span style={{ flex: '0 0 72px', fontSize: 11 }}>簡易演出</span>
+            <select
+              style={{ flex: 1, minWidth: 0 }}
+              disabled={!cfg.miniFxEnabled}
+              value={cfg.miniFx.helper}
+              onChange={(e) => onPatch({ miniFx: { ...cfg.miniFx, helper: e.target.value } })}
+            >
+              <option value="off">出さない</option>
+              {CHALLENGE_MINI_IDS.map((m) => (
+                <option key={m} value={m}>
+                  {MINI_LABELS[m] ?? m}
+                </option>
+              ))}
+            </select>
+          </div>
+          {!cfg.miniFxEnabled ? (
+            <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+              「演出」タブの<b>「7セグの上に軽いアニメを重ねる」がオフ</b>なので、いまは出ません。
+            </div>
+          ) : null}
+          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+            この2つは<b>お助けギフト専用</b>で、ほかのギフト(小)には影響しません。同じ設定は
+            「効果音」タブ・「演出 &gt; 簡易演出」の<b>お助け(ファンスタンプ)</b>の行にも出ます。
+          </div>
+
           <div className="row" style={{ marginTop: 10 }}>
             <MonitorTestBtn
               spec={{ kind: 'fanStamp' }}
@@ -2048,7 +2233,7 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
             giftId が空のあいだは何にも一致しません(この機能はオフと同じです)。giftId は
             ギフト一覧やビューアー詳細のギフト履歴で確認できます。モニターには
             <b>「−N ◯◯さん がお助け!」の専用バナー</b>(緑リング)が出ます — ギフトカードは出しません。
-            効果音は「効果音」タブの<b>ギフト(小)</b>が鳴ります。なお「ギフト増減」タブの
+            効果音・簡易演出は上の<b>お助け専用</b>の設定が使われます。なお「ギフト増減」タブの
             「チャレンジ設定をすべて既定に戻す」を押すと、この設定も既定に戻ります。
           </div>
         </>
@@ -2057,6 +2242,162 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn small" onClick={() => onPatch({ fanStamp: structuredClone(DEFAULT_FAN_STAMP) })}>
           お助け設定を既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * タップブースト(フィーバー)。トリガーギフトが届くと 起動カットイン(咆哮・
+ * 固定5秒)→ カウントダウン(3・2・1 映像焼き込み・固定3秒)→ タップウィンドウ
+ * (5〜15秒・ループ映像+BGM)→ 溜めたタップの着弾一括減算、と進む。
+ * 各段の映像はドロップダウンで選択できる(id の出所は shared の TAP_BOOST_*_CLIPS)。
+ *
+ * giftId が type="text" なのは HelperSection と同じ理由(前置ゼロ・長い ID)。
+ */
+function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const tb = cfg.tapBoost;
+  // tapBoost はネストしたオブジェクト — 丸ごと差し替える(patchFs と同じ作法)。
+  const patchTb = (p: Partial<TapBoostConfig>): void => {
+    onPatch({ tapBoost: { ...tb, ...p } });
+  };
+  const introSec = Math.round(TAP_BOOST_INTRO_MS / 1000);
+  const countSec = Math.round(TAP_BOOST_COUNT_MS / 1000);
+
+  return (
+    <>
+      <h3>タップブースト(フィーバー)</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={tb.enabled} onChange={(e) => patchTb({ enabled: e.target.checked })} />
+        <span>指定ギフトでタップブーストを発動する</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        ギフトが届くと <b>起動カットイン{introSec}秒 → カウントダウン{countSec}秒(3・2・1)→
+        タップウィンドウ</b>に入り、その間の PUSH(クリック / Space / ホットキー)は
+        <b>数えるだけ</b>で溜まります。ウィンドウが終わると溜めたタップ数が7セグへ飛んで、
+        <b>タップ数 × 1回の減少量 × 倍率</b> がまとめて減ります。
+        <b>お助け(ファンスタンプ)より後・ルーレットより先</b>に判定され、一致したギフトは
+        増減規則を通りません。
+      </div>
+
+      {tb.enabled ? (
+        <>
+          <div className="row" style={{ gap: 8 }}>
+            <label className="field" style={{ width: 160 }}>
+              対象 giftId
+              <input
+                type="text"
+                placeholder="例: 5655"
+                value={tb.giftId}
+                onChange={(e) => patchTb({ giftId: e.target.value.trim() })}
+              />
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              ギフト名(部分一致・IDが変わった時の保険)
+              <input
+                type="text"
+                placeholder="例: ローズ"
+                value={tb.giftName}
+                onChange={(e) => patchTb({ giftName: e.target.value.toLowerCase() })}
+              />
+            </label>
+          </div>
+          <div className="row" style={{ gap: 8, marginTop: 6 }}>
+            <label className="field" style={{ width: 140 }}>
+              タップ倍率
+              <input
+                type="number"
+                min={TAP_BOOST_MULT_MIN}
+                max={TAP_BOOST_MULT_MAX}
+                value={tb.multiplier}
+                onChange={(e) => patchTb({ multiplier: Number(e.target.value) })}
+              />
+            </label>
+            <label className="field" style={{ width: 200 }}>
+              タップウィンドウ(秒・{TAP_BOOST_DURATION_MIN_SEC}〜{TAP_BOOST_DURATION_MAX_SEC})
+              <input
+                type="number"
+                min={TAP_BOOST_DURATION_MIN_SEC}
+                max={TAP_BOOST_DURATION_MAX_SEC}
+                value={tb.durationSec}
+                onChange={(e) => patchTb({ durationSec: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
+            例: 倍率5・1回の減少量1で、ウィンドウ中に20回タップすると <b>−100</b> がまとめて反映されます。
+            起動{introSec}秒・カウントダウン{countSec}秒は固定です(3・2・1 が映像に焼き込まれているため)。
+          </div>
+
+          <div className="row" style={{ gap: 8, marginTop: 6 }}>
+            <label className="field" style={{ flex: 1 }}>
+              起動カットイン({introSec}秒)
+              <select value={tb.introClip} onChange={(e) => patchTb({ introClip: e.target.value })}>
+                {TAP_BOOST_INTRO_CLIPS.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+                <option value="off">出さない(この段をスキップ)</option>
+              </select>
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              カウントダウン({countSec}秒)
+              <select value={tb.countClip} onChange={(e) => patchTb({ countClip: e.target.value })}>
+                {TAP_BOOST_COUNT_CLIPS.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+                <option value="off">出さない(この段をスキップ)</option>
+              </select>
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              タップウィンドウの映像
+              <select value={tb.loopClip} onChange={(e) => patchTb({ loopClip: e.target.value })}>
+                {TAP_BOOST_LOOP_CLIPS.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+                <option value="off">出さない(暗幕+カウンタのみ)</option>
+              </select>
+            </label>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
+            「スキップ」にした段はその秒数ごと飛ばします(例: 両方スキップでギフト到着後すぐ
+            タップウィンドウ)。映像は素材を assets/fx/boost に追加すると選択肢を増やせます。
+          </div>
+
+          <label className="row" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={tb.flash} onChange={(e) => patchTb({ flash: e.target.checked })} />
+            <span>発動時の照明フラッシュ</span>
+          </label>
+
+          <div className="row" style={{ marginTop: 10 }}>
+            <MonitorTestBtn
+              spec={{ kind: 'tapBoost' }}
+              onTest={onTest}
+              busy={testBusy}
+              label="▶ ブースト演出をテスト"
+              title="モニターウィンドウで起動カットイン→タップウィンドウ→着弾を実演再生します(giftId 未設定でも確認できます。カウントは動きません)"
+            />
+          </div>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            giftId が空のあいだは何にも一致しません(この機能はオフと同じです)。
+            演出中はモニターの数字が止まり、<b>画面中央にタップ数のカウンタ</b>が出ます。
+            モニターを閉じているとき(演出が出せないとき)はカウントを止めず、
+            タップのたびに倍率ぶんが即時反映されます。効果音は「効果音」タブの
+            <b>ブースト タップ開始 / ブースト着弾</b>で変更できます。
+          </div>
+        </>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn small" onClick={() => onPatch({ tapBoost: structuredClone(DEFAULT_TAP_BOOST) })}>
+          ブースト設定を既定に戻す
         </button>
       </div>
     </>

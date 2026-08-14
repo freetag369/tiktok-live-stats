@@ -19,12 +19,19 @@ import { backupTo, exportCsv, purge, rebuildLifetime } from './export';
  * behind this surface makes swapping to better-sqlite3 or node-sqlite3-wasm a
  * one-directory change.
  */
+/** 視聴者テーブルの総件数キャッシュの寿命。「記録 N人」は分単位でしか動かない。 */
+const VIEWER_COUNT_TTL_MS = 60_000;
+/** 同キャッシュの上限。キーは sessionId x filter x 検索語。 */
+const VIEWER_COUNT_CACHE_MAX = 32;
+
 export class Store {
   private db!: DatabaseSync;
   private st!: Statements;
   private ctx!: ApplyCtx;
   private caps!: D.StoreCapabilities;
   private scoring: D.ScoringConfig = DEFAULT_SCORING;
+  /** 視聴者テーブルの総件数キャッシュ。詳細は getSessionViewerTable を参照。 */
+  private viewerCountCache = new Map<string, { c: number; atMs: number }>();
 
   open(opts: D.OpenOptions, giftAliases: { idAliases: Record<string, string>; nameRules: Array<{ canonical: string; match: string[] }> }): D.StoreCapabilities {
     const { db, caps, orphanSessionIds } = openDatabase(opts.dbPath);
@@ -138,7 +145,18 @@ export class Store {
    * 呼び出し側は 30 分より古い行を渡す想定。
    */
   pruneLikeSeen(beforeMs: number): number {
-    return Number(this.st.get(SQL.pruneLikeSeen).run(beforeMs).changes);
+    // 明示トランザクションで括る。autocommit だと削除行数ぶんの WAL 書き込みが
+    // 1文の中で分割され、長時間配信(10分ぶん=数万行)では取り込みと押下の両方を
+    // その間ずっと待たせる。
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const n = Number(this.st.get(SQL.pruneLikeSeen).run(beforeMs).changes);
+      this.db.exec('COMMIT');
+      return n;
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
 
   private reloadBlocklist(): void {
@@ -220,6 +238,10 @@ export class Store {
           this.db.prepare(SQL.insertConnectLog).run(input.startedMs, 'sessionResumed', String(cand.session_id));
           this.db.exec('COMMIT');
           this.ctx.lastMetricMs = 0;
+          // 新規セッション経路だけがクリアしていて、resume(再接続)では
+          // 前の接続ぶんが残り続けていた。キーに sessionId を含むので誤判定は
+          // 起きないが、放置すると単調増加する。
+          this.ctx.lastJoinMs.clear();
           return { sessionId: cand.session_id, resumed: true };
         }
       }
@@ -380,6 +402,7 @@ export class Store {
 
   /** block = stop recording from now on (history kept). purge = delete everything. */
   forgetViewer(userId: UserId, mode: 'block' | 'purge'): void {
+    this.invalidateViewerCount();
     if (mode === 'block') {
       this.db.prepare('UPDATE viewer SET is_blocked = 1 WHERE user_id = ?').run(userId);
       this.ctx.blocked.add(userId);
@@ -390,6 +413,7 @@ export class Store {
   }
 
   unblockViewer(userId: UserId): void {
+    this.invalidateViewerCount();
     this.db.prepare('UPDATE viewer SET is_blocked = 0 WHERE user_id = ?').run(userId);
     this.ctx.blocked.delete(userId);
   }
@@ -397,7 +421,37 @@ export class Store {
   // ── reads ─────────────────────────────────────────────────────────────────
 
   getSessionViewerTable(sessionId: number | null, q: D.ViewerTableQuery): D.Page<D.ViewerTableRow> {
-    return QV.getSessionViewerTable(this.db, sessionId, q, this.scoring.halfLifeDays);
+    // COUNT(*) は viewer 全件走査(実測 12,000行で 13.1ms、全期間累積なので
+    // 配信を重ねるほど伸びる)。ダッシュボードは8秒ごとにこのクエリを叩くが、
+    // total の用途は「記録 N人」の表示だけで分単位でしか動かない数字なので、
+    // 実測コストに見合わない。行の取得だけを毎回やり、total は使い回す。
+    const key = `${sessionId ?? -1}|${q.filter ?? 'all'}|${(q.search ?? '').trim()}`;
+    const hit = this.viewerCountCache.get(key);
+    const now = Date.now();
+    const fresh = hit !== undefined && now - hit.atMs < VIEWER_COUNT_TTL_MS;
+    const page = QV.getSessionViewerTable(
+      this.db,
+      sessionId,
+      q,
+      this.scoring.halfLifeDays,
+      now,
+      fresh ? hit.c : undefined
+    );
+    if (!fresh) {
+      // 素朴な FIFO で足りる(キーは sessionId x filter x 検索語で、実際に
+      // 回るのは数個)。Map は挿入順を保つので先頭が最古。
+      if (this.viewerCountCache.size >= VIEWER_COUNT_CACHE_MAX) {
+        const oldest = this.viewerCountCache.keys().next();
+        if (!oldest.done) this.viewerCountCache.delete(oldest.value);
+      }
+      this.viewerCountCache.set(key, { c: page.total, atMs: now });
+    }
+    return page;
+  }
+
+  /** 視聴者を消す/隠す操作の後は total が変わるので捨てる。 */
+  private invalidateViewerCount(): void {
+    this.viewerCountCache.clear();
   }
 
   getSessionTotals(sessionId: number): D.SessionTotals | null {
@@ -479,6 +533,7 @@ export class Store {
   }
 
   purge(spec: D.PurgeSpec): D.PurgeResult {
+    this.invalidateViewerCount();
     const res = purge(this.db, spec);
     // メモリ側キャッシュはテーブルと一緒には消えない。
     this.ctx.giftAlias.clear();

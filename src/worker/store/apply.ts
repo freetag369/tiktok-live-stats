@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { JOIN_DEBOUNCE_MS, LIKE_BUCKET_MS, SESSION_METRIC_MS } from '@shared/constants';
+import { JOIN_DEBOUNCE_MS, LAST_JOIN_PRUNE_AT, LIKE_BUCKET_MS, SESSION_METRIC_MS } from '@shared/constants';
 import type { BatchResult } from '@shared/dto';
 import type { NormViewer, NormalizedEvent, UserId } from '@shared/events';
 import { SQL, type Statements } from './statements';
@@ -211,6 +211,15 @@ export function applyEvent(ctx: ApplyCtx, sessionId: number, e: NormalizedEvent,
         return;
       }
       // Debounce re-entries so 入室 counts stay meaningful.
+      //
+      // 判定に使うのは「直近 JOIN_DEBOUNCE_MS 以内か」だけなので、それより古い
+      // エントリは二度と読まれない純粋なゴミ。5時間の耐久配信では入室ユニーク数
+      // ぶん(数万件)まで無制限に育つので、たまに掃く。閾値を超えたときだけ回すので
+      // 通常の join では追加コストが乗らない。
+      if (ctx.lastJoinMs.size > LAST_JOIN_PRUNE_AT) {
+        const cutoff = e.tsMs - JOIN_DEBOUNCE_MS;
+        for (const [k, t] of ctx.lastJoinMs) if (t < cutoff) ctx.lastJoinMs.delete(k);
+      }
       const key = `${sessionId}:${v.userId}`;
       const last = ctx.lastJoinMs.get(key) ?? -Infinity;
       if (e.tsMs - last >= JOIN_DEBOUNCE_MS) {

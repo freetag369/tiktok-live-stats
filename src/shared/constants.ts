@@ -19,6 +19,13 @@ export const LIKE_BUCKET_MS = 60_000;
 export const LIKE_SEEN_TTL_MS = 30 * 60_000;
 export const LIKE_SEEN_PRUNE_EVERY_MS = 10 * 60_000;
 
+/**
+ * ミッション再計算の間隔。同期SQL5本(7日窓の COUNT(DISTINCT) 込み)なので
+ * pushDelta = 押下の即時反映経路からは追い出し、この間隔の専用タイマーで回す。
+ * ミッションは分単位で動く数字なので、この程度の遅れは体感に出ない。
+ */
+export const MISSIONS_CHECK_MS = 3000;
+
 /** Aggregate deltas pushed to the renderer. 2 Hz visible, 0.5 Hz when the window is hidden. */
 export const DELTA_MS = 500;
 export const DELTA_MS_HIDDEN = 2000;
@@ -34,6 +41,11 @@ export const SESSION_METRIC_MS = 5000;
 
 /** MEMBER can re-fire for the same viewer (app switch, network blip). Debounce visit counting. */
 export const JOIN_DEBOUNCE_MS = 60_000;
+/**
+ * ApplyCtx.lastJoinMs をこの件数を超えたら掃除する。中身は入室デバウンスの
+ * タイムスタンプだけで、JOIN_DEBOUNCE_MS より古い行は二度と読まれない。
+ */
+export const LAST_JOIN_PRUNE_AT = 2000;
 
 /**
  * Reconnecting within this window to the same room_id resumes the same session
@@ -83,5 +95,18 @@ export const CH_MONITOR_STATE = 'app:monitor-state';
 /** cfg.set 直後の設定全量プッシュ。モニターの30秒ポーリングを待たずに反映する。 */
 export const CH_SETTINGS_PUSH = 'app:settings';
 
-/** Viewer table page size on the live dashboard. */
-export const VIEWER_PAGE_SIZE = 5000;
+/**
+ * 生ダッシュボードの視聴者テーブルの取得件数。
+ *
+ * **仮想化で実際に描画されるのは可視 ~30 行だけ**(ViewerTable の useVirtualizer)
+ * なのに、以前はここが 5000 だった。所要時間は取得件数にほぼ比例し、実DB
+ * (viewer 11,971行)での実測は 5000件=43.5ms / 1000件=7.3ms / 300件=2.2ms。
+ * worker は単一スレッドで node:sqlite も同期なので、**その間 challenge.press は
+ * 配送すらされない** = カウントボタンが効かない時間そのものになる。
+ *
+ * 1000 なのは「1配信のユニーク視聴者(実測 約1,100人)と現実のスクロール量を
+ * 確実に超える」ため — **追記式ページングのUIがまだ無いので、ここを下げすぎると
+ * 「スクロールしてもそれ以上出てこない」が黙って起きる**。ページングを入れたら
+ * 300(=2.2ms)まで下げてよい。
+ */
+export const VIEWER_PAGE_SIZE = 1000;

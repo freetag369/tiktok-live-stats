@@ -584,6 +584,23 @@ export interface GiftFullCutRule {
   giftName: string;
   /** canonical 完全一致(小文字で保存)。'' で無視。 */
   canonical: string;
+  /**
+   * giftName の照合を**完全一致**にする。既定 false = 従来どおり部分一致(includes)。
+   * giftId / canonical は元から完全一致なのでこのフラグの影響を受けない。
+   *
+   * 必要な理由: ギフト名は部分一致なので、短い名前の行が上位ギフトを巻き込む。
+   * 例えば giftName 'tiktok' の行は「TikTok Universe」(44,999💎)にも一致してしまい、
+   * 1ダイヤのロゴ演出が最高額ギフトの演出を奪う。そういう行だけ true にする。
+   *
+   * ⚠ この規約は giftFullCut 専用。matchGiftTrigger を共有するルーレット
+   *   (ChallengeRouletteConfig)とファンスタンプ(FanStampConfig)はこのキーを
+   *   持たないので、undefined = 従来の部分一致のまま変わらない。
+   *
+   * 省略可(?:)にしないのは、既定を toEqual で比較しているテストが
+   * 「キー有り false」と「キー無し」を別物と判定するのと、UI の controlled
+   * checkbox が undefined を嫌うため(FanStampConfig.suppressBandFx と同じ流儀)。
+   */
+  exactName: boolean;
   /** クリップ id(CHALLENGE_FX_CLIP_IDS)または 'off'(この行では出さない)。 */
   clip: string;
   /** 演出とカウンタ凍結の秒数(1〜30)。動画が短ければループで持たせる。 */
@@ -666,6 +683,48 @@ export interface FanStampConfig {
    * 届くたびにカウントが止まる。既定 true。
    */
   suppressBandFx: boolean;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+}
+
+/**
+ * タップブースト(フィーバー)の設定。トリガーギフトが届くと
+ * ①起動カットイン(introClip・固定 TAP_BOOST_INTRO_MS = 5秒)→
+ * ②カウントダウン(countClip・固定 TAP_BOOST_COUNT_MS = 3秒。3・2・1 は映像
+ * 焼き込み)→ ③タップウィンドウ durationSec 秒(loopClip のループ+BGM。
+ * 減算タップは「数えるだけ」で溜める)→ ④溜めたタップ数の着弾アニメ →
+ * ⑤一括減算(タップ数 × pressStep × multiplier)、の順に進む。
+ *
+ * 各段の映像は同梱素材(assets/fx/boost/)から段ごとに選択できる。id の一覧は
+ * shared/challenge.ts の TAP_BOOST_*_CLIPS(validate がそのリストで検証する)。
+ *
+ * お助け(fanStamp)とは別機能・別トリガー。トリガー3フィールド(giftId/giftName/
+ * canonical)は FanStampConfig と意味も '' = 無効の規約も同一で、判定は
+ * matchGiftTrigger を共有する。
+ */
+export interface TapBoostConfig {
+  enabled: boolean;
+  /** トリガーギフトの giftId 直接一致。ライブ経路の本線(FanStampConfig と同じ理由)。 */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  /** ブースト中のタップ倍率。既定 5(clamp 1〜100)。 */
+  multiplier: number;
+  /**
+   * タップウィンドウの長さ(秒)。既定 5・clamp 5〜15(ユーザー要件)。前置き
+   * (起動5秒+カウントダウン3秒)と合わせた総凍結は最長 23 秒 — 帯域カットインの
+   * GIFT_FX_FREEZE_MAX_MS(15秒)を意図的に超える(理由は
+   * TAP_BOOST_DURATION_MAX_SEC のコメント参照)。
+   */
+  durationSec: number;
+  /** 起動カットインのクリップ id(TAP_BOOST_INTRO_CLIPS)または 'off'(この段をスキップ)。 */
+  introClip: string;
+  /** カウントダウンのクリップ id(TAP_BOOST_COUNT_CLIPS)または 'off'(この段をスキップ)。 */
+  countClip: string;
+  /** タップウィンドウのクリップ id(TAP_BOOST_LOOP_CLIPS)または 'off'(暗幕+カウンタのみ)。 */
+  loopClip: string;
   /** true ならモニターに照明フラッシュ演出。 */
   flash: boolean;
 }
@@ -758,6 +817,11 @@ export interface ChallengeConfig {
    * され、一致したギフトはそれらの規則を通らない(matchFanStamp)。
    */
   fanStamp: FanStampConfig;
+  /**
+   * タップブースト(フィーバー)。fanStamp の**次・ルーレットより先**に評価され、
+   * 一致したギフトは増減規則を通らない(matchTapBoost — fanStamp と同じ先勝ち規約)。
+   */
+  tapBoost: TapBoostConfig;
 }
 
 /** 指定コメント妨害の1規則。keyword はコメント本文への部分一致(大文字小文字無視)。 */
@@ -781,10 +845,15 @@ export type ChallengeSeSlot =
   | 'gift-t2'
   | 'gift-t3'
   | 'gift-t4'
+  // お助け機能(ファンスタンプ)専用。1ダイヤなので tier だけでは gift-t1 と
+  // 区別できず、お助けだけ音や簡易演出を変えられなかったので専用スロットにした。
+  | 'helper'
   | 'roulette'
   | 'roulette-near'
   | 'roulette-kick'
   | 'roulette-hit'
+  | 'boost-start'
+  | 'boost-end'
   | 'achieved';
 
 export type ChallengeStatus = 'idle' | 'running' | 'achieved';
@@ -801,7 +870,18 @@ export interface ChallengeEffect {
    * 'gauge-full' はテスト再生(challenge.testEffect)専用 — ライブ経路の着弾演出は
    * likeGauge.fills の差分駆動で effect を持たないため、実演用にだけ effect を作る。
    */
-  kind: 'press' | 'follow' | 'like' | 'gauge-full' | 'stock-full' | 'comment' | 'gift' | 'roulette' | 'achieved';
+  kind:
+    | 'press'
+    | 'follow'
+    | 'like'
+    | 'gauge-full'
+    | 'stock-full'
+    | 'comment'
+    | 'gift'
+    | 'roulette'
+    | 'boost-start'
+    | 'boost-end'
+    | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
   /**
@@ -891,6 +971,32 @@ export interface ChallengeEffect {
    */
   fxRepeatIntervalMs?: number;
   /**
+   * kind='boost-start'/'boost-end': タップブーストの倍率。rouletteSegments と同じ
+   * 「effect 1件で自己完結」の流儀 — モニターの cfg は 30 秒ポーリングで古く
+   * なりうるので、発動時点の設定を worker が焼き込む。
+   */
+  boostMultiplier?: number;
+  /** kind='boost-end': 演出中に溜めたタップ回数。amount = -(tapCount × pressStep × multiplier)。 */
+  boostTapCount?: number;
+  /** kind='boost-start': タップウィンドウの期限(ms)。前置き演出の後に閉じる。 */
+  boostEndsAtMs?: Ms;
+  /**
+   * kind='boost-start': 起動カットイン(咆哮)の尺(ms)。0 = この段なし
+   * (プレーンモード発動・'off' 選択)。fxDurationMs には前置き+ウィンドウの
+   * 総尺が入り、タップウィンドウは boostIntroMs + boostCountMs が明けてから。
+   */
+  boostIntroMs?: number;
+  /** kind='boost-start': カウントダウン(3・2・1)の尺(ms)。0 = この段なし。 */
+  boostCountMs?: number;
+  /**
+   * kind='boost-start': 各段のクリップ id(assets/fx/boost)。rouletteSegments と
+   * 同じ「effect 1件で自己完結」の流儀 — モニターの cfg は 30 秒ポーリングで
+   * 古くなりうるので、発動時点の選択を worker が焼き込む。欠損 = その段は暗幕。
+   */
+  boostIntroClip?: string;
+  boostCountClip?: string;
+  boostLoopClip?: string;
+  /**
    * カットイン凍結の解除ドレインで同種の保留演出を1件に畳んだとき、元の件数
    * (2以上のときだけ載る)。amount 等は合算済み。ダッシュボードの履歴ログは
    * これを「×N」として1行にまとめる。省略 = 畳んでいない(1件そのまま)。
@@ -925,6 +1031,12 @@ export type ChallengeTestEffectSpec =
    * 見た目だけは確認できるようにするため、トリガー一致は評価しない。
    */
   | { kind: 'fanStamp' }
+  /**
+   * タップブースト。設定中の multiplier/durationSec/clip をそのまま使って
+   * カットイン+タップカウンタを実演する — fanStamp と同じくトリガー一致は
+   * 評価しない(giftId 未設定でも見た目を確認できる)。値・凍結には触れない。
+   */
+  | { kind: 'tapBoost' }
   | {
       kind: 'gift';
       /** tier(小〜特大)判定とフラッシュ判定に使うダイヤ数。 */
@@ -1087,10 +1199,31 @@ export interface ChallengeState {
    */
   runRank?: ChallengeRankRow[];
   /**
+   * ダッシュボードの「ランキング表示」で出す全画面ランキング(ギフト/イイネ
+   * TOP5)。**キーがあること自体が「表示中」の意味**で、参加者ゼロでも
+   * 表示中なら空配列を載せる — runRank の「ゼロならキーごと省く」とは規約が
+   * 違うので混同しないこと。非表示のときだけキーごと省く。
+   *
+   * result との違い: result は CLEAR 時に1度だけ組んで凍結する不変値。こちらは
+   * 表示中の毎 delta で組み直すライブ値で、集計元(runViewers)と件数
+   * (CHALLENGE_RESULT_TOP_N)は同じ。達成すると worker 側で自動的に畳まれ、
+   * CLEAR リザルトへ引き継がれる。
+   */
+  rankBoard?: ChallengeResult;
+  /**
    * カットイン再生中のカウンタ凍結の期限(ms)。null = 凍結なし。
    * ダッシュボードの表示・テスト用 — モニターは自前でクリップ再生中を知っている。
    */
   fxFreezeUntilMs?: number | null;
+  /**
+   * タップブースト中だけ載る。press RPC は session.nudgeChallenge を通るので、
+   * タップのたびに即時 delta で配られる(2Hz を待たない)— モニターのタップ
+   * カウンタはこれが唯一のソース。pressStep/multiplier は発動時に焼き込んだ値
+   * (ブースト中の設定変更で表示と適用がズレないように)。
+   * startsAtMs = タップウィンドウの開始(起動カットイン明け)。それ以前の
+   * タップは倍にならない(通常の凍結キュー行き)。
+   */
+  boost?: { tapCount: number; startsAtMs: Ms; endsAtMs: Ms; multiplier: number; pressStep: number } | null;
 }
 
 /**
@@ -1129,6 +1262,10 @@ export interface ChallengeLogEntry {
   likeStep?: number;
   /** kind='comment': 一致した規則のキーワード(effect からそのまま引き継ぐ)。 */
   commentKeyword?: string;
+  /** kind='boost-start'/'boost-end': ブースト倍率(effect からそのまま引き継ぐ)。 */
+  boostMultiplier?: number;
+  /** kind='boost-end': 溜めたタップ回数(effect からそのまま引き継ぐ)。 */
+  boostTapCount?: number;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────
@@ -1146,8 +1283,10 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  * 1: 妨害スロットの効果音を専用音へ(migrateChallengeSeSounds)。
  * 2: ルーレットの回転サウンドを刷新 — 回転中BGMを既定オフ、回転ループ音を
  *    spin-reel2、確定音を reel-confirm へ(migrateChallengeSeSounds)。
+ * 3: 全面カットの既定行を 2 → 42 へ拡張(migrateChallengeGiftFullCut)。
+ *    足すのは v3 で新しく増えた40行だけで、バラ/ローザや利用者が編集した行には触らない。
  */
-export const SETTINGS_VERSION = 2;
+export const SETTINGS_VERSION = 3;
 
 export interface AppSettings {
   eulerApiKey: string;

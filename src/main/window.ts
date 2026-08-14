@@ -35,6 +35,32 @@ export function hardenWebContents(wc: WebContents): void {
   wc.on('will-navigate', (e, url) => {
     if (url !== wc.getURL()) e.preventDefault();
   });
+  attachDevToolsHotkey(wc);
+}
+
+/**
+ * 開発者ツールの開閉。**この関数はメイン窓とモニター窓の唯一の共通点**なので、
+ * ここに1つ足せば両方の窓で効く。
+ *
+ * 必要な理由: Windows では `Menu.setApplicationMenu(null)` で既定メニューごと
+ * 消してあるため、既定の Ctrl+Shift+I アクセラレータも一緒に消えている。
+ * 「重い」「演出が出ない」の調査に使える口がアプリ内に一切無い状態だった。
+ *
+ * 注意点2つ:
+ * - **F12 と Ctrl+Shift+I の両方**を受ける。チャレンジのホットキーは
+ *   globalShortcut で OS 全体を先取りするので、ユーザーが F12 を割り当てて
+ *   いると before-input-event までそもそも届かない。
+ * - **必ず detach で開く。** モニター窓は背面ディスプレイに出していてカメラに
+ *   映るため、docked で開くとステージが割れて配信事故になる。
+ */
+function attachDevToolsHotkey(wc: WebContents): void {
+  wc.on('before-input-event', (_e, input) => {
+    if (input.type !== 'keyDown') return;
+    const hit = input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i');
+    if (!hit) return;
+    if (wc.isDevToolsOpened()) wc.closeDevTools();
+    else wc.openDevTools({ mode: 'detach' });
+  });
 }
 
 export function createWindow(preload: string): BrowserWindow {

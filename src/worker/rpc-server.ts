@@ -92,6 +92,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       session.nudgeChallenge();
       return s;
     },
+    'challenge.toggleRank': async () => {
+      const s = challenge.toggleRank();
+      session.nudgeChallenge();
+      return s;
+    },
     'challenge.testEffect': async (p) => {
       challenge.testEffect(p);
       // 未接続でも challenge-only の delta が出る(pushDelta の許可規約)。
@@ -176,6 +181,7 @@ type HandlerMap = {
   'challenge.stop': () => Promise<D.ChallengeState>;
   'challenge.reset': () => Promise<D.ChallengeState>;
   'challenge.press': () => Promise<D.ChallengeState>;
+  'challenge.toggleRank': () => Promise<D.ChallengeState>;
   'challenge.testEffect': (p: D.ChallengeTestEffectSpec) => Promise<void>;
   'challenge.fxCaps': (p: { bandFx: boolean }) => Promise<void>;
   'q.viewerTable': (p: { sessionId: number | null } & D.ViewerTableQuery) => Promise<unknown>;

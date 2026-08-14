@@ -366,7 +366,12 @@ export function LikeGauge({
   };
 
   return (
-    <div className="like-gauge" data-phase={phase} data-hot={!filling && pct >= 85}>
+    <div
+      className="like-gauge"
+      data-phase={phase}
+      data-hot={!filling && pct >= 85}
+      data-empty={displayPct <= 0}
+    >
       <div className="lg-track" ref={trackRef}>
         <i className="lg-fill" style={{ width: `${displayPct}%`, ...noAnim }}>
           <i className="lg-shimmer" />

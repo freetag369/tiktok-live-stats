@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DEFAULT_ZOOM_FACTOR, SETTINGS_VERSION, type AppSettings } from '@shared/dto';
-import { DEFAULT_CHALLENGE, migrateChallengeSeSounds, validateChallengeConfig } from '@shared/challenge';
+import { DEFAULT_ZOOM_FACTOR, SETTINGS_VERSION, type AppSettings, type ChallengeConfig } from '@shared/dto';
+import { DEFAULT_CHALLENGE, migrateChallengeConfig, validateChallengeConfig } from '@shared/challenge';
 import { DEFAULT_SCORING, validateScoringConfig } from '@shared/scoring';
 import { configDirIn, dbPathIn } from './paths';
 
@@ -25,7 +25,9 @@ export function defaultSettings(dataDir: string): AppSettings {
     alertMinTier: 1,
     giftAlertDiamonds: 100,
     zoomFactor: DEFAULT_ZOOM_FACTOR,
-    challenge: { ...structuredClone(DEFAULT_CHALLENGE), hotkey: defaultHotkey() },
+    // デフォ保存(challenge-default.json)があればそれが既定 — 新しいPCへファイルを
+    // コピーするだけで、初回起動からその内容で立ち上がる。
+    challenge: loadChallengeDefault(dataDir) ?? { ...structuredClone(DEFAULT_CHALLENGE), hotkey: defaultHotkey() },
     // 新規インストールは既に最新の既定なので移行対象にしない。
     settingsVersion: SETTINGS_VERSION,
   };
@@ -81,7 +83,7 @@ export function loadSettings(dataDir: string): AppSettings {
     // 移行はメモリ上だけ。ここで保存しないのは、起動のたびに settings.json を書かないため。
     // 次に UI から何か保存された時点で settingsVersion ごと永続化される(sanitizeSettings の
     // base スプレッドが運ぶ)ので、ユーザーが旧既定を選び直しても再移行はされない。
-    return { ...s, settingsVersion: SETTINGS_VERSION, challenge: migrateChallengeSeSounds(s.challenge, from) };
+    return { ...s, settingsVersion: SETTINGS_VERSION, challenge: migrateChallengeConfig(s.challenge, from) };
   } catch {
     return d;
   }
@@ -94,6 +96,44 @@ export function saveSettings(dataDir: string, s: AppSettings): void {
   const tmp = `${p}.tmp`;
   writeFileSync(tmp, JSON.stringify(s, null, 2), 'utf8');
   renameSync(tmp, p);
+}
+
+/**
+ * 「デフォ保存」 — チャレンジ設定の既定値ファイル(config/challenge-default.json)。
+ * settings.json とは別のファイルに全量を保存し、存在すれば同梱既定
+ * (DEFAULT_CHALLENGE)の代わりに既定として使う。用途は2つ:
+ * - 「チャレンジ設定をすべて既定に戻す」の戻り先になる(自分好みの既定)。
+ * - ファイルを**他のPCの同じ場所へコピーするだけ**で、そのPCでも同じ内容が
+ *   既定になる(初回起動はこの内容で立ち上がる)。
+ */
+export function challengeDefaultPath(dataDir: string): string {
+  return join(configDirIn(dataDir), 'challenge-default.json');
+}
+
+export function loadChallengeDefault(dataDir: string): ChallengeConfig | null {
+  const p = challengeDefaultPath(dataDir);
+  if (!existsSync(p)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<ChallengeConfig> & { settingsVersion?: number };
+    // 世代印は settings.json と同じ扱い — 古いアプリで作られたファイルにも新既定の移行を配る。
+    const from = typeof raw.settingsVersion === 'number' ? raw.settingsVersion : 0;
+    return migrateChallengeConfig(validateChallengeConfig(raw as ChallengeConfig), from);
+  } catch {
+    // 壊れたファイルで起動不能にしない — 同梱既定へフォールバック。
+    return null;
+  }
+}
+
+/** 検証(clamp)してから書く。戻り値は保存先パス(トーストでユーザーに見せる)。 */
+export function saveChallengeDefault(dataDir: string, cfg: ChallengeConfig): string {
+  const p = challengeDefaultPath(dataDir);
+  const tmp = `${p}.tmp`;
+  // validateChallengeConfig は明示リテラル return なので settingsVersion キーは残らない —
+  // 先頭に付け直して世代印だけ運ぶ(loadChallengeDefault が読み、validate が捨てる)。
+  const body = { settingsVersion: SETTINGS_VERSION, ...validateChallengeConfig(cfg) };
+  writeFileSync(tmp, JSON.stringify(body, null, 2), 'utf8');
+  renameSync(tmp, p);
+  return p;
 }
 
 /**

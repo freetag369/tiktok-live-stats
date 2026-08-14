@@ -36,6 +36,9 @@ export function useQuery<K extends RpcMethod>(
   // 完了後の再試行トリガーが無く data が古いまま固着する(別ビューアの詳細を
   // 開いたのに前の人の統計が出続ける、reload が無反応、など)。
   const rerun = useRef<(() => void) | null>(null);
+  // 直前の所要時間。予約された再実行はこの時間ぶん待ってから走らせる(下記)。
+  const lastMs = useRef(0);
+  const gapTimer = useRef<number | null>(null);
   const paramsRef = useRef(params);
   paramsRef.current = params;
 
@@ -50,6 +53,7 @@ export function useQuery<K extends RpcMethod>(
       inflight.current = true;
       rerun.current = null;
       setLoading(true);
+      const startedAt = Date.now();
       rpc(method, paramsRef.current)
         .then((r) => {
           if (!cancelled) {
@@ -62,11 +66,26 @@ export function useQuery<K extends RpcMethod>(
         })
         .finally(() => {
           inflight.current = false;
+          lastMs.current = Date.now() - startedAt;
           if (!cancelled) setLoading(false);
           // 飛行中に予約された最新の1回だけを実行(それより古い予約は上書き済み)。
           const next = rerun.current;
           rerun.current = null;
-          next?.();
+          if (!next) return;
+          // **直前の所要時間ぶんだけ間を空けてから走らせる。**
+          // 素直に即再実行すると、クエリが呼び出し側の間隔(生ダッシュボードなら
+          // 8秒)より遅くなった瞬間に「終わったら即また投げる」の連鎖に入り、
+          // ワーカーを100%占有して**アプリが固まる**。DB が育つほど近づく崖なので、
+          // デューティ比が5割を超えないところで自律的に頭打ちにする。
+          if (lastMs.current <= 0) {
+            next();
+            return;
+          }
+          if (gapTimer.current !== null) window.clearTimeout(gapTimer.current);
+          gapTimer.current = window.setTimeout(() => {
+            gapTimer.current = null;
+            if (!cancelled) next();
+          }, lastMs.current);
         });
     };
     runOnce();
@@ -74,6 +93,10 @@ export function useQuery<K extends RpcMethod>(
       cancelled = true;
       // この effect が予約した再実行は無効化する(新しい effect が自分の分を積む)。
       if (rerun.current === runOnce) rerun.current = null;
+      if (gapTimer.current !== null) {
+        window.clearTimeout(gapTimer.current);
+        gapTimer.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, nonce, opts?.skip]);

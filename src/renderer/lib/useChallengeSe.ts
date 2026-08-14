@@ -34,11 +34,26 @@ function slotFor(e: ChallengeEffect): ChallengeSeSlot | null {
       // ダッシュボード側(モニター閉時)はBGMを持たないが、カットインの視覚も
       // 出ないので無音で整合する。
       if (e.fxBandClip != null) return null;
+      // お助け(ファンスタンプ)は専用スロット。1ダイヤなので tier では gift-t1 と
+      // 区別できない。判定は cfg ではなく effect の焼き込み(worker が付ける印)を
+      // 見る — モニターの 30 秒ポーリングで古い設定を読む事故を避ける規約。
+      // カットイン判定より後に置くこと: suppressBandFx をオフにした設定で
+      // カットインが出るとき、BGM とジングルを重ねない既存規約を守る。
+      if (e.fanStamp) return 'helper';
       return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
     // 到着時 = 回転開始音。確定音('roulette-hit')はモニターがリール停止の瞬間に
     // 直接鳴らす(gauge-full の impactStrike と同型)。
     case 'roulette':
       return 'roulette';
+    // ブーストの音はモニターが直接鳴らす: 起動カットインは音声焼き込み動画、
+    // 'boost-start' スロットはタップウィンドウ開始の合図として window 入りの瞬間、
+    // 'boost-end' スロットは着弾の瞬間(stock-full と同型)。ここで鳴らすと
+    // 動画音声と二重になる。モニター閉時(プレーンモード)は press 音が個々に
+    // 鳴るので無音で整合する。
+    case 'boost-start':
+      return null;
+    case 'boost-end':
+      return null;
     case 'achieved':
       return 'achieved';
   }

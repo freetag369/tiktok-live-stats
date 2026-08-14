@@ -5,6 +5,7 @@ import LIKE_DEDUPE_SQL from './003_like_dedupe_and_room_counts.sql?raw';
 import CLEAR_AVG_SQL from './004_clear_stale_avg_viewers.sql?raw';
 import LIKE_SEEN_TS_SQL from './005_like_seen_ts.sql?raw';
 import SCORING_IDEMPOTENT_SQL from './006_scoring_idempotent.sql?raw';
+import VL_SORT_SQL from './007_viewer_lifetime_sort.sql?raw';
 
 export interface Migration {
   version: number;
@@ -25,6 +26,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 4, name: 'clear_stale_avg_viewers', sql: CLEAR_AVG_SQL },
   { version: 5, name: 'like_seen_ts', sql: LIKE_SEEN_TS_SQL },
   { version: 6, name: 'scoring_idempotent', sql: SCORING_IDEMPOTENT_SQL },
+  { version: 7, name: 'viewer_lifetime_sort', sql: VL_SORT_SQL },
 ];
 
 export interface MigrateResult {

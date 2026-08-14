@@ -1,5 +1,12 @@
 import { join } from 'node:path';
-import { DELTA_MS, DELTA_MS_HIDDEN, FEED_MS, LIKE_SEEN_PRUNE_EVERY_MS, LIKE_SEEN_TTL_MS } from '@shared/constants';
+import {
+  DELTA_MS,
+  DELTA_MS_HIDDEN,
+  FEED_MS,
+  LIKE_SEEN_PRUNE_EVERY_MS,
+  LIKE_SEEN_TTL_MS,
+  MISSIONS_CHECK_MS,
+} from '@shared/constants';
 import type { AdapterStatus, EndReason, NormalizedEvent, QuotaInfo, TikTokAdapter, UserId } from '@shared/events';
 import type { LiveMessage } from '@shared/ipc';
 import type { MissionConfig, MissionProgress } from '@shared/dto';
@@ -57,6 +64,15 @@ export class SessionManager {
 
   private deltaTimer: NodeJS.Timeout | null = null;
   private feedTimer: NodeJS.Timeout | null = null;
+  /**
+   * ミッション計算と like_seen 掃除の専用タイマー。どちらも同期SQLなので
+   * pushDelta(= 押下の即時反映経路)から追い出してある。詳細は pushDelta の
+   * コメントを参照。
+   */
+  private missionTimer: NodeJS.Timeout | null = null;
+  private pruneTimer: NodeJS.Timeout | null = null;
+  /** missionTimer が計算して置いておく、次の delta に載せる分。 */
+  private pendingMissions: MissionProgress[] | null = null;
   private hidden = false;
 
   private meta = new Map<UserId, ViewerMeta>();
@@ -160,6 +176,11 @@ export class SessionManager {
     }
     // 終了後のチャレンジ nudge delta で elapsedMs が伸び続けないようにする。
     this.sessionStartMs = 0;
+    // モニターの全画面ランキングは配信が終わったら畳む(下部の TOP3 が sessionId
+    // で自動的に消えるのと揃える)。**冒頭で stopTimers() 済み = 2Hz tick はもう
+    // 止まっている**ので、ここで自分から1回配らないとモニターに永久に残る。
+    // 自動再接続はこの stop を通らないので、瞬断でランキングが消えることはない。
+    if (this.deps.challenge.hideRank()) this.pushDelta(false);
     if (announce) this.setStatus({ state: 'ended', reason });
   }
 
@@ -180,6 +201,8 @@ export class SessionManager {
     this.meta.clear();
     this.firstTimers = 0;
     this.lastMissions = '';
+    // 停止を跨いで持ち越すと、次の配信の最初の delta に前回のミッションが載る。
+    this.pendingMissions = null;
     this.sessionStartMs = 0;
   }
 
@@ -187,6 +210,15 @@ export class SessionManager {
     this.stopTimers();
     this.deltaTimer = setInterval(() => this.pushDelta(false), this.hidden ? DELTA_MS_HIDDEN : DELTA_MS);
     this.deltaTimer.unref?.();
+    // 同期SQL を持つ2つは押下経路から独立させる(pushDelta のコメント参照)。
+    // 変化があった tick にだけ載る規約は変わらない — computeMissions が
+    // 署名比較で null を返した場合は pendingMissions を上書きしない。
+    this.missionTimer = setInterval(() => {
+      this.pendingMissions = this.computeMissions() ?? this.pendingMissions;
+    }, MISSIONS_CHECK_MS);
+    this.missionTimer.unref?.();
+    this.pruneTimer = setInterval(() => this.pruneLikeSeen(), LIKE_SEEN_PRUNE_EVERY_MS);
+    this.pruneTimer.unref?.();
     if (!this.hidden) {
       this.feedTimer = setInterval(() => this.pushFeed(), FEED_MS);
       this.feedTimer.unref?.();
@@ -196,8 +228,12 @@ export class SessionManager {
   private stopTimers(): void {
     if (this.deltaTimer) clearInterval(this.deltaTimer);
     if (this.feedTimer) clearInterval(this.feedTimer);
+    if (this.missionTimer) clearInterval(this.missionTimer);
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
     this.deltaTimer = null;
     this.feedTimer = null;
+    this.missionTimer = null;
+    this.pruneTimer = null;
   }
 
   // ── adapter callbacks ─────────────────────────────────────────────────────
@@ -379,8 +415,13 @@ export class SessionManager {
     const totals = { ...this.agg.totals };
     totals.elapsedMs = this.sessionStartMs ? Date.now() - this.sessionStartMs : 0;
 
-    const missions = this.computeMissions();
-    this.pruneLikeSeen();
+    // 押下(nudgeChallenge)もこの経路を通る。ここで同期SQL を走らせると、その分
+    // だけ challenge.press の応答が遅れる — worker は単一スレッドで node:sqlite
+    // も同期なので、クエリ実行中は後続の RPC メッセージが配送すらされない。
+    // ミッション計算(7日窓の COUNT(DISTINCT) 込み5クエリ)と like_seen の一括
+    // DELETE は独立タイマーへ追い出し、ここでは計算済みの結果を読むだけにする。
+    const missions = this.pendingMissions;
+    this.pendingMissions = null;
 
     this.deps.post({
       t: 'delta',
