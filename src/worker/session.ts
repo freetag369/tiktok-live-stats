@@ -11,6 +11,7 @@ import type { AdapterStatus, EndReason, NormalizedEvent, QuotaInfo, TikTokAdapte
 import type { LiveMessage } from '@shared/ipc';
 import type { MissionConfig, MissionProgress } from '@shared/dto';
 import { evaluateMissions } from '@shared/missions';
+import { pruneLiveRows } from '@shared/live-rows';
 import { Aggregator } from './aggregator';
 import { Alerts } from './alerts';
 import { Batcher } from './batcher';
@@ -35,7 +36,18 @@ interface ViewerMeta {
   likesLifetime?: number;
   readingKana?: string;
   note?: string;
+  /** 剪定(pruneMeta)用。最後にこの視聴者の行を作った時刻。 */
+  lastSeenMs: number;
 }
+
+/**
+ * meta キャッシュの剪定パラメータ。レンダラ側 liveStore の rows と同じ値 —
+ * worker は単一スレッドで同期 sqlite と同居するため、耐久配信でヒープが
+ * ユニーク視聴者数に比例して育つと GC 停止が press RPC / 2Hz delta を塞ぐ。
+ * 剪定された常連が戻ると getRecallCard の同期 SQL が1回走る(初見と同じコスト)。
+ */
+const META_TTL_MS = 30 * 60_000;
+const META_HARD_CAP = 20_000;
 
 export interface SessionDeps {
   store: Store;
@@ -76,6 +88,13 @@ export class SessionManager {
   private hidden = false;
 
   private meta = new Map<UserId, ViewerMeta>();
+  /**
+   * 観測ユニーク / 初見のカウンタ。meta.size を表示に使うと剪定で数字が減って
+   * しまうため、ID 集合とカウンタを meta のライフサイクルから分離してある。
+   * seenIds は ID 文字列だけ(ViewerMeta より1桁以上軽い)なので剪定しない。
+   */
+  private seenIds = new Set<UserId>();
+  private uniqueViewers = 0;
   /** Distinct viewers seen this session whose very first visit this is. */
   private firstTimers = 0;
   private sessionStartMs = 0;
@@ -199,6 +218,8 @@ export class SessionManager {
     this.feed.reset();
     this.alerts.reset();
     this.meta.clear();
+    this.seenIds.clear();
+    this.uniqueViewers = 0;
     this.firstTimers = 0;
     this.lastMissions = '';
     // 停止を跨いで持ち越すと、次の配信の最初の delta に前回のミッションが載る。
@@ -217,7 +238,10 @@ export class SessionManager {
       this.pendingMissions = this.computeMissions() ?? this.pendingMissions;
     }, MISSIONS_CHECK_MS);
     this.missionTimer.unref?.();
-    this.pruneTimer = setInterval(() => this.pruneLikeSeen(), LIKE_SEEN_PRUNE_EVERY_MS);
+    this.pruneTimer = setInterval(() => {
+      this.pruneLikeSeen();
+      this.pruneMeta();
+    }, LIKE_SEEN_PRUNE_EVERY_MS);
     this.pruneTimer.unref?.();
     if (!this.hidden) {
       this.feedTimer = setInterval(() => this.pushFeed(), FEED_MS);
@@ -271,7 +295,10 @@ export class SessionManager {
     // Restore the roster so 観測ユニーク does not restart at zero and regulars are
     // not re-announced as fresh arrivals after a reconnect.
     this.meta.clear();
+    this.seenIds.clear();
+    this.uniqueViewers = 0;
     this.firstTimers = 0;
+    const now = Date.now();
     for (const a of this.deps.store.getSessionAttendees(sessionId)) {
       this.meta.set(a.userId, {
         vipTier: a.vipTier,
@@ -283,7 +310,10 @@ export class SessionManager {
         likesLifetime: a.likesLifetime,
         readingKana: a.readingKana,
         note: a.note,
+        lastSeenMs: now,
       });
+      this.seenIds.add(a.userId);
+      this.uniqueViewers++;
       if (a.firstEver) this.firstTimers++;
       this.alerts.markSeen(a.userId);
     }
@@ -314,6 +344,7 @@ export class SessionManager {
     let m = this.meta.get(userId);
     if (!m) {
       const card = this.deps.store.getRecallCard(userId, this.sessionId);
+      const now = Date.now();
       m = card
         ? {
             vipTier: card.vipTier,
@@ -325,10 +356,18 @@ export class SessionManager {
             likesLifetime: card.likesLifetime,
             readingKana: card.readingKana ?? undefined,
             note: card.note ?? undefined,
+            lastSeenMs: now,
           }
-        : { vipTier: 0, visits: 0, firstEver: true };
+        : { vipTier: 0, visits: 0, firstEver: true, lastSeenMs: now };
       this.meta.set(userId, m);
-      if (m.firstEver) this.firstTimers++;
+      // 剪定後の再訪・invalidateMeta 後の再取得でユニーク/初見を二重加算しない。
+      if (!this.seenIds.has(userId)) {
+        this.seenIds.add(userId);
+        this.uniqueViewers++;
+        if (m.firstEver) this.firstTimers++;
+      }
+    } else {
+      m.lastSeenMs = Date.now();
     }
     return m;
   }
@@ -407,10 +446,9 @@ export class SessionManager {
     const { tick, viewers, deferred } = this.agg.drain();
     if (!full && viewers.length === 0 && deferred === 0 && this.sessionId == null && !challenge) return;
 
-    // The meta cache holds exactly the distinct viewers observed this session, so
-    // it is the live source for 観測ユニーク / 初見 — previously these were only
-    // ever written to the database and always displayed as 0 during the stream.
-    this.agg.countUnique(this.meta.size, this.firstTimers);
+    // 観測ユニーク / 初見 のライブ値。meta.size ではなく専用カウンタを読む —
+    // meta は pruneMeta で剪定されるため、size を使うと配信中に数字が減る。
+    this.agg.countUnique(this.uniqueViewers, this.firstTimers);
 
     const totals = { ...this.agg.totals };
     totals.elapsedMs = this.sessionStartMs ? Date.now() - this.sessionStartMs : 0;
@@ -472,6 +510,16 @@ export class SessionManager {
     } catch {
       /* 掃除の失敗で配信を止めない */
     }
+  }
+
+  /**
+   * 配信中10分ごと — 30分動きの無い視聴者の meta を捨てる。耐久配信で meta が
+   * ユニーク視聴者数に比例して育つと、単一スレッド worker の GC 停止が伸びて
+   * press RPC / 2Hz delta(= モニターの演出)が引っかかる。表示値は seenIds /
+   * uniqueViewers / firstTimers が持つので剪定しても減らない。
+   */
+  private pruneMeta(): void {
+    pruneLiveRows(this.meta, Date.now(), META_TTL_MS, META_HARD_CAP);
   }
 
   private pushFeed(): void {

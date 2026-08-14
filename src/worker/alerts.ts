@@ -1,5 +1,6 @@
 import type { NormViewer, NormalizedEvent, UserId } from '@shared/events';
 import type { JoinAlertCard } from '@shared/ipc';
+import { BoundedSet } from '@shared/bounded-set';
 import type { Store } from './store/index';
 
 /**
@@ -16,7 +17,11 @@ import type { Store } from './store/index';
 const QUEUE_CAP = 60;
 
 export class Alerts {
-  private seen = new Set<UserId>();
+  /**
+   * 上限つき — 耐久配信でユニーク入室者に比例して育たないように。溢れの副作用は
+   * 「最初期の入室者が20万人超の後に再入室するとアラートがもう一度出る」だけ。
+   */
+  private seen = new BoundedSet<UserId>(200_000);
   private queue: JoinAlertCard[] = [];
 
   /** 上限つき push — 溢れたら最古(=もう画面に出る見込みの薄い)カードを落とす。 */

@@ -33,6 +33,7 @@ import {
   TAP_BOOST_INTRO_MS,
 } from '@shared/challenge';
 import { drawRoulettePattern } from '@shared/roulette-fx';
+import { BoundedSet } from '@shared/bounded-set';
 
 /** runViewers の値。DTO(ChallengeRankRow)と違い、表示名は未確定のまま持つ。 */
 interface RunParticipant {
@@ -69,8 +70,12 @@ export class ChallengeEngine {
   private recentEffects: ChallengeEffect[] = [];
   /** reset でも巻き戻さない — モニターの冪等再生(既再生 id 比較)が壊れるため。 */
   private nextEffectId = 1;
-  /** フォロー妨害はチャレンジ1回につきユーザー1度だけ(付け外しスパム対策)。 */
-  private seenFollowers = new Set<UserId>();
+  /**
+   * フォロー妨害はチャレンジ1回につきユーザー1度だけ(付け外しスパム対策)。
+   * 上限つき — 耐久ランでフォロワー数に比例して育たないように(溢れの副作用は
+   * 5万人超の後に最初期のフォロワーの付け外しがもう一度効くだけ)。
+   */
+  private seenFollowers = new BoundedSet<UserId>(50_000);
   /**
    * ギフトの msgId 重複排除。手動での停止→再接続は processInitialData: true で
    * バックログを再配信するため(adapter.ts 参照)、これが無いと直前のギフトが
