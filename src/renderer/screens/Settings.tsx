@@ -11,6 +11,9 @@ export function Settings(): React.JSX.Element {
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const { data: diag, reload: reloadDiag } = useQuery('q.diagnostics', undefined, []);
+  // 診断ログ(main の有界リング)。fetch-once — ここを polling にすると、
+  // 「worker がどれだけ忙しいか」を測るために worker を忙しくすることになる。
+  const { data: diagLog, reload: reloadDiagLog } = useQuery('diag.recent', undefined, []);
 
   useEffect(() => {
     if (settings && !draft) setDraft(settings);
@@ -347,6 +350,44 @@ export function Settings(): React.JSX.Element {
           <button className="btn small" style={{ marginTop: 10 }} onClick={() => go('licenses')}>
             ライセンス・ソースコード
           </button>
+        </div>
+
+        <div className="card">
+          <h3>診断ログ</h3>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            演出のスキップ・レンダラの例外・ワーカーの遅延警告など。配信中は DevTools を開けないので、
+            あとから原因を追えるようにここに残しています。同じ内容は件数だけが増えます。
+          </div>
+          {diagLog && diagLog.length > 0 ? (
+            <div style={{ maxHeight: 260, overflow: 'auto' }}>
+              <table className="data">
+                <tbody>
+                  {diagLog.slice(0, 40).map((e, i) => (
+                    <tr key={String(e.atMs) + '-' + String(i)}>
+                      <td style={{ whiteSpace: 'nowrap', verticalAlign: 'top', opacity: 0.7 }}>
+                        {new Date(e.atMs).toLocaleTimeString('ja-JP')}
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap', verticalAlign: 'top', opacity: 0.7 }}>{e.scope}</td>
+                      <td style={{ fontSize: 12, wordBreak: 'break-word' }}>
+                        {e.message}
+                        {e.count > 1 ? <b style={{ marginLeft: 6 }}>×{num(e.count)}</b> : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="muted" style={{ fontSize: 12 }}>まだ記録はありません。</div>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button className="btn small" onClick={reloadDiagLog}>
+              更新
+            </button>
+            <button className="btn small" onClick={() => rpcFire('diag.openLogDir', undefined, 'ログフォルダを開く')}>
+              ログフォルダを開く
+            </button>
+          </div>
         </div>
 
         <div className="card">

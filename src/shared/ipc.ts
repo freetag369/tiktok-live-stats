@@ -104,7 +104,29 @@ export type RpcMap = {
     p: void;
     r: Array<{ id: number; label: string; primary: boolean; width: number; height: number }>;
   };
+  /**
+   * レンダラの描画が例外で落ちた(エラーバウンダリ)。main がループガード付きで
+   * 窓を作り直す。monitor.restart と分けてあるのは、あちらを**人が押す無条件の
+   * 手段**として残すため — 自動側にガードを掛け、手動側は4回目でも必ず効く。
+   */
+  'monitor.crashed': { p: { message: string; componentStack?: string }; r: void };
+  /** レンダラからの診断報告(console-message では運べない構造化データ用)。 */
+  'diag.report': { p: { scope: 'dashboard' | 'monitor'; level: 'warn' | 'error'; message: string }; r: void };
+  /** 診断リングのスナップショット(設定画面の 状態 カード)。 */
+  'diag.recent': { p: void; r: DiagEntrySnapshot[] };
+  /** 診断ログのフォルダを開く。 */
+  'diag.openLogDir': { p: void; r: void };
 };
+
+/** diag.recent の1行(shared/diag-ring.ts の DiagEntry と同形)。 */
+export interface DiagEntrySnapshot {
+  atMs: number;
+  lastMs: number;
+  scope: 'main' | 'worker' | 'dashboard' | 'monitor';
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  count: number;
+}
 
 export type RpcMethod = keyof RpcMap;
 export type RpcParams<K extends RpcMethod> = RpcMap[K]['p'];
@@ -141,6 +163,10 @@ export const MAIN_HANDLED: ReadonlySet<string> = new Set([
   'monitor.restart',
   'monitor.status',
   'monitor.displays',
+  'monitor.crashed',
+  'diag.report',
+  'diag.recent',
+  'diag.openLogDir',
 ]);
 
 // ── Firehose (direct worker → renderer MessagePort) ──────────────────────────

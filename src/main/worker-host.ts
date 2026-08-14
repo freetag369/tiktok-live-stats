@@ -3,6 +3,7 @@ import { RPC_TIMEOUT_MS } from '@shared/constants';
 import type { AppSettings, StoreCapabilities } from '@shared/dto';
 import type { RpcRequest, RpcResponse, WorkerState } from '@shared/ipc';
 import { CH_FEED_PORT } from '@shared/ipc';
+import { reportWorkerLine } from './diag-log';
 import { workerEntry } from './paths';
 
 interface Pending {
@@ -75,8 +76,18 @@ export class WorkerHost {
     });
     this.proc = proc;
 
-    proc.stdout?.on('data', (d: Buffer) => console.log('[worker]', d.toString().trimEnd()));
-    proc.stderr?.on('data', (d: Buffer) => console.error('[worker]', d.toString().trimEnd()));
+    // console はそのまま(開発時の見え方を変えない)+ 診断リングにも積む。
+    // これで worker のイベントループ遅延警告が事後に読める。
+    proc.stdout?.on('data', (d: Buffer) => {
+      const line = d.toString().trimEnd();
+      console.log('[worker]', line);
+      reportWorkerLine('info', '[worker] ' + line);
+    });
+    proc.stderr?.on('data', (d: Buffer) => {
+      const line = d.toString().trimEnd();
+      console.error('[worker]', line);
+      reportWorkerLine('error', '[worker] ' + line);
+    });
 
     proc.on('message', (msg: Record<string, unknown>) => {
       switch (msg?.t) {

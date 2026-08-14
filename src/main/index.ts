@@ -7,7 +7,9 @@ import { clearChallengeDefault, defaultSettings, loadChallengeDefault, loadSetti
 import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
 import { closeMonitorWindow, getMonitorWindow, openMonitorWindow, repositionMonitor } from './monitor-window';
 import { configDirIn, defaultDataDir, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
+import { attachConsoleCapture, diagLogDir, initDiagLog, recentDiag, report } from './diag-log';
 import { WorkerHost } from './worker-host';
+import { resetAutoRecoverBudget, tryAutoRecoverMonitor, watchDashboardWindow, watchMonitorWindow } from './window-health';
 import { createWindow } from './window';
 
 /**
@@ -73,6 +75,20 @@ function syncVisibility(): void {
   host?.send({ t: 'visibility', hidden: !visible(win) && !visible(getMonitorWindow()) });
 }
 
+/**
+ * モニター窓を作り直す。手動(monitor.restart)と自動復旧(window-health)の
+ * 唯一の合流点 — close が非同期なので 350ms 挟む。openMonitor 経由なので
+ * MessagePort の再アタッチ・monitorOpen 通知・ディスプレイ設定の読み直しは自動。
+ */
+function restartMonitorWindow(): void {
+  if (getMonitorWindow()) {
+    closeMonitorWindow();
+    setTimeout(() => openMonitor(), 350);
+  } else {
+    openMonitor();
+  }
+}
+
 function openMonitor(): void {
   // 冪等化: 開いている窓に対してリスナーを積み増さない(重複 open で
   // did-finish-load ごとにポートが多重配線され、worker 側の番犬がメイン窓の
@@ -97,6 +113,11 @@ function openMonitor(): void {
   );
   host?.attachRenderer(mon.webContents);
   host?.send({ t: 'monitorOpen', open: true });
+  // 診断: この窓の console を main のリングへ。レンダラ側は1行も変えずに
+  // 既存の fxWarn 21箇所と fx エンジンの警告が事後に読めるようになる。
+  attachConsoleCapture(mon.webContents, 'monitor');
+  // エラーバウンダリが構造的に見られない側(OOM・GPU 巻き添え・sad tab)を拾う。
+  watchMonitorWindow(mon, { restartMonitor: restartMonitorWindow, toast });
   // Re-handshake the firehose port after a reload (メイン窓と同じ流儀)。
   mon.webContents.on('did-finish-load', () => {
     const m = getMonitorWindow();
@@ -344,13 +365,39 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
       // openMonitor() 経由なので MessagePort の再アタッチ・monitorOpen 通知・現在の
       // ディスプレイ設定の読み直しはすべて自動で走る。閉じているときは待たずに開く。
       case 'monitor.restart': {
-        if (getMonitorWindow()) {
-          closeMonitorWindow();
-          setTimeout(() => openMonitor(), 350);
-        } else {
-          openMonitor();
-        }
+        // 手動は無条件 — 自動復旧が止まったあと人が押して直す、が通常の運用なので
+        // ここで予算も戻す(ループガードは自動側にだけ掛ける)。
+        resetAutoRecoverBudget();
+        restartMonitorWindow();
         return { id, ok: true, result: { open: true } } as RpcResponse;
+      }
+
+      case 'monitor.crashed': {
+        const c = req.params as { message: string; componentStack?: string };
+        report(
+          'monitor',
+          'error',
+          ['[diag] モニターの描画が例外で停止: ' + c.message, c.componentStack ?? ''].join('\n').trimEnd()
+        );
+        tryAutoRecoverMonitor('render-error', { restartMonitor: restartMonitorWindow, toast });
+        return { id, ok: true, result: undefined } as RpcResponse;
+      }
+
+      case 'diag.report': {
+        const d = req.params as { scope: 'dashboard' | 'monitor'; level: 'warn' | 'error'; message: string };
+        report(d.scope, d.level, d.message);
+        return { id, ok: true, result: undefined } as RpcResponse;
+      }
+
+      case 'diag.recent':
+        return { id, ok: true, result: recentDiag(100) } as RpcResponse;
+
+      case 'diag.openLogDir': {
+        const dir = diagLogDir();
+        if (!dir) return { id, ok: false, error: { code: 'INTERNAL', message: 'ログフォルダが未初期化です' } };
+        const derr = await shell.openPath(dir);
+        if (derr) return { id, ok: false, error: { code: 'INTERNAL', message: derr } };
+        return { id, ok: true, result: undefined } as RpcResponse;
       }
 
       case 'monitor.status':
@@ -377,6 +424,8 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
 }
 
 async function boot(): Promise<void> {
+  // 設定より先に — loadSettings 中の警告も拾えるようにする。
+  initDiagLog(dataDir);
   settings = loadSettings(dataDir);
 
   await app.whenReady();
@@ -448,6 +497,27 @@ async function boot(): Promise<void> {
   ipcMain.handle('rpc', async (_e, req: RpcRequest): Promise<RpcResponse> => {
     if (MAIN_HANDLED.has(req.method)) return handleMainRpc(req);
     return host!.rpc(req);
+  });
+
+  attachConsoleCapture(win.webContents, 'dashboard');
+  watchDashboardWindow(win, {
+    toast,
+    onRepeatCrash: (reason) => {
+      // 短時間の再発 = 本当に壊れている。ここだけは操作者を止める。
+      void dialog
+        .showMessageBox({
+          type: 'error',
+          title: '画面が繰り返し停止しました',
+          message: '画面のプロセスが短時間に繰り返し停止しました(' + reason + ')。',
+          detail: '再読み込みで直らない場合はアプリを再起動してください。集計データは保存されています。',
+          buttons: ['再読み込み', '閉じる'],
+          defaultId: 0,
+          cancelId: 1,
+        })
+        .then((r) => {
+          if (r.response === 0 && win && !win.isDestroyed()) win.reload();
+        });
+    },
   });
 
   // Re-handshake the firehose port after a renderer reload.

@@ -1,13 +1,40 @@
-# Windows + macOS release builds. Trigger: tag push (v*) or manual dispatch.
+# check(typecheck+lint+test)は全 push / PR。重い配布ビルド(win/mac)はタグと
+# 手動のときだけ。以前はタグを打つまで一度もテストが走らず、リリース直前に
+# 初めて赤くなっていた(v0.5.0 の libm 丸め差、v0.5.2 のソーク lag が実例)。
 name: build
 
 on:
   push:
+    branches: ['**']
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
+concurrency:
+  # PR の古い実行は打ち切る。タグのリリースビルドは途中で殺さない。
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # 軽い検証。ubuntu を使うのは windows ランナーの2倍速く課金単価も半分だから —
+  # テスト対象は node:sqlite と純ロジックだけでプラットフォーム依存が無い
+  # (配布物そのものの検証は下の win / mac ジョブが担う)。
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # typecheck は従来タグ時の `npm run build` の中でしか走っていなかった。
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
   win:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +59,7 @@ jobs:
             release/*/tiktok-live-stats-source-*.zip
 
   mac:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     env:
       # No Developer ID cert: skip keychain discovery. electron-builder then
