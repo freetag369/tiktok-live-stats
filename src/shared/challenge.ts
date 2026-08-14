@@ -756,6 +756,9 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   // ストックも既定で無効(likeStockCount: 0)— ゲージ満タンの従属機能なので同じくオプトイン。
   likeStockCount: 0,
   likeStockStep: 25,
+  // カットイン動画の焼き込み音声。giftFullCut.volume と同じ 70 に揃える —
+  // 「全面カットの音量は既定 70」を2箇所で食い違わせないため。
+  stockCutinVolume: 70,
   // 指定コメント妨害は既定で規則なし(= オフ)— キーワードは企画ごとに違うので
   // 既定を置きようがない(fanStamp の giftId と同じ判断)。
   commentRules: [],
@@ -1287,6 +1290,11 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     // count の上限 99 はドットUIの現実的上限(実用は 3〜10 想定)。
     likeStockCount: num(c.likeStockCount, d.likeStockCount, 0, 99),
     likeStockStep: num(c.likeStockStep, d.likeStockStep, 0, 999_999),
+    // 保存済み settings.json には無いフィールド。**欠損が既定(70)へ倒れること
+    // 自体が移行の代わり** — v0.5.3 までカットイン動画は seVolumes['stock-full']
+    // (配布デフォ 16%)を流用していたので、キーを足すだけで既存ユーザーも
+    // 11% → 70% になる。既定値の書き換えでは保存済みファイルに届かない。
+    stockCutinVolume: num(c.stockCutinVolume, d.stockCutinVolume, 0, 100),
     commentRules: validateCommentRules(c.commentRules),
     giftRules,
     giftDefault,

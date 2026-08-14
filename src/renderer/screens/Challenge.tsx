@@ -121,7 +121,7 @@ const SE_SLOT_HINTS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   like: 'いいね妨害の +N が流れる瞬間',
   'gauge-full': 'ゲージが満タンになり、弾が7セグに着弾して数字が増える瞬間(モニター表示中のみ)',
   'stock-full':
-    'ドットが全部埋まったあと、カットイン(約5秒)が終わって7セグに +N が乗る瞬間(モニター表示中のみ)',
+    'ドットが全部埋まったあと、カットイン(約5秒)が終わって7セグに +N が乗る瞬間(モニター表示中のみ)。カットイン動画そのものの音量は「演出」タブ',
   comment: 'コメント応援で数字が減った瞬間',
   'gift-t1': 'ダイヤ 1〜99 のギフトを受け取った瞬間',
   'gift-t2': 'ダイヤ 100〜999 のギフトを受け取った瞬間',
@@ -520,6 +520,7 @@ export function Challenge(): React.JSX.Element {
             <MiniFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftClipsSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftFullCutSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+            <StockCutinSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftBandFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftRepeatFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
           </>
@@ -1364,6 +1365,55 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
           ) : null}
         </>
       ) : null}
+    </>
+  );
+}
+
+/**
+ * いいねストック満杯の全面カットの音量。**ダイヤの全面カットの隣**に置いてある —
+ * どちらも「音声焼き込みの動画をそのまま鳴らす」同じ仕組みで、スライダーの目盛りも
+ * 同じ絶対値(0-100・全体音量は掛からない)。
+ *
+ * 「効果音」タブに置かないのは目盛りの意味が食い違うため — あちらのスライダーは
+ * 全部「全体音量に対する%」で、絶対値を1本だけ混ぜると読めなくなる。代わりに
+ * SE_SLOT_HINTS['stock-full'] からこのタブへ案内している。
+ *
+ * 行の有効/無効やクリップ選択は持たない(素材は stock-cutin.mp4 の1本きりで、
+ * 出す/出さないは「演出クリップを出す」= fxClipsEnabled が握っている)。
+ */
+function StockCutinSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  return (
+    <>
+      <h3 style={{ marginTop: 14 }}>いいねストック満杯の全面カット(カウント一時停止)</h3>
+      <div className="faint" style={{ fontSize: 11, marginBottom: 8 }}>
+        ストックのドットが全部埋まると、着弾の瞬間から約5秒の全面カット動画を再生し、
+        <b>再生中はカウントを一時停止</b>します(その間のギフト・いいね・フォローは捨てられず、演出後に反映されます)。
+        BGM は動画に入っているので選択欄はありません(音量だけ下で調整)。
+      </div>
+      <div className="row" style={{ gap: 10, alignItems: 'center' }}>
+        <label className="field" style={{ width: 220 }}>
+          音量 {cfg.stockCutinVolume}
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={cfg.stockCutinVolume}
+            onChange={(e) => onPatch({ stockCutinVolume: Number(e.target.value) })}
+          />
+        </label>
+        <MonitorTestBtn
+          spec={{ kind: 'stock-full' }}
+          onTest={onTest}
+          busy={testBusy}
+          title="ストック満杯の演出をモニターで実演再生(カットイン動画の音もこの音量で鳴ります)。テスト中はカウントを止めません。"
+        />
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+        これは<b>動画に焼き込まれた音</b>の音量です。同じ瞬間に鳴る効果音
+        「いいねストック満杯(着弾)」は<b>別枠</b>で、あちらは「効果音」タブで調整します
+        (以前は両方が同じスライダーに連動していて、効果音側を絞ると動画の音まで小さくなっていました)。
+        音量は<b>効果音がオフのときは無音</b>になります。
+      </div>
     </>
   );
 }

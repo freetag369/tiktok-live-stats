@@ -2942,8 +2942,8 @@ export function MonitorView(): React.JSX.Element {
       {/*
         ストック着弾カットイン(不透明フルフレーム・音声焼き込み)。配置の制約は
         .fx-clip-opaque と同じ — .monitor-root 直下・z-index なし。バンドと違い
-        muted にしない(BGM は mp4 の音声トラック側)。音量はストック満杯 SE の
-        スロット音量に連動し、効果音オフなら映像ごと無音。尺は STOCK_CUTIN_MS の
+        muted にしない(BGM は mp4 の音声トラック側)。音量は専用設定
+        stockCutinVolume(既定 70)で、効果音オフなら映像ごと無音。尺は STOCK_CUTIN_MS の
         タイマー(startStockCutin)が権威で、loop なし・onEnded も使わない
         (素材が短くても最終フレーム静止 → フェードで隠れる)。
       */}
@@ -2957,10 +2957,10 @@ export function MonitorView(): React.JSX.Element {
           preload="auto"
           muted={!(cfg?.challenge.seEnabled ?? true)}
           ref={(v) => {
-            if (v) {
-              v.volume =
-                effectiveSeVolume(cfg?.challenge.seVolume ?? 70, cfg?.challenge.seVolumes?.['stock-full']) / 100;
-            }
+            // 専用設定の絶対値(giftFullCut.volume と同じ流儀)。着弾効果音
+            // stock-burst と共用だった seVolumes['stock-full'] からは切り離してある —
+            // あちらは配布デフォが 16% で、動画の音まで 11% に潰していた。
+            if (v) v.volume = (cfg?.challenge.stockCutinVolume ?? 70) / 100;
             return armVideoPlay(v, 'stock-cutin', finishStockCutin);
           }}
           onError={(ev) => {

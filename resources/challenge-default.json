@@ -9,6 +9,7 @@
   "likeStep": 25,
   "likeStockCount": 9,
   "likeStockStep": 25,
+  "stockCutinVolume": 70,
   "commentRules": [],
   "giftRules": [],
   "giftDefault": {

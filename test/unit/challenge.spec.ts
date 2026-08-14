@@ -405,6 +405,46 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
     expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, likeStockStep: 1e12 }).likeStockStep).toBe(999_999);
   });
 
+  it('stockCutinVolume: 欠損は既定(70)、範囲外は clamp、非数値は既定、正常値は保持', () => {
+    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
+    delete legacy.stockCutinVolume;
+    expect(validateChallengeConfig(legacy).stockCutinVolume).toBe(70);
+    expect(
+      validateChallengeConfig({ ...DEFAULT_CHALLENGE, stockCutinVolume: 250 }).stockCutinVolume
+    ).toBe(100); // 過大は clamp
+    expect(
+      validateChallengeConfig({ ...DEFAULT_CHALLENGE, stockCutinVolume: -5 }).stockCutinVolume
+    ).toBe(0); // 負値は 0
+    expect(
+      validateChallengeConfig({ ...DEFAULT_CHALLENGE, stockCutinVolume: 'x' } as unknown).stockCutinVolume
+    ).toBe(70); // 非数値は既定
+    expect(
+      validateChallengeConfig({ ...DEFAULT_CHALLENGE, stockCutinVolume: 40 }).stockCutinVolume
+    ).toBe(40); // 正常値は保持
+    // 0 は「無音にした意思」— 欠損と同じ扱いにして 70 へ戻してはいけない。
+    expect(
+      validateChallengeConfig({ ...DEFAULT_CHALLENGE, stockCutinVolume: 0 }).stockCutinVolume
+    ).toBe(0);
+  });
+
+  it('stockCutinVolume: 保存済み設定にキーが無くても 70 になる(移行段なしで効く)', () => {
+    // v0.5.3 までカットイン動画は seVolumes['stock-full'](配布デフォ 16%)を流用して
+    // いた。**欠損が既定へ倒れること自体が移行の代わり**なので、settingsVersion が
+    // 最新の保存済み設定(= 移行段を通らない)でも 70 になることを固定する。
+    // ここが崩れると「既定を直したのに保存済み settings.json に届かない」に逆戻りする。
+    const saved = {
+      ...structuredClone(DEFAULT_CHALLENGE),
+      seVolume: 70,
+      seVolumes: { ...DEFAULT_SE_VOLUMES, 'stock-full': 16 },
+    } as Record<string, unknown>;
+    delete saved.stockCutinVolume;
+    const v = validateChallengeConfig(saved);
+    expect(v.stockCutinVolume).toBe(70);
+    // 効果音スロットは巻き込まない — 着弾効果音 stock-burst の音量は据え置き。
+    expect(v.seVolumes['stock-full']).toBe(16);
+    expect(effectiveSeVolume(v.seVolume, v.seVolumes['stock-full'])).toBeCloseTo(11.2, 5);
+  });
+
   it('fxClipsEnabled: 欠損は既定(ON)、false は保持', () => {
     const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
     delete legacy.fxClipsEnabled;

@@ -335,7 +335,23 @@ the start, peaks, and fully decays — the frame returns to pure black and stays
 | 尺 | 5.06 秒(アプリ側は `STOCK_CUTIN_MS = 5000` のタイマーで打ち切り) |
 | 参照画像 | ユーザー提供のフェニックスのイラスト(TikTok ギフト一覧アイコンのスクリーンショット) |
 
-加工内容: **無し**(返却された mp4 をそのままリネームして格納)。
+加工内容: **音声のみ定数ゲイン +2.2 dB**(2026-08-14)。映像は `-c:v copy` で無劣化。
+
+```
+ffmpeg -i stock-cutin.orig.mp4 -c:v copy -af "volume=2.2dB" -c:a aac -b:a 160k -movflags +faststart stock-cutin.mp4
+```
+
+| 実測(ffmpeg `ebur128=peak=true`) | 加工前 | 加工後 |
+|---|---|---|
+| Integrated | -17.1 LUFS | **-15.0 LUFS** |
+| True Peak | -3.2 dBFS | **-0.9 dBFS** |
+| 終端 0.4 秒の RMS | -44.5 dB | -42.3 dB |
+
+`loudnorm` は使っていない — **定数ゲインなので終端 0.4 秒の減衰カーブがそのまま保たれる**
+(実測どおり全区間が一律 +2.2 dB)。dynamic 正規化のリミッタを通すと、映像の `.out`
+フェードと揃えてあるこの減衰と、パチンコ大当たり風の立ち上がりの両方が潰れる。
+真ピークは -0.9 dBFS なので、これ以上の定数ゲインはクリップする — さらに上げたい場合は
+素材ではなく設定側(`stockCutinVolume`、既定 70 → 最大 100)で稼ぐこと。
 
 > 配色はストックUI(`monitor.css` の `.lgs-dot` `#3dff9c`、canvas 2発目の弾 hue 140)に
 > 合わせた**エメラルドグリーン**。初回生成は参照画像そのままの赤で、ユーザー指示で
@@ -348,8 +364,16 @@ the start, peaks, and fully decays — the frame returns to pure black and stays
 > `.fx-clip-opaque` で重ねる。配置の制約(`.monitor-root` 直下・z-index なし)は同じ。
 >
 > **このクリップだけは音声を焼き込んである**(他は全部無音)。`MonitorView` は
-> この `<video>` に限り muted を外し、音量を `seVolumes['stock-full']` に連動させる。
-> 音声は終端 0.4 秒で無音まで減衰する構成(実測 RMS -47dB→-80dB)— 映像の
+> この `<video>` に限り muted を外し、音量は**専用設定 `stockCutinVolume`**(既定 70・
+> 設定画面の「演出」タブ)で鳴らす。`cut/*.mp4` の `giftFullCut.volume` と同じ絶対値で、
+> 全体音量(`seVolume`)は掛からない。
+>
+> ⚠ v0.5.3 までは `seVolumes['stock-full']` に連動させていた。あのスロットは同じ瞬間に
+> 鳴る効果音 `stock-burst` と共用で、配布デフォが 16% に絞ってあるため動画の音が
+> 70×16% ≒ **11%** まで潰れていた(「音が小さい」の原因はこれで、素材側ではなかった)。
+> **戻さないこと** — 効果音の音量を下げると動画の音まで下がる構造に戻る。
+>
+> 音声は終端 0.4 秒で無音まで減衰する構成 — 映像の
 > `.out` フェード(`STOCK_CUTIN_FADE_MS = 400`)と揃えてある。
 >
 > このファイルを削除してもビルドは壊れない(`lib/fx.ts` の 0 件許容 glob)。

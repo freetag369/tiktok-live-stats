@@ -614,7 +614,8 @@ export interface GiftFullCutRule {
  *
  * 帯域と違い BGM 選択を持たない — 素材(assets/fx/cut/*.mp4)に音声が焼き込んで
  * あるため。音量だけをここで持ち、モニターは stock-cutin と同じ方式で
- * <video> の muted を外して鳴らす。
+ * <video> の muted を外して鳴らす(あちらの音量は stockCutinVolume が持つ —
+ * 焼き込み音声の音量は**その動画を出す機能が自分で持つ**のがこの2つの共通規約)。
  */
 export interface GiftFullCutConfig {
   enabled: boolean;
@@ -754,6 +755,18 @@ export interface ChallengeConfig {
   likeStockCount: number;
   /** ストック満杯1回あたりの加算量。 */
   likeStockStep: number;
+  /**
+   * ストック満杯カットイン(assets/fx/stock-cutin.mp4)の焼き込み音声の音量 0-100。
+   *
+   * giftFullCut.volume と同じ**絶対値**で、seVolume(全体音量)は掛からない。
+   * v0.5.3 までは効果音スロット 'stock-full' の音量(= seVolume × seVolumes)を
+   * 流用していたが、あのスロットは同じ瞬間に鳴る効果音 stock-burst と共用で、
+   * 配布デフォが 16% に絞ってあるため動画の音が 70×16% ≒ 11% まで潰れていた。
+   * 音を分けられるようにスロットから独立させたのがこのフィールド。
+   *
+   * seEnabled=false のときは映像ごと無音になる(muted 側の判定)。
+   */
+  stockCutinVolume: number;
   /**
    * 指定コメント(キーワード)の妨害規則。**上から順に評価し、最初に一致した
    * 1件だけ適用**(giftRules と同じ先勝ち)。空配列 = 機能オフ。
