@@ -21,6 +21,13 @@
  *      false になり、最長45秒のカットインの上に一瞬出て消える
  * の2経路でバナーが失われる — この判定をここに一本化する。
  *
+ * 保留の入れ物は**配列ではなくアキュムレータ**(PendingFloat)。ストック満杯の
+ * カットイン中は worker が凍結しない(stock-full は fxFreezeUntilMs を張らない)ので
+ * flushLikeFx が 1Hz でいいね演出を出し続け、配列で持つと最長7秒ぶん(5〜6件)溜まる。
+ * それを revealStock が同期ループで push すると React のバッチで FLOAT_MAX(3枠)の
+ * 押し出しが起きて、「満杯の瞬間に＋が3枚同時に出る」になっていた。金額だけを畳んで
+ * 描画を flush まで遅らせれば1種類につき必ず1枚 — 枚数の上限は構造で担保する。
+ *
  * shared に置くのは fx-drain.ts / live-rows.ts と同じ理由 — レンダラのテスト環境が
  * このリポジトリに無いので、決定ロジックを純関数としてここへ抽出して node の
  * テストで固定する。
@@ -51,4 +58,23 @@ export function shouldDeferFloat(s: FloatHoldState): boolean {
  */
 export function shouldFlushDeferredFloats(s: FloatHoldState): boolean {
   return !shouldDeferFloat(s);
+}
+
+/**
+ * 保留バナーの中身。React ノードではなく**加算量だけ**を持つのが要点 —
+ * 描画を flush まで遅らせることで、保留中に何件届いても1枚に畳める。null = 保留なし。
+ */
+export interface PendingFloat {
+  /** 畳んだ合計加算量(バナーの +N)。 */
+  amount: number;
+  /**
+   * 畳んだ件数。表示には使わない — 「保留が何件来ても出るバナーは1枚」を
+   * テストで固定するための観測点(fx-floats.spec.ts)。
+   */
+  count: number;
+}
+
+/** 保留へ1件積む。配列にしないので、flush で出る枚数は構造的に1枚を超えない。 */
+export function mergePendingFloat(cur: PendingFloat | null, amount: number): PendingFloat {
+  return { amount: (cur?.amount ?? 0) + amount, count: (cur?.count ?? 0) + 1 };
 }

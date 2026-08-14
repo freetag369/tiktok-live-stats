@@ -29,9 +29,11 @@ import { CFG_POLL_MS } from '@shared/constants';
 import { runFxDrain, type FxDrainOrder } from '@shared/fx-drain';
 import { boostStartTiming, planBoostStart, type BoostStartPlan } from '@shared/boost-start';
 import {
+  mergePendingFloat,
   shouldDeferFloat,
   shouldFlushDeferredFloats,
   type FloatHoldState,
+  type PendingFloat,
 } from '@shared/fx-floats';
 import {
   STRIKE_TRAVEL_MAX_MS,
@@ -211,6 +213,31 @@ function rouletteBanner(e: ChallengeEffect): React.JSX.Element {
         <b>{e.nickname ?? ''}</b>
         {head.suffix}
       </span>
+    </>
+  );
+}
+
+/**
+ * 「♥ +N いいね妨害!」バナーの中身。保留(PendingFloat)は金額しか持たないので、
+ * 描画は flush の瞬間にここで組む — 畳んだ合計でも即時1件でも同じ見た目になる。
+ */
+function likeFloatNode(amount: number): React.JSX.Element {
+  return (
+    <>
+      <span className="f-heart">♥</span>
+      <span className="f-amt">+{num(amount)}</span>
+      <span className="f-txt">いいね妨害!</span>
+    </>
+  );
+}
+
+/** 「💚 +N いいねストック満杯!」バナーの中身(likeFloatNode と同じ理由で関数)。 */
+function stockFloatNode(amount: number): React.JSX.Element {
+  return (
+    <>
+      <span className="f-heart">💚</span>
+      <span className="f-amt">+{num(amount)}</span>
+      <span className="f-txt">いいねストック満杯!</span>
     </>
   );
 }
@@ -419,10 +446,16 @@ export function MonitorView(): React.JSX.Element {
    * 保留する。出口は4つあり、どれかに必ず当たるのでバナーが闇に消えることはない:
    * 着弾(impactStrike / revealStock)/ 出す先が居ない flushStrike / チェーンを
    * 張らない drainPendingStrike / 全カットイン終了時のウォッチドッグ。
-   * 出す順は必ず like → stock — FLOAT_MAX(3枠)の押し出しで stock を生かすため。
+   * 出す順は必ず like → stock — 主役(ストック満杯)を手前に置くため。
+   *
+   * 入れ物は配列ではなく畳み込み(shared/fx-floats の PendingFloat)。配列だと
+   * worker が凍結しないストックカットイン(最長7秒)の間に flushLikeFx が 1Hz で
+   * 積み続け、revealStock の同期 flush が React のバッチで FLOAT_MAX を押し出して
+   * 「満杯の瞬間に＋が3枚同時に出る」になっていた。金額だけを畳んで描画を flush
+   * まで遅らせるので、1種類につき必ず1枚しか出ない(枚数の上限は構造で担保)。
    */
-  const pendingLikeFloats = useRef<{ node: React.ReactNode; cls: string }[]>([]);
-  const pendingStockFloats = useRef<{ node: React.ReactNode; cls: string }[]>([]);
+  const pendingLikeFloats = useRef<PendingFloat | null>(null);
+  const pendingStockFloats = useRef<PendingFloat | null>(null);
   /**
    * ルーレット/カットイン/飛行中チェーンに譲ったいいね満タン・ストック満杯の
    * 持ち越し(合算)。据え置き(heldValue)の持ち主は常に1人という規約がある
@@ -821,8 +854,8 @@ export function MonitorView(): React.JSX.Element {
       clearRepeatTimers();
       clipQueue.current = [];
       // 着弾待ちのバナーも捨てる — 停止/リセット後に古い通知を出さない。
-      pendingLikeFloats.current = [];
-      pendingStockFloats.current = [];
+      pendingLikeFloats.current = null;
+      pendingStockFloats.current = null;
       // 再生中のギフトクリップ・着弾クリップ・簡易演出・フラッシュも片付ける —
       // clipQueue だけ空にして再生中の1本を残すのは非対称だった(リセット直後に
       // 前ランの演出が流れ続ける)。floats は自アニメ終了で消えるので触らない。
@@ -1102,9 +1135,19 @@ export function MonitorView(): React.JSX.Element {
     strikeTimers.current = [];
   }
 
-  /** 着弾待ちのバナーをまとめて出す(splice で空にしてから push)。 */
-  function flushFloatQueue(q: { current: { node: React.ReactNode; cls: string }[] }): void {
-    for (const f of q.current.splice(0)) pushFloat(f.node, f.cls);
+  /**
+   * 着弾待ちの保留を1枚にまとめて出す(保留なしなら no-op)。node は畳んだ合計 +N で
+   * ここで組む。ref を先に null にしてから push するので、どの出口から二重に
+   * 呼ばれてもバナーは1枚しか出ない。
+   */
+  function flushPendingFloat(
+    ref: { current: PendingFloat | null },
+    render: (amount: number) => React.ReactNode
+  ): void {
+    const p = ref.current;
+    if (p === null) return;
+    ref.current = null;
+    pushFloat(render(p.amount), 'bad like-float');
   }
 
   /**
@@ -1122,12 +1165,13 @@ export function MonitorView(): React.JSX.Element {
   }
 
   /**
-   * 保留バナーを「いいね妨害 → ストック満杯」の順で出す。stock を後にするのは
-   * FLOAT_MAX(3枠)の押し出しで必ず生き残らせるため(revealStock の既存順と同じ)。
+   * 保留バナーを「いいね妨害 → ストック満杯」の順で出す。畳み込みで最大2枚に
+   * なったので FLOAT_MAX(3枠)の押し出しはもう起きないが、主役(ストック満杯)を
+   * 後 = 手前に置く並びは revealStock の既存順として維持する。
    */
   function flushDeferredFloats(): void {
-    flushFloatQueue(pendingLikeFloats);
-    flushFloatQueue(pendingStockFloats);
+    flushPendingFloat(pendingLikeFloats, likeFloatNode);
+    flushPendingFloat(pendingStockFloats, stockFloatNode);
   }
 
   /** 出す先の演出が誰もいないときだけ出す。取りこぼし防止の共通口。 */
@@ -2000,7 +2044,7 @@ export function MonitorView(): React.JSX.Element {
   function impactStrikeVisuals() {
     // 着弾の瞬間に「+N いいね妨害!」を出す — アニメーション → 通知の順序。
     // 2段着弾の1段目(impactStrikePartial)もここを通るので、いいね分はそこで出る。
-    flushFloatQueue(pendingLikeFloats);
+    flushPendingFloat(pendingLikeFloats, likeFloatNode);
     setPunchDir('strike');
     setPunchKey((k) => k + 1);
     pushShake('shake');
@@ -2112,8 +2156,7 @@ export function MonitorView(): React.JSX.Element {
     // いいね側のバナーもここで必ず出す — ストック着弾カットイン(最長7秒)の間は
     // strikeTimers が生きているため playEffect が保留しており、この経路で流さないと
     // 次の着弾が起きるまでバナーが闇に消える。
-    flushFloatQueue(pendingLikeFloats);
-    flushFloatQueue(pendingStockFloats);
+    flushDeferredFloats();
     setPunchDir('strike');
     setPunchKey((k) => k + 1);
     pushShake('shake-strong');
@@ -2361,17 +2404,11 @@ export function MonitorView(): React.JSX.Element {
         // 居るのに今出すと、不透明カットインの上で一瞬光って本番の着弾では消える。
         // どれも無い(effect が値より遅れて届いた flushLikeFx 経路や reduced motion)
         // ときだけ即時に出す — 着弾が来ずに闇に消えるのを防ぐ。
-        const likeNode = (
-          <>
-            <span className="f-heart">♥</span>
-            <span className="f-amt">+{num(e.amount)}</span>
-            <span className="f-txt">いいね妨害!</span>
-          </>
-        );
         if (shouldDeferFloat(floatHoldState())) {
-          pendingLikeFloats.current.push({ node: likeNode, cls: 'bad like-float' });
+          // 保留は畳み込み — カットイン中に何件届いても、flush で出るのは合算1枚。
+          pendingLikeFloats.current = mergePendingFloat(pendingLikeFloats.current, e.amount);
         } else {
-          pushFloat(likeNode, 'bad like-float');
+          pushFloat(likeFloatNode(e.amount), 'bad like-float');
         }
         // ハートがゲージへ吸い込まれて着弾ごとに明滅 — 「いいねが注がれて
         // ゲージが貯まる」の視覚連結。ゲージ非表示時は弾け上がりへ退避。
@@ -2465,17 +2502,10 @@ export function MonitorView(): React.JSX.Element {
           });
           if (!busy && !prefersReducedMotion()) revealStock(e.amount);
         }
-        const stockNode = (
-          <>
-            <span className="f-heart">💚</span>
-            <span className="f-amt">+{num(e.amount)}</span>
-            <span className="f-txt">いいねストック満杯!</span>
-          </>
-        );
         if (shouldDeferFloat(floatHoldState())) {
-          pendingStockFloats.current.push({ node: stockNode, cls: 'bad like-float' });
+          pendingStockFloats.current = mergePendingFloat(pendingStockFloats.current, e.amount);
         } else {
-          pushFloat(stockNode, 'bad like-float');
+          pushFloat(stockFloatNode(e.amount), 'bad like-float');
         }
         return;
       }
