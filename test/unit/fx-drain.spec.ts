@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { drainFxQueues, type FxDrainQueues } from '@shared/fx-drain';
+import { drainFxQueues, runFxDrain, type FxDrainOrder, type FxDrainQueues } from '@shared/fx-drain';
 
 /**
  * 演出終了時のドレイン順序の固定。
@@ -115,5 +115,121 @@ describe('drainFxQueues: 安全弁(expire)経路のバグ再現', () => {
     expect(r.next).toEqual({ kind: 'band', effect: 'C' });
     // 残ったスピンは次の finish が拾う(キューに残っている)。
     expect(queues.roulettes).toEqual(['R']);
+  });
+});
+
+/**
+ * runFxDrain: 「断られたら次の持ち越しへ落ちる」ドライバの契約。
+ *
+ * 旧実装は1件だけ試して return していたため、start* が断ると hold も張られず
+ * onIdle/drainPendingStrike も走らず、pendingStrike が宙に浮いて以降のバナーが
+ * 永久に保留された。出口は「started」か「drainStrike」の2つだけに閉じる。
+ */
+const ORDERS: FxDrainOrder[] = ['roulette-first', 'standard'];
+
+/** start の呼ばれ方を記録するスパイ。accept で「どれを受けるか」を決める。 */
+function spy(accept: (kind: string, effect: string) => boolean) {
+  const calls: string[] = [];
+  return {
+    calls,
+    start: (kind: 'roulette' | 'boost' | 'band', effect: string): boolean => {
+      calls.push(`${kind}:${effect}`);
+      return accept(kind, effect);
+    },
+  };
+}
+
+describe('runFxDrain: 断られたら次の持ち越しへ落ちる', () => {
+  it('全部空 — start は1度も呼ばれず、着弾を流してよい', () => {
+    for (const order of ORDERS) {
+      const s = spy(() => true);
+      const r = runFxDrain(q(), order, { start: s.start });
+      expect(r.started, order).toBeNull();
+      expect(r.drainStrike, order).toBe(true);
+      expect(r.skipped, order).toEqual([]);
+      expect(s.calls, order).toEqual([]);
+    }
+  });
+
+  it('先頭が断ると次のキューが開始される(standard: boost → band)', () => {
+    const s = spy((kind) => kind !== 'boost');
+    const queues = q({ boosts: ['B'], bands: ['C'] });
+    const r = runFxDrain(queues, 'standard', { start: s.start });
+    expect(s.calls).toEqual(['boost:B', 'band:C']);
+    expect(r.started).toEqual({ kind: 'band', effect: 'C' });
+    expect(r.skipped).toEqual([{ kind: 'boost', effect: 'B' }]);
+    expect(r.drainStrike).toBe(false);
+  });
+
+  it('全部断られたら drainStrike が立つ(B3 の本体 — pendingStrike が宙に浮かない)', () => {
+    for (const order of ORDERS) {
+      const s = spy(() => false);
+      const queues = q({ boosts: ['B'], bands: ['C'], roulettes: ['R'] });
+      const r = runFxDrain(queues, order, { start: s.start });
+      expect(r.started, order).toBeNull();
+      expect(r.drainStrike, order).toBe(true);
+      expect(r.skipped.length, order).toBe(3);
+      // 捨てた順は drainFxQueues の優先順と一致する。
+      expect(r.skipped.map((x) => `${x.kind}:${x.effect}`), order).toEqual(
+        order === 'roulette-first' ? ['roulette:R', 'boost:B', 'band:C'] : ['boost:B', 'band:C', 'roulette:R']
+      );
+      // 断られた要素はキューへ戻らない。
+      expect([queues.boosts, queues.bands, queues.roulettes], order).toEqual([[], [], []]);
+    }
+  });
+
+  it('最初に成功した時点で止まる — 後続キューは減らない', () => {
+    const s = spy(() => true);
+    const queues = q({ boosts: ['B'], bands: ['C'], roulettes: ['R1', 'R2'] });
+    const r = runFxDrain(queues, 'standard', { start: s.start });
+    expect(r.started).toEqual({ kind: 'boost', effect: 'B' });
+    expect(s.calls).toEqual(['boost:B']);
+    expect(queues.bands).toEqual(['C']);
+    expect(queues.roulettes).toEqual(['R1', 'R2']);
+  });
+
+  it('achieved は最初の start より前に1回だけ再生され、開始スロットを消費しない', () => {
+    const order: FxDrainOrder = 'standard';
+    const log: string[] = [];
+    const queues = q({ achieved: 'CLEAR', boosts: ['B'], bands: ['C'] });
+    const r = runFxDrain(queues, order, {
+      playAchieved: (e) => log.push(`achieved:${e}`),
+      start: (kind, effect) => {
+        log.push(`${kind}:${effect}`);
+        return kind !== 'boost';
+      },
+    });
+    expect(log).toEqual(['achieved:CLEAR', 'boost:B', 'band:C']);
+    expect(r.achieved).toBe('CLEAR');
+    expect(r.started).toEqual({ kind: 'band', effect: 'C' });
+    expect(queues.achieved).toBeNull();
+  });
+
+  it('CLEAR + 全部断られても achieved は返り、drainStrike が立つ', () => {
+    const r = runFxDrain(q({ achieved: 'CLEAR', bands: ['C'] }), 'standard', { start: () => false });
+    expect(r.achieved).toBe('CLEAR');
+    expect(r.started).toBeNull();
+    expect(r.drainStrike).toBe(true);
+  });
+
+  it('満杯のキューを全部断っても呼び出し回数は有界(13回)で maxSteps に届かない', () => {
+    const s = spy(() => false);
+    const queues = q({
+      boosts: ['B1', 'B2'],
+      bands: ['C1', 'C2'],
+      roulettes: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9'],
+    });
+    const r = runFxDrain(queues, 'standard', { start: s.start });
+    expect(s.calls.length).toBe(13);
+    expect(r.drainStrike).toBe(true);
+  });
+
+  it('maxSteps で打ち切られても安全側(drainStrike: true)へ倒れる', () => {
+    const s = spy(() => false);
+    const queues = q({ boosts: ['B1', 'B2'], bands: ['C1', 'C2'] });
+    const r = runFxDrain(queues, 'standard', { start: s.start }, 2);
+    expect(s.calls.length).toBe(2);
+    expect(r.started).toBeNull();
+    expect(r.drainStrike).toBe(true);
   });
 });

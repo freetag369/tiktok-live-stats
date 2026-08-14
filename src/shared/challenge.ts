@@ -484,6 +484,13 @@ export const CLIP_ABORT_MS = 8_000;
  * .fx-layer の overflow:hidden で切れる。
  */
 export const FLOAT_MAX = 3;
+/**
+ * フロートバナーの安全弁(ms)。最長は .float.gift-card の 2.2 秒なので余裕を見た値。
+ * shake / mini / clip と同じ「animationend 単独依存にしない」規約 — 遮蔽ウィンドウでは
+ * animationend が届かず、バナーが出たまま固着して FLOAT_MAX の枠を食い潰す。
+ * CSS の実尺との整合は test/unit/float-abort.spec.ts が monitor.css を読んで固定する。
+ */
+export const FLOAT_ABORT_MS = 3_000;
 /** 同時に表示する簡易演出の上限(floats/flashes と同じ「積む」層)。 */
 export const MINI_MAX = 3;
 /** 簡易演出の安全弁(ms)。最長の mini が 880ms(panic)なので余裕を見た値。 */

@@ -99,6 +99,19 @@ export class ChallengeEngine {
    * エンジン全体の規約どおり DB には一切書かない。
    */
   private runViewers = new Map<UserId, RunParticipant>();
+  /**
+   * ラン中のユニーク参加者の ID 集合。**参加者数は runViewers.size ではなくこれ**を使う
+   * — あちらは pruneRunViewers で「💎上位200 ∪ いいね上位200」まで間引かれるので、
+   * 4000 ユニークを超えた配信では CLEAR リザルトもランキング盤も参加者数が
+   * 約400で頭打ちになっていた(毎回ほぼ同じ数字が出るので壊れているのが丸わかりだった)。
+   *
+   * session.ts の seenIds / uniqueViewers(:90-99)と同じ「ID 集合を剪定対象の
+   * Map から切り離す」既決パターン。ID 文字列だけなので RunParticipant より
+   * 1桁軽く、剪定しない。Set なので**間引きで消えた人が戻っても二重に数えない**
+   * (単純なカウンタだと再訪のたびに +1 されて青天井に膨らむ)。
+   * ライフサイクルは runViewers と完全に同じ — start/reset でクリア、stop では残す。
+   */
+  private runParticipantIds = new Set<UserId>();
   /** CLEAR 時に1度だけ組み立てて凍結する。生成後は絶対に書き換えない。 */
   private result: ChallengeResult | null = null;
   /**
@@ -262,6 +275,7 @@ export class ChallengeEngine {
     this.recentEffects = [];
     this.seenFollowers.clear();
     this.runViewers.clear();
+    this.runParticipantIds.clear();
     this.result = null;
     // 新ランは空のランキングから始まる。出しっぱなしのボードを引き継ぐと
     // モニターが「全員 —」の全画面で始まってしまう。
@@ -322,6 +336,7 @@ export class ChallengeEngine {
     this.recentEffects = [];
     this.seenFollowers.clear();
     this.runViewers.clear();
+    this.runParticipantIds.clear();
     this.result = null;
     this.rankShown = false;
     this.resetLikeAccumulators();
@@ -1050,6 +1065,15 @@ export class ChallengeEngine {
     const t = setTimeout(() => {
       this.freezeTimer = null;
       this.flushFxFreeze(this.now());
+      // 早発(注入時計 = Date.now と libuv の単調時計のズレ。NTP 巻き戻しや
+      // サスペンド/レジュームで起きる)だと flushFxFreeze が冒頭の
+      // 「nowMs < fxFreezeUntilMs なら return」で戻るため、**タイマーだけ消えて
+      // 凍結が残る**。配信終了後は 2Hz tick もイベント入口も無いので、ここで
+      // 張り直さないと凍結と保留 op が次の RPC まで永久に解除されない。
+      // ドレインまで到達した経路は末尾で既に張り直しているので、null ガードで
+      // 二重張り(= onFreezeExpired が2回飛ぶ)を防ぐ。
+      // 張り直しの delay は「残りのズレ + 25ms」なので、時計が追いつけば収束する。
+      if (this.fxFreezeUntilMs !== null && this.freezeTimer === null) this.armFreezeTimer();
       if (this.dirty) this.onFreezeExpired?.();
     }, delay);
     // worker の shutdown をこのタイマーが引き留めない(テストの後始末も同様)。
@@ -1413,6 +1437,9 @@ export class ChallengeEngine {
    * (events.ts の各フィールドのコメント参照)。
    */
   private touchParticipant(v: NormViewer): RunParticipant {
+    // 参加者数の権威。Set なので冪等 — 間引きの前でも後でも結果は同じなので、
+    // 下の「間引きは挿入前」という既存の順序規約には一切触れない。
+    this.runParticipantIds.add(v.userId);
     let p = this.runViewers.get(v.userId);
     if (!p) {
       // 間引きは**挿入前**に回す。挿入後にやると、いま作った 0💎 の p が生存者に
@@ -1483,7 +1510,7 @@ export class ChallengeEngine {
     return {
       atMs,
       startedMs: this.startedMs,
-      participants: this.runViewers.size,
+      participants: this.runParticipantIds.size,
       gifts: this.topRank('diamonds', CHALLENGE_RESULT_TOP_N),
       likes: this.topRank('likes', CHALLENGE_RESULT_TOP_N),
     };

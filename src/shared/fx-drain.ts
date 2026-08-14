@@ -72,3 +72,74 @@ export function drainFxQueues<T>(q: FxDrainQueues<T>, order: FxDrainOrder): FxDr
   }
   return { achieved, next: null, drainStrike: true };
 }
+
+/**
+ * 1回の runFxDrain で試す最大件数。到達しない上限(下の停止性の議論を参照)で、
+ * 将来 start が新たにキューへ積むようになった場合の暴走止め。
+ */
+export const FX_DRAIN_MAX_STEPS = 32;
+
+export interface FxDrainStep<T> {
+  kind: 'roulette' | 'boost' | 'band';
+  effect: T;
+}
+
+export interface FxDrainRun<T> {
+  /** 先に「再生」した CLEAR 演出(開始スロットを消費しない)。 */
+  achieved: T | null;
+  /** 実際に開始した演出。null = 誰も始まらなかった。 */
+  started: FxDrainStep<T> | null;
+  /** 断られて捨てた演出(捨てた順・ログ用)。 */
+  skipped: FxDrainStep<T>[];
+  /** 保留着弾を流してよいか。started === null と常に一致する。 */
+  drainStrike: boolean;
+}
+
+/**
+ * 「何かが実際に始まるまで」ドレインし続けるドライバ。
+ *
+ * 従来の呼び出し側は drainFxQueues の結果を**1件だけ**試し、start* が断った場合
+ * (素材欠損 / prefers-reduced-motion / 期限切れ)でもそのまま return していた。
+ * 断られると hold が張られず onIdle も drainPendingStrike も走らないので、
+ * pendingStrike が宙に浮いたまま floatHoldState().strikePending が true で固着し、
+ * 以降のいいね/ストックのバナーが shouldDeferFloat で**永久に**保留される。
+ * 正しくは「断られたら次のキューへ落ちる」で、出口は必ず
+ * 「started(誰かが始まった)」か「drainStrike(誰も始まらなかった)」の2つだけ。
+ *
+ * 停止性: drainFxQueues は next を返す前にキューから shift 済みなので、各周回は
+ * 必ず return するか要素を1つ消費する。start は積まない(3つの start* は effect を
+ * 読むだけ)ので、上限は boosts(2) + bands(2) + roulettes(9) + 1 = 14 < 32。
+ * maxSteps に達した場合も **drainStrike: true** 側へ倒す — pendingStrike を
+ * 宙に浮かせないことを最優先する。
+ *
+ * drainFxQueues 本体は1文字も変えない(test/unit/fx-drain.spec.ts の順序契約を維持)。
+ */
+export function runFxDrain<T>(
+  q: FxDrainQueues<T>,
+  order: FxDrainOrder,
+  hooks: {
+    /** CLEAR 演出の再生。最初の1回だけ、どの start よりも前に呼ばれる。 */
+    playAchieved?: (e: T) => void;
+    /** 演出の開始。false = 断った(次のキューへ落ちる)。 */
+    start: (kind: 'roulette' | 'boost' | 'band', effect: T) => boolean;
+  },
+  maxSteps: number = FX_DRAIN_MAX_STEPS
+): FxDrainRun<T> {
+  let achieved: T | null = null;
+  const skipped: FxDrainStep<T>[] = [];
+  for (let i = 0; i < maxSteps; i++) {
+    const r = drainFxQueues(q, order);
+    if (r.achieved !== null && achieved === null) {
+      achieved = r.achieved;
+      // 2周目以降に同じ CLEAR を拾わせない(再生は1回だけ)。
+      q.achieved = null;
+      hooks.playAchieved?.(r.achieved);
+    }
+    if (!r.next) return { achieved, started: null, skipped, drainStrike: true };
+    if (hooks.start(r.next.kind, r.next.effect)) {
+      return { achieved, started: r.next, skipped, drainStrike: false };
+    }
+    skipped.push(r.next);
+  }
+  return { achieved, started: null, skipped, drainStrike: true };
+}

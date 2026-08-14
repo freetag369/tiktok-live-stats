@@ -6,6 +6,7 @@ import {
   CHALLENGE_RESULT_TOP_N,
   CLIP_ABORT_MS,
   CLIP_QUEUE_MAX,
+  FLOAT_ABORT_MS,
   FLOAT_MAX,
   GIFT_FX_REPEAT_TIMERS_MAX,
   MINI_ABORT_MS,
@@ -25,7 +26,8 @@ import {
 } from '@shared/challenge';
 import { num } from '@shared/format';
 import { CFG_POLL_MS } from '@shared/constants';
-import { drainFxQueues, type FxDrainOrder } from '@shared/fx-drain';
+import { runFxDrain, type FxDrainOrder } from '@shared/fx-drain';
+import { boostStartTiming, planBoostStart, type BoostStartPlan } from '@shared/boost-start';
 import {
   shouldDeferFloat,
   shouldFlushDeferredFloats,
@@ -364,6 +366,10 @@ export function MonitorView(): React.JSX.Element {
   /** 簡易演出は floats/flashes と同じ「積む」層(上限 MINI_MAX)。 */
   const [minis, setMinis] = useState<MiniItem[]>([]);
   const miniTimers = useRef<number[]>([]);
+  /** フロートバナーの安全弁タイマー(発火時に自己削除するので配列は有界)。 */
+  const floatTimers = useRef<number[]>([]);
+  /** tickGauge の強制レイアウトを次フレームへ逃がす rAF。0 = 予約なし。 */
+  const gaugeTickRaf = useRef(0);
   /** 連打ギフトの反復ショットのタイマー。値には一切効かないので安全弁は不要。 */
   const repeatTimers = useRef<number[]>([]);
   const [shake, setShake] = useState<{ key: number; cls: string } | null>(null);
@@ -549,7 +555,21 @@ export function MonitorView(): React.JSX.Element {
   // 切り替わり、「カットイン → CLEAR 演出 → リザルト」の順序が壊れる。
   // deps はオブジェクトではなく boolean に畳む — roulette/bandClip/boostClip は
   // フェード({...c, out:true})等で参照が変わるたびにタイマーを張り直していた。
-  const fxHoldBusy = roulette !== null || bandClip !== null || stockCutin !== null || boostClip !== null;
+  //
+  // 【不変条件】最前面のオーバーレイを描く state は**全部**ここに並べること。
+  // boostSettle だけ名前が *Clip で終わらないため長らく漏れていた: 清算発表は
+  // finishBoostFx の startRoll が setBoostClip(null) してから setBoostSettle(...) を
+  // 呼ぶので、roll/lock/fly(最長 rollup 2200 + hold 650 + 飛翔 420 ≒ 3.3 秒)の
+  // あいだ「オーバーレイが出ているのに busy=false」になり、CLEAR のリザルト画面が
+  // ロールアップの上に生えていた(7セグが 0 に着く前・CLEAR 演出の前)。
+  // ref 由来にしてはいけない — ref は再レンダーを起こさないので、下の2つの
+  // effect が解除時に再実行されず「リザルトが永久に出ない」側へ静かに壊れる。
+  const fxHoldBusy =
+    roulette !== null ||
+    bandClip !== null ||
+    stockCutin !== null ||
+    boostClip !== null ||
+    boostSettle !== null;
 
   /*
    * 保留バナーの最後の砦 — 全カットアニメーションが終わった瞬間に、取り残された
@@ -779,6 +799,8 @@ export function MonitorView(): React.JSX.Element {
       clearBoostTimers();
       clearRepeatTimers();
       clearMiniTimers();
+      clearFloatTimers();
+      if (gaugeTickRaf.current !== 0) cancelAnimationFrame(gaugeTickRaf.current);
       clearClipTimer();
       clearStrikeClipTimer();
       clearShakeTimer();
@@ -888,7 +910,24 @@ export function MonitorView(): React.JSX.Element {
   }, [challenge?.recentEffects, cfgTried]);
 
   function pushFloat(node: React.ReactNode, cls: string): void {
-    setFloats((f) => [...f.slice(-(FLOAT_MAX - 1)), { key: ++fxKey, node, cls }]);
+    // key は updater の**外**で採番する — StrictMode は updater を二重実行するので、
+    // 中で ++fxKey すると下のタイマーが存在しない key を掴む。
+    const key = ++fxKey;
+    setFloats((f) => [...f.slice(-(FLOAT_MAX - 1)), { key, node, cls }]);
+    // 安全弁: floats だけ安全弁を持っていなかった。遮蔽ウィンドウで animationend が
+    // 届かないとバナーが固着し、FLOAT_MAX=3 の枠を食って以後のバナーが出なくなる。
+    // playMini と同じ自己削除方式 — 配列は FLOAT_ABORT_MS 窓で自然に有界。
+    const tid = window.setTimeout(() => {
+      const a = floatTimers.current;
+      const at = a.indexOf(tid);
+      if (at !== -1) a.splice(at, 1);
+      setFloats((s2) => s2.filter((x) => x.key !== key));
+    }, FLOAT_ABORT_MS);
+    floatTimers.current.push(tid);
+  }
+  function clearFloatTimers(): void {
+    for (const t of floatTimers.current) window.clearTimeout(t);
+    floatTimers.current = [];
   }
   function pushFlash(cls: string): void {
     setFlashes((f) => [...f.slice(-3), { key: ++fxKey, cls }]);
@@ -1196,24 +1235,63 @@ export function MonitorView(): React.JSX.Element {
     order: FxDrainOrder,
     hooks?: { onNext?: (kind: 'roulette' | 'boost' | 'band') => void; onIdle?: () => void }
   ): void {
-    const r = drainFxQueues(
-      {
-        achieved: pendingAchieved.current,
-        boosts: pendingBoosts.current,
-        bands: pendingBands.current,
-        roulettes: rouletteQueue.current,
-      },
-      order
-    );
+    const queues = {
+      achieved: pendingAchieved.current,
+      boosts: pendingBoosts.current,
+      bands: pendingBands.current,
+      roulettes: rouletteQueue.current,
+    };
     pendingAchieved.current = null;
-    if (r.achieved) playEffect(r.achieved);
-    if (r.next) {
-      hooks?.onNext?.(r.next.kind);
-      if (r.next.kind === 'roulette') startRoulette(r.next.effect, true);
-      else if (r.next.kind === 'boost') startBoostFx(r.next.effect);
-      else startBandFx(r.next.effect);
-      return;
-    }
+    const r = runFxDrain(queues, order, {
+      playAchieved: (e) => playEffect(e),
+      start: (kind, e) => {
+        if (kind === 'roulette') {
+          // startRoulette は戻り値を持たず、必ず rouletteHold を張る = 断れない。
+          hooks?.onNext?.('roulette');
+          startRoulette(e, true);
+          return true;
+        }
+        if (kind === 'band') {
+          // 断る条件は startBandFx の入口ガードと同じ述語を先に見る — 断る相手の
+          // ために onNext(ルーレット BGM の即断)を撃たないため。撃つと次の
+          // スピンで BGM が頭から鳴り直す。
+          if (!bandWillStart(e)) {
+            fxWarn('ドレイン: カットインを開始できない — 次の持ち越しへ', {
+              clip: e.fxBandClip,
+              durationMs: e.fxDurationMs,
+              reducedMotion: prefersReducedMotion(),
+            });
+            return false;
+          }
+          hooks?.onNext?.('band');
+          return startBandFx(e);
+        }
+        // ブーストだけは「期限切れ」がある。worker のフィーバーは絶対時刻で走り、
+        // ルーレット連鎖(最長 ~19秒)では worker は凍結しないので、キューから
+        // 出す時点で終わっているフィーバーがありうる。そのまま再生すると
+        // 0 のままのタップカウンタを不透明動画で最大 26 秒見せることになる。
+        const plan = planBoostStart(boostStartTiming(e), Date.now());
+        if (plan.action === 'skip') {
+          fxWarn('ドレイン: フィーバーの期限切れ — 再生しない', {
+            reason: plan.reason,
+            atMs: e.atMs,
+            endsAtMs: e.boostEndsAtMs,
+            nowMs: Date.now(),
+          });
+          return false;
+        }
+        if (!boostWillStart(e)) {
+          fxWarn('ドレイン: ブースト開始不可(尺不足 / 動きの抑制)', {
+            durationMs: e.fxDurationMs,
+            reducedMotion: prefersReducedMotion(),
+          });
+          return false;
+        }
+        hooks?.onNext?.('boost');
+        return startBoostFx(e, plan);
+      },
+    });
+    if (r.started) return;
     hooks?.onIdle?.();
     // 次演出を始めないパスの最後だけ — start* の冒頭 flushStrike に出したばかりの
     // チェーンを畳ませない(従来の finish* 各所にあった規約)。
@@ -1494,7 +1572,8 @@ export function MonitorView(): React.JSX.Element {
    * 尺は effect の焼き込み値が権威(worker の凍結と同期)。
    * 戻り値 false = 開始不可(呼び出し側はバナーへフォールバック)。
    */
-  function startBoostFx(e: ChallengeEffect): boolean {
+  function startBoostFx(e: ChallengeEffect, plan: BoostStartPlan = { action: 'full' }): boolean {
+    if (plan.action === 'skip') return false; // 呼び出し側で判定済み(型を閉じるだけ)
     if (!boostWillStart(e)) {
       fxWarn('ブースト開始不可(尺不足 / 動きの抑制)', {
         durationMs: e.fxDurationMs,
@@ -1502,10 +1581,14 @@ export function MonitorView(): React.JSX.Element {
       });
       return false;
     }
-    const introMs = e.boostIntroMs ?? 0;
-    const countMs = e.boostCountMs ?? 0;
+    // 途中参加(resume)は起動カットインを丸ごと捨て、カウントダウンの残りと
+    // ウィンドウの残りだけを組み直す。3・2・1 は映像に焼き込まれていて「1」が
+    // タップ開始と同期する契約(shared/challenge.ts の TAP_BOOST_COUNT_CLIPS)
+    // なので、段の尺ではなく**ウィンドウが開く時刻**の側を守る。
+    const introMs = plan.action === 'full' ? (e.boostIntroMs ?? 0) : 0;
+    const countMs = plan.action === 'full' ? (e.boostCountMs ?? 0) : plan.countMs;
     const preMs = introMs + countMs;
-    const totalMs = e.fxDurationMs ?? 0;
+    const totalMs = plan.action === 'full' ? (e.fxDurationMs ?? 0) : plan.remainingMs;
     // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。handoff=true —
     // 直後にこの演出が始まるので、保留バナーは出さずに持ち越す(演出明けの着弾で出る)。
     flushStrike(true);
@@ -2060,13 +2143,29 @@ export function MonitorView(): React.JSX.Element {
     if (cfg) playMini(miniForSlot(cfg.challenge, 'stock-full'), stockDelta);
   }
 
-  /** いいね着弾でゲージを明滅させる(remove→reflow→add で毎回再生)。 */
+  /**
+   * いいね着弾でゲージを明滅させる(remove→reflow→add で毎回再生)。
+   *
+   * これは粒子エンジンの onArrive として **rAF の中から**呼ばれる
+   * (engine.ts の update() が p.onArrive?.() を叩く)。offsetWidth の読み出しは
+   * 強制同期レイアウトなので、エンジンの update と render のあいだで毎ハート
+   * レイアウトが走っていた。1フレーム後ろへ遅らせて、ついでに1バーストぶんの
+   * 着弾を1回の再スタートに畳む(最後の再スタートだけが見えるので見た目は同じ)。
+   *
+   * cancel-and-reschedule にしてあるのが要点 — 素の `if (pending) return` だと、
+   * 遮蔽ウィンドウで rAF が止まったときに pending が true のまま固着し、
+   * 復帰後もゲージが二度と明滅しなくなる(このモニター窓は実際に遮蔽される)。
+   */
   function tickGauge(): void {
-    const el = gaugeTrackRef.current;
-    if (!el) return;
-    el.classList.remove('tick');
-    void el.offsetWidth;
-    el.classList.add('tick');
+    if (gaugeTickRaf.current !== 0) cancelAnimationFrame(gaugeTickRaf.current);
+    gaugeTickRaf.current = requestAnimationFrame(() => {
+      gaugeTickRaf.current = 0;
+      const el = gaugeTrackRef.current;
+      if (!el) return;
+      el.classList.remove('tick');
+      void el.offsetWidth;
+      el.classList.add('tick');
+    });
   }
 
   /**
@@ -2441,7 +2540,21 @@ export function MonitorView(): React.JSX.Element {
           if (pendingBoosts.current.length < 2) pendingBoosts.current.push(e);
           return;
         }
-        if (!startBoostFx(e)) {
+        // 持ち越さない直行経路でも遅れは起きる — freshChallengeEffects は
+        // EFFECT_FRESH_MS(5秒)まで古い effect を通すので、既定設定
+        // (前置き8秒 + ウィンドウ5秒)だと 4.9 秒遅れの再生でタップ可能時間が
+        // 0.1 秒しか残らない。判定はキュー経路とまったく同じものを共有する。
+        const directPlan = planBoostStart(boostStartTiming(e), Date.now());
+        if (directPlan.action === 'skip') {
+          // 終わったフィーバーの「発動!」バナーは出さない — 結果は boost-end 側が出す。
+          fxWarn('フィーバーの期限切れ — 再生しない(直行経路)', {
+            reason: directPlan.reason,
+            atMs: e.atMs,
+            endsAtMs: e.boostEndsAtMs,
+          });
+          return;
+        }
+        if (!startBoostFx(e, directPlan)) {
           // 動きの抑制等で演出を出せない — 発動の事実だけバナーで残す。
           pushFloat(
             <>
@@ -2456,6 +2569,23 @@ export function MonitorView(): React.JSX.Element {
         return;
       }
       case 'boost-end': {
+        // このフィーバーより前に積まれた boost-start は全部死んでいる — worker は
+        // 同時に1本しかフィーバーを持たず(activateBoost が前を強制清算する)、
+        // boost-end の id は必ずその start より大きい。
+        // **期限(boostEndsAtMs)だけでは落とせない**: モニターを閉じた/動きの
+        // 抑制を入れた等の強制清算(worker の applyFxCapsChange)では、期限が
+        // まだ未来のままフィーバーが終わっている。
+        // 押し出し効果もある — 積む側の上限は2件なので、死んだ1件が枠を占めると
+        // 直後の**生きた**ブーストが入り口で捨てられる。
+        if (pendingBoosts.current.length > 0) {
+          const alive = pendingBoosts.current.filter((x) => x.id > e.id);
+          if (alive.length !== pendingBoosts.current.length) {
+            fxWarn('boost-end: 終了済みフィーバーの持ち越しを破棄', {
+              dropped: pendingBoosts.current.length - alive.length,
+            });
+            pendingBoosts.current = alive;
+          }
+        }
         if (boostHold.current) {
           finishBoostFx(e);
           return;
@@ -2996,7 +3126,14 @@ export function MonitorView(): React.JSX.Element {
               onAnimationEnd={(ev) => {
                 // ギフトカード内の子アニメーション(シマー等)のバブリングで
                 // 早死にしないよう、自分自身の浮上アニメ終了だけを拾う。
-                if (ev.target !== ev.currentTarget) return;
+                //
+                // **擬似要素は target では弾けない**: ::after の float-shine(1.6s 固定)
+                // が終わると target === currentTarget のままイベントが届くので、
+                // animation-duration を 2.2s に伸ばした .float.gift-card が 1.6s で
+                // 消えていた(::after 側に上書きが無いため)。擬似要素かどうかは
+                // ev.pseudoElement('' / '::after')で見る。
+                // Electron 43.2.0 / Chrome 150 で実測確認済み。
+                if (ev.target !== ev.currentTarget || ev.pseudoElement) return;
                 setFloats((s) => s.filter((x) => x.key !== f.key));
               }}
             >

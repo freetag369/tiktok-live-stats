@@ -1272,6 +1272,68 @@ describe('ChallengeEngine — CLEAR リザルト(ラン中の参加者 TOP5)', (
     const r = clear(e);
     expect(r.gifts[0]).toMatchObject({ userId: 'whale', diamonds: 100_000 });
     expect(r.likes[0]).toMatchObject({ userId: 'fan', likes: 9_999 });
+    // このテストは間引きを踏むのに参加者数を見ていなかった — runViewers.size を
+    // 読んでいた頃はここが 400 前後に潰れていた(専用 describe も参照)。
+    expect(r.participants).toBe(5002);
+  });
+});
+
+describe('ChallengeEngine — participants は間引きで減らない(リザルト/ランキング盤の「参加 N 人」)', () => {
+  const CLEAR_CFG = { initialValue: 100, pressStep: 1_000_000 };
+  /** 間引きが実際に起きたことの確認用(上位 200×2 の和集合 = 最大 400)。 */
+  interface EngineInternals { runViewers: Map<string, unknown> }
+  const peek = (e: ChallengeEngine): EngineInternals => e as unknown as EngineInternals;
+
+  it('間引き(4000 ユニーク)を跨いでも参加者数は実数のまま — 約400 に頭打ちしない', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    const n = 9_000;
+    for (let i = 0; i < n; i++) e.handleEvent(like(1, { viewer: { userId: `mob${i}` } }));
+    expect(e.toggleRank().rankBoard!.participants).toBe(n);
+    const s = e.press();
+    expect(s.status).toBe('achieved');
+    expect(s.result!.participants).toBe(n);
+    // 前提が崩れたらテストの意味が無くなるので、間引きが起きたことも押さえる
+    // (剪定後も再成長するので上限は固定値で押さえられない — 実数より減っていれば十分)。
+    expect(peek(e).runViewers.size).toBeLessThan(n);
+  });
+
+  it('間引きで消えた参加者が戻っても二重に数えない(単純カウンタとの違い)', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    const n = 9_000;
+    for (let i = 0; i < n; i++) e.handleEvent(like(1, { viewer: { userId: `mob${i}` } }));
+
+    // **実際に間引かれた**人を選ぶ。mob0 のような先頭の人は、いいね数が全員同数
+    // (=1)で pruneRunViewers のソートが安定なため常に生き残るので、再訪させても
+    // if (!p) を踏まず、単純カウンタでも二重計上が起きない = テストが空振りする。
+    const survivors = peek(e).runViewers;
+    const evicted: string[] = [];
+    for (let i = 0; i < n && evicted.length < 3; i++) {
+      if (!survivors.has(`mob${i}`)) evicted.push(`mob${i}`);
+    }
+    expect(evicted.length, '間引きが起きていない = テストの前提が崩れている').toBe(3);
+
+    const before = e.toggleRank().rankBoard!.participants;
+    expect(before).toBe(n);
+    for (const id of evicted) e.handleEvent(like(1, { viewer: { userId: id } }));
+    expect(e.get().rankBoard!.participants).toBe(before);
+  });
+
+  it('start / reset でゼロに戻り、stop では残る(runViewers と同じ規約)', () => {
+    const e = engine(cfg(CLEAR_CFG));
+    e.start();
+    e.handleEvent(gift({ viewer: { userId: 'a', nickname: 'A' }, diamonds: 10 }));
+    e.toggleRank();
+    expect(e.get().rankBoard!.participants).toBe(1);
+    expect(e.stop().rankBoard!.participants).toBe(1); // stop は集計を残す
+    // start は rankShown を false に戻す規約なので、出し直してから確認する。
+    e.start();
+    expect(e.toggleRank().rankBoard!.participants).toBe(0);
+    e.handleEvent(gift({ viewer: { userId: 'b', nickname: 'B' }, diamonds: 1 }));
+    expect(e.get().rankBoard!.participants).toBe(1);
+    e.reset();
+    expect(e.toggleRank().rankBoard!.participants).toBe(0);
   });
 });
 
@@ -2493,6 +2555,57 @@ describe('ChallengeEngine — 凍結期限のワンショットタイマー', ()
       expect(e.get().fxFreezeUntilMs).toBeNull();
       expect(e.get().value).toBe(1040);
       expect(nudged).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('早発(注入時計がまだ期限前)でもタイマーを張り直し、遅れて必ず解除する', () => {
+    vi.useFakeTimers();
+    try {
+      let t = NOW;
+      const e = engine(bandCfg({ initialValue: 1000, followStep: 10 }), () => t);
+      let nudged = 0;
+      e.setOnFreezeExpired(() => nudged++);
+      e.start();
+      e.handleEvent(gift({ diamonds: 30 })); // band1: 6.5 秒凍結
+      e.handleEvent(follow('f1')); // 保留
+
+      // タイマーだけ発火させ、注入時計は期限の 200ms 手前で止めておく
+      // (= NTP 巻き戻し/サスペンドで libuv 時計と Date.now がズレた状態)。
+      t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS - 200;
+      vi.advanceTimersByTime(6000 + GIFT_FX_FREEZE_MARGIN_MS + 25);
+      expect(e.get().fxFreezeUntilMs).not.toBeNull(); // まだ解除しないのが正しい
+      expect(e.get().value).toBe(1030);
+
+      // 時計が追いつけば、2Hz tick もイベントも無しで張り直したタイマーが解除する。
+      t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS + 500;
+      vi.advanceTimersByTime(1000);
+      expect(e.get().fxFreezeUntilMs).toBeNull();
+      expect(e.get().value).toBe(1040);
+      expect(e.get().stats.follows).toBe(1);
+      expect(nudged).toBeGreaterThanOrEqual(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('再凍結でドレインが中断してもタイマーを二重に張らない', () => {
+    vi.useFakeTimers();
+    try {
+      let t = NOW;
+      const e = engine(bandCfg({ initialValue: 1000, followStep: 10 }), () => t);
+      let nudged = 0;
+      e.setOnFreezeExpired(() => nudged++);
+      e.start();
+      e.handleEvent(gift({ diamonds: 30 })); // band1
+      e.handleEvent(gift({ giftId: '8888', diamonds: 80 })); // 保留 → 解除時に再凍結
+      e.handleEvent(follow('f1'));
+      t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS + 25;
+      vi.advanceTimersByTime(6000 + GIFT_FX_FREEZE_MARGIN_MS + 25);
+      // 二重張りなら nudged が 2 になる。
+      expect(nudged).toBe(1);
+      expect(e.get().fxFreezeUntilMs).not.toBeNull();
     } finally {
       vi.useRealTimers();
     }
