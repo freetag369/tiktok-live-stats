@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CHALLENGE_EFFECTS_MAX,
   DEFAULT_CHALLENGE,
   EFFECT_FRESH_MS,
   TEST_EFFECT_FRESH_MS,
@@ -58,6 +59,20 @@ describe('freshChallengeEffects — 演出 watermark の共有規約', () => {
     const r = freshChallengeEffects(effects, 100, NOW);
     expect(r.next).toBe(2);
     expect(r.play.map((e) => e.id)).toEqual([1, 2]);
+  });
+
+  it('リング溢れ(1 delta に上限+1件以上)は古い方から欠番になるが、watermark は前進し新しい分は再生される', () => {
+    // 仕様の文書化: recentEffects は CHALLENGE_EFFECTS_MAX(12)件のリングなので、
+    // 500ms の delta 間に 13 件以上積まれると古い方が renderer に届かない。
+    // 「値だけ適用して演出は捨てる」意図的設計 — 演出が出ない調査の際は
+    // まずこの欠番(id の飛び)と fxWarn ログを疑う。
+    const n = CHALLENGE_EFFECTS_MAX;
+    // watermark=0 から、id 2..n+1 だけが残った(id 1 が溢れた)状況。
+    const effects = Array.from({ length: n }, (_, i) => fx(n + 1 - i)); // [n+1, n, ..., 2]
+    const r = freshChallengeEffects(effects, 0, NOW);
+    expect(r.next).toBe(n + 1);
+    // 残っている n 件は全部再生される(欠番 id:1 はそもそも配られない)。
+    expect(r.play.map((e) => e.id)).toEqual(Array.from({ length: n }, (_, i) => i + 2));
   });
 
   it('空配列でも壊れない(reset 後は巻き戻り扱いで 0 に倒す — 従来実装と同じ)', () => {
