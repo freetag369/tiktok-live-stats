@@ -21,6 +21,14 @@ export interface FullCutClipDef {
   /** 既定行の表示名(日本語・原文のまま。小文字化しない)。 */
   ruleLabel: string;
   /**
+   * 既定行の giftId(完全一致)。**実データで確認できた行だけ入れる。**
+   * ギフト名はクライアントの言語で変わる(日本語UIでも配信イベントは英語名で届く)うえ、
+   * **同名で別IDのギフトが実在する**(Hand Heart は 5660=ハートポーズ と 8343=ハンドハート の2つ)。
+   * giftId だけがその2つを区別できるので、判明しているものは必ずここを埋める。
+   * '' は「このアカウントで未受領のため未確認」— giftName の推定だけで当てにいく。
+   */
+  giftId: string;
+  /**
    * 既定行の giftName(部分一致)。**小文字で書くこと** — matchGiftTrigger が
    * 設定値を小文字前提で比較する。日本語は toLowerCase が恒等なのでそのまま。
    *
@@ -44,8 +52,8 @@ export interface FullCutClipDef {
  * 変えないため。
  */
 export const FULL_CUT_CLIPS_V1: readonly FullCutClipDef[] = [
-  { id: 'cut-rose', label: 'バラ', ruleLabel: 'バラ', giftName: 'バラ', canonical: 'rose', exactName: false },
-  { id: 'cut-rosa', label: 'ローザ', ruleLabel: 'ローザ', giftName: 'ローザ', canonical: '', exactName: false },
+  { id: 'cut-rose', label: 'バラ', ruleLabel: 'バラ', giftId: '5655', giftName: 'rose', canonical: 'rose', exactName: false },
+  { id: 'cut-rosa', label: 'ローザ', ruleLabel: 'ローザ', giftId: '8913', giftName: 'rosa', canonical: '', exactName: false },
 ];
 
 /**
@@ -58,52 +66,52 @@ export const FULL_CUT_CLIPS_V1: readonly FullCutClipDef[] = [
  * それは exactName で塞いである(回帰テスト: test/unit/fx-catalog.spec.ts)。
  */
 export const FULL_CUT_CLIPS_V3: readonly FullCutClipDef[] = [
-  { id: 'cut-subarashii', label: '素晴らしい', ruleLabel: '素晴らしい', giftName: '素晴らしい', canonical: '', exactName: false },
-  { id: 'cut-mini-hanabi', label: 'ミニ花火', ruleLabel: 'ミニ花火', giftName: 'ミニ花火', canonical: '', exactName: false },
-  { id: 'cut-neko-ashi', label: '猫の足', ruleLabel: '猫の足', giftName: '猫の足', canonical: '', exactName: false },
+  { id: 'cut-subarashii', label: '素晴らしい', ruleLabel: '素晴らしい', giftId: '15232', giftName: 'awesome', canonical: '', exactName: false },
+  { id: 'cut-mini-hanabi', label: 'ミニ花火', ruleLabel: 'ミニ花火', giftId: '', giftName: 'mini fireworks', canonical: '', exactName: false },
+  { id: 'cut-neko-ashi', label: '猫の足', ruleLabel: '猫の足', giftId: '', giftName: 'cat paw', canonical: '', exactName: false },
   // ⚠ 'tiktok' は「TikTok Universe」「TikTok Stars」の部分文字列。完全一致必須。
-  { id: 'cut-tiktok', label: 'TikTok', ruleLabel: 'TikTok', giftName: 'tiktok', canonical: '', exactName: true },
+  { id: 'cut-tiktok', label: 'TikTok', ruleLabel: 'TikTok', giftId: '5269', giftName: 'tiktok', canonical: '', exactName: true },
   // ⚠ 2文字の英字は将来のギフト名に埋もれやすいので予防的に完全一致。
-  { id: 'cut-gg', label: 'GG', ruleLabel: 'GG', giftName: 'gg', canonical: '', exactName: true },
-  { id: 'cut-shoken', label: '初見です', ruleLabel: '初見です', giftName: '初見', canonical: '', exactName: false },
-  { id: 'cut-hakushu', label: '拍手', ruleLabel: '拍手', giftName: '拍手', canonical: '', exactName: false },
-  { id: 'cut-daisuki', label: '大好き', ruleLabel: '大好き', giftName: '大好き', canonical: '', exactName: false },
-  { id: 'cut-soft-cream', label: 'ソフトクリーム', ruleLabel: 'ソフトクリーム', giftName: 'ソフトクリーム', canonical: '', exactName: false },
-  { id: 'cut-uchiwa', label: 'うちわ', ruleLabel: 'うちわ', giftName: 'うちわ', canonical: '', exactName: false },
-  { id: 'cut-yakyu', label: '野球', ruleLabel: '野球', giftName: '野球', canonical: '', exactName: false },
-  { id: 'cut-love-letter', label: 'ラブレター', ruleLabel: 'ラブレター', giftName: 'ラブレター', canonical: '', exactName: false },
-  { id: 'cut-ai-no-kaori', label: '愛の香り', ruleLabel: '愛の香り', giftName: '愛の香り', canonical: '', exactName: false },
-  { id: 'cut-finger-heart', label: 'フィンガーハート', ruleLabel: 'フィンガーハート', giftName: 'フィンガーハート', canonical: 'finger_heart', exactName: false },
-  { id: 'cut-nyao', label: 'ニャオ', ruleLabel: 'ニャオ', giftName: 'ニャオ', canonical: '', exactName: false },
-  { id: 'cut-yell', label: 'エール', ruleLabel: 'エール', giftName: 'エール', canonical: '', exactName: false },
-  { id: 'cut-honki', label: '本気', ruleLabel: '本気', giftName: '本気', canonical: '', exactName: false },
-  { id: 'cut-omamori', label: 'おまもり', ruleLabel: 'おまもり', giftName: 'おまもり', canonical: '', exactName: false },
+  { id: 'cut-gg', label: 'GG', ruleLabel: 'GG', giftId: '6064', giftName: 'gg', canonical: '', exactName: true },
+  { id: 'cut-shoken', label: '初見です', ruleLabel: '初見です', giftId: '12202', giftName: 'nice to meet u', canonical: '', exactName: false },
+  { id: 'cut-hakushu', label: '拍手', ruleLabel: '拍手', giftId: '231956', giftName: 'clap clap', canonical: '', exactName: false },
+  { id: 'cut-daisuki', label: '大好き', ruleLabel: '大好き', giftId: '15231', giftName: 'love you so much', canonical: '', exactName: false },
+  { id: 'cut-soft-cream', label: 'ソフトクリーム', ruleLabel: 'ソフトクリーム', giftId: '', giftName: 'ice cream cone', canonical: '', exactName: false },
+  { id: 'cut-uchiwa', label: 'うちわ', ruleLabel: 'うちわ', giftId: '15563', giftName: 'fan', canonical: '', exactName: true },
+  { id: 'cut-yakyu', label: '野球', ruleLabel: '野球', giftId: '7897', giftName: 'baseball', canonical: '', exactName: false },
+  { id: 'cut-love-letter', label: 'ラブレター', ruleLabel: 'ラブレター', giftId: '14113', giftName: 'love letter', canonical: '', exactName: false },
+  { id: 'cut-ai-no-kaori', label: '愛の香り', ruleLabel: '愛の香り', giftId: '919386', giftName: 'love in scent', canonical: '', exactName: false },
+  { id: 'cut-finger-heart', label: 'フィンガーハート', ruleLabel: 'フィンガーハート', giftId: '5487', giftName: 'finger heart', canonical: '', exactName: false },
+  { id: 'cut-nyao', label: 'ニャオ', ruleLabel: 'ニャオ', giftId: '', giftName: 'nyao', canonical: '', exactName: false },
+  { id: 'cut-yell', label: 'エール', ruleLabel: 'エール', giftId: '12238', giftName: 'support', canonical: '', exactName: false },
+  { id: 'cut-honki', label: '本気', ruleLabel: '本気', giftId: '13521', giftName: 'seriously', canonical: '', exactName: false },
+  { id: 'cut-omamori', label: 'おまもり', ruleLabel: 'おまもり', giftId: '', giftName: 'omamori', canonical: '', exactName: false },
   // ⚠ 「ねば〜る君」の「〜」は波ダッシュ/全角チルダの表記ゆれがあるので短く取る。
-  { id: 'cut-nebaaru', label: 'ねば〜る君', ruleLabel: 'ねば〜る君', giftName: 'ねば', canonical: '', exactName: false },
-  { id: 'cut-fukka', label: 'ふっかちゃん', ruleLabel: 'ふっかちゃん', giftName: 'ふっか', canonical: '', exactName: false },
-  { id: 'cut-udon-no', label: 'うどん脳', ruleLabel: 'うどん脳', giftName: 'うどん脳', canonical: '', exactName: false },
-  { id: 'cut-ice-bar', label: 'アイスバー', ruleLabel: 'アイスバー', giftName: 'アイスバー', canonical: '', exactName: false },
-  { id: 'cut-journey-pass', label: 'ジャーニーパス', ruleLabel: 'ジャーニーパス', giftName: 'ジャーニーパス', canonical: '', exactName: false },
-  { id: 'cut-oshi-shosan', label: '推しへの称賛', ruleLabel: '推しへの称賛', giftName: '推しへの称賛', canonical: '', exactName: false },
-  { id: 'cut-kosui', label: '香水', ruleLabel: '香水', giftName: '香水', canonical: 'perfume', exactName: false },
+  { id: 'cut-nebaaru', label: 'ねば〜る君', ruleLabel: 'ねば〜る君', giftId: '', giftName: 'ねば', canonical: '', exactName: false },
+  { id: 'cut-fukka', label: 'ふっかちゃん', ruleLabel: 'ふっかちゃん', giftId: '', giftName: 'ふっか', canonical: '', exactName: false },
+  { id: 'cut-udon-no', label: 'うどん脳', ruleLabel: 'うどん脳', giftId: '', giftName: 'うどん脳', canonical: '', exactName: false },
+  { id: 'cut-ice-bar', label: 'アイスバー', ruleLabel: 'アイスバー', giftId: '', giftName: 'ice bar', canonical: '', exactName: false },
+  { id: 'cut-journey-pass', label: 'ジャーニーパス', ruleLabel: 'ジャーニーパス', giftId: '', giftName: 'journey pass', canonical: '', exactName: false },
+  { id: 'cut-oshi-shosan', label: '推しへの称賛', ruleLabel: '推しへの称賛', giftId: '', giftName: 'applause', canonical: '', exactName: false },
+  { id: 'cut-kosui', label: '香水', ruleLabel: '香水', giftId: '5658', giftName: 'perfume', canonical: 'perfume', exactName: false },
   // ⚠ 「G.O.A.T.バスカー」はドットの有無が揺れうるので後半だけ取る。
-  { id: 'cut-goat-busker', label: 'G.O.A.T.バスカー', ruleLabel: 'G.O.A.T.バスカー', giftName: 'バスカー', canonical: '', exactName: false },
-  { id: 'cut-donut', label: 'ドーナッツ', ruleLabel: 'ドーナッツ', giftName: 'ドーナッツ', canonical: '', exactName: false },
-  { id: 'cut-tensai', label: '天才', ruleLabel: '天才', giftName: '天才', canonical: '', exactName: false },
-  { id: 'cut-boshi-hige', label: '帽子と口ひげ', ruleLabel: '帽子と口ひげ', giftName: '帽子と口ひげ', canonical: '', exactName: false },
-  { id: 'cut-utau-kinoko', label: '歌うキノコ', ruleLabel: '歌うキノコ', giftName: '歌うキノコ', canonical: '', exactName: false },
-  { id: 'cut-pearl-chime', label: 'パールチャイム', ruleLabel: 'パールチャイム', giftName: 'パールチャイム', canonical: '', exactName: false },
-  { id: 'cut-flower-melody', label: 'フラワーメロディ', ruleLabel: 'フラワーメロディ', giftName: 'フラワーメロディ', canonical: '', exactName: false },
-  { id: 'cut-groove-guitar', label: 'グルーヴギター', ruleLabel: 'グルーヴギター', giftName: 'グルーヴギター', canonical: '', exactName: false },
+  { id: 'cut-goat-busker', label: 'G.O.A.T.バスカー', ruleLabel: 'G.O.A.T.バスカー', giftId: '', giftName: 'busker', canonical: '', exactName: false },
+  { id: 'cut-donut', label: 'ドーナッツ', ruleLabel: 'ドーナッツ', giftId: '5879', giftName: 'doughnut', canonical: '', exactName: false },
+  { id: 'cut-tensai', label: '天才', ruleLabel: '天才', giftId: '13523', giftName: 'genius', canonical: '', exactName: false },
+  { id: 'cut-boshi-hige', label: '帽子と口ひげ', ruleLabel: '帽子と口ひげ', giftId: '', giftName: 'hat and moustache', canonical: '', exactName: false },
+  { id: 'cut-utau-kinoko', label: '歌うキノコ', ruleLabel: '歌うキノコ', giftId: '170506', giftName: 'singing mushroom', canonical: '', exactName: false },
+  { id: 'cut-pearl-chime', label: 'パールチャイム', ruleLabel: 'パールチャイム', giftId: '', giftName: 'pearl chime', canonical: '', exactName: false },
+  { id: 'cut-flower-melody', label: 'フラワーメロディ', ruleLabel: 'フラワーメロディ', giftId: '', giftName: 'flower melody', canonical: '', exactName: false },
+  { id: 'cut-groove-guitar', label: 'グルーヴギター', ruleLabel: 'グルーヴギター', giftId: '', giftName: 'groove guitar', canonical: '', exactName: false },
   // ⚠ スクショで名前が省略されていた(「フィエスタアコーディ…」)ので短く取る。
-  { id: 'cut-fiesta-accordion', label: 'フィエスタアコーディオン', ruleLabel: 'フィエスタアコーディオン', giftName: 'フィエスタアコーディ', canonical: '', exactName: false },
-  { id: 'cut-heart-pose', label: 'ハートポーズ', ruleLabel: 'ハートポーズ', giftName: 'ハートポーズ', canonical: '', exactName: false },
-  { id: 'cut-hand-heart', label: 'ハンドハート', ruleLabel: 'ハンドハート', giftName: 'ハンドハート', canonical: 'hand_hearts', exactName: false },
+  { id: 'cut-fiesta-accordion', label: 'フィエスタアコーディオン', ruleLabel: 'フィエスタアコーディオン', giftId: '', giftName: 'fiesta accordion', canonical: '', exactName: false },
+  { id: 'cut-heart-pose', label: 'ハートポーズ', ruleLabel: 'ハートポーズ', giftId: '5660', giftName: '', canonical: '', exactName: false },
+  { id: 'cut-hand-heart', label: 'ハンドハート', ruleLabel: 'ハンドハート', giftId: '8343', giftName: '', canonical: '', exactName: false },
   // ⚠ 「ミシカ ベア」は空白の有無が揺れうるので前半だけ取る。
-  { id: 'cut-mischka-bear', label: 'ミシカベア', ruleLabel: 'ミシカベア', giftName: 'ミシカ', canonical: '', exactName: false },
-  { id: 'cut-cracker', label: 'クラッカー', ruleLabel: 'クラッカー', giftName: 'クラッカー', canonical: '', exactName: false },
-  { id: 'cut-koi-megane', label: '恋のメガネ', ruleLabel: '恋のメガネ', giftName: '恋のメガネ', canonical: '', exactName: false },
-  { id: 'cut-tempo-flute', label: 'テンポフルート', ruleLabel: 'テンポフルート', giftName: 'テンポフルート', canonical: '', exactName: false },
+  { id: 'cut-mischka-bear', label: 'ミシカベア', ruleLabel: 'ミシカベア', giftId: '', giftName: 'mischka', canonical: '', exactName: false },
+  { id: 'cut-cracker', label: 'クラッカー', ruleLabel: 'クラッカー', giftId: '', giftName: 'party popper', canonical: '', exactName: false },
+  { id: 'cut-koi-megane', label: '恋のメガネ', ruleLabel: '恋のメガネ', giftId: '19168', giftName: 'love glasses', canonical: '', exactName: false },
+  { id: 'cut-tempo-flute', label: 'テンポフルート', ruleLabel: 'テンポフルート', giftId: '', giftName: 'tempo flute', canonical: '', exactName: false },
 ];
 
 /** 全42行。並び順がそのまま既定行の評価順(上から先勝ち)になる。 */

@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { rpc } from './ipc/client';
-import { attachLive, useLive } from './state/liveStore';
+import { attachLive, setChallenge, useLive } from './state/liveStore';
 import { go, setSettings, toast, useUi, type Route } from './state/uiStore';
 import { StatusChip } from './components/common';
 import { ZoomControls } from './components/Zoom';
@@ -46,6 +46,26 @@ export function App(): React.JSX.Element {
       off();
       offToast();
     };
+  }, []);
+
+  // タップブースト中のメイン窓 Space。カウンタはモニター窓に出るが、配信者は
+  // ダッシュボード/設定画面を見ながら叩くことが多く、「モニターにフォーカスが
+  // 無いと Space が効かない」を解消する。boost(実発動・▶実演の両方で載る)が
+  // 無いときは素通し — 通常時の Space の意味(スクロール/ボタン活性)を奪わない。
+  // どの画面でも効くよう App に常設する(routes は排他レンダーのため)。
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent): void => {
+      if (ev.key !== ' ' || ev.repeat) return;
+      // 入力系は素通し。BUTTON はブラウザ既定の Space 活性化(keyup で click)に
+      // 任せる — 拾うと PUSH ボタンのフォーカス時に二重押しになる。
+      const t = ev.target as HTMLElement | null;
+      if (t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(t.tagName))) return;
+      if (useLive.getState().challenge?.boost == null) return;
+      ev.preventDefault();
+      void rpc('challenge.press', undefined).then(setChallenge).catch(() => undefined);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   return (

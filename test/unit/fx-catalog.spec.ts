@@ -47,7 +47,8 @@ describe('全面カットのカタログ(shared/fx-cut.ts)', () => {
 
   it('トリガーが全部空の行は無い(どのギフトにも一致しない行は事故)', () => {
     for (const c of FULL_CUT_CLIPS) {
-      expect(c.giftName !== '' || c.canonical !== '', c.id).toBe(true);
+      // giftId も判定に使う — ハートポーズ/ハンドハートは giftId だけを持つ。
+      expect(c.giftId !== '' || c.giftName !== '' || c.canonical !== '', c.id).toBe(true);
     }
   });
 
@@ -92,15 +93,45 @@ describe('全面カットの既定行(DEFAULT_GIFT_FULL_CUT)', () => {
    * 新しい素材を足したときにここが落ちたら、その行を exactName にするか
    * トリガー文字列を長くする。
    */
-  it('各既定行は自分自身に一致する(先勝ちで上の行に食われない)', () => {
+  it('各既定行は自分の giftName に一致する(先勝ちで上の行に食われない)', () => {
     const cfg = fullCutCfg();
     for (const c of FULL_CUT_CLIPS) {
+      // giftName が '' の行(ハートポーズ/ハンドハート)は giftId でしか引けない。
+      if (c.giftName === '') continue;
       const expected = `fullcut-${c.id.slice('cut-'.length)}`;
-      // ruleLabel は実際のギフト名そのもの。ライブ経路は canonical が乗らないので
-      // giftName だけで引く(本番と同じ条件)。
-      const hit = matchGiftFullCut(cfg, { giftId: 'x', giftName: c.ruleLabel });
+      // ⚠ ruleLabel(日本語の表示名)で引いてはいけない。配信イベントの giftName は
+      //   表示言語に関係なく英語で届くので、実データに合わせて c.giftName で引く。
+      //   giftId を 'x' にしているのは giftName の段だけを試すため — giftId が先に
+      //   当たると「食われている」行まで通ってしまい、検出の意味が無くなる。
+      const hit = matchGiftFullCut(cfg, { giftId: 'x', giftName: c.giftName });
       expect(hit?.id, `${c.id} は ${hit?.id ?? 'null'} に食われている`).toBe(expected);
     }
+  });
+
+  it('giftId を持つ行は giftId だけで自分に一致する(同名別IDの区別)', () => {
+    const cfg = fullCutCfg();
+    for (const c of FULL_CUT_CLIPS) {
+      if (c.giftId === '') continue; // 未受領で実 id が未確認の行
+      const expected = `fullcut-${c.id.slice('cut-'.length)}`;
+      const hit = matchGiftFullCut(cfg, { giftId: c.giftId, giftName: '' });
+      expect(hit?.id, `${c.id} (giftId=${c.giftId})`).toBe(expected);
+    }
+  });
+
+  it('giftId は重複しない(2行が同じギフトを奪い合わない)', () => {
+    const ids = FULL_CUT_CLIPS.map((c) => c.giftId).filter((v) => v !== '');
+    expect(new Set(ids).size, `重複: ${ids.join(',')}`).toBe(ids.length);
+  });
+
+  it('ハートポーズ(5660)とハンドハート(8343)は giftId で別々に発火する', () => {
+    const cfg = fullCutCfg();
+    // 同名 Hand Heart で届く別ギフト。giftName では区別できないので giftId が要る。
+    expect(matchGiftFullCut(cfg, { giftId: '5660', giftName: 'Hand Heart' })?.clip).toBe(
+      'cut-heart-pose'
+    );
+    expect(matchGiftFullCut(cfg, { giftId: '8343', giftName: 'Hand Heart' })?.clip).toBe(
+      'cut-hand-heart'
+    );
   });
 
   it('TikTok 行は上位ギフトを奪わない(exactName の実効性)', () => {

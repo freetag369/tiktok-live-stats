@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_LABEL_MAX, ROULETTE_QUEUE_MAX, ROULETTE_SEGMENTS_MAX, rouletteHeadline, ROULETTES_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_LABEL_MAX, ROULETTE_QUEUE_MAX, ROULETTE_SEGMENTS_MAX, rouletteHeadline, ROULETTES_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type { ChallengeConfig, ChallengeResult, ChallengeRouletteConfig } from '@shared/dto';
 import type { CommentEvent, GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
+import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 
 const NOW = Date.UTC(2026, 7, 1, 12, 0, 0);
 
@@ -234,7 +235,8 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
       rouletteSound: { ...DEFAULT_ROULETTE_SOUND, bgm: 'bgm-roulette1', spinSe: 'spin-reel1' },
     };
     const m = migrateChallengeSeSounds(old, 1);
-    expect(m.seSounds['roulette-hit']).toBe('reel-confirm');
+    // v2 が jingle-hit → reel-confirm に寄せた値を、さらに v5 が reel-hit まで進める。
+    expect(m.seSounds['roulette-hit']).toBe('reel-hit');
     expect(m.rouletteSound.bgm).toBe('off');
     expect(m.rouletteSound.spinSe).toBe('spin-reel2');
     // 音量は触らない(自分で下げている人の設定を戻さない)。
@@ -252,7 +254,7 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
     expect(migrateChallengeSeSounds(old, 2)).toBe(old);
   });
 
-  it('migrateChallengeSeSounds: 世代 0 は v1 と v2 の両方を通る(段が積まれている)', () => {
+  it('migrateChallengeSeSounds: 世代 0 は v1・v2・v5 を全部通る(段が積まれている)', () => {
     const v0 = {
       ...DEFAULT_CHALLENGE,
       seSounds: { ...DEFAULT_SE_SOUNDS, like: 'pop', follow: 'question', 'roulette-hit': 'jingle-hit' },
@@ -261,11 +263,90 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
     const m = migrateChallengeSeSounds(v0, 0);
     expect(m.seSounds.like).toBe('like-jam');
     expect(m.seSounds.follow).toBe('follow-jam');
-    expect(m.seSounds['roulette-hit']).toBe('reel-confirm');
+    // jingle-hit →(v2)→ reel-confirm →(v5)→ reel-hit の2段。
+    expect(m.seSounds['roulette-hit']).toBe('reel-hit');
     expect(m.rouletteSound.bgm).toBe('off');
     expect(m.rouletteSound.spinSe).toBe('spin-reel2');
     // 入力は破壊しない。
     expect(v0.rouletteSound.bgm).toBe('bgm-roulette1');
+  });
+
+  it('migrateChallengeSeSounds(v5): 演出9スロットを旧既定のときだけ専用録りへ寄せる', () => {
+    // v5 より前の既定。DEFAULT_SE_SOUNDS はもう新しい値なので、旧既定は手で組む。
+    const V5_WAS = {
+      'gauge-full': 'jingle-hit',
+      'stock-full': 'jingle-steel',
+      comment: 'pop',
+      helper: 'confirm-1',
+      'roulette-kick': 'bong',
+      'roulette-hit': 'reel-confirm',
+      'boost-start': 'jingle-steel',
+      'boost-end': 'fanfare-8bit-short',
+      achieved: 'fanfare-8bit',
+    } as const;
+    const V5_NOW = {
+      'gauge-full': 'gauge-burst',
+      'stock-full': 'stock-burst',
+      comment: 'comment-jam',
+      helper: 'helper-stamp',
+      'roulette-kick': 'reel-kick',
+      'roulette-hit': 'reel-hit',
+      'boost-start': 'boost-tap',
+      'boost-end': 'boost-hit',
+      achieved: 'clear-fanfare',
+    } as const;
+    const slots = Object.keys(V5_WAS) as (keyof typeof V5_WAS)[];
+    const legacy = { ...DEFAULT_CHALLENGE, seSounds: { ...DEFAULT_SE_SOUNDS, ...V5_WAS } };
+
+    // 世代4(= v5 だけ通る)で9スロットとも寄る。
+    const m = migrateChallengeSeSounds(legacy, 4);
+    for (const slot of slots) expect(m.seSounds[slot], slot).toBe(V5_NOW[slot]);
+    // 寄せ替え対象外のスロットは素通り。
+    expect(m.seSounds.press).toBe(DEFAULT_SE_SOUNDS.press);
+    expect(m.seSounds['roulette-near']).toBe(DEFAULT_SE_SOUNDS['roulette-near']);
+
+    // 自分で選んだ音・'off' は触らない。旧既定のスロットだけが寄る。
+    const partial = migrateChallengeSeSounds(
+      { ...legacy, seSounds: { ...legacy.seSounds, achieved: 'jingle-sax', comment: 'off' } },
+      4
+    );
+    expect(partial.seSounds.achieved).toBe('jingle-sax');
+    expect(partial.seSounds.comment).toBe('off');
+    expect(partial.seSounds.helper).toBe('helper-stamp');
+
+    // 移行済み(世代5)は旧既定を選び直していても書き換えない。
+    expect(migrateChallengeSeSounds(legacy, 5)).toBe(legacy); // 同一参照 = 無加工
+    // 寄せ替え対象が1件も無ければ新しいオブジェクトを作らない。
+    const fresh = { ...DEFAULT_CHALLENGE, seSounds: { ...DEFAULT_SE_SOUNDS } };
+    expect(migrateChallengeSeSounds(fresh, 4)).toBe(fresh);
+
+    // 入力を破壊しない。
+    migrateChallengeSeSounds(legacy, 4);
+    expect(legacy.seSounds.achieved).toBe('fanfare-8bit');
+  });
+
+  it('演出9スロットの既定は専用録りで、validate がその id を落とさない', () => {
+    // CHALLENGE_SE_SOUND_IDS への追加忘れの回帰テスト(妨害スロットの版と同じ理由)。
+    // 既定と無関係な press へ入れて素通りするかを見るのが要点。
+    const dedicated = [
+      'gauge-burst',
+      'stock-burst',
+      'helper-stamp',
+      'comment-jam',
+      'boost-tap',
+      'boost-final', // どのスロットの既定でもない — ここでしか登録漏れを検出できない
+      'boost-hit',
+      'reel-kick',
+      'reel-hit',
+      'clear-fanfare',
+    ];
+    for (const id of dedicated) {
+      const v = validateChallengeConfig({
+        ...DEFAULT_CHALLENGE,
+        seSounds: { ...DEFAULT_SE_SOUNDS, press: id },
+      });
+      expect(v.seSounds.press, id).toBe(id);
+    }
   });
 
   it('rouletteSound の既定: BGM は鳴らさず、回転ループ音だけ鳴る', () => {
@@ -2619,8 +2700,10 @@ describe('お助け専用の演出スロット(helper)', () => {
     }
   });
 
-  it('既定は gift-t1 を流用していた頃と同じ音・簡易演出(アップデートで体感を変えない)', () => {
-    expect(DEFAULT_SE_SOUNDS.helper).toBe('confirm-1');
+  it('効果音は専用録り、簡易演出は gift-t1 を流用していた頃のまま', () => {
+    // 効果音だけ v5 で専用録りへ差し替えた(旧既定 'confirm-1' はカタログに残る)。
+    // 簡易演出は素材が無いので 'stamp' のまま — アップデートで見え方を変えない。
+    expect(DEFAULT_SE_SOUNDS.helper).toBe('helper-stamp');
     expect(DEFAULT_MINI_FX.helper).toBe('stamp');
   });
 
@@ -3204,12 +3287,14 @@ describe('指定コメント妨害(commentRules — キーワード部分一致�
 describe('matchGiftFullCut — ギフト名/ID による最優先カットインの写像', () => {
   const g = (giftName: string, giftId = '5655', canonical?: string) => ({ giftId, giftName, canonical });
 
-  it('既定行はギフト名の部分一致で当たる(バラ / ローザ)', () => {
+  it('既定行はギフト名の部分一致で当たる(Rose / Rosa)', () => {
     const c = fullCutCfg();
-    expect(matchGiftFullCut(c, g('バラ'))?.clip).toBe('cut-rose');
-    expect(matchGiftFullCut(c, g('ローザ'))?.clip).toBe('cut-rosa');
+    // ⚠ 配信イベントの giftName は表示言語に関係なく英語で届く(日本限定ギフトを除く)。
+    //   giftId は既定行に無い値を渡し、giftName の段だけを試している。
+    expect(matchGiftFullCut(c, g('Rose', 'x'))?.clip).toBe('cut-rose');
+    expect(matchGiftFullCut(c, g('Rosa', 'x'))?.clip).toBe('cut-rosa');
     // 部分一致なので前後に文字があっても当たる
-    expect(matchGiftFullCut(c, g('赤いバラの花束'))?.clip).toBe('cut-rose');
+    expect(matchGiftFullCut(c, g('Golden Rose Bouquet', 'x'))?.clip).toBe('cut-rose');
   });
 
   it('canonical でも当たる(リプレイ/テスト経路の保険)', () => {
@@ -3288,14 +3373,15 @@ describe('ChallengeEngine — 全面カットはダイヤ数帯より優先さ�
   it('高額ギフトでもギフト名が一致すれば帯域(band4)より全面カットが勝つ', () => {
     const e = engine(fullCutCfg({ initialValue: 100_000 }), () => NOW);
     e.start();
-    e.handleEvent(gift({ diamonds: 700, giftName: 'ローザ' }));
+    e.handleEvent(gift({ diamonds: 700, giftId: '8913', giftName: 'Rosa' }));
     expect(e.get().recentEffects[0]).toMatchObject({ fxBandClip: 'cut-rosa', fxFullCut: true });
   });
 
   it('一致しないギフトは従来どおり帯域カットインへ落ちる(fxFullCut は載らない)', () => {
     const e = engine(fullCutCfg({ initialValue: 1000 }), () => NOW);
     e.start();
-    e.handleEvent(gift({ diamonds: 30, giftName: 'ドラゴン' }));
+    // gift() の既定 giftId は Rose の実 ID('5655')なので、必ず両方を上書きすること。
+    e.handleEvent(gift({ diamonds: 30, giftId: '99999', giftName: 'Dragon' }));
     const first = e.get().recentEffects[0]!;
     expect(first).toMatchObject({ fxBandClip: 'gift-band1', fxDurationMs: 6000 });
     expect(first.fxFullCut).toBeUndefined();
@@ -3595,7 +3681,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   const PRE = INTRO + COUNT; // 前置き演出(咆哮+カウントダウン)の総尺
   const WINDOW = DEFAULT_TAP_BOOST.durationSec * 1000; // 5000
 
-  it('シネマティック発動: 値は動かず boost-start が焼き込まれ、総尺+margin で凍結する', () => {
+  it('シネマティック発動: 値は動かず boost-start が焼き込まれ、総尺+清算予算+margin で凍結する', () => {
     const e = engine(boostCfg(), () => NOW);
     e.start();
     expect(e.handleEvent(boostGift())).toBe(true);
@@ -3621,7 +3707,139 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       fxDurationMs: PRE + WINDOW,
       valueAfter: 1000,
     });
-    expect(s.fxFreezeUntilMs).toBe(NOW + PRE + WINDOW + GIFT_FX_FREEZE_MARGIN_MS);
+    // 既定は resultClip 'off' — 結果カットシーンのフィールドは載らない。
+    expect(s.recentEffects[0]).not.toHaveProperty('boostResultMs');
+    expect(s.recentEffects[0]).not.toHaveProperty('boostResultClip');
+    // 凍結は清算発表(ロールアップ→着弾)の予算ぶん先まで(resultClip 'off' でも
+    // '-N' の発表自体は出るので BOOST_SETTLE_BUDGET_MS は常に乗る)。
+    expect(s.fxFreezeUntilMs).toBe(
+      NOW + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
+    );
+  });
+
+  it('resultClip 有効: boost-start/boost-end に尺とクリップが焼き込まれ、凍結がさらに延びる', () => {
+    let t = NOW;
+    const e = engine(
+      boostCfg({
+        tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, resultClip: 'result-panther' },
+      }),
+      () => t
+    );
+    e.start();
+    e.handleEvent(boostGift());
+    const s0 = e.get();
+    expect(s0.recentEffects[0]).toMatchObject({
+      kind: 'boost-start',
+      boostResultMs: TAP_BOOST_RESULT_MS,
+      boostResultClip: 'result-panther',
+    });
+    expect(s0.fxFreezeUntilMs).toBe(
+      NOW + PRE + WINDOW + TAP_BOOST_RESULT_MS + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
+    );
+    // タップして清算 → boost-end 側にも同じ焼き込み(発表シーケンスの本線)。
+    t = NOW + PRE + 1000;
+    e.press();
+    t = NOW + PRE + WINDOW + 1;
+    const s1 = e.drainIfChanged()!;
+    expect(s1.recentEffects.find((x) => x.kind === 'boost-end')).toMatchObject({
+      amount: -5,
+      boostTapCount: 1,
+      boostResultMs: TAP_BOOST_RESULT_MS,
+      boostResultClip: 'result-panther',
+    });
+  });
+
+  it("testEffect('tapBoost') にも結果段が焼き込まれる(▶実演で結果発表まで試写できる)", () => {
+    const e = engine(
+      boostCfg({
+        tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, resultClip: 'result-panther' },
+      }),
+      () => NOW
+    );
+    e.testEffect({ kind: 'tapBoost' });
+    expect(e.get().recentEffects[0]).toMatchObject({
+      kind: 'boost-start',
+      test: true,
+      boostResultMs: TAP_BOOST_RESULT_MS,
+      boostResultClip: 'result-panther',
+    });
+  });
+
+  it("testEffect('tapBoost') 実演中のタップは worker が数える(idle でも値・統計は不変)", () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.testEffect({ kind: 'tapBoost' }); // status は idle のまま
+    // ウィンドウ前(起動カットイン中)は数えない(実発動と同じ)。
+    t = NOW + 1000;
+    expect(e.press().boost?.tapCount).toBe(0);
+    // ウィンドウ中は press の全経路(F9/PUSH/Space/モニター)が同じ RPC で届く。
+    t = NOW + PRE + 1000;
+    e.press();
+    const s = e.press();
+    expect(s.boost).toEqual({
+      tapCount: 2,
+      startsAtMs: NOW + PRE,
+      endsAtMs: NOW + PRE + WINDOW,
+      multiplier: 5,
+      pressStep: 1,
+    });
+    expect(s.value).toBe(1000);
+    expect(s.stats.presses).toBe(0);
+    expect(s.recentEffects.filter((x) => x.kind === 'press')).toHaveLength(0);
+    // 期限後は boost が消える(lazy 掃除)。
+    t = NOW + PRE + WINDOW + 1;
+    expect(e.press().boost).toBeUndefined();
+  });
+
+  it('配信中の実演でもタップは実カウント値を減らさない(testBoost が吸収)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.testEffect({ kind: 'tapBoost' });
+    t = NOW + PRE + 1000;
+    const s = e.press();
+    expect(s.value).toBe(1000);
+    expect(s.boost?.tapCount).toBe(1);
+    // 期限後の press は通常どおり減算へ戻る。
+    t = NOW + PRE + WINDOW + 1;
+    const s2 = e.press();
+    expect(s2.value).toBe(999);
+    expect(s2.boost).toBeUndefined();
+  });
+
+  it('実ブースト発動は実演のタップ計数を破棄する(実発動優先)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.testEffect({ kind: 'tapBoost' });
+    t = NOW + PRE + 1000; // 実演ウィンドウ内
+    e.press();
+    expect(e.get().boost?.tapCount).toBe(1);
+    e.handleEvent(boostGift()); // 実発動 → 実演の計数は破棄
+    const s = e.get();
+    expect(s.boost?.tapCount).toBe(0);
+    expect(s.boost?.startsAtMs).toBe(NOW + PRE + 1000 + PRE); // 実発動の前置き明け
+  });
+
+  it('タップ 0 の清算は凍結を従来の期限(ウィンドウ終端+margin)へ引き戻す', () => {
+    let t = NOW;
+    const e = engine(
+      boostCfg({
+        tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, resultClip: 'result-panther' },
+      }),
+      () => t
+    );
+    e.start();
+    e.handleEvent(boostGift());
+    // 発表するものが無い(タップ 0)— settle が凍結を引き戻し、保留イベントを
+    // 発表予算(結果4秒+予算4秒)ぶん待たせない。
+    t = NOW + PRE + WINDOW + 1;
+    e.drainIfChanged();
+    expect(e.get().fxFreezeUntilMs).toBe(NOW + PRE + WINDOW + GIFT_FX_FREEZE_MARGIN_MS);
+    const be = e.get().recentEffects.find((x) => x.kind === 'boost-end')!;
+    expect(be).toMatchObject({ amount: 0, boostTapCount: 0 });
+    // 発表が出ないので結果カットシーンのフィールドも載らない。
+    expect(be).not.toHaveProperty('boostResultMs');
   });
 
   it("introClip/countClip の 'off' は段ごと尺を詰める(即ウィンドウ入り)", () => {
@@ -3694,8 +3912,9 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     expect(s.stats.presses).toBe(3);
     const be = s.recentEffects.find((x) => x.kind === 'boost-end')!;
     expect(be).toMatchObject({ amount: -30, boostTapCount: 3, boostMultiplier: 5, valueAfter: 970 });
-    // 凍結明けに保留の press(通常 -2)が適用される
-    t = NOW + PRE + WINDOW + GIFT_FX_FREEZE_MARGIN_MS + 1;
+    // 凍結明けに保留の press(通常 -2)が適用される(タップ>0 なので凍結は
+    // 清算発表の予算ぶん先まで残る — 発表中に保留演出が割り込まない)。
+    t = NOW + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS + 1;
     const s2 = e.drainIfChanged()!;
     expect(s2.value).toBe(968);
     expect(s2.stats.presses).toBe(4);
@@ -3818,7 +4037,8 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     e.press(); // タップ(数えるだけ)
     e.handleEvent(follow('f1')); // 保留
     expect(e.get().value).toBe(1000);
-    t = NOW + PRE + WINDOW + GIFT_FX_FREEZE_MARGIN_MS + 1;
+    // タップ>0 なので凍結は清算発表の予算ぶん先まで残る(発表中に割り込まない)。
+    t = NOW + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS + 1;
     const s = e.drainIfChanged()!;
     expect(s.value).toBe(1000 - 5 + 10);
     const be = s.recentEffects.find((x) => x.kind === 'boost-end')!;
@@ -3849,6 +4069,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
         introClip: 'unknown-clip', // 未知 id → 既定へ
         countClip: 'off', // 明示の 'off' は尊重
         loopClip: 'loop-panther', // カタログ内の別 id はそのまま
+        resultClip: 'result-panther', // カタログ内の id はそのまま
         flash: true,
       },
     });
@@ -3862,11 +4083,104 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       introClip: 'intro-panther',
       countClip: 'off',
       loopClip: 'loop-panther',
+      resultClip: 'result-panther',
       flash: true,
     });
+    // resultClip の未知 id・キー欠損は既定('off')へ
+    expect(
+      validateChallengeConfig({
+        ...structuredClone(DEFAULT_CHALLENGE),
+        tapBoost: { ...DEFAULT_TAP_BOOST, resultClip: 'unknown-clip' },
+      }).tapBoost.resultClip
+    ).toBe('off');
     // キーごと無い旧 settings.json は既定へ
     const legacy = structuredClone(DEFAULT_CHALLENGE) as unknown as Record<string, unknown>;
     delete legacy.tapBoost;
     expect(validateChallengeConfig(legacy).tapBoost).toEqual(DEFAULT_TAP_BOOST);
+  });
+});
+
+describe('全面カットのトリガー修復移行(v4)', () => {
+  // v3 が保存した壊れた既定(日本語ギフト名)を再現する。実際の settings.json と同じ形。
+  const brokenCfg = (): ChallengeConfig => {
+    const c = structuredClone(DEFAULT_CHALLENGE);
+    const broken: Record<string, { giftName: string; canonical: string }> = {
+      'fullcut-rose': { giftName: 'バラ', canonical: 'rose' },
+      'fullcut-tensai': { giftName: '天才', canonical: '' },
+      'fullcut-heart-pose': { giftName: 'ハートポーズ', canonical: '' },
+      'fullcut-hand-heart': { giftName: 'ハンドハート', canonical: 'hand_hearts' },
+    };
+    c.giftFullCut = {
+      ...c.giftFullCut,
+      rules: c.giftFullCut.rules.map((r) => {
+        const b = broken[r.id];
+        return b == null ? r : { ...r, giftId: '', giftName: b.giftName, canonical: b.canonical };
+      }),
+    };
+    return c;
+  };
+
+  it('旧既定のままの行は実データのトリガーへ寄る', () => {
+    const after = migrateChallengeGiftFullCutTriggers(brokenCfg(), 3);
+    const tensai = after.giftFullCut.rules.find((r) => r.id === 'fullcut-tensai');
+    expect(tensai?.giftId).toBe('13523');
+    expect(tensai?.giftName).toBe('genius');
+  });
+
+  it('寄せた後は実際のギフトイベントで発火する', () => {
+    const cfg = { ...migrateChallengeGiftFullCutTriggers(brokenCfg(), 3), enabled: true };
+    expect(matchGiftFullCut(cfg, { giftId: '13523', giftName: 'Genius' })?.clip).toBe('cut-tensai');
+    expect(matchGiftFullCut(cfg, { giftId: '5655', giftName: 'Rose' })?.clip).toBe('cut-rose');
+    // 同名別ID が giftId で割れること — 修復の主目的のひとつ。
+    expect(matchGiftFullCut(cfg, { giftId: '5660', giftName: 'Hand Heart' })?.clip).toBe(
+      'cut-heart-pose'
+    );
+    expect(matchGiftFullCut(cfg, { giftId: '8343', giftName: 'Hand Heart' })?.clip).toBe(
+      'cut-hand-heart'
+    );
+  });
+
+  it('日本語名のままでは発火しなかったことを対照で示す', () => {
+    const cfg = { ...brokenCfg(), enabled: true };
+    expect(matchGiftFullCut(cfg, { giftId: '13523', giftName: 'Genius' })).toBeNull();
+  });
+
+  it('利用者が書き換えた行は触らない', () => {
+    const c = brokenCfg();
+    c.giftFullCut.rules = c.giftFullCut.rules.map((r) =>
+      r.id === 'fullcut-tensai' ? { ...r, giftName: 'わたしの天才' } : r
+    );
+    const after = migrateChallengeGiftFullCutTriggers(c, 3);
+    const tensai = after.giftFullCut.rules.find((r) => r.id === 'fullcut-tensai');
+    expect(tensai?.giftName).toBe('わたしの天才');
+    expect(tensai?.giftId).toBe('');
+  });
+
+  it('enabled / durationSec / clip / 並び順は保つ', () => {
+    const c = brokenCfg();
+    c.giftFullCut.rules = c.giftFullCut.rules.map((r) =>
+      r.id === 'fullcut-rose' ? { ...r, enabled: false, durationSec: 9 } : r
+    );
+    const after = migrateChallengeGiftFullCutTriggers(c, 3);
+    expect(after.giftFullCut.rules.map((r) => r.id)).toEqual(c.giftFullCut.rules.map((r) => r.id));
+    const rose = after.giftFullCut.rules.find((r) => r.id === 'fullcut-rose');
+    expect(rose?.enabled).toBe(false);
+    expect(rose?.durationSec).toBe(9);
+    expect(rose?.giftId).toBe('5655'); // トリガーだけは寄る
+  });
+
+  it('冪等 — 二度通しても同じ', () => {
+    const once = migrateChallengeGiftFullCutTriggers(brokenCfg(), 3);
+    expect(migrateChallengeGiftFullCutTriggers(once, 3)).toEqual(once);
+  });
+
+  it('世代 4 以上には効かない', () => {
+    const c = brokenCfg();
+    expect(migrateChallengeGiftFullCutTriggers(c, 4)).toBe(c);
+  });
+
+  it('入口(migrateChallengeConfig)から v3 の設定が修復される', () => {
+    const after = migrateChallengeConfig(brokenCfg(), 3);
+    expect(after.giftFullCut.rules.find((r) => r.id === 'fullcut-tensai')?.giftId).toBe('13523');
   });
 });

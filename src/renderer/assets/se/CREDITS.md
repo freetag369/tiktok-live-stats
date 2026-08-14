@@ -42,21 +42,43 @@ https://creativecommons.org/publicdomain/zero/1.0/
 | like-jam.mp3 | `like`(いいね妨害) | 5.64 秒 | いいね障害(s3にカット).mp3 | リネームのみ(未加工) |
 | follow-jam.mp3 | `follow`(フォロー妨害) | 2.25 秒 | フォロー障害.mp3 | リネームのみ(未加工) |
 | reel-stop.ogg | `roulette-near`(ルーレット 止まりそう) | 0.28 秒 | スイッチ5.mp3 | 前後の無音を除去 → **+10.9dB** → ogg(q5) |
-| reel-confirm.ogg | `roulette-hit`(ルーレット確定) | 0.74 秒 | 確認1.mp3 | 前後の無音を除去 → ogg(q5)。音量は未加工 |
+| reel-confirm.ogg | (選択肢のみ・旧 `roulette-hit` 既定) | 0.74 秒 | 確認1.mp3 | 前後の無音を除去 → ogg(q5)。音量は未加工 |
+| gauge-burst.mp3 | `gauge-full`(ゲージ満タン着弾) | 1.49 秒 | いいねゲージ満タン専用.mp3 | 末尾無音を除去 → **+5.1dB** → mp3(192k) |
+| stock-burst.mp3 | `stock-full`(ストック満杯着弾) | 1.07 秒 | いいねストック満杯(着弾).mp3 | 末尾無音を除去 → **+4.3dB** → mp3(192k) |
+| helper-stamp.mp3 | `helper`(お助け・ファンスタンプ) | 0.42 秒 | お助け(ファンスタンプ).mp3 | 末尾無音を除去 → **+4.2dB** → mp3(192k) |
+| comment-jam.mp3 | `comment`(指定コメント妨害) | 2.93 秒 | コメント障害.mp3 | 末尾無音を除去 → **+7.8dB** → mp3(192k) |
+| boost-tap.mp3 | `boost-start`(ブースト タップ開始) | 0.81 秒 | ブースト タップ開始.mp3 | 末尾無音を除去 → **+6.3dB** → mp3(192k) |
+| boost-final.mp3 | **(未割当・選択肢のみ)** | 1.57 秒 | ブースト最後の.mp3 | 末尾無音を除去 → **+5.4dB** → mp3(192k) |
+| boost-hit.mp3 | `boost-end`(ブースト着弾・一括減算) | 3.16 秒 | ブースト着弾(一括減算).mp3 | 末尾無音を除去 → **+6.4dB** → mp3(192k) |
+| reel-kick.mp3 | `roulette-kick`(フェイク停止からの一撃) | 0.24 秒 | ルーレット キック(フェイク停止からの一撃).mp3 | 末尾無音を除去 → **+8.2dB** → mp3(192k) |
+| reel-hit.mp3 | `roulette-hit`(ルーレット確定) | 0.65 秒 | ルーレット確定.mp3 | 末尾無音を除去 → **+6.5dB** → mp3(192k) |
+| clear-fanfare.mp3 | `achieved`(達成 CLEAR) | 2.52 秒 | 達成.mp3 | 末尾無音を除去 → **+3.9dB** → mp3(192k) |
 
-妨害の2つが ogg ではなく mp3 なのは提供された素材の形式そのままだから(単発音なので
-`band/` の BGM と同じくエンコーダ遅延の継ぎ目問題は起きない)。ルーレットの2つは
-無音除去とレベル合わせで再エンコードが必要だったので、他の単発音と同じ ogg に揃えた。
+妨害の2つと 2026-08-14 追加の10件が ogg ではなく mp3 なのは提供された素材の形式
+そのままだから(単発音なので `band/` の BGM と同じくエンコーダ遅延の継ぎ目問題は
+起きない — 継ぎ目が問題になるのはループ素材だけ)。`reel-stop` / `reel-confirm` の2つは
+初期に取り込んだぶんで、他の単発音と同じ ogg に揃えてある。
 
 `reel-stop` だけ増幅しているのは素材のピークが -11.9dB と他の単発音より 11dB 低く、
 カタログの `gain`(≤1)では合わせきれなかったため。増幅後のピークは -1.5dB
 (`bong.ogg` の -0.9dB とほぼ同じ)で、カタログ側の gain 0.9 で最終調整している。
+
+**下10件(2026-08-14 追加)も同じ理由で増幅している。** 素材のピークは -5.4〜-9.7dB
+(平均 -18〜-27dB)で、既存の同梱音(ピーク -0.4〜-4.9dB / 平均 -11〜-20dB)より
+6〜8dB 小さい。`playSe` は最終音量を 1.0 にクランプし(`lib/se.ts`)音量スライダの
+上限も 100 なので、**小さいぶんを後から取り戻す手段が無い** — カタログの `gain` は
+減衰しかできない。そこで `reel-stop` と同じ **ピーク -1.5dB** へ揃えて取り込み、
+カタログ側は全件 gain 0.9 に置いた。形式は元素材のまま mp3(192k)。
 
 取り込みコマンド(再現用。元ファイルはリポジトリ外の `IMAGE/`):
 
 ```
 ffmpeg -i "スイッチ5.mp3" -af "atrim=start=0.020:end=0.30,asetpts=N/SR/TB,volume=10.9dB" -c:a libvorbis -q:a 5 reel-stop.ogg
 ffmpeg -i "確認1.mp3"     -af "atrim=start=0.022:end=0.76,asetpts=N/SR/TB"               -c:a libvorbis -q:a 5 reel-confirm.ogg
+
+# 2026-08-14 追加の10件(元は IMAGE/0120260814/)。末尾無音を落として +N dB でピーク -1.5dB へ。
+# <+N> は上の表のとおり(実測ピークから -1.5dB までの差)。
+ffmpeg -i "<元ファイル>"   -af "areverse,silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0,areverse,volume=<+N>dB"   -c:a libmp3lame -b:a 192k <出力>.mp3
 ```
 
 既定の割り当ては `src/shared/challenge.ts` の `DEFAULT_SE_SOUNDS`。旧既定のまま

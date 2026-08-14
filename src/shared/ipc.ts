@@ -92,6 +92,8 @@ export type RpcMap = {
   // monitor window — handled in MAIN(第2ウィンドウの開閉)
   'monitor.open': { p: void; r: { open: boolean } };
   'monitor.close': { p: void; r: { open: boolean } };
+  /** 窓ごと作り直す(固まった/真っ黒/ディスプレイずれの復旧)。close は非同期なので main 側で間を空ける。 */
+  'monitor.restart': { p: void; r: { open: boolean } };
   'monitor.status': { p: void; r: { open: boolean } };
   'monitor.displays': {
     p: void;
@@ -130,6 +132,7 @@ export const MAIN_HANDLED: ReadonlySet<string> = new Set([
   'app.licenses',
   'monitor.open',
   'monitor.close',
+  'monitor.restart',
   'monitor.status',
   'monitor.displays',
 ]);

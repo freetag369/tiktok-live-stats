@@ -698,7 +698,8 @@ body {
   right: 20px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 32px;
+  font-size: 48px;
+  line-height: 1;
   font-weight: 900;
   color: var(--gold);
   text-shadow:
@@ -839,7 +840,8 @@ body {
 }
 
 .lgs-label {
-  font-size: 32px;
+  font-size: 48px;
+  line-height: 1;
   font-weight: 900;
   color: #7dffbe;
   text-shadow:
@@ -1249,6 +1251,15 @@ body {
   opacity: 1;
   transition: opacity 300ms linear;
   pointer-events: none;
+  /*
+   * 素材(gauge-strike.mp4 960×960)の衝撃波は減衰前にフレーム端まで届くため、
+   * 素の矩形のままだと数字の上で波紋が四角い縁でスパッと切れて見える。
+   * 円形マスクで縁に向かって溶かし、正方形の輪郭を出さない
+   * (closest-side なので四隅は完全に透明 = □ は絶対に見えない)。
+   * screen 合成とマスクは干渉しない — .mini-panic の「mask 禁止」は
+   * アルファ焼き込み素材との二重フェードの話で、黒背景素材のここには当たらない。
+   */
+  mask-image: radial-gradient(circle closest-side, #000 58%, transparent 98%);
 }
 
 .fx-strike.out {
@@ -1567,6 +1578,24 @@ body {
 }
 
 .float {
+  /*
+   * 【パチンコ役物カラーセット】variant(follow / like / helper / roulette …)は
+   * 原則この変数だけを差し替える。フレームは全バナー共通の金メッキ
+   * (パチンコ台の役物枠)で、盤面色・ランプ色・グロー色で由来を読ませる。
+   *   --fl-metal-*: 枠メッキのグラデ4点
+   *   --fl-lamp:    縁の電飾ランプ(チェイス点滅)
+   *   --fl-glow:    外周の発光色
+   *   --fl-bg-1/2:  盤面(内側)のグラデ
+   */
+  --fl-metal-hi: #fff7cf;
+  --fl-metal-1: #ffdf7e;
+  --fl-metal-2: #b8860f;
+  --fl-metal-3: #6e4a00;
+  --fl-lamp: #ffd75e;
+  --fl-glow: rgba(255, 190, 60, 0.45);
+  --fl-bg-1: rgba(44, 26, 58, 0.96);
+  --fl-bg-2: rgba(13, 6, 20, 0.94);
+  position: relative;
   display: flex;
   /* 下段送りの土台。flex-basis:100% の子だけが次の行へ落ちる。 */
   flex-wrap: wrap;
@@ -1576,7 +1605,13 @@ body {
   row-gap: calc(3px * var(--float-scale));
   font-size: calc(36px * var(--float-scale));
   font-weight: 900;
-  padding: calc(9px * var(--float-scale)) calc(12px * var(--float-scale));
+  /*
+   * 【横 padding は 8px 基準のまま増やさないこと】メッキ枠(border 3px)が
+   * 内寸を食うため、旧 12px のままだと "いいねストック満杯!"(f-txt 25px 基準
+   * ×10 文字 ≒ 475px)が内寸(520 − 24 − 24 = 472px)を 1 文字ぶん超えて
+   * 2 行に折れる。8px + border 3px なら内寸 492px で旧実装(496px)とほぼ同じ。
+   */
+  padding: calc(9px * var(--float-scale)) calc(8px * var(--float-scale));
   /*
    * 【999px にしないこと】高さが 203px あるので、スタジアム型にすると角丸半径が
    * 101px(=高さの半分)まで太り、1 段目の左右端 — ♥ や桁数の多い +N — が曲面の
@@ -1588,15 +1623,132 @@ body {
      (1280px)で 1200px 超の間延びしたバナーになるため、px 基準 + % の上限。 */
   width: calc(260px * var(--float-scale));
   max-width: 96%;
-  background: linear-gradient(180deg, rgba(38, 32, 52, 0.92), rgba(12, 10, 20, 0.88));
+  /*
+   * 金属フレーム: border-box 側にメッキのグラデ、padding-box 側に盤面。
+   * box-sizing:border-box(先頭の *)なので border を足しても外形は変わらない。
+   * 盤面には中央下からの放射光(パチンコの後光)を薄く重ねる — 文字の邪魔を
+   * しない 0.05 前後に留めること。
+   */
+  border: calc(3px * var(--float-scale)) solid transparent;
+  background:
+    radial-gradient(130% 100% at 50% -30%, rgba(255, 255, 255, 0.10), transparent 55%)
+      padding-box,
+    repeating-conic-gradient(
+        from -90deg at 50% 130%,
+        transparent 0deg 9deg,
+        rgba(255, 235, 190, 0.05) 9deg 18deg
+      )
+      padding-box,
+    linear-gradient(180deg, var(--fl-bg-1), var(--fl-bg-2)) padding-box,
+    linear-gradient(
+        168deg,
+        var(--fl-metal-hi) 0%,
+        var(--fl-metal-1) 16%,
+        var(--fl-metal-2) 38%,
+        var(--fl-metal-3) 52%,
+        var(--fl-metal-2) 64%,
+        var(--fl-metal-1) 82%,
+        var(--fl-metal-hi) 100%
+      )
+      border-box;
   box-shadow:
-    inset 0 0 0 calc(1px * var(--float-scale)) rgba(255, 255, 255, 0.16),
-    inset 0 calc(12px * var(--float-scale)) calc(20px * var(--float-scale))
-      calc(-14px * var(--float-scale)) rgba(255, 255, 255, 0.35),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+    /* フレーム内縁の締め(メッキと盤面の境目) */
+    inset 0 0 0 calc(1px * var(--float-scale)) rgba(0, 0, 0, 0.6),
+    /* 盤面上部のガラス写り込み */
+    inset 0 calc(14px * var(--float-scale)) calc(22px * var(--float-scale))
+      calc(-16px * var(--float-scale)) rgba(255, 255, 255, 0.4),
+    /* 盤面下部の沈み込み */
+    inset 0 calc(-12px * var(--float-scale)) calc(20px * var(--float-scale))
+      calc(-14px * var(--float-scale)) rgba(0, 0, 0, 0.65),
+    /* 役物の後光 + 接地影 */
+    0 0 calc(26px * var(--float-scale)) var(--fl-glow),
+    0 calc(10px * var(--float-scale)) calc(30px * var(--float-scale)) rgba(0, 0, 0, 0.6);
   animation: floatup 1.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
   overflow: hidden;
   white-space: nowrap;
+}
+
+/*
+ * 縁の電飾ランプ(上下2列のチェイス点滅)。タイルの背景を
+ * background-position-x だけ流すので、玉の数・間隔は background-size が権威。
+ * 上下の inset はフレーム内縁ぴったり(border ぶんは自動で内側)。
+ */
+.float::before {
+  content: '';
+  position: absolute;
+  inset: calc(3px * var(--float-scale)) calc(22px * var(--float-scale));
+  pointer-events: none;
+  background-image:
+    radial-gradient(
+      circle closest-side at 50% 50%,
+      #fff 18%,
+      var(--fl-lamp) 45%,
+      rgba(255, 255, 255, 0) 72%
+    ),
+    radial-gradient(
+      circle closest-side at 50% 50%,
+      #fff 18%,
+      var(--fl-lamp) 45%,
+      rgba(255, 255, 255, 0) 72%
+    );
+  background-size: calc(30px * var(--float-scale)) calc(9px * var(--float-scale));
+  background-repeat: repeat-x;
+  background-position:
+    0 top,
+    calc(15px * var(--float-scale)) bottom;
+  filter: drop-shadow(0 0 calc(4px * var(--float-scale)) var(--fl-lamp));
+  animation: float-lamp-chase 900ms linear infinite;
+}
+
+@keyframes float-lamp-chase {
+  to {
+    background-position:
+      calc(30px * var(--float-scale)) top,
+      calc(-15px * var(--float-scale)) bottom;
+  }
+}
+
+/* 出現直後に一度だけ走る斜めのシャイン(メッキの照り返し)。 */
+.float::after {
+  content: '';
+  position: absolute;
+  top: calc(-30px * var(--float-scale));
+  bottom: calc(-30px * var(--float-scale));
+  left: -45%;
+  width: 38%;
+  pointer-events: none;
+  background: linear-gradient(
+    105deg,
+    transparent,
+    rgba(255, 255, 255, 0.22) 40%,
+    rgba(255, 255, 255, 0.5) 50%,
+    rgba(255, 255, 255, 0.22) 60%,
+    transparent
+  );
+  transform: skewX(-16deg);
+  animation: float-shine 1.6s ease-out forwards;
+}
+
+@keyframes float-shine {
+  0% {
+    left: -45%;
+  }
+  38% {
+    left: 115%;
+  }
+  100% {
+    left: 115%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float::before {
+    animation: none;
+  }
+
+  .float::after {
+    display: none;
+  }
 }
 
 .float .f-amt {
@@ -1643,73 +1795,96 @@ body {
   overflow: hidden;
 }
 
+.float .f-txt {
+  /* 打ち抜き文字風: 黒の落とし込み + 盤面ランプの照り返し */
+  text-shadow:
+    0 calc(2px * var(--float-scale)) 0 rgba(0, 0, 0, 0.7),
+    0 0 calc(12px * var(--float-scale)) rgba(255, 200, 120, 0.28);
+}
+
 .float .f-txt b {
   color: #ffd7e8;
 }
 
+/*
+ * 数字はネオン管3層(白芯 → 色グロー2段 → 下の落とし込み)。
+ * 単色 + text-shadow 一発だと役物の金属枠に負けて平板に見える。
+ */
 .float.bad .f-amt {
-  color: #ff6b6b;
-  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(255, 59, 59, 0.8);
+  color: #ff5d5d;
+  text-shadow:
+    0 0 calc(6px * var(--float-scale)) rgba(255, 255, 255, 0.4),
+    0 0 calc(16px * var(--float-scale)) rgba(255, 59, 59, 0.95),
+    0 0 calc(36px * var(--float-scale)) rgba(255, 59, 59, 0.5),
+    0 calc(3px * var(--float-scale)) 0 rgba(70, 0, 0, 0.9);
 }
 
 .float.good .f-amt {
   color: var(--green);
-  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(74, 217, 145, 0.8);
+  text-shadow:
+    0 0 calc(6px * var(--float-scale)) rgba(255, 255, 255, 0.4),
+    0 0 calc(16px * var(--float-scale)) rgba(74, 217, 145, 0.95),
+    0 0 calc(36px * var(--float-scale)) rgba(74, 217, 145, 0.5),
+    0 calc(3px * var(--float-scale)) 0 rgba(0, 60, 30, 0.9);
 }
 
 /* いいね: ハート付き(上段で数字と並ぶ) */
 .float .f-heart {
   color: #ff8fbf;
   font-size: calc(40px * var(--float-scale));
-  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(255, 79, 160, 0.9);
+  text-shadow:
+    0 0 calc(8px * var(--float-scale)) rgba(255, 255, 255, 0.35),
+    0 0 calc(18px * var(--float-scale)) rgba(255, 79, 160, 0.95),
+    0 0 calc(36px * var(--float-scale)) rgba(255, 79, 160, 0.5);
   line-height: 1;
 }
 
-/* フォロー: 赤リングのバナー */
+/*
+ * variant は【変数の差し替えだけ】(基底 .float の長いコメント参照)。
+ * フレームの金メッキは共通、盤面色 + ランプ色 + グロー色で由来を読ませる。
+ */
+
+/* フォロー: 赤ランプのバナー */
 .float.banner-follow {
-  background: linear-gradient(180deg, rgba(84, 18, 30, 0.94), rgba(30, 6, 12, 0.9));
-  box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 82, 82, 0.75),
-    0 0 calc(26px * var(--float-scale)) rgba(255, 59, 59, 0.45),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-lamp: #ff7a7a;
+  --fl-glow: rgba(255, 59, 59, 0.5);
+  --fl-bg-1: rgba(88, 16, 28, 0.96);
+  --fl-bg-2: rgba(26, 4, 10, 0.94);
 }
 
 /*
  * いいね妨害 / いいねストック満杯のバナー(MonitorView の 'bad like-float')。
- * リングは .f-heart と同じピンク系 — フォローの赤と並んでも「いいね由来」が
- * 色だけで読める。妨害なので数字は .bad の赤のまま(リングだけを差し替える)。
+ * ランプは .f-heart と同じピンク系 — フォローの赤と並んでも「いいね由来」が
+ * 色だけで読める。妨害なので数字は .bad の赤のまま(ランプだけを差し替える)。
  */
 .float.like-float {
-  background: linear-gradient(180deg, rgba(72, 18, 46, 0.94), rgba(26, 6, 18, 0.9));
-  box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 143, 191, 0.75),
-    0 0 calc(26px * var(--float-scale)) rgba(255, 79, 160, 0.45),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-lamp: #ff9fca;
+  --fl-glow: rgba(255, 79, 160, 0.5);
+  --fl-bg-1: rgba(76, 16, 48, 0.96);
+  --fl-bg-2: rgba(24, 5, 17, 0.94);
 }
 
 /*
- * お助け(ファンスタンプ): 緑リングのバナー。フォロー(妨害)の赤と対にして、
- * リングの色だけで「助けられた/戻された」が読めるようにする。コメント応援は素の
- * .float + .good で出しているので、リング付きはここだけ — ファンスタンプは
+ * お助け(ファンスタンプ): 緑ランプのバナー。フォロー(妨害)の赤と対にして、
+ * ランプの色だけで「助けられた/戻された」が読めるようにする。コメント応援は素の
+ * .float + .good で出しているので、色替え付きはここだけ — ファンスタンプは
  * 「わざわざ買って送った応援」なので一段強い見た目にする。
  *
- * amountEach を正(妨害)に設定された場合はクラスが .bad になるので、リングも
+ * amountEach を正(妨害)に設定された場合はクラスが .bad になるので、盤面も
  * 赤へ倒す — 数字だけ赤・枠は緑という読み違えを作らない。
  */
 .float.banner-helper {
-  background: linear-gradient(180deg, rgba(16, 66, 44, 0.94), rgba(5, 24, 16, 0.9));
-  box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(74, 217, 145, 0.75),
-    0 0 calc(26px * var(--float-scale)) rgba(74, 217, 145, 0.45),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-lamp: #7dffbf;
+  --fl-glow: rgba(74, 217, 145, 0.5);
+  --fl-bg-1: rgba(14, 66, 42, 0.96);
+  --fl-bg-2: rgba(4, 22, 14, 0.94);
 }
 
 .float.banner-helper.bad {
-  background: linear-gradient(180deg, rgba(84, 18, 30, 0.94), rgba(30, 6, 12, 0.9));
-  box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 82, 82, 0.75),
-    0 0 calc(26px * var(--float-scale)) rgba(255, 59, 59, 0.45),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-lamp: #ff7a7a;
+  --fl-glow: rgba(255, 59, 59, 0.5);
+  --fl-bg-1: rgba(88, 16, 28, 0.96);
+  --fl-bg-2: rgba(26, 4, 10, 0.94);
 }
 
 /*
@@ -1792,42 +1967,52 @@ body {
 }
 
 .float.bad .gc-amt {
-  color: #ff6b6b;
-  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(255, 59, 59, 0.8);
+  color: #ff5d5d;
+  text-shadow:
+    0 0 calc(6px * var(--float-scale)) rgba(255, 255, 255, 0.4),
+    0 0 calc(16px * var(--float-scale)) rgba(255, 59, 59, 0.95),
+    0 0 calc(36px * var(--float-scale)) rgba(255, 59, 59, 0.5),
+    0 calc(3px * var(--float-scale)) 0 rgba(70, 0, 0, 0.9);
 }
 
 .float.good .gc-amt {
   color: var(--green);
-  text-shadow: 0 0 calc(14px * var(--float-scale)) rgba(74, 217, 145, 0.8);
+  text-shadow:
+    0 0 calc(6px * var(--float-scale)) rgba(255, 255, 255, 0.4),
+    0 0 calc(16px * var(--float-scale)) rgba(74, 217, 145, 0.95),
+    0 0 calc(36px * var(--float-scale)) rgba(74, 217, 145, 0.5),
+    0 calc(3px * var(--float-scale)) 0 rgba(0, 60, 30, 0.9);
 }
 
-/* tier 別の格(枠と光)。t3+ は金、t4 は白金 + 一段大きく */
+/* tier 別の格(盤面と光)。t3+ は金の後光、t4 は白金メッキ + 一段大きく */
 .float.gift-card.t2 {
-  box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 197, 66, 0.55),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-glow: rgba(255, 197, 66, 0.35);
 }
 
 .float.gift-card.t3 {
-  box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 197, 66, 0.85),
-    0 0 calc(30px * var(--float-scale)) rgba(255, 197, 66, 0.45),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-lamp: #ffdf7e;
+  --fl-glow: rgba(255, 197, 66, 0.6);
+  --fl-bg-1: rgba(58, 42, 14, 0.96);
+  --fl-bg-2: rgba(20, 14, 4, 0.94);
 }
 
 /*
  * 【重要】拡大には transform ではなく scale プロパティを使うこと。
  * floatup の keyframes が transform を丸ごと書き換えるため、transform:scale()
  * だとアニメ開始と同時に無効化される(個別変形プロパティなら合成される)。
+ * t4 はメッキ自体を白金へ差し替える(最上位ギフトの格)。
  */
 .float.gift-card.t4 {
   transform-origin: center;
   scale: 1.12;
-  background: linear-gradient(180deg, rgba(64, 52, 18, 0.95), rgba(26, 20, 6, 0.92));
-  box-shadow:
-    inset 0 0 0 calc(3px * var(--float-scale)) rgba(255, 224, 130, 0.95),
-    0 0 calc(44px * var(--float-scale)) rgba(255, 197, 66, 0.65),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-metal-hi: #ffffff;
+  --fl-metal-1: #e8ecf4;
+  --fl-metal-2: #9aa4b8;
+  --fl-metal-3: #566076;
+  --fl-lamp: #fff2c0;
+  --fl-glow: rgba(255, 214, 90, 0.75);
+  --fl-bg-1: rgba(62, 50, 16, 0.96);
+  --fl-bg-2: rgba(24, 18, 5, 0.94);
 }
 
 .float.gift-card.t4 .gc-name {
@@ -2081,7 +2266,10 @@ body {
   align-items: center;
   justify-content: center;
   pointer-events: none;
-  background: rgba(5, 3, 10, 0.78);
+  /* 暗幕 + 金の後光(パチンコの大当たりスポット)。中央だけ薄く温める。 */
+  background:
+    radial-gradient(80% 60% at 50% 42%, rgba(140, 80, 12, 0.32), transparent 70%),
+    rgba(5, 3, 10, 0.8);
   animation: rl-screen-in 220ms ease-out both;
   /* パネル実幅 約486px(窓450 + パディング36)。縦 540: 486×1.06 ≈ 515px */
   --rl-fs: 1.06;
@@ -2124,6 +2312,11 @@ body {
   }
 }
 
+/*
+ * パネルは .float と同じパチンコ役物枠(金メッキ border + 盤面 + 放射後光)。
+ * 寸法は据え置き(border 3px ぶんだけ外形 +6px — 拡大率 1.06 でも 540px 内)。
+ * リールの走行・着地の幾何はここでは持たない(rl-run-* が権威)。
+ */
 .roulette-panel {
   position: absolute;
   left: 50%;
@@ -2134,14 +2327,122 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 12px 18px 14px;
-  border-radius: 18px;
-  background: linear-gradient(180deg, rgba(38, 32, 52, 0.94), rgba(12, 10, 20, 0.9));
+  padding: 13px 18px 15px;
+  border-radius: 20px;
+  border: 3px solid transparent;
+  background:
+    radial-gradient(130% 100% at 50% -30%, rgba(255, 255, 255, 0.09), transparent 55%)
+      padding-box,
+    repeating-conic-gradient(
+        from -90deg at 50% 130%,
+        transparent 0deg 9deg,
+        rgba(255, 235, 190, 0.05) 9deg 18deg
+      )
+      padding-box,
+    linear-gradient(180deg, rgba(62, 42, 12, 0.97), rgba(20, 12, 4, 0.95)) padding-box,
+    linear-gradient(
+        168deg,
+        #fff7cf 0%,
+        #ffdf7e 16%,
+        #b8860f 38%,
+        #6e4a00 52%,
+        #b8860f 64%,
+        #ffdf7e 82%,
+        #fff7cf 100%
+      )
+      border-box;
   box-shadow:
-    inset 0 0 0 2px rgba(255, 214, 90, 0.55),
-    0 0 30px rgba(255, 190, 60, 0.35),
-    0 10px 32px rgba(0, 0, 0, 0.6);
+    inset 0 0 0 1px rgba(0, 0, 0, 0.6),
+    inset 0 14px 22px -16px rgba(255, 255, 255, 0.4),
+    inset 0 -12px 20px -14px rgba(0, 0, 0, 0.65),
+    0 0 34px rgba(255, 190, 60, 0.45),
+    0 12px 34px rgba(0, 0, 0, 0.65);
   animation: rl-pop 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * 縁の電飾ランプ(上下2列のチェイス)。.float::before と同型だが、パネルは
+ * --float-scale の外なので px 直書き + 専用キーフレーム(変数が未定義だと
+ * background-position ごと無効になる)。窓やポインタより奥(z-index なしの
+ * 疑似要素は子より背面)なので演出を遮らない。
+ */
+.roulette-panel::before {
+  content: '';
+  position: absolute;
+  inset: 3px 18px;
+  pointer-events: none;
+  background-image:
+    radial-gradient(
+      circle closest-side at 50% 50%,
+      #fff 18%,
+      #ffd75e 45%,
+      rgba(255, 255, 255, 0) 72%
+    ),
+    radial-gradient(
+      circle closest-side at 50% 50%,
+      #fff 18%,
+      #ffd75e 45%,
+      rgba(255, 255, 255, 0) 72%
+    );
+  background-size: 26px 8px;
+  background-repeat: repeat-x;
+  background-position:
+    0 top,
+    13px bottom;
+  /* チェイス + 色サイクル(パチンコの多色電飾)。hue-rotate は基準の金色ごと
+     回すので、drop-shadow を各キーフレームへ書かず1本の filter に同居させる。 */
+  filter: drop-shadow(0 0 4px #ffd75e);
+  animation:
+    rl-lamp-chase 800ms linear infinite,
+    rl-lamp-disco 2.8s linear infinite;
+}
+
+@keyframes rl-lamp-chase {
+  to {
+    background-position:
+      26px top,
+      -13px bottom;
+  }
+}
+
+@keyframes rl-lamp-disco {
+  to {
+    filter: drop-shadow(0 0 4px #ffd75e) hue-rotate(360deg);
+  }
+}
+
+/* 確定の瞬間はランプを全力点滅(チェイス倍速 + 色サイクルも加速)。 */
+.roulette-panel.hit::before {
+  animation-duration: 300ms, 1.2s;
+}
+
+/*
+ * 確定ハロー(外周の脈動光)。box-shadow を直接アニメすると毎フレーム再描画に
+ * なるので、影を焼き付けた疑似要素の opacity だけ脈動させる(合成のみ)。
+ */
+.roulette-panel::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 24px;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow:
+    0 0 36px 6px rgba(255, 224, 110, 0.85),
+    0 0 90px 22px rgba(255, 180, 40, 0.5);
+}
+
+.roulette-panel.hit::after {
+  animation: rl-halo 560ms ease-in-out infinite alternate;
+}
+
+@keyframes rl-halo {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes rl-pop {
@@ -2162,6 +2463,10 @@ body {
   font-size: 24px;
   font-weight: 800;
   color: #fff;
+  /* 打ち抜き文字風(.f-txt と同じ): 黒の落とし込み + 金ランプの照り返し */
+  text-shadow:
+    0 2px 0 rgba(0, 0, 0, 0.7),
+    0 0 12px rgba(255, 200, 120, 0.3);
   /* ギフト名の前置き(「ハートミー ○○がルーレット」)が入るぶん、窓幅まで許す。 */
   max-width: calc(var(--rl-w, 150px) * 3);
   overflow: hidden;
@@ -2197,8 +2502,19 @@ body {
   height: 128px;
   overflow: hidden;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.45);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  /* ドラム窓のガラス感: 上下を暗く沈めてリールの曲率を出す。 */
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.62),
+    rgba(12, 5, 18, 0.42) 30%,
+    rgba(12, 5, 18, 0.42) 70%,
+    rgba(0, 0, 0, 0.66)
+  );
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 214, 90, 0.35),
+    inset 0 0 0 3px rgba(0, 0, 0, 0.6),
+    inset 0 14px 18px -10px rgba(0, 0, 0, 0.85),
+    inset 0 -14px 18px -10px rgba(0, 0, 0, 0.85);
   -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 14%, #000 86%, transparent 100%);
   mask-image: linear-gradient(90deg, transparent 0, #000 14%, #000 86%, transparent 100%);
 }
@@ -2229,6 +2545,58 @@ body {
   100% {
     filter: blur(0) saturate(1);
     transform: scale(1.035);
+  }
+}
+
+/*
+ * 回転中のスピード光条。窓の中を斜めの光が流れ続けて「高速で回っている」を
+ * 足す。ズーム層の中に置くので veil(目隠し)より必ず奥 — 終盤の暗がりを
+ * 光条が横切って隣のブロックを照らしてしまうことはない。transform だけの
+ * ループなので合成のみで回る。
+ */
+.roulette-panel .rl-zoom::after {
+  content: '';
+  position: absolute;
+  inset: -20px -90px;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    100deg,
+    transparent 0 34px,
+    rgba(255, 220, 140, 0.15) 34px 40px,
+    transparent 40px 58px,
+    rgba(255, 120, 200, 0.11) 58px 63px,
+    transparent 63px 88px
+  );
+  animation: rl-streak 620ms linear infinite;
+}
+
+@keyframes rl-streak {
+  to {
+    transform: translateX(-88px);
+  }
+}
+
+/* 確定後は流れを消す(止まったのに背景だけ流れていると錯覚が割れる)。 */
+.roulette-panel.hit .rl-zoom::after {
+  display: none;
+}
+
+/* 確定の瞬間、窓全体を白く一閃。veil/ポインタより後に描かれる = 最前面。 */
+.roulette-panel.hit .rl-window::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.95), rgba(255, 240, 200, 0.35) 45%, transparent 75%);
+  animation: rl-win-flash 480ms ease-out both;
+}
+
+@keyframes rl-win-flash {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
   }
 }
 
@@ -2516,16 +2884,22 @@ body {
   align-items: center;
   justify-content: center;
   border-radius: 14px;
-  background: linear-gradient(180deg, rgba(64, 56, 86, 0.9), rgba(28, 24, 44, 0.9));
+  /* ドラムの絵柄コマ: 深紫の盤面 + 上面のガラス写り込み + 金の細リム */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent 42%),
+    linear-gradient(180deg, rgba(74, 54, 100, 0.95), rgba(26, 16, 44, 0.95));
   box-shadow:
-    inset 0 0 0 2px rgba(255, 255, 255, 0.16),
-    inset 0 10px 16px -12px rgba(255, 255, 255, 0.4);
+    inset 0 0 0 2px rgba(255, 214, 90, 0.4),
+    inset 0 0 0 3px rgba(0, 0, 0, 0.5),
+    inset 0 10px 16px -12px rgba(255, 255, 255, 0.45);
   font-family: var(--mono);
   font-size: 40px;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
-  color: rgba(255, 255, 255, 0.85);
-  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+  color: rgba(255, 250, 235, 0.92);
+  text-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.7),
+    0 0 12px rgba(255, 200, 120, 0.25);
   white-space: nowrap;
 }
 
@@ -2580,22 +2954,62 @@ body {
  * 瞬間」に答えが見えてしまう(旧実装の不具合)。.win は DOM にも .hit まで無い。
  */
 .roulette-panel.hit.bad .rl-block.win {
-  color: #ff6b6b;
+  color: #ff5d5d;
   box-shadow:
-    inset 0 0 0 2px rgba(255, 107, 107, 0.75),
+    inset 0 0 0 3px rgba(255, 107, 107, 0.9),
+    inset 0 0 24px rgba(255, 59, 59, 0.55),
     inset 0 10px 16px -12px rgba(255, 255, 255, 0.4);
 }
 
 .roulette-panel.hit.good .rl-block.win {
   color: var(--green);
   box-shadow:
-    inset 0 0 0 2px rgba(74, 217, 145, 0.75),
+    inset 0 0 0 3px rgba(74, 217, 145, 0.9),
+    inset 0 0 24px rgba(74, 217, 145, 0.55),
     inset 0 10px 16px -12px rgba(255, 255, 255, 0.4);
 }
 
 .roulette-panel.hit .rl-block.win {
+  /*
+   * z-index:0 でスタッキングコンテキストを固定し、::before(回転光背)を
+   * z-index:-1 に落とす — この形なら光背は**自分の背景の上・数字の下**に挟まる。
+   * コンテキストを作らないと -1 はブロック背景の裏に沈んで見えなくなる。
+   */
+  position: relative;
+  z-index: 0;
   animation: rl-win 900ms cubic-bezier(0.22, 1, 0.36, 1);
-  text-shadow: 0 0 22px currentColor;
+  /* ネオン管3層(.f-amt と同じ思想): 白芯 → 色グロー2段 */
+  text-shadow:
+    0 0 6px rgba(255, 255, 255, 0.5),
+    0 0 18px currentColor,
+    0 0 38px currentColor;
+}
+
+/*
+ * 当選ブロックの回転光背(大当たりの後光)。マスクはドーナツ状 — 中心を
+ * 空けて数字と赤/緑リングの可読性を守り、光は縁から外へ放射させる。
+ */
+.roulette-panel.hit .rl-block.win::before {
+  content: '';
+  position: absolute;
+  inset: -38%;
+  z-index: -1;
+  pointer-events: none;
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(255, 232, 150, 0.32) 0deg 9deg,
+    transparent 9deg 26deg
+  );
+  border-radius: 50%;
+  -webkit-mask-image: radial-gradient(circle, transparent 0 18%, #000 34%, transparent 70%);
+  mask-image: radial-gradient(circle, transparent 0 18%, #000 34%, transparent 70%);
+  animation: rl-win-rays 1600ms linear infinite;
+}
+
+@keyframes rl-win-rays {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .roulette-panel .rl-block .rl-sign {
@@ -2625,11 +3039,15 @@ body {
   }
 }
 
+/* 確定: 役物全体が大当たり発光(枠の変数はそのまま、外光だけ強める)。 */
 .roulette-panel.hit {
   box-shadow:
-    inset 0 0 0 3px rgba(255, 224, 110, 0.9),
-    0 0 46px rgba(255, 200, 70, 0.6),
-    0 10px 32px rgba(0, 0, 0, 0.6);
+    inset 0 0 0 1px rgba(0, 0, 0, 0.6),
+    inset 0 14px 22px -16px rgba(255, 255, 255, 0.5),
+    inset 0 -12px 20px -14px rgba(0, 0, 0, 0.65),
+    0 0 26px rgba(255, 224, 110, 0.85),
+    0 0 64px rgba(255, 200, 70, 0.55),
+    0 12px 34px rgba(0, 0, 0, 0.65);
 }
 
 /*
@@ -2642,8 +3060,11 @@ body {
   left: 50%;
   font-size: 20px;
   line-height: 1;
-  color: rgba(255, 214, 90, 0.9);
-  text-shadow: 0 0 10px rgba(255, 190, 60, 0.8);
+  color: #ffe9a8;
+  text-shadow:
+    0 0 4px rgba(255, 255, 255, 0.6),
+    0 0 12px rgba(255, 190, 60, 0.95),
+    0 0 24px rgba(255, 150, 30, 0.6);
   transform: translateX(-50%);
   transform-origin: 50% 50%;
   animation: rl-point var(--rl-ms) linear both;
@@ -2712,6 +3133,25 @@ body {
   }
 }
 
+/*
+ * 確定でポインタを一発パンチ(スピン用の rl-point/-kick はこの時点で走り切って
+ * いるので上書きしてよい)。白熱 → 定常の金へ戻す。
+ */
+.roulette-panel.hit .rl-pointer {
+  animation: rl-point-hit 420ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+@keyframes rl-point-hit {
+  0% {
+    transform: translateX(-50%) scale(1.7);
+    filter: brightness(2.2);
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+    filter: brightness(1);
+  }
+}
+
 .roulette-panel .rl-pointer-top {
   top: 2px;
 }
@@ -2720,12 +3160,19 @@ body {
   bottom: 2px;
 }
 
-/* ルーレット確定のバナー(float)は金リングで少し格上に。 */
+/*
+ * ルーレット確定のバナー(float)は大当たり格 — 盤面まで金に寄せ、
+ * ランプのチェイスを速める(基底 .float の variant 規約どおり変数差し替え + 尺だけ上書き)。
+ */
 .float.banner-roulette {
-  box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 214, 90, 0.7),
-    0 0 calc(26px * var(--float-scale)) rgba(255, 190, 60, 0.4),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+  --fl-lamp: #ffdf7e;
+  --fl-glow: rgba(255, 190, 60, 0.65);
+  --fl-bg-1: rgba(64, 44, 12, 0.96);
+  --fl-bg-2: rgba(22, 14, 4, 0.94);
+}
+
+.float.banner-roulette::before {
+  animation-duration: 480ms;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2867,17 +3314,130 @@ body {
   padding: 20px 52px 24px;
 }
 
-/* ブースト結果バナー(float)。金リング — ルーレット確定と同格。 */
+/* ブースト結果バナー(float)。大当たり格 — ルーレット確定と同格(変数差し替えのみ)。 */
 .float.banner-boost {
+  --fl-lamp: #ffdf7e;
+  --fl-glow: rgba(255, 190, 60, 0.65);
+  --fl-bg-1: rgba(64, 44, 12, 0.96);
+  --fl-bg-2: rgba(22, 14, 4, 0.94);
+}
+
+.float.banner-boost::before {
+  animation-duration: 480ms;
+}
+
+/*
+ * 清算発表(パチンコ風「-N」ロールアップ)。boost-end 後、結果カットシーンに
+ * 続いて fx-layer 内に出る。段の進行(roll → lock → fly)と長尺タイミングは
+ * すべて MonitorView の JS タイマーが権威 — ここの keyframes は短い単発と
+ * 微振動ループだけにする(shake-abort 方式の尺整合テストを増やさないため)。
+ */
+.boost-settle {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  animation: boost-overlay-in 260ms ease-out both;
+}
+
+.boost-settle-counter {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 30px 72px 34px;
+  border-radius: 28px;
+  background: rgba(16, 4, 0, 0.6);
   box-shadow:
-    inset 0 0 0 calc(2px * var(--float-scale)) rgba(255, 214, 90, 0.7),
-    0 0 calc(26px * var(--float-scale)) rgba(255, 190, 60, 0.4),
-    0 calc(8px * var(--float-scale)) calc(28px * var(--float-scale)) rgba(0, 0, 0, 0.55);
+    inset 0 0 0 3px rgba(255, 120, 60, 0.8),
+    0 0 56px rgba(255, 120, 40, 0.55),
+    0 10px 34px rgba(0, 0, 0, 0.55);
+}
+
+/* 減算量の大型数字。roll 中の桁文字は rAF が textContent 直書きで回す。 */
+.boost-settle-amt {
+  font-family: var(--mono);
+  font-size: 190px;
+  line-height: 1;
+  font-weight: 700;
+  color: #ffd9a8;
+  text-shadow:
+    0 0 20px rgba(255, 140, 60, 0.95),
+    0 0 70px rgba(255, 90, 20, 0.65),
+    0 4px 0 rgba(90, 24, 0, 0.8);
+}
+
+/* 回転中: ドラムロールの微振動+滲み。 */
+.roll .boost-settle-amt {
+  animation: boost-settle-jitter 120ms steps(2) infinite;
+  filter: blur(0.6px);
+}
+
+@keyframes boost-settle-jitter {
+  0% {
+    transform: translateY(-3px);
+  }
+  100% {
+    transform: translateY(3px);
+  }
+}
+
+/* 全桁確定: 一発のパンチ(単発 400ms — 進行は JS が握る)。 */
+.lock .boost-settle-amt {
+  animation: boost-settle-lock 400ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+@keyframes boost-settle-lock {
+  0% {
+    transform: scale(1.45, 0.75);
+    filter: brightness(2);
+  }
+  45% {
+    transform: scale(0.92, 1.12);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+/* 発射: 数字が7セグへ吸い込まれて消える(弾本体は fx.strike の canvas 粒子)。 */
+.fly .boost-settle-counter {
+  animation: boost-settle-fly 300ms ease-in both;
+}
+
+@keyframes boost-settle-fly {
+  to {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+}
+
+.boost-settle-sub {
+  font-family: var(--font);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #ffe6c4;
+  text-shadow: 0 0 14px rgba(255, 140, 60, 0.8);
+}
+
+/* 横ステージは高さが足りないので一回り小さく(.boost-count と同じ判断)。 */
+.landscape .boost-settle-amt {
+  font-size: 148px;
+}
+
+.landscape .boost-settle-counter {
+  padding: 22px 56px 26px;
 }
 
 @media (prefers-reduced-motion: reduce) {
   /* MonitorView 側も boostWillStart が false になり演出ごとスキップされる。 */
   .boost-overlay,
+  .boost-settle,
   .boost-screen {
     display: none;
   }

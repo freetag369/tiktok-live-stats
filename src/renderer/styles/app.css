@@ -192,6 +192,18 @@ button.btn.danger {
   border-color: #5a2a2a;
   color: var(--red);
 }
+/* 復旧系(モニター再起動)。隣の .primary はティールなので、緑は塗りつぶしではなく
+   枠+文字で出して色が競合しないようにする(.ch-warn と同じ流儀)。 */
+button.btn.ok {
+  background: rgba(74, 217, 145, 0.16);
+  border-color: var(--green);
+  color: var(--green);
+  font-weight: 600;
+}
+button.btn.ok:hover:not(:disabled) {
+  background: var(--green);
+  color: #052b18;
+}
 button.btn.small {
   padding: 4px 9px;
   font-size: 12px;

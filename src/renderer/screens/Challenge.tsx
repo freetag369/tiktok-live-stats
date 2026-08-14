@@ -46,8 +46,10 @@ import {
   TAP_BOOST_LOOP_CLIPS,
   TAP_BOOST_MULT_MAX,
   TAP_BOOST_MULT_MIN,
+  TAP_BOOST_RESULT_CLIPS,
   effectiveSeVolume,
 } from '@shared/challenge';
+import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { setSettings, toast } from '../state/uiStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
@@ -2264,6 +2266,7 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
   };
   const introSec = Math.round(TAP_BOOST_INTRO_MS / 1000);
   const countSec = Math.round(TAP_BOOST_COUNT_MS / 1000);
+  const resultSec = Math.round(TAP_BOOST_RESULT_MS / 1000);
 
   return (
     <>
@@ -2275,7 +2278,8 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
         ギフトが届くと <b>起動カットイン{introSec}秒 → カウントダウン{countSec}秒(3・2・1)→
         タップウィンドウ</b>に入り、その間の PUSH(クリック / Space / ホットキー)は
-        <b>数えるだけ</b>で溜まります。ウィンドウが終わると溜めたタップ数が7セグへ飛んで、
+        <b>数えるだけ</b>で溜まります。ウィンドウが終わると<b>結果カットシーン(任意)→
+        減算量「-N」のドラムロール発表 → 7セグへ着弾</b>と進み、
         <b>タップ数 × 1回の減少量 × 倍率</b> がまとめて減ります。
         <b>お助け(ファンスタンプ)より後・ルーレットより先</b>に判定され、一致したギフトは
         増減規則を通りません。
@@ -2364,10 +2368,23 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
                 <option value="off">出さない(暗幕+カウンタのみ)</option>
               </select>
             </label>
+            <label className="field" style={{ flex: 1 }}>
+              結果カットシーン({resultSec}秒)
+              <select value={tb.resultClip} onChange={(e) => patchTb({ resultClip: e.target.value })}>
+                {TAP_BOOST_RESULT_CLIPS.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+                <option value="off">出さない(この段をスキップ)</option>
+              </select>
+            </label>
           </div>
           <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
-            「スキップ」にした段はその秒数ごと飛ばします(例: 両方スキップでギフト到着後すぐ
-            タップウィンドウ)。映像は素材を assets/fx/boost に追加すると選択肢を増やせます。
+            「スキップ」にした段はその秒数ごと飛ばします(例: 起動とカウントダウンを両方スキップで
+            ギフト到着後すぐタップウィンドウ)。映像は素材を assets/fx/boost に追加すると選択肢を
+            増やせます(素材が無い段は暗幕で同じ秒数を待ちます)。結果カットシーンをスキップしても
+            <b>減算量「-N」のドラムロール発表と着弾は必ず出ます</b>。
           </div>
 
           <label className="row" style={{ cursor: 'pointer' }}>
@@ -2381,7 +2398,7 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
               onTest={onTest}
               busy={testBusy}
               label="▶ ブースト演出をテスト"
-              title="モニターウィンドウで起動カットイン→3・2・1→タップウィンドウ→着弾を実演再生します(giftId 未設定でも確認できます)。ウィンドウ中にモニターをクリック/Spaceするとタップカウンタが動きます(カウント値は変わりません)"
+              title="モニターウィンドウで起動カットイン→3・2・1→タップウィンドウ→結果カットシーン→減算発表→着弾を実演再生します(giftId 未設定でも確認できます)。ウィンドウ中にモニターをクリック/Spaceするとタップカウンタが動き、タップ数に応じた発表まで試写できます(カウント値は変わりません)"
             />
           </div>
 

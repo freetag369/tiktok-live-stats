@@ -327,6 +327,21 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
         closeMonitorWindow();
         return { id, ok: true, result: { open: false } } as RpcResponse;
 
+      // 窓ごと作り直す。close は非同期(BrowserWindow の 'closed' でシングルトンが null に
+      // なる)なので、続けて open すると monitor-window の冪等ガードに当たって死にかけの窓を
+      // focus するだけになる。cfg.set の monitorWindowed 変更と同じ 350ms を挟む。
+      // openMonitor() 経由なので MessagePort の再アタッチ・monitorOpen 通知・現在の
+      // ディスプレイ設定の読み直しはすべて自動で走る。閉じているときは待たずに開く。
+      case 'monitor.restart': {
+        if (getMonitorWindow()) {
+          closeMonitorWindow();
+          setTimeout(() => openMonitor(), 350);
+        } else {
+          openMonitor();
+        }
+        return { id, ok: true, result: { open: true } } as RpcResponse;
+      }
+
       case 'monitor.status':
         return { id, ok: true, result: { open: getMonitorWindow() != null } } as RpcResponse;
 

@@ -18,6 +18,16 @@ import likeJamUrl from '../assets/se/like-jam.mp3';
 import followJamUrl from '../assets/se/follow-jam.mp3';
 import reelStopUrl from '../assets/se/reel-stop.ogg';
 import reelConfirmUrl from '../assets/se/reel-confirm.ogg';
+import gaugeBurstUrl from '../assets/se/gauge-burst.mp3';
+import stockBurstUrl from '../assets/se/stock-burst.mp3';
+import helperStampUrl from '../assets/se/helper-stamp.mp3';
+import commentJamUrl from '../assets/se/comment-jam.mp3';
+import boostTapUrl from '../assets/se/boost-tap.mp3';
+import boostFinalUrl from '../assets/se/boost-final.mp3';
+import boostHitUrl from '../assets/se/boost-hit.mp3';
+import reelKickUrl from '../assets/se/reel-kick.mp3';
+import reelHitUrl from '../assets/se/reel-hit.mp3';
+import clearFanfareUrl from '../assets/se/clear-fanfare.mp3';
 
 /**
  * チャレンジ演出の効果音カタログ(素材の由来は assets/se/CREDITS.md)。Kenney の CC0 と
@@ -65,6 +75,21 @@ export const SE_SOUNDS: readonly SeSound[] = [
   // ピーク -1.5dB 前後)。gain は like-jam と同じ考え方でピークの熱さぶんを引く。
   { id: 'reel-stop', label: 'リール停止(スイッチ)', url: reelStopUrl, gain: 0.9 },
   { id: 'reel-confirm', label: 'ルーレット確定(確認音)', url: reelConfirmUrl, gain: 0.85 },
+  // 演出ごとの専用録り(作者提供)。取り込み時に末尾の無音を落としてピークを -1.5dB へ
+  // 揃えてある(素材のままでは既存音より 6〜8dB 小さく、gain は ≤1 なので後から
+  // 取り戻せない — reel-stop を +10.9dB したのと同じ理由)。揃えた結果の位置づけは
+  // reel-stop / like-jam と同じなので gain も同じ 0.9。
+  { id: 'gauge-burst', label: 'ゲージ満タン(専用)', url: gaugeBurstUrl, gain: 0.9 },
+  { id: 'stock-burst', label: 'ストック満杯(専用)', url: stockBurstUrl, gain: 0.9 },
+  { id: 'helper-stamp', label: 'お助け(専用)', url: helperStampUrl, gain: 0.9 },
+  { id: 'comment-jam', label: 'コメント妨害(専用)', url: commentJamUrl, gain: 0.9 },
+  { id: 'boost-tap', label: 'ブースト タップ開始(専用)', url: boostTapUrl, gain: 0.9 },
+  // どのスロットの既定でもない選択肢 — 清算の締めなど、好みの位置に手で割り当てる用。
+  { id: 'boost-final', label: 'ブースト 締め(専用)', url: boostFinalUrl, gain: 0.9 },
+  { id: 'boost-hit', label: 'ブースト着弾(専用)', url: boostHitUrl, gain: 0.9 },
+  { id: 'reel-kick', label: 'ルーレット キック(専用)', url: reelKickUrl, gain: 0.9 },
+  { id: 'reel-hit', label: 'ルーレット確定(専用)', url: reelHitUrl, gain: 0.9 },
+  { id: 'clear-fanfare', label: '達成(専用)', url: clearFanfareUrl, gain: 0.9 },
 ];
 
 const BY_ID = new Map(SE_SOUNDS.map((s) => [s.id, s]));

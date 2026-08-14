@@ -425,6 +425,9 @@ function ChallengeCard(): React.JSX.Element | null {
   const log = useLive((s) => s.challengeLog);
   const settings = useUi((s) => s.settings);
   const [monitorOpen, setMonitorOpen] = useState(false);
+  // モニター再起動の連打よけ。窓の作り直しは close→350ms→open なので、その間は押させない。
+  const [restarting, setRestarting] = useState(false);
+  const restartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const enabled = settings?.challenge.enabled ?? false;
 
   useEffect(() => {
@@ -463,6 +466,7 @@ function ChallengeCard(): React.JSX.Element | null {
   useEffect(
     () => () => {
       if (wakeTimer.current) clearTimeout(wakeTimer.current);
+      if (restartTimer.current) clearTimeout(restartTimer.current);
     },
     [],
   );
@@ -694,6 +698,22 @@ function ChallengeCard(): React.JSX.Element | null {
           onClick={() => rpcFire(monitorOpen ? 'monitor.close' : 'monitor.open', undefined, 'モニターの開閉')}
         >
           {monitorOpen ? 'モニターを閉じる' : 'モニターを開く'}
+        </button>
+        {/* 固まった・真っ黒になった・表示ディスプレイがずれた窓の復旧用。窓ごと作り直すが、
+            残数も統計もログも worker が持っているのでそのまま出直す(失うものは無い)。
+            よって確認ダイアログは挟まない — 復旧が遅れる方が事故になる。 */}
+        <button
+          className="btn small ok"
+          disabled={restarting}
+          onClick={() => {
+            setRestarting(true);
+            if (restartTimer.current) clearTimeout(restartTimer.current);
+            restartTimer.current = setTimeout(() => setRestarting(false), 1200);
+            rpcFire('monitor.restart', undefined, 'モニターの再起動');
+          }}
+          title="モニター窓を閉じて開き直します。固まった・真っ黒になった・表示ディスプレイがずれたときに使ってください(残数や統計は消えません)"
+        >
+          {restarting ? '再起動中…' : 'モニター再起動'}
         </button>
       </div>
 

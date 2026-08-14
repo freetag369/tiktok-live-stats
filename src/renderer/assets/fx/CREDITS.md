@@ -419,8 +419,13 @@ the start, peaks, and fully decays — the frame returns to pure black and stays
 
 | ファイル | 既定のトリガー | モチーフ | 尺 |
 |---|---|---|---|
-| `cut-rose.mp4` | ギフト名「バラ」/ canonical `rose` | 光沢のある3Dのバラ(ポップ・可愛い系) | 5.06 秒 |
-| `cut-rosa.mp4` | ギフト名「ローザ」 | 深紅のベルベットのバラ(重厚・最高レア系) | 5.06 秒 |
+| `cut-rose.mp4` | giftId `5655` / giftName `rose` / canonical `rose` | 光沢のある3Dのバラ(ポップ・可愛い系) | 5.06 秒 |
+| `cut-rosa.mp4` | giftId `8913` / giftName `rosa` | 深紅のベルベットのバラ(重厚・最高レア系) | 5.06 秒 |
+
+> トリガーは初版で「バラ」「ローザ」という**日本語名**だったが、配信イベントの
+> `giftName` は表示言語に関係なく英語で届くため実データへ寄せ直した(`settingsVersion` 4)。
+> 詳細は下の「第2弾」の節を参照。バラだけは canonical `rose` を持っていたため
+> 初版でも発火していた。
 
 加工内容: **無し**(返却された mp4 をそのままリネームして格納)。
 
@@ -456,6 +461,110 @@ the start, peaks, and fully decays — the frame returns to pure black and stays
 > Higgsfield の罠(`band/` のときと同じ): `generate_video_batch` は最初の投入で
 > **プリセット推奨("IN THE DARK")が返ってジョブが作られない**ことがある。
 > 返ってきた `declined_preset_id` を同じ params に足して再投入すれば通る。
+
+# ダイヤの全面カット・第2弾(`cut/` サブフォルダ・40本)
+
+TikTok のギフト一覧40種に、それぞれ専用のフルスクリーンカットインを用意したもの。
+判定とカタログの出所は `src/shared/fx-cut.ts` の `FULL_CUT_CLIPS_V3` ただ一つ。
+第1弾の2本と合わせて42行が `DEFAULT_GIFT_FULL_CUT.rules` になる。
+
+> ## ⚠️ トリガーは **giftId と英語のギフト名**。日本語名では発火しない
+>
+> TikTok の配信イベントが載せてくる `giftName` は、**視聴側・配信側の表示言語に
+> 関係なく英語**で届く(`Rose` / `Genius` / `Clap Clap`)。日本限定ギフト
+>(ねば〜る君・ふっかちゃん・うどん脳など)だけが日本語で届く。
+> 初版(`settingsVersion` 3)はスクリーンショットの表示名をそのまま日本語で
+> 入れてしまい、**42行中40行が一度も発火しなかった**。
+>
+> さらに **同名で別IDのギフトが実在する** — `Hand Heart` は `5660`(ハートポーズ)と
+> `8343`(ハンドハート)の2つあり、名前では区別できない。だから giftId が要る。
+>
+> 下表の giftId は**実データ(`gift_catalog` / `gift_alias` と受信履歴)で確認した 20 行**。
+> 「—」の行はこのアカウントで未受領のため未確認で、英語名の推定だけで当てにいっている。
+> 実際に受け取ったら giftId を埋めること。
+>
+> canonical は原則使わない。`gift_alias` は Finger Heart と Hand Heart を
+> どちらも `heart` に畳んでしまうなど粒度が粗く、別々のクリップに割れないため。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | Higgsfield / `seedance_2_0_mini`(720p・参照画像 `image_references`) |
+| 生成日 | 2026-08-14 |
+| 出力(生成時) | 1280×720 (16:9) / 24fps / H.264 / **AAC 音声トラックあり**(`generate_audio: true`) |
+| 参照画像 | `IMAGE/20260814/WS0005xx.JPG`(TikTok ギフト一覧のスクリーンショット) |
+| 尺 | 各 5.09 秒(アプリ側は `giftFullCut.rules[].durationSec` = 5 秒で打ち切る) |
+
+**加工内容: ffmpeg で再エンコード(第1弾の2本と違い無加工ではない)。**
+40本を無加工で入れると約180MB 増え、`app.asar` と AGPL ソース zip の**両方**に載るため
+インストーラが約2倍太る。次の設定で約1/3に圧縮した(SSIM 0.970 / PSNR 37.8dB・
+実フレーム比較で劣化を確認できず):
+
+```
+ffmpeg -i raw.mp4 -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v high   -movflags +faststart -c:a aac -b:a 128k -ac 2 -ar 48000 out.mp4
+```
+
+- `yuv420p` — 生成物が 4:4:4 で返ることがあり、Chromium が再生を拒む場合があるため明示。
+- `+faststart` — moov atom を先頭へ。`app.asar` 内からの `preload="auto"` が全読みせずに始まる。
+- 音声も再エンコード(`-c:a copy` にしない)— 40本の音圧がバラつくと、
+  `giftFullCut.volume` 一つで音量を決めるこの経路では耳に付くため。
+
+| ファイル | ギフト | giftId | giftName | 尺 | サイズ |
+|---|---|---|---|---|---|
+| `cut-subarashii.mp4` | 素晴らしい | `15232` | `awesome` | 5.09 秒 | 1.08 MB |
+| `cut-mini-hanabi.mp4` | ミニ花火 | — | `mini fireworks` | 5.09 秒 | 1.63 MB |
+| `cut-neko-ashi.mp4` | 猫の足 | — | `cat paw` | 5.09 秒 | 0.98 MB |
+| `cut-tiktok.mp4` | TikTok | `5269` | `tiktok`(完全一致) | 5.09 秒 | 1.23 MB |
+| `cut-gg.mp4` | GG | `6064` | `gg`(完全一致) | 5.09 秒 | 1.31 MB |
+| `cut-shoken.mp4` | 初見です | `12202` | `nice to meet u` | 5.09 秒 | 1.07 MB |
+| `cut-hakushu.mp4` | 拍手 | `231956` | `clap clap` | 5.09 秒 | 1.11 MB |
+| `cut-daisuki.mp4` | 大好き | `15231` | `love you so much` | 5.09 秒 | 1.25 MB |
+| `cut-soft-cream.mp4` | ソフトクリーム | — | `ice cream cone` | 5.09 秒 | 0.92 MB |
+| `cut-uchiwa.mp4` | うちわ | `15563` | `fan`(完全一致) | 5.09 秒 | 1.39 MB |
+| `cut-yakyu.mp4` | 野球 | `7897` | `baseball` | 5.09 秒 | 0.76 MB |
+| `cut-love-letter.mp4` | ラブレター | `14113` | `love letter` | 5.09 秒 | 0.91 MB |
+| `cut-ai-no-kaori.mp4` | 愛の香り | `919386` | `love in scent` | 5.09 秒 | 1.08 MB |
+| `cut-finger-heart.mp4` | フィンガーハート | `5487` | `finger heart` | 5.09 秒 | 1.30 MB |
+| `cut-nyao.mp4` | ニャオ | — | `nyao` | 5.09 秒 | 1.34 MB |
+| `cut-yell.mp4` | エール | `12238` | `support` | 5.09 秒 | 0.95 MB |
+| `cut-honki.mp4` | 本気 | `13521` | `seriously` | 5.09 秒 | 1.49 MB |
+| `cut-omamori.mp4` | おまもり | — | `omamori` | 5.09 秒 | 1.37 MB |
+| `cut-nebaaru.mp4` | ねば〜る君 | — | `ねば` | 5.09 秒 | 1.17 MB |
+| `cut-fukka.mp4` | ふっかちゃん | — | `ふっか` | 5.09 秒 | 1.33 MB |
+| `cut-udon-no.mp4` | うどん脳 | — | `うどん脳` | 5.09 秒 | 1.11 MB |
+| `cut-ice-bar.mp4` | アイスバー | — | `ice bar` | 5.09 秒 | 1.11 MB |
+| `cut-journey-pass.mp4` | ジャーニーパス | — | `journey pass` | 5.09 秒 | 1.51 MB |
+| `cut-oshi-shosan.mp4` | 推しへの称賛 | — | `applause` | 5.09 秒 | 1.55 MB |
+| `cut-kosui.mp4` | 香水 | `5658` | `perfume` | 5.09 秒 | 1.12 MB |
+| `cut-goat-busker.mp4` | G.O.A.T.バスカー | — | `busker` | 5.09 秒 | 1.07 MB |
+| `cut-donut.mp4` | ドーナッツ | `5879` | `doughnut` | 5.09 秒 | 1.06 MB |
+| `cut-tensai.mp4` | 天才 | `13523` | `genius` | 5.09 秒 | 1.54 MB |
+| `cut-boshi-hige.mp4` | 帽子と口ひげ | — | `hat and moustache` | 5.09 秒 | 1.03 MB |
+| `cut-utau-kinoko.mp4` | 歌うキノコ | `170506` | `singing mushroom` | 5.09 秒 | 1.40 MB |
+| `cut-pearl-chime.mp4` | パールチャイム | — | `pearl chime` | 5.09 秒 | 1.19 MB |
+| `cut-flower-melody.mp4` | フラワーメロディ | — | `flower melody` | 5.09 秒 | 1.26 MB |
+| `cut-groove-guitar.mp4` | グルーヴギター | — | `groove guitar` | 5.09 秒 | 1.17 MB |
+| `cut-fiesta-accordion.mp4` | フィエスタアコーディオン | — | `fiesta accordion` | 5.09 秒 | 1.44 MB |
+| `cut-heart-pose.mp4` | ハートポーズ | `5660` | — | 5.09 秒 | 1.28 MB |
+| `cut-hand-heart.mp4` | ハンドハート | `8343` | — | 5.09 秒 | 0.92 MB |
+| `cut-mischka-bear.mp4` | ミシカベア | — | `mischka` | 5.09 秒 | 1.13 MB |
+| `cut-cracker.mp4` | クラッカー | — | `party popper` | 5.09 秒 | 1.66 MB |
+| `cut-koi-megane.mp4` | 恋のメガネ | `19168` | `love glasses` | 5.09 秒 | 1.05 MB |
+| `cut-tempo-flute.mp4` | テンポフルート | — | `tempo flute` | 5.09 秒 | 1.21 MB |
+
+合計 **48.5 MB**。
+
+> ## ⚠️ band/*.mp4・stock-cutin.mp4 と同族 — screen 禁止・`.fx-clip-opaque` 必須・音声あり
+>
+> 不透明フルフレーム素材なので `mix-blend-mode: screen` は禁止。配置の制約
+>(`.monitor-root` 直下・z-index なし)も同じ。音声の有無の分岐は
+> `ChallengeEffect.fxFullCut` ただ一つで、worker はこの印が付く effect に
+> `fxBandBgm` を**載せない**(載せると mp4 の音と BGM が二重に鳴る)。
+>
+> **既定 5 秒 < 素材 5.09 秒なのでループしない。** 設定で 6 秒以上にすると
+> 頭から再生し直すので音楽も鳴り直す。
+>
+> 素材を差し替え・削除しても `lib/fx.ts` は 0 件許容の glob なのでビルドは落ちないが、
+> `test/unit/fx-catalog.spec.ts` の「素材ファイルと id が一対一」が赤くなる(意図的)。
 
 ## Higgsfield の実務メモ(この40本で踏んだもの)
 

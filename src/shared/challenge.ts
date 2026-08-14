@@ -225,6 +225,18 @@ export const CHALLENGE_SE_SOUND_IDS: readonly string[] = [
   'follow-jam',
   'reel-stop',
   'reel-confirm',
+  // 演出ごとの専用録り(assets/se/CREDITS.md の「作者提供の専用音」)。
+  // 'boost-final' だけどのスロットの既定でもない — 手で割り当てる用の選択肢。
+  'gauge-burst',
+  'stock-burst',
+  'helper-stamp',
+  'comment-jam',
+  'boost-tap',
+  'boost-final',
+  'boost-hit',
+  'reel-kick',
+  'reel-hit',
+  'clear-fanfare',
 ];
 
 /**
@@ -342,30 +354,28 @@ export const DEFAULT_SE_SOUNDS: Record<ChallengeSeSlot, string> = {
   // — 既存 settings.json の寄せ替えは migrateChallengeSeSounds が一度だけ行う。
   follow: 'follow-jam',
   like: 'like-jam',
-  'gauge-full': 'jingle-hit',
-  'stock-full': 'jingle-steel',
-  // 指定コメント妨害は軽いポップ音(旧いいね妨害の既定 — 妨害の専用音化で空いた)。
-  // 連投されうるスロットなので、like-jam のような主張の強い音は既定にしない。
-  comment: 'pop',
+  // 妨害の2つに続いて、演出ごとの専用録りへ差し替えた9スロット。旧既定
+  // (jingle-hit / jingle-steel / pop / confirm-1 / bong / reel-confirm /
+  //  jingle-steel / fanfare-8bit-short / fanfare-8bit)は選択肢としてカタログに
+  // 残る — 保存済み settings.json の寄せ替えは migrateChallengeSeSounds の v5 が行う。
+  'gauge-full': 'gauge-burst',
+  'stock-full': 'stock-burst',
+  comment: 'comment-jam',
   'gift-t1': 'confirm-1',
   'gift-t2': 'confirm-2',
   'gift-t3': 'jingle-hit',
   'gift-t4': 'jingle-steel',
-  // お助けは専用スロットになる前は gift-t1 を流用していたので、既定はその
-  // 'confirm-1' のまま — アップデートで鳴る音を変えない(DEFAULT_MINI_FX と同じ理由)。
-  helper: 'confirm-1',
+  helper: 'helper-stamp',
   // 回転開始はチクタク感のある tick。
   roulette: 'tick',
   // 「止まりそう」(当選の1つ手前に着いて溜めに入る瞬間)はスイッチのカチッ。
+  // ここだけ専用録りが無いので reel-stop のまま。
   'roulette-near': 'reel-stop',
-  // キック(フェイク停止から蹴り出される一撃)は低い衝撃音。
-  'roulette-kick': 'bong',
-  // 確定は専用の確認音。
-  'roulette-hit': 'reel-confirm',
-  // ブースト開始はフィーバー突入のジングル。着弾(boost-end)は短いファンファーレ。
-  'boost-start': 'jingle-steel',
-  'boost-end': 'fanfare-8bit-short',
-  achieved: 'fanfare-8bit',
+  'roulette-kick': 'reel-kick',
+  'roulette-hit': 'reel-hit',
+  'boost-start': 'boost-tap',
+  'boost-end': 'boost-hit',
+  achieved: 'clear-fanfare',
 };
 
 /**
@@ -683,6 +693,12 @@ export const TAP_BOOST_LOOP_CLIPS: readonly TapBoostClipDef[] = [
   { id: 'loop-panther', label: '黒豹コズミックFEVER(15秒・コインなし)' },
   { id: 'loop-pachinko', label: 'ゴールドFEVER(初代・縦動画)' },
 ];
+export const TAP_BOOST_RESULT_CLIPS: readonly TapBoostClipDef[] = [
+  // 結果カットシーン(タップウィンドウ終了 → 減算発表の前置き)。実尺は
+  // TAP_BOOST_RESULT_MS(shared/boost-settle.ts)で固定 — 素材はこの尺で揃える。
+  // mp4 が未投入でも boostClipUrl は 0 件許容 glob なので暗幕で同じ尺を待つ。
+  { id: 'result-panther', label: '結果発表(黒豹)' },
+];
 
 /**
  * タップブースト(フィーバー)の既定。giftId は空 — クリエイター固有の値なので
@@ -700,6 +716,10 @@ export const DEFAULT_TAP_BOOST: TapBoostConfig = {
   introClip: 'intro-panther',
   countClip: 'count-321',
   loopClip: 'loop-panther',
+  // 既定 'off' — result-* の mp4 素材は未同梱で、catalog id を既定にすると
+  // 全ユーザーが4秒の暗幕を見る。素材を同梱したらここを差し替える。
+  // ロールアップ発表('-N' の桁回転→着弾)自体は 'off' でも常に出る。
+  resultClip: 'off',
   flash: true,
 };
 
@@ -763,7 +783,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
 /**
  * playSe に渡す実効音量(0-100)。全体音量 × スロットごとの相対音量(%)。
  * slotPct が欠損なら 100(= 全体音量そのまま)として扱う — モニター窓は設定を
- * 30秒ポーリングで拾うので、個別音量を持たない古い設定が渡ってくることがある。
+ * 120秒ポーリング(CFG_POLL_MS)で拾うので、個別音量を持たない古い設定が渡ってくることがある。
  */
 export function effectiveSeVolume(master: number, slotPct: number | undefined): number {
   const m = Math.min(100, Math.max(0, master));
@@ -885,7 +905,7 @@ export function matchGiftBand(
 //
 // 規約: **反復するのは見た目だけ。値・統計・ランキング・履歴ログは1件のまま。**
 // worker が回数を決めて effect に焼き込み(fxRepeat/fxRepeatIntervalMs)、モニターは
-// それを読むだけ — cfg は30秒ポーリングで古くなりうるので再判定させない
+// それを読むだけ — cfg は120秒ポーリング(CFG_POLL_MS)で古くなりうるので再判定させない
 // (fxBandClip / rouletteSegments と同じ「effect 1件で自己完結」の流儀)。
 
 /**
@@ -1024,7 +1044,9 @@ export function freshChallengeEffects(
  * ⚠ この表は**凍結する**。「今の既定」ではなく「v3 が書き込んだ値」なので、
  *   FULL_CUT_CLIPS から生成し直してはいけない(生成し直すと新旧が同値になり修復が空振る)。
  */
-const OLD_FULL_CUT_TRIGGERS_V3: Readonly<Record<string, GiftTrigger>> = {
+const OLD_FULL_CUT_TRIGGERS_V3: Readonly<
+  Record<string, { giftId: string; giftName: string; canonical: string; exactName: boolean }>
+> = {
   'fullcut-rose': { giftId: '', giftName: 'バラ', canonical: 'rose', exactName: false },
   'fullcut-rosa': { giftId: '', giftName: 'ローザ', canonical: '', exactName: false },
   'fullcut-subarashii': { giftId: '', giftName: '素晴らしい', canonical: '', exactName: false },
@@ -1177,6 +1199,35 @@ export function migrateChallengeSeSounds(cfg: ChallengeConfig, fromVersion: numb
           spinSe: r.spinSe === 'spin-reel1' ? 'spin-reel2' : r.spinSe,
         },
       };
+    }
+  }
+
+  // v5: 演出ごとの専用録りへ差し替え(素材は assets/se/CREDITS.md)。**旧既定のまま
+  // だったスロットだけ**寄せる。自分で別の音を選んでいる設定は触らない。
+  // 段の順序に意味がある: 'roulette-hit' は上の v2 が jingle-hit → reel-confirm に
+  // 寄せた **後** の値を見るので、世代0の設定は jingle-hit → reel-confirm → reel-hit と
+  // 2段通る(out を積み上げているのがその担保)。
+  // 既定音を自分で選び直していた人は旧既定と区別できず寄ってしまう — v1/v2 から続く
+  // この方式の構造的な限界で、今回も同じ扱いにする。
+  if (fromVersion < 5) {
+    const s = out.seSounds;
+    const swap: ReadonlyArray<readonly [ChallengeSeSlot, string, string]> = [
+      ['gauge-full', 'jingle-hit', 'gauge-burst'],
+      ['stock-full', 'jingle-steel', 'stock-burst'],
+      ['comment', 'pop', 'comment-jam'],
+      ['helper', 'confirm-1', 'helper-stamp'],
+      ['roulette-kick', 'bong', 'reel-kick'],
+      ['roulette-hit', 'reel-confirm', 'reel-hit'],
+      ['boost-start', 'jingle-steel', 'boost-tap'],
+      ['boost-end', 'fanfare-8bit-short', 'boost-hit'],
+      ['achieved', 'fanfare-8bit', 'clear-fanfare'],
+    ];
+    const hit = swap.filter(([slot, was]) => s[slot] === was);
+    // 1件も該当しなければ同一参照のまま返す(上の段と同じ「無加工 = toBe で見える」流儀)。
+    if (hit.length > 0) {
+      const next = { ...s };
+      for (const [slot, , now] of hit) next[slot] = now;
+      out = { ...out, seSounds: next };
     }
   }
 
@@ -1477,6 +1528,7 @@ function validateTapBoost(raw: unknown): TapBoostConfig {
     introClip: clip(c.introClip, TAP_BOOST_INTRO_CLIPS, d.introClip),
     countClip: clip(c.countClip, TAP_BOOST_COUNT_CLIPS, d.countClip),
     loopClip: clip(c.loopClip, TAP_BOOST_LOOP_CLIPS, d.loopClip),
+    resultClip: clip(c.resultClip, TAP_BOOST_RESULT_CLIPS, d.resultClip),
     flash: c.flash !== false,
   };
 }
