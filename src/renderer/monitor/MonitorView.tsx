@@ -478,6 +478,16 @@ export function MonitorView(): React.JSX.Element {
   const boostCounterRef = useRef<HTMLDivElement | null>(null);
   /** タップ数の前回値(増加検知で press 音とカウンタのパンチを出す)。 */
   const prevBoostTap = useRef(0);
+  /**
+   * テスト再生(▶)中のローカルタップ数。testEffect は worker の値・状態に一切
+   * 触れない契約なので challenge.boost が作られず、カウンタの実源が無い —
+   * テスト中だけモニター自身がタップを数えて表示する(実発動では worker が権威)。
+   * ref はタイマー/リスナーのクロージャ用ミラー(setState だけだと stale になる)。
+   */
+  const [boostTestTaps, setBoostTestTaps] = useState(0);
+  const boostTestTapRef = useRef(0);
+  /** タップウィンドウ中の印(テストのローカル計数ゲート。キー/クリック両リスナーが読む)。 */
+  const boostWindowActive = useRef(false);
 
   // ── ストック着弾カットイン ───────────────────────────────────────────────
   // ストック満杯の2発目(緑)が7セグに着弾した瞬間から STOCK_CUTIN_MS の間、
@@ -750,21 +760,24 @@ export function MonitorView(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [challenge?.status]);
 
+  // ブースト中のタップ数。実発動は worker の challenge.boost.tapCount が権威、
+  // テスト再生(▶)は boost 状態が無いのでローカル計数(boostTestTaps)へ落ちる。
+  const shownBoostTap = challenge?.boost?.tapCount ?? boostTestTaps;
+
   // ブースト中のタップ検知。press effect はブースト中は積まれない(worker は
   // 数えるだけ)ので、タップの手応えはここが受け持つ — カウンタのパンチは
   // key 再マウント(render 側)、音はこの effect が press スロットで鳴らす。
   useEffect(() => {
-    const tap = challenge?.boost?.tapCount ?? 0;
     const prev = prevBoostTap.current;
-    prevBoostTap.current = tap;
-    if (tap > prev && boostHold.current && cfg?.challenge.seEnabled) {
+    prevBoostTap.current = shownBoostTap;
+    if (shownBoostTap > prev && boostHold.current && cfg?.challenge.seEnabled) {
       playSe(
         cfg.challenge.seSounds['press'],
         effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['press'])
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [challenge?.boost?.tapCount]);
+  }, [shownBoostTap]);
 
   // 効果音(視覚とは独立の watermark)。モニターが開いている間はここが鳴らし、
   // ダッシュボード側は monitorOpen ゲートで黙る。設定は 30 秒ポーリング(上の
@@ -1351,6 +1364,9 @@ export function MonitorView(): React.JSX.Element {
     boostHold.current = true;
     boostEffect.current = e;
     boostTest.current = e.test === true;
+    boostWindowActive.current = false;
+    boostTestTapRef.current = 0;
+    setBoostTestTaps(0);
     // テスト再生は据え置かない(testEffect は値を変えない契約 — 実タップで値が
     // 動いたときに表示が固まって見えるのを避ける)。
     if (!e.test) setHeldValue(Math.max(0, e.valueAfter - e.amount));
@@ -1363,6 +1379,7 @@ export function MonitorView(): React.JSX.Element {
     // カウントダウンが暗幕でも、タップ開始は boost-start SE が合図する)。
     const startWindow = (): void => {
       if (!boostHold.current) return;
+      boostWindowActive.current = true;
       setBoostClip({ key: ++fxKey, phase: 'window', url: boostClipUrl(e.boostLoopClip), out: false });
       boostWindowBlast();
     };
@@ -1434,9 +1451,11 @@ export function MonitorView(): React.JSX.Element {
     clearBoostTimers();
     const isTest = boostTest.current;
     boostTest.current = false;
+    boostWindowActive.current = false;
     boostEffect.current = null;
     setBoostClip((c) => (c ? { ...c, out: true } : c));
-    const tap = e?.boostTapCount ?? 0;
+    // テスト(e=null)はローカル計数を弾に使う — 実発動は effect の焼き込みが権威。
+    const tap = e?.boostTapCount ?? (isTest ? boostTestTapRef.current : 0);
     const fx = fxRef.current;
     const from = fx?.pointFor(boostCounterRef.current);
     const to = fx?.pointFor(countdownRef.current);
@@ -1529,6 +1548,7 @@ export function MonitorView(): React.JSX.Element {
   function abortBoostFx() {
     clearBoostTimers();
     pendingBoosts.current = [];
+    boostWindowActive.current = false;
     if (!boostHold.current) return;
     boostHold.current = false;
     boostEffect.current = null;
@@ -2253,6 +2273,12 @@ export function MonitorView(): React.JSX.Element {
         // この窓にトーストは無い — 失敗は握って unhandled rejection だけ防ぐ
         // (worker 復帰後の delta / 次の押下で回復する)。
         void rpc('challenge.press', undefined).then(setChallenge).catch(() => undefined);
+        // テスト再生(▶)中は worker がタップを数えない(値・状態に触れない契約)
+        // ので、ウィンドウ中のタップをローカルで数えてカウンタに映す。
+        if (boostTest.current && boostWindowActive.current) {
+          boostTestTapRef.current += 1;
+          setBoostTestTaps(boostTestTapRef.current);
+        }
       } else if (ev.key === 'Escape') {
         void rpc('monitor.close', undefined).catch(() => undefined);
       }
@@ -2287,7 +2313,14 @@ export function MonitorView(): React.JSX.Element {
     // keyframes の transform が scale を上書きして一瞬拡大が外れる)。
     <div
       className="stage-viewport"
-      onPointerDown={() => void rpc('challenge.press', undefined).then(setChallenge).catch(() => undefined)}
+      onPointerDown={() => {
+        void rpc('challenge.press', undefined).then(setChallenge).catch(() => undefined);
+        // テスト再生(▶)中のローカル計数(キー入力側と同じ理由)。
+        if (boostTest.current && boostWindowActive.current) {
+          boostTestTapRef.current += 1;
+          setBoostTestTaps(boostTestTapRef.current);
+        }
+      }}
     >
     <div
       className={`stage-scale${landscape ? ' landscape' : ''}`}
@@ -2695,8 +2728,8 @@ export function MonitorView(): React.JSX.Element {
         {boostClip && boostClip.phase === 'window' && !boostClip.out ? (
           <div className="boost-overlay">
             <div className="boost-counter" ref={boostCounterRef}>
-              <div className="boost-count" key={challenge.boost?.tapCount ?? 0}>
-                {num(challenge.boost?.tapCount ?? 0)}
+              <div className="boost-count" key={shownBoostTap}>
+                {num(shownBoostTap)}
               </div>
               <div className="boost-label">TAP!</div>
               <div className="boost-mult">

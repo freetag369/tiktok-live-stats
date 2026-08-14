@@ -2381,7 +2381,7 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
               onTest={onTest}
               busy={testBusy}
               label="▶ ブースト演出をテスト"
-              title="モニターウィンドウで起動カットイン→タップウィンドウ→着弾を実演再生します(giftId 未設定でも確認できます。カウントは動きません)"
+              title="モニターウィンドウで起動カットイン→3・2・1→タップウィンドウ→着弾を実演再生します(giftId 未設定でも確認できます)。ウィンドウ中にモニターをクリック/Spaceするとタップカウンタが動きます(カウント値は変わりません)"
             />
           </div>
 
