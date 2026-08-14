@@ -1397,7 +1397,8 @@ export function MonitorView(): React.JSX.Element {
       push(totalMs, () => finishBoostFx(null));
     } else {
       // 安全弁: boost-end が届かない(worker 再起動等)なら強制解除。
-      push(totalMs + 3000, abortBoostFx);
+      // abort ではなく expire — 持ち越しキューを捨てずにドレインする。
+      push(totalMs + 3000, expireBoostFx);
     }
     return true;
   }
@@ -1513,7 +1514,7 @@ export function MonitorView(): React.JSX.Element {
     );
   }
 
-  /** reset/stop・安全弁用の全破棄。据え置きもタイマーも捨てて worker 値へ戻す。 */
+  /** reset/stop 用の全破棄。据え置きもタイマーもキューも捨てて worker 値へ戻す。 */
   function abortBoostFx() {
     clearBoostTimers();
     pendingBoosts.current = [];
@@ -1524,6 +1525,31 @@ export function MonitorView(): React.JSX.Element {
     boostTest.current = false;
     setBoostClip(null);
     setHeldValue(null);
+  }
+
+  /**
+   * 安全弁専用の締め(boost-end が届かない — worker 再起動・遮蔽での取りこぼし等)。
+   * abortBoostFx と違い pendingBoosts は捨てず、finish 系と同じドレイン連鎖で
+   * 持ち越し(CLEAR・キュー済みブースト/カットイン/スピン・保留着弾)を必ず流す。
+   * これが無いと pendingAchieved の CLEAR 演出が永久に出ず、残ったキューが
+   * 数分後の別の finish で因果不明のカットインとして突然再生される。
+   */
+  function expireBoostFx() {
+    if (!boostHold.current) return;
+    clearBoostTimers();
+    fxWarn('boost-end が届かないため強制終了 — 持ち越し演出をドレイン', {
+      pendingBoosts: pendingBoosts.current.length,
+      pendingBands: pendingBands.current.length,
+      rouletteQueue: rouletteQueue.current.length,
+      achieved: pendingAchieved.current != null,
+    });
+    boostWindowActive.current = false;
+    boostHold.current = false;
+    boostEffect.current = null;
+    boostTest.current = false;
+    setBoostClip(null);
+    setHeldValue(null);
+    runDrain('standard');
   }
 
   /**
