@@ -478,6 +478,14 @@ export const FLOAT_MAX = 3;
 export const MINI_MAX = 3;
 /** 簡易演出の安全弁(ms)。最長の mini が 880ms(panic)なので余裕を見た値。 */
 export const MINI_ABORT_MS = 1_200;
+/**
+ * shake(画面揺れ)の安全弁(ms)。monitor.css の shake(450ms)/
+ * shakestrong(900ms)の最長尺 + 余白。遮蔽で animationend が届かず
+ * .monitor-root にクラスが固着すると、「同名クラスの連続 shake は再スタート
+ * しない」制限と合わさって以後の揺れが全部消える — タイマーで必ず外す。
+ * CSS 側の尺を伸ばしたら test/unit/shake-abort.spec.ts が落ちる契約。
+ */
+export const SHAKE_ABORT_MS = 1_200;
 
 /**
  * カットインBGMの id 一覧。実ファイルとラベルは renderer/lib/bgm.ts。
@@ -541,9 +549,12 @@ export function fullCutRuleFor(c: FullCutClipDef): GiftFullCutRule {
   return {
     id: `fullcut-${c.id.slice('cut-'.length)}`,
     label: c.ruleLabel,
-    // giftId は既定では空 — クリエイターごとに違う値なので既定を置きようがない
-    // (ギフト名の一致で足りる。確実に1つへ絞りたい人は設定画面で入れる)。
-    giftId: '',
+    // giftId はカタログ側が持つ。**実データで確認できたギフトだけ**入っていて、
+    // 未確認の行は ''(= giftName の推定だけで当てにいく)。
+    // ギフト名は配信クライアントの言語で変わり(日本語UIでも英語名で届く)、
+    // さらに同名別IDが実在する(Hand Heart = 5660 ハートポーズ / 8343 ハンドハート)ため、
+    // 判明しているものは giftId を最優先で使う。
+    giftId: c.giftId,
     giftName: c.giftName,
     canonical: c.canonical,
     exactName: c.exactName,

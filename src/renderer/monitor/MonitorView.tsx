@@ -11,6 +11,7 @@ import {
   MINI_ABORT_MS,
   MINI_MAX,
   ROULETTE_QUEUE_MAX,
+  SHAKE_ABORT_MS,
   rouletteAbortMs,
   effectiveSeVolume,
   freshChallengeEffects,
@@ -356,6 +357,8 @@ export function MonitorView(): React.JSX.Element {
   /** 連打ギフトの反復ショットのタイマー。値には一切効かないので安全弁は不要。 */
   const repeatTimers = useRef<number[]>([]);
   const [shake, setShake] = useState<{ key: number; cls: string } | null>(null);
+  /** shake の安全弁タイマー(animationend が届かないときの固着解除)。 */
+  const shakeTimer = useRef<number | null>(null);
   // 粒子演出(紙吹雪・火花・光線)は canvas エンジンに任せる。
   const fxRef = useRef<FxEngine | null>(null);
   const countdownRef = useRef<HTMLDivElement | null>(null);
@@ -720,6 +723,7 @@ export function MonitorView(): React.JSX.Element {
       clearMiniTimers();
       clearClipTimer();
       clearStrikeClipTimer();
+      clearShakeTimer();
       bandBgm.current?.stop(0);
       bandBgm.current = null;
       stopRouletteSound(0);
@@ -828,6 +832,17 @@ export function MonitorView(): React.JSX.Element {
   }
   function pushShake(cls: string): void {
     setShake({ key: ++fxKey, cls });
+    // 安全弁: clip/mini と同型。animationend 単独依存だと遮蔽でクラスが固着し、
+    // 以後すべての揺れが黙って消える(SHAKE_ABORT_MS のコメント参照)。
+    if (shakeTimer.current !== null) window.clearTimeout(shakeTimer.current);
+    shakeTimer.current = window.setTimeout(() => {
+      shakeTimer.current = null;
+      setShake(null);
+    }, SHAKE_ABORT_MS);
+  }
+  function clearShakeTimer(): void {
+    if (shakeTimer.current !== null) window.clearTimeout(shakeTimer.current);
+    shakeTimer.current = null;
   }
   function clearClipTimer(): void {
     if (clipTimer.current !== null) window.clearTimeout(clipTimer.current);
@@ -2309,7 +2324,10 @@ export function MonitorView(): React.JSX.Element {
       className={`monitor-root${wakeTime ? ' has-wake' : ''}${shake ? ` ${shake.cls}` : ''}`}
       data-shake={shake?.key}
       onAnimationEnd={(e) => {
-        if (e.target === e.currentTarget) setShake(null);
+        if (e.target === e.currentTarget) {
+          clearShakeTimer();
+          setShake(null);
+        }
       }}
     >
       <div className={`title-banner${achieved ? ' clear' : ''}`}>{challenge.title}</div>

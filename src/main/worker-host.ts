@@ -30,6 +30,13 @@ export class WorkerHost {
   private stopping = false;
   /** クラッシュ後の自動再起動タイマー。shutdown で必ず止める(終了処理中の再 fork 防止)。 */
   private restartTimer: NodeJS.Timeout | null = null;
+  /**
+   * 再起動カウンタのリセットタイマー。再起動後 60 秒生き延びたら restarts を 0 に
+   * 戻す — これが無いと「数時間に1回ずつ落ちる」耐久配信で累計5回に達した瞬間、
+   * 以後 worker が永久に dead になりモニターが全停止する。60秒未満で落ち続ける
+   * 場合はリセットが走らずカウントが進むので、従来のスピン防止は保たれる。
+   */
+  private stableTimer: NodeJS.Timeout | null = null;
   /** メイン窓とモニター窓 — firehose ポートはウィンドウごとに1本張る。 */
   private wcs = new Set<WebContents>();
   /**
@@ -81,6 +88,13 @@ export class WorkerHost {
           this.missionError = (msg.missionError as string) ?? null;
           this.ready = true;
           this.deps.onState('ready');
+          if (this.restarts > 0) {
+            this.stableTimer = setTimeout(() => {
+              this.stableTimer = null;
+              this.restarts = 0;
+            }, 60_000);
+            this.stableTimer.unref?.();
+          }
           this.flushQueue();
           for (const wc of this.wcs) this.wireFeedPort(wc);
           return;
@@ -109,6 +123,11 @@ export class WorkerHost {
     proc.on('exit', (code) => {
       this.ready = false;
       this.proc = null;
+      // 60秒未満で落ちた場合はリセットさせない(スピン防止のカウントを保つ)。
+      if (this.stableTimer) {
+        clearTimeout(this.stableTimer);
+        this.stableTimer = null;
+      }
       for (const [id, p] of this.pending) {
         clearTimeout(p.timer);
         p.resolve({ id, ok: false, error: { code: 'WORKER_DOWN', message: 'ワーカーが停止しました。' } });
@@ -218,6 +237,10 @@ export class WorkerHost {
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
+    }
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
     }
     if (!this.proc) return;
     const p = this.proc;

@@ -154,19 +154,34 @@ export function resetLive(): void {
   });
 }
 
-let pendingFlush = false;
+let flushRafId = 0;
+let flushTimerId = 0;
 
-/** Coalesces bursts into a single rAF-gated state bump. */
+/**
+ * rAF が返ってこない環境(GPU プロセスのリセット、ディスプレイ構成変更、
+ * 遮蔽と省電力の組合せ等)でも delta の反映が止まらないためのフォールバック尺。
+ * 旧実装は rAF 単独依存で、コールバックが一度も呼ばれないと pendingFlush が
+ * true に固着し、以後 7セグも演出も**完全に**止まった。
+ */
+const FLUSH_FALLBACK_MS = 250;
+
+function flushPending(): void {
+  // 先に発火した方が両方を回収する — 二重 flush は version の空回りになる。
+  if (flushRafId) cancelAnimationFrame(flushRafId);
+  if (flushTimerId) window.clearTimeout(flushTimerId);
+  flushRafId = 0;
+  flushTimerId = 0;
+  const p = { ...pendingPatch, version: useLive.getState().version + 1 };
+  for (const k of Object.keys(pendingPatch)) delete (pendingPatch as Record<string, unknown>)[k];
+  useLive.setState(p);
+}
+
+/** Coalesces bursts into a single rAF-gated state bump (with a timer fallback). */
 function scheduleFlush(patch: Partial<LiveState>): void {
   Object.assign(pendingPatch, patch);
-  if (pendingFlush) return;
-  pendingFlush = true;
-  requestAnimationFrame(() => {
-    pendingFlush = false;
-    const p = { ...pendingPatch, version: useLive.getState().version + 1 };
-    for (const k of Object.keys(pendingPatch)) delete (pendingPatch as Record<string, unknown>)[k];
-    useLive.setState(p);
-  });
+  if (flushRafId || flushTimerId) return;
+  flushRafId = requestAnimationFrame(flushPending);
+  flushTimerId = window.setTimeout(flushPending, FLUSH_FALLBACK_MS);
 }
 const pendingPatch: Partial<LiveState> = {};
 
