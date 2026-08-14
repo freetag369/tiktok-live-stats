@@ -479,6 +479,24 @@ export const MINI_MAX = 3;
 /** 簡易演出の安全弁(ms)。最長の mini が 880ms(panic)なので余裕を見た値。 */
 export const MINI_ABORT_MS = 1_200;
 /**
+ * いいねゲージの滴下補間で「この tick の setState を省けるか」の判定。
+ * 表示に影響するのは (a) 数字 = floor(値) と (b) バー幅 = 値/分母 の2つだけ —
+ * どちらも動かない中間値の setState は LikeGauge と全ドットの再レンダーを
+ * 積むだけなので捨てる。いいねが流れ続ける配信ではこの補間が実質止まらず、
+ * モニター窓(backgroundThrottling 無効で常時フル稼働)の常時数十Hz 再描画が
+ * 「長時間でだんだん重い」の主要因だった。
+ * バー幅は 0.25% 刻み(1080px 級の縦画面でゲージ幅 ~1000px として ~2.5px)で
+ * 十分滑らか。最終ステップ(target 到達)は呼び出し側が無条件で commit する
+ * こと — 「必ず DRIP_MS で追いつき、到達値は厳密に target」の契約を守る。
+ */
+export function dripCommitNeeded(prevShown: number, next: number, every: number): boolean {
+  if (Math.floor(next) !== Math.floor(prevShown)) return true;
+  if (every <= 0) return false;
+  const step = every * 0.0025; // バー幅 0.25% 刻み
+  return Math.floor(next / step) !== Math.floor(prevShown / step);
+}
+
+/**
  * shake(画面揺れ)の安全弁(ms)。monitor.css の shake(450ms)/
  * shakestrong(900ms)の最長尺 + 余白。遮蔽で animationend が届かず
  * .monitor-root にクラスが固着すると、「同名クラスの連続 shake は再スタート
@@ -996,6 +1014,99 @@ export function freshChallengeEffects(
  * settings.json は v1 と v2 の両方を順に通る必要がある。
  */
 /**
+ * v3 で配ってしまった**壊れたトリガー**の実値。修復対象かどうかの判定にだけ使う。
+ *
+ * v3 の既定はギフト名を日本語(スクリーンショットの表示名)で入れていたが、
+ * 配信イベントの `giftName` は**クライアントの表示言語に関係なく英語で届く**
+ * (日本限定ギフトだけは日本語)。そのため42行中40行が一度も発火しなかった。
+ * 発火していたのは canonical を持つ 2 行(バラ / 香水)だけ。
+ *
+ * ⚠ この表は**凍結する**。「今の既定」ではなく「v3 が書き込んだ値」なので、
+ *   FULL_CUT_CLIPS から生成し直してはいけない(生成し直すと新旧が同値になり修復が空振る)。
+ */
+const OLD_FULL_CUT_TRIGGERS_V3: Readonly<Record<string, GiftTrigger>> = {
+  'fullcut-rose': { giftId: '', giftName: 'バラ', canonical: 'rose', exactName: false },
+  'fullcut-rosa': { giftId: '', giftName: 'ローザ', canonical: '', exactName: false },
+  'fullcut-subarashii': { giftId: '', giftName: '素晴らしい', canonical: '', exactName: false },
+  'fullcut-mini-hanabi': { giftId: '', giftName: 'ミニ花火', canonical: '', exactName: false },
+  'fullcut-neko-ashi': { giftId: '', giftName: '猫の足', canonical: '', exactName: false },
+  'fullcut-tiktok': { giftId: '', giftName: 'tiktok', canonical: '', exactName: true },
+  'fullcut-gg': { giftId: '', giftName: 'gg', canonical: '', exactName: true },
+  'fullcut-shoken': { giftId: '', giftName: '初見', canonical: '', exactName: false },
+  'fullcut-hakushu': { giftId: '', giftName: '拍手', canonical: '', exactName: false },
+  'fullcut-daisuki': { giftId: '', giftName: '大好き', canonical: '', exactName: false },
+  'fullcut-soft-cream': { giftId: '', giftName: 'ソフトクリーム', canonical: '', exactName: false },
+  'fullcut-uchiwa': { giftId: '', giftName: 'うちわ', canonical: '', exactName: false },
+  'fullcut-yakyu': { giftId: '', giftName: '野球', canonical: '', exactName: false },
+  'fullcut-love-letter': { giftId: '', giftName: 'ラブレター', canonical: '', exactName: false },
+  'fullcut-ai-no-kaori': { giftId: '', giftName: '愛の香り', canonical: '', exactName: false },
+  'fullcut-finger-heart': { giftId: '', giftName: 'フィンガーハート', canonical: 'finger_heart', exactName: false },
+  'fullcut-nyao': { giftId: '', giftName: 'ニャオ', canonical: '', exactName: false },
+  'fullcut-yell': { giftId: '', giftName: 'エール', canonical: '', exactName: false },
+  'fullcut-honki': { giftId: '', giftName: '本気', canonical: '', exactName: false },
+  'fullcut-omamori': { giftId: '', giftName: 'おまもり', canonical: '', exactName: false },
+  'fullcut-nebaaru': { giftId: '', giftName: 'ねば', canonical: '', exactName: false },
+  'fullcut-fukka': { giftId: '', giftName: 'ふっか', canonical: '', exactName: false },
+  'fullcut-udon-no': { giftId: '', giftName: 'うどん脳', canonical: '', exactName: false },
+  'fullcut-ice-bar': { giftId: '', giftName: 'アイスバー', canonical: '', exactName: false },
+  'fullcut-journey-pass': { giftId: '', giftName: 'ジャーニーパス', canonical: '', exactName: false },
+  'fullcut-oshi-shosan': { giftId: '', giftName: '推しへの称賛', canonical: '', exactName: false },
+  'fullcut-kosui': { giftId: '', giftName: '香水', canonical: 'perfume', exactName: false },
+  'fullcut-goat-busker': { giftId: '', giftName: 'バスカー', canonical: '', exactName: false },
+  'fullcut-donut': { giftId: '', giftName: 'ドーナッツ', canonical: '', exactName: false },
+  'fullcut-tensai': { giftId: '', giftName: '天才', canonical: '', exactName: false },
+  'fullcut-boshi-hige': { giftId: '', giftName: '帽子と口ひげ', canonical: '', exactName: false },
+  'fullcut-utau-kinoko': { giftId: '', giftName: '歌うキノコ', canonical: '', exactName: false },
+  'fullcut-pearl-chime': { giftId: '', giftName: 'パールチャイム', canonical: '', exactName: false },
+  'fullcut-flower-melody': { giftId: '', giftName: 'フラワーメロディ', canonical: '', exactName: false },
+  'fullcut-groove-guitar': { giftId: '', giftName: 'グルーヴギター', canonical: '', exactName: false },
+  'fullcut-fiesta-accordion': { giftId: '', giftName: 'フィエスタアコーディ', canonical: '', exactName: false },
+  'fullcut-heart-pose': { giftId: '', giftName: 'ハートポーズ', canonical: '', exactName: false },
+  'fullcut-hand-heart': { giftId: '', giftName: 'ハンドハート', canonical: 'hand_hearts', exactName: false },
+  'fullcut-mischka-bear': { giftId: '', giftName: 'ミシカ', canonical: '', exactName: false },
+  'fullcut-cracker': { giftId: '', giftName: 'クラッカー', canonical: '', exactName: false },
+  'fullcut-koi-megane': { giftId: '', giftName: '恋のメガネ', canonical: '', exactName: false },
+  'fullcut-tempo-flute': { giftId: '', giftName: 'テンポフルート', canonical: '', exactName: false },
+};
+
+/**
+ * v3 が配った壊れたトリガーを、実データで確認した giftId / 英語ギフト名へ寄せ直す。
+ *
+ * **旧既定と完全に同じ行だけ**書き換える — トリガーを自分で書き換えた人の設定は触らない
+ * (migrateChallengeSeSounds と同じ方針)。書き換えるのは判定に使う4つ
+ * (giftId / giftName / canonical / exactName)だけで、enabled・durationSec・clip・
+ * 並び順・label には触れない。
+ *
+ * ⚠ validateChallengeConfig の中に入れてはいけない — UI の cfg.set も通るので、
+ *   ユーザーが旧値を選び直した瞬間に上書きし返してしまう。
+ */
+export function migrateChallengeGiftFullCutTriggers(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 4) return cfg;
+  const fresh = new Map(FULL_CUT_CLIPS.map((c) => [`fullcut-${c.id.slice('cut-'.length)}`, c]));
+  let touched = 0;
+  const rules = cfg.giftFullCut.rules.map((r) => {
+    const old = OLD_FULL_CUT_TRIGGERS_V3[r.id];
+    const c = fresh.get(r.id);
+    if (old == null || c == null) return r;
+    if (
+      r.giftId !== old.giftId ||
+      r.giftName !== old.giftName ||
+      r.canonical !== old.canonical ||
+      (r.exactName === true) !== old.exactName
+    ) {
+      return r; // 手を入れてある行 — 尊重する
+    }
+    touched++;
+    return { ...r, giftId: c.giftId, giftName: c.giftName, canonical: c.canonical, exactName: c.exactName };
+  });
+  if (touched === 0) return cfg;
+  return { ...cfg, giftFullCut: { ...cfg.giftFullCut, rules } };
+}
+
+/**
  * 全面カットの既定行が増えた世代を、保存済み settings.json へ一度だけ配る。
  * **追加しかしない** — 既存行の順序も内容も enabled も触らず、まだ持っていない id を
  * 末尾へ足すだけ(先勝ちなので、ユーザーが自分で並べた優先度を壊さない)。
@@ -1024,7 +1135,10 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion);
+  return migrateChallengeGiftFullCutTriggers(
+    migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+    fromVersion
+  );
 }
 
 export function migrateChallengeSeSounds(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {

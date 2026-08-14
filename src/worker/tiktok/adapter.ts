@@ -312,6 +312,11 @@ export class LiveAdapter implements TikTokAdapter {
       // 並列の再接続 loop を起動しない。現役の接続だけが再接続を駆動する。
       if (conn !== this.conn) return;
       if (this.stopped) return;
+      // 旧接続はここで手放す — loopInner は新しい接続を作って this.conn を
+      // 差し替えるだけなので、リスナーを付けたまま放置すると瞬断のたびに
+      // ゾンビ接続が積み上がる(disconnect()/connect 失敗 catch と同じ後始末)。
+      this.conn = null;
+      conn.removeAllListeners();
       // Reconnects must not replay TikTok's buffered backlog.
       this.sink.status({ state: 'reconnecting', attempt: 1, nextAttemptMs: Date.now() + 5000 });
       void this.reconnectSoon().catch((e) => this.fail(e));

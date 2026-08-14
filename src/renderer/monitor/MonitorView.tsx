@@ -512,13 +512,16 @@ export function MonitorView(): React.JSX.Element {
   // achievedFxAt が更新されて再実行される(state 依存)。これが無いと、
   // バンドカットイン中の CLEAR で 2.5 秒後に不透明動画の裏でリザルトへ
   // 切り替わり、「カットイン → CLEAR 演出 → リザルト」の順序が壊れる。
+  // deps はオブジェクトではなく boolean に畳む — roulette/bandClip/boostClip は
+  // フェード({...c, out:true})等で参照が変わるたびにタイマーを張り直していた。
+  const fxHoldBusy = roulette !== null || bandClip !== null || stockCutin !== null || boostClip !== null;
   useEffect(() => {
     if (!hasResult) {
       setShowResult(false);
       setAchievedFxAt(null);
       return;
     }
-    if (roulette || bandClip || stockCutin || boostClip) return;
+    if (fxHoldBusy) return;
     // 達成後に開き直したモニターは待たずに出す(achievedMs が過去なので残り 0)。
     const base = achievedFxAt ?? challenge?.achievedMs ?? 0;
     const wait = Math.max(0, RESULT_DELAY_MS - (Date.now() - base));
@@ -530,7 +533,7 @@ export function MonitorView(): React.JSX.Element {
     return () => clearTimeout(t);
     // 依存は boolean と数値・軽い state だけ — 2Hz で同じ result が再配信されても
     // タイマーは再起動しない。
-  }, [hasResult, challenge?.achievedMs, achievedFxAt, roulette, bandClip, stockCutin, boostClip]);
+  }, [hasResult, challenge?.achievedMs, achievedFxAt, fxHoldBusy]);
 
   useEffect(() => {
     // ワーカー再起動中は rpc が throw する — この窓にはトーストが無いので握って
@@ -869,13 +872,29 @@ export function MonitorView(): React.JSX.Element {
    * dataset ガードで再レンダーの ref 再呼び出しでは多重 arm しない(key 変更 =
    * 新要素でだけ再 arm される)。
    */
-  function armVideoPlay(v: HTMLVideoElement | null, label: string, onFail: () => void): void {
-    if (!v || v.dataset.playArmed) return;
-    v.dataset.playArmed = '1';
-    v.play().catch((err: unknown) => {
-      fxWarn(`${label}: play() が拒否された`, err);
-      onFail();
-    });
+  function armVideoPlay(v: HTMLVideoElement | null, label: string, onFail: () => void): (() => void) | undefined {
+    if (!v) return undefined;
+    if (!v.dataset.playArmed) {
+      v.dataset.playArmed = '1';
+      v.play().catch((err: unknown) => {
+        fxWarn(`${label}: play() が拒否された`, err);
+        onFail();
+      });
+    }
+    // ref cleanup(React 19)でメディアリソースを即時解放する。演出のたびに
+    // key 再マウントで <video> を作り捨てる設計のため、GC 任せだと Chromium の
+    // レンダラ毎メディアプレイヤ上限に達して play() が reject し始める
+    // (= 時間が経つと演出動画だけ出なくなる)。cleanup は再レンダーの ref
+    // 付け替えでも走るので、マイクロタスクで commit 完了を待ってから
+    // 「DOM から外れた要素だけ」を解放する — 再生中の要素には触れない。
+    return () => {
+      queueMicrotask(() => {
+        if (v.isConnected) return;
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+      });
+    };
   }
   function startClip(url: string): void {
     const key = ++fxKey;
@@ -958,11 +977,17 @@ export function MonitorView(): React.JSX.Element {
     const y = Math.max(MINI_EDGE, digitsTop - MINI_GAP - h);
     setMinis((m) => [...m.slice(-(MINI_MAX - 1)), { key, id, amount, x, y, w, h }]);
     // 安全弁: 遮蔽ウィンドウでは onAnimationEnd が来ないので必ず畳む。
-    // 発火済み id への clearTimeout は no-op なので、直近ぶんだけ持てば足りる。
-    miniTimers.current = [
-      ...miniTimers.current.slice(-32),
-      window.setTimeout(() => setMinis((m) => m.filter((x2) => x2.key !== key)), MINI_ABORT_MS),
-    ];
+    // repeatTimers と同じく発火時に自分の id を配列から抜く — 旧実装の
+    // slice(-32) は、1.2 秒内に33件以上の playMini が走ると未発火タイマーが
+    // 配列から落ちて clearMiniTimers で回収できなくなっていた(リセット直後に
+    // mini が1枚だけ出る)。自己削除なら配列は MINI_ABORT_MS 窓で自然に有界。
+    const tid = window.setTimeout(() => {
+      const a = miniTimers.current;
+      const at = a.indexOf(tid);
+      if (at !== -1) a.splice(at, 1);
+      setMinis((m) => m.filter((x2) => x2.key !== key));
+    }, MINI_ABORT_MS);
+    miniTimers.current.push(tid);
   }
 
   /** フロート帯(上部 26%)付近のステージ座標 — 粒子演出の既定の発生点。 */
@@ -2570,7 +2595,7 @@ export function MonitorView(): React.JSX.Element {
             if (v && bandClip.fullCut) v.volume = (cfg?.challenge.giftFullCut?.volume ?? 70) / 100;
             // 再生失敗の即時解除 — 放置すると bandHold が totalMs(最大45秒)まで
             // 数字を据え置いたまま真っ黒になる(finishBandFx は hold ガードで冪等)。
-            armVideoPlay(v, 'band-cutin', finishBandFx);
+            return armVideoPlay(v, 'band-cutin', finishBandFx);
           }}
           onError={(ev) => {
             fxWarn('カットイン(bandClip)の再生エラー', ev.currentTarget.error);
@@ -2601,7 +2626,7 @@ export function MonitorView(): React.JSX.Element {
               v.volume =
                 effectiveSeVolume(cfg?.challenge.seVolume ?? 70, cfg?.challenge.seVolumes?.['stock-full']) / 100;
             }
-            armVideoPlay(v, 'stock-cutin', finishStockCutin);
+            return armVideoPlay(v, 'stock-cutin', finishStockCutin);
           }}
           onError={(ev) => {
             fxWarn('ストック着弾カットインの再生エラー', ev.currentTarget.error);
@@ -2638,7 +2663,7 @@ export function MonitorView(): React.JSX.Element {
                     cfg?.challenge.seVolumes?.['boost-start']
                   ) / 100;
               }
-              armVideoPlay(v, 'boost-cutin', () =>
+              return armVideoPlay(v, 'boost-cutin', () =>
                 setBoostClip((c) => (c ? { ...c, url: null } : c))
               );
             }}

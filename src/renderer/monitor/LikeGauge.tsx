@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChallengeLikeGauge } from '@shared/dto';
+import { dripCommitNeeded } from '@shared/challenge';
 import { num } from '@shared/format';
 import type { FxEngine } from './fx/engine';
 
@@ -39,9 +40,11 @@ const HOLD_MS = 300;
 const DRIP_MS = 450;
 /**
  * 表示更新の間隔。イージングの評価は時刻ベースなので、tick が遅れても
- * 追いつきの保証(DRIP_MS)は崩れない。
+ * 追いつきの保証(DRIP_MS)は崩れない。28ms(36Hz)から 48ms(≈20Hz)へ —
+ * DRIP_MS=450 内に9ステップ入り ease-out の見た目は保たれる。加えて
+ * dripCommitNeeded の量子化で「表示が動かない tick」は setState 自体を省く。
  */
-const DRIP_TICK_MS = 28;
+const DRIP_TICK_MS = 48;
 
 /** 動きの抑制設定。MonitorView の同名関数と同じ(あちらは module private で、
  *  import すると MonitorView → LikeGauge と循環するため複製している)。 */
@@ -137,6 +140,8 @@ export function LikeGauge({
    */
   const [drip, setDrip] = useState(gauge.counter);
   const dripRef = useRef(gauge.counter);
+  /** setDrip で最後に commit した値(量子化スキップの基準)。 */
+  const dripShown = useRef(gauge.counter);
   const dripTimer = useRef(0);
   /** 補間のアンカー(開始値・開始時刻・目標)。バッチが重なったら現在値から張り直す。 */
   const dripFrom = useRef(gauge.counter);
@@ -156,6 +161,7 @@ export function LikeGauge({
     dripRef.current = v;
     dripFrom.current = v;
     dripTarget.current = v;
+    dripShown.current = v;
     setDrip(v);
   }
 
@@ -173,8 +179,20 @@ export function LikeGauge({
     const e = 1 - (1 - t) ** 2;
     const v = dripFrom.current + (dripTarget.current - dripFrom.current) * e;
     dripRef.current = v;
-    setDrip(v);
-    if (t >= 1) return; // 到達(v は厳密に target の整数)— 次の増加で effect が再点火
+    if (t >= 1) {
+      // 到達(v は厳密に target の整数)— 量子化に関わらず必ず commit する。
+      // 「必ず DRIP_MS で追いつく」契約はここが守る。次の増加で effect が再点火。
+      dripShown.current = v;
+      setDrip(v);
+      return;
+    }
+    // 表示(数字の floor / バー幅の 0.25% 刻み)が動かない中間 tick は setState を
+    // 省く — いいねが流れ続ける配信で LikeGauge + 全ドットの常時再レンダーを
+    // 積まないため(dripCommitNeeded のコメント参照)。
+    if (dripCommitNeeded(dripShown.current, v, dripEvery.current)) {
+      dripShown.current = v;
+      setDrip(v);
+    }
     dripTimer.current = window.setTimeout(dripStep, DRIP_TICK_MS);
   }
 

@@ -281,8 +281,17 @@ export function createFxEngine(): FxEngine {
     if (!ctx || !canvas) return;
     const dt = Math.min((nowMs - lastMs) / 1000, MAX_DT);
     lastMs = nowMs;
-    update(dt);
-    render();
+    try {
+      update(dt);
+      render();
+    } catch (e) {
+      // 例外で再スケジュールが切れると、粒子が静止画のまま画面に貼り付く。
+      // 全滅させてキャンバスを拭き、次の spawn の ensureLoop で再開させる。
+      alive = 0;
+      ctx.clearRect(0, 0, stageW, stageH);
+      console.warn('[fx-skip]', 'engine tick でエラー — 粒子を全破棄して停止', e);
+      return;
+    }
     if (alive > 0) {
       raf = requestAnimationFrame(tick);
     } else {
