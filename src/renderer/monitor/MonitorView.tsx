@@ -23,6 +23,7 @@ import {
   tierForDiamonds,
 } from '@shared/challenge';
 import { num } from '@shared/format';
+import { drainFxQueues, type FxDrainOrder } from '@shared/fx-drain';
 import { rpc } from '../ipc/client';
 import { setChallenge, useLive } from '../state/liveStore';
 import { Avatar } from '../components/common';
@@ -1033,6 +1034,40 @@ export function MonitorView(): React.JSX.Element {
     drainPendingStrike();
   }
 
+  /**
+   * 演出終了時の持ち越しドレイン。どのキューをどの順で見るかは
+   * shared/fx-drain.ts の drainFxQueues が権威(順序はテストで固定)。
+   * achieved(CLEAR)は「再生」— 開始スロットを消費せず次演出と並走する。
+   * hooks はルーレット BGM の後始末(finishRoulette だけが使う)。
+   */
+  function runDrain(
+    order: FxDrainOrder,
+    hooks?: { onNext?: (kind: 'roulette' | 'boost' | 'band') => void; onIdle?: () => void }
+  ): void {
+    const r = drainFxQueues(
+      {
+        achieved: pendingAchieved.current,
+        boosts: pendingBoosts.current,
+        bands: pendingBands.current,
+        roulettes: rouletteQueue.current,
+      },
+      order
+    );
+    pendingAchieved.current = null;
+    if (r.achieved) playEffect(r.achieved);
+    if (r.next) {
+      hooks?.onNext?.(r.next.kind);
+      if (r.next.kind === 'roulette') startRoulette(r.next.effect, true);
+      else if (r.next.kind === 'boost') startBoostFx(r.next.effect);
+      else startBandFx(r.next.effect);
+      return;
+    }
+    hooks?.onIdle?.();
+    // 次演出を始めないパスの最後だけ — start* の冒頭 flushStrike に出したばかりの
+    // チェーンを畳ませない(従来の finish* 各所にあった規約)。
+    drainPendingStrike();
+  }
+
   function clearRouletteTimers() {
     for (const t of rouletteTimers.current) window.clearTimeout(t);
     rouletteTimers.current = [];
@@ -1137,40 +1172,16 @@ export function MonitorView(): React.JSX.Element {
     }
     pushFloat(rouletteBanner(e), `${e.amount < 0 ? 'good' : 'bad'} banner-roulette`);
 
-    // スピン中に届いた達成演出をここで再生する(リザルト画面は RESULT_DELAY_MS
-    // 側の独立タイマーで出るため、多少遅れても破綻しない)。
-    const a = pendingAchieved.current;
-    pendingAchieved.current = null;
-    if (a) playEffect(a);
-
-    // キューが詰まっていれば短縮スピンで消化する(BGM は鳴りっぱなしのまま次へ)。
-    const next = rouletteQueue.current.shift();
-    if (next) {
-      startRoulette(next, true);
-      return;
-    }
-    // リール中に届いたブーストをここで開始する(pendingBands より先 — ブーストは
-    // タップのゲーム性を持つので待たせない)。
-    const nb = pendingBoosts.current.shift();
-    if (nb) {
-      stopRouletteSound(0);
-      startBoostFx(nb);
-      return;
-    }
-    // リール中に届いたカットインをここで開始する(worker はすでに凍結中 —
-    // 見た目の開始が遅れるだけで、数字の整合は凍結側が保証している)。
-    // スピンの連鎖はここで終わる。BGM は 400ms フェード(バンドBGMの終端と同じ尺)。
-    // ただし直後にカットインを始めるならクロスフェードさせず即断(bandBgm と重ねない)。
-    const b = pendingBands.current.shift();
-    stopRouletteSound(b ? 0 : 400);
-    if (b) {
-      startBandFx(b);
-      return;
-    }
-    // リール中に譲ったいいね着弾/ストック満杯をここで出す — 次演出を始めない
-    // パスの最後だけ(start* の冒頭 flushStrike に出したばかりのチェーンを
-    // 畳ませない)。フルチェーンなのでストック段の緑弾・カットイン・SE も残る。
-    drainPendingStrike();
+    // 持ち越しのドレイン(達成 → 短縮スピン連鎖 → ブースト → カットイン → 着弾。
+    // 順序は shared/fx-drain.ts の 'roulette-first' が権威)。BGM は次が短縮スピン
+    // なら鳴りっぱなし、ブースト/カットインなら即断(bandBgm と重ねない)、
+    // 何も始めないなら 400ms フェード(バンドBGMの終端と同じ尺)。
+    runDrain('roulette-first', {
+      onNext: (kind) => {
+        if (kind !== 'roulette') stopRouletteSound(0);
+      },
+      onIdle: () => stopRouletteSound(400),
+    });
   }
 
   /** reset/stop 用の全破棄。演出もキューも据え置きも捨てて worker 値へ戻す。 */
@@ -1290,34 +1301,10 @@ export function MonitorView(): React.JSX.Element {
     // ここで出す — 「カットイン → セグ通知」の順序。次のカットイン開始より前に出すこと。
     // シェイクはヘルパー内の tier 判定に任せる(旧来の amount 判定は重複するので廃止)。
     if (e) giftImpactVisuals(e, 0);
-    // カットイン中に届いた達成演出をここで再生する(finishRoulette と同じ持ち越し)。
-    const a = pendingAchieved.current;
-    pendingAchieved.current = null;
-    if (a) playEffect(a);
-    // カットイン中に届いたブーストをここで開始する(pendingBands より先 —
-    // finishRoulette と同じ優先順)。
-    const nb = pendingBoosts.current.shift();
-    if (nb) {
-      startBoostFx(nb);
-      return;
-    }
-    // 再生中に届いた次のカットインをここで開始する(finishRoulette と同じ持ち越し)。
-    // bandHold はすでに false なので再入して問題ない。
-    const b = pendingBands.current.shift();
-    if (b) {
-      startBandFx(b);
-      return;
-    }
-    // カットイン中に積まれたスピンをここで流す(finishRoulette のドレインと対称)。
-    // これが無いと、キューに乗ったルーレットは次のギフトが来るまで再生されない。
-    const r = rouletteQueue.current.shift();
-    if (r) {
-      startRoulette(r, true);
-      return;
-    }
-    // カットイン中に譲ったいいね着弾/ストック満杯をここで出す(finishRoulette と
-    // 同じく、次演出を始めないパスの最後だけ)。
-    drainPendingStrike();
+    // カットイン中に届いた持ち越しのドレイン(達成 → ブースト → カットイン →
+    // スピン → 着弾。順序は shared/fx-drain.ts の 'standard' が権威)。
+    // bandHold はすでに false なので次のカットインへ再入して問題ない。
+    runDrain('standard');
   }
 
   /** reset/stop 用の全破棄。据え置きもタイマーもBGMも捨てて worker 値へ戻す。 */
@@ -1472,25 +1459,7 @@ export function MonitorView(): React.JSX.Element {
         setHeldValue(null); // ここで初めて数字が一括減算後の値へ動く
         impactBoostVisuals(e);
         // ブースト中に届いた演出の持ち越しをドレインする(finishBandFx と同順)。
-        const a = pendingAchieved.current;
-        pendingAchieved.current = null;
-        if (a) playEffect(a);
-        const nb = pendingBoosts.current.shift();
-        if (nb) {
-          startBoostFx(nb);
-          return;
-        }
-        const b = pendingBands.current.shift();
-        if (b) {
-          startBandFx(b);
-          return;
-        }
-        const r = rouletteQueue.current.shift();
-        if (r) {
-          startRoulette(r, true);
-          return;
-        }
-        drainPendingStrike();
+        runDrain('standard');
       }, travel)
     );
   }
@@ -1774,27 +1743,7 @@ export function MonitorView(): React.JSX.Element {
     setStockCutin(null); // unmount = 焼き込み音声も止まる
     revealStock(delta);
     // カットイン中に届いた演出の持ち越しをドレインする(finishBandFx と同順)。
-    const a = pendingAchieved.current;
-    pendingAchieved.current = null;
-    if (a) playEffect(a);
-    const nb = pendingBoosts.current.shift();
-    if (nb) {
-      startBoostFx(nb);
-      return;
-    }
-    const b = pendingBands.current.shift();
-    if (b) {
-      startBandFx(b);
-      return;
-    }
-    const r = rouletteQueue.current.shift();
-    if (r) {
-      startRoulette(r, true);
-      return;
-    }
-    // カットイン中に積まれた満タン/満杯をここで出す — 次演出を始めないパスだけ
-    // (finishRoulette / finishBandFx と同じ規約)。
-    drainPendingStrike();
+    runDrain('standard');
   }
 
   /** ストック分の reveal — 据え置き全解除+着弾演出(パンチ/シェイク/粒子/SE)。 */
