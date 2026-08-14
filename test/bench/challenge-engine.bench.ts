@@ -12,23 +12,27 @@ import { ChallengeEngine } from '@worker/challenge';
  */
 
 let t = 0;
-function likeEvent(i: number): NormalizedEvent {
+let seq = 0;
+function base(id: string) {
   t += 50;
+  seq += 1;
+  return { msgId: `${id}-${t}`, tsMs: 1_700_000_000_000 + t, tsSource: 'server' as const, seq };
+}
+
+function likeEvent(i: number): NormalizedEvent {
   return {
+    ...base(`like-${i}`),
     kind: 'like',
-    tsMs: 1_700_000_000_000 + t,
-    msgId: `like-${i}-${t}`,
     viewer: { userId: `u${i % 5000}`, nickname: `視聴者${i % 5000}` },
     count: 5,
   } as NormalizedEvent;
 }
 
 function follow(i: number): NormalizedEvent {
-  t += 50;
   return {
-    kind: 'follow',
-    tsMs: 1_700_000_000_000 + t,
-    msgId: `f-${i}-${t}`,
+    ...base(`f-${i}`),
+    kind: 'social',
+    sub: 'follow',
     viewer: { userId: `u${i}`, nickname: `視聴者${i}` },
   } as NormalizedEvent;
 }
