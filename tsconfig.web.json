@@ -26,5 +26,13 @@
     },
     "tsBuildInfoFile": "./tsconfig.web.tsbuildinfo"
   },
-  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/shared/**/*.ts", "src/preload/**/*.ts", "src/preload/**/*.d.ts"]
+  "include": [
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.tsx",
+    "src/shared/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/preload/**/*.d.ts",
+    // renderer ソースを import するテスト(tsconfig.node.json からは除外されている)
+    "test/renderer/**/*.ts"
+  ]
 }

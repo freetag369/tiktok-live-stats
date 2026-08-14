@@ -285,6 +285,11 @@ export class SessionManager {
     }
 
     this.setStatus(s);
+    // renderer は 'live' 受信で resetLive() し、その瞬間に保留中だった challenge
+    // パッチを失いうる(drainIfChanged は dirty を1回しか返さない)。status の
+    // 直後に全量 delta を1発配って、両窓とも必ず最新スナップショットへ揃える。
+    // postMessage は順序保証されるので「'live' → reset → 全量」の順になる。
+    if (s.state === 'live') this.pushDelta(true);
   }
 
   private hydrateTotals(sessionId: number): void {

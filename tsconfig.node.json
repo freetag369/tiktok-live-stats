@@ -34,5 +34,7 @@
     "electron.vite.config.ts",
     "vite.worker.config.ts",
     "vitest.config.ts"
-  ]
+  ],
+  // renderer ソースを import するテストは DOM lib が要るので web プロジェクト側で型検査する
+  "exclude": ["test/renderer"]
 }

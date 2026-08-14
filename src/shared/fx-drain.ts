@@ -76,8 +76,10 @@ export function drainFxQueues<T>(q: FxDrainQueues<T>, order: FxDrainOrder): FxDr
 /**
  * 1回の runFxDrain で試す最大件数。到達しない上限(下の停止性の議論を参照)で、
  * 将来 start が新たにキューへ積むようになった場合の暴走止め。
+ * **各キューの上限を上げたらここも上げること** — 到達可能になると
+ * 「まだ残っているのに drainStrike へ倒れる」= 持ち越しが1周ぶん遅れる。
  */
-export const FX_DRAIN_MAX_STEPS = 32;
+export const FX_DRAIN_MAX_STEPS = 64;
 
 export interface FxDrainStep<T> {
   kind: 'roulette' | 'boost' | 'band';
@@ -108,7 +110,7 @@ export interface FxDrainRun<T> {
  *
  * 停止性: drainFxQueues は next を返す前にキューから shift 済みなので、各周回は
  * 必ず return するか要素を1つ消費する。start は積まない(3つの start* は effect を
- * 読むだけ)ので、上限は boosts(2) + bands(2) + roulettes(9) + 1 = 14 < 32。
+ * 読むだけ)ので、上限は boosts(2) + bands(4) + roulettes(24) + 1 = 31 < 64。
  * maxSteps に達した場合も **drainStrike: true** 側へ倒す — pendingStrike を
  * 宙に浮かせないことを最優先する。
  *

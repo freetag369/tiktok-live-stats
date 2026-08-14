@@ -43,21 +43,31 @@ const CFG = { ...structuredClone(DEFAULT_CHALLENGE), enabled: true };
 
 describe('ChallengeEngine ホットパス', () => {
   bench('handleEvent: like ×10,000(5,000 ユニーク)', () => {
-    const en = new ChallengeEngine(() => CFG);
+    const en = new ChallengeEngine(() => CFG, Date.now, Math.random, Math.random, () => undefined);
     en.start();
     for (let i = 0; i < 10_000; i += 1) en.handleEvent(likeEvent(i));
   });
 
   bench('handleEvent: follow ×10,000 ユニーク(seenFollowers の成長込み)', () => {
-    const en = new ChallengeEngine(() => CFG);
+    const en = new ChallengeEngine(() => CFG, Date.now, Math.random, Math.random, () => undefined);
     en.start();
     for (let i = 0; i < 10_000; i += 1) en.handleEvent(follow(i));
   });
 
   bench('get(): 満載状態のスナップショット ×1,000', () => {
-    const en = new ChallengeEngine(() => CFG);
+    const en = new ChallengeEngine(() => CFG, Date.now, Math.random, Math.random, () => undefined);
     en.start();
     for (let i = 0; i < 5_000; i += 1) en.handleEvent(likeEvent(i));
     for (let i = 0; i < 1_000; i += 1) en.get();
+  });
+
+  // press はホットキーのキーリピート(~30/s)で連打され、1回ごとに get() が
+  // ランキング(runViewers 全走査)を組み直す — ランキング表示中が最悪ケース。
+  bench('press ×1,000(runViewers 満載・ランキング表示中)', () => {
+    const en = new ChallengeEngine(() => CFG, Date.now, Math.random, Math.random, () => undefined);
+    en.start();
+    for (let i = 0; i < 5_000; i += 1) en.handleEvent(likeEvent(i));
+    en.toggleRank();
+    for (let i = 0; i < 1_000; i += 1) en.press();
   });
 });

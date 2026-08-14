@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ROULETTE_SEGMENTS_MAX } from '@shared/challenge';
+import type { RoulettePattern } from '@shared/dto';
 import {
   ROULETTE_BLOCK_GAP,
   ROULETTE_BLOCK_W,
-  ROULETTE_KICK_AT,
-  ROULETTE_NEAR_STOP_AT,
+  ROULETTE_MAX_OVERSHOOT,
+  ROULETTE_PATTERN_TIMING,
   ROULETTE_PATTERNS,
-  ROULETTE_SPIN_SE_END_AT,
   ROULETTE_STRIP_LEN,
   ROULETTE_TARGET_BLOCK,
   drawRoulettePattern,
@@ -65,6 +65,14 @@ describe('走行距離と幾何の不変条件', () => {
     expect(ROULETTE_STRIP_LEN).toBeGreaterThanOrEqual(ROULETTE_TARGET_BLOCK + 2);
   });
 
+  it('最大の行き過ぎ(overrun のフェイク着地)でも右端に空白が出ない', () => {
+    // 右端ブロックの右縁は当選中心から (STRIP_LEN - 1 - TARGET) + 0.5 ブロック右。
+    // 行き過ぎ x のとき窓の右縁は当選中心から x + 1.5 ブロック右まで要る。
+    // キーフレームの行き過ぎ量を増やすときは ROULETTE_MAX_OVERSHOOT とセットで。
+    const coverage = ROULETTE_STRIP_LEN - 1 - ROULETTE_TARGET_BLOCK + 0.5;
+    expect(coverage).toBeGreaterThanOrEqual(1.5 + ROULETTE_MAX_OVERSHOOT);
+  });
+
   it('ジッタは 0..n-1 で、負の seed でも範囲内に収まる', () => {
     const n = 6;
     const base = rouletteRun(0, n, false);
@@ -94,47 +102,114 @@ describe('走行距離と幾何の不変条件', () => {
 });
 
 describe('drawRoulettePattern — 終盤パターンの抽選', () => {
-  it('rand=0 は先頭、rand→1 は末尾', () => {
-    expect(drawRoulettePattern(() => 0)).toBe('slow');
-    expect(drawRoulettePattern(() => 0.999999)).toBe('kick');
+  it('パターンは13種', () => {
+    expect(ROULETTE_PATTERNS).toHaveLength(13);
   });
 
-  it('3パターンすべてが出る', () => {
-    const seen = new Set(ROULETTE_PATTERNS.map((_, i) => drawRoulettePattern(() => i / 3 + 0.01)));
-    expect(seen).toEqual(new Set(['slow', 'pop', 'kick']));
+  it('rand=0 は先頭、rand→1 は末尾', () => {
+    expect(drawRoulettePattern(() => 0)).toBe('slow');
+    expect(drawRoulettePattern(() => 0.999999)).toBe('jackback');
+  });
+
+  it('全パターンが出る', () => {
+    const n = ROULETTE_PATTERNS.length;
+    const seen = new Set(ROULETTE_PATTERNS.map((_, i) => drawRoulettePattern(() => i / n + 0.001)));
+    expect(seen).toEqual(new Set(ROULETTE_PATTERNS));
   });
 
   it('rand が範囲外を返しても既知のパターンに収まる(クラッシュ源を作らない)', () => {
     expect(ROULETTE_PATTERNS).toContain(drawRoulettePattern(() => 1));
     expect(ROULETTE_PATTERNS).toContain(drawRoulettePattern(() => -1));
   });
-});
 
-describe('キックの時刻', () => {
-  it('スピンの終盤にあり、着地より前(monitor.css の rl-run-kick 87.5% と揃える)', () => {
-    expect(ROULETTE_KICK_AT).toBeGreaterThan(0.8);
-    expect(ROULETTE_KICK_AT).toBeLessThan(1);
-  });
-});
-
-describe('「止まりそう」の時刻', () => {
-  it('段のある3パターンすべてで鳴り、fast だけ番兵 1(= 鳴らさない)', () => {
-    for (const p of ROULETTE_PATTERNS) {
-      expect(ROULETTE_NEAR_STOP_AT[p]).toBeGreaterThan(0.5);
-      expect(ROULETTE_NEAR_STOP_AT[p]).toBeLessThan(1);
+  it('許可リストを渡すとその中からだけ出る', () => {
+    const allowed: RoulettePattern[] = ['pop', 'teeter', 'jackstop'];
+    for (let i = 0; i < 30; i++) {
+      expect(allowed).toContain(drawRoulettePattern(() => i / 30, allowed));
     }
-    expect(ROULETTE_NEAR_STOP_AT.fast).toBe(1);
   });
 
-  it('キックより前に来る(溜めの合図が一撃を追い越さない)', () => {
-    expect(ROULETTE_NEAR_STOP_AT.kick).toBeLessThan(ROULETTE_KICK_AT);
+  it('許可リストは正順に正規化される(rand=0 で並び順に依らず同じ先頭)', () => {
+    // ROULETTE_PATTERNS 側の順でプールを組むので、逆順で渡しても先頭は 'pop'。
+    expect(drawRoulettePattern(() => 0, ['kick', 'pop'])).toBe('pop');
   });
 
-  it('回転ループ音が止まったあとに鳴る(カラカラに埋もれさせない)', () => {
-    // slow は例外 — ループ音が 94% まで鳴り、その手前 80% で合図が入る。
-    // 「止まりそう」の合図は着地の1個手前に着いた瞬間という幾何側の都合が優先。
-    for (const p of ['pop', 'kick'] as const) {
-      expect(ROULETTE_NEAR_STOP_AT[p]).toBeGreaterThan(ROULETTE_SPIN_SE_END_AT[p]);
+  it('許可リストの未知値は無視される', () => {
+    const allowed = ['pop', 'no-such-pattern'] as RoulettePattern[];
+    for (let i = 0; i < 10; i++) {
+      expect(drawRoulettePattern(() => i / 10, allowed)).toBe('pop');
+    }
+  });
+
+  it('許可リストが空・未指定・全滅なら全パターンへ倒す(スピンを止めない)', () => {
+    expect(drawRoulettePattern(() => 0, [])).toBe('slow');
+    expect(drawRoulettePattern(() => 0, undefined)).toBe('slow');
+    expect(drawRoulettePattern(() => 0.999999, ['bogus'] as unknown as RoulettePattern[])).toBe(
+      'jackback'
+    );
+  });
+});
+
+describe('ROULETTE_PATTERN_TIMING — SE タイミングの不変条件', () => {
+  it('fast は全て番兵(段が無いので何も鳴らさない)', () => {
+    const t = ROULETTE_PATTERN_TIMING.fast;
+    expect(t.nearAt).toBe(1);
+    expect(t.quietAt).toBe(1);
+    expect(t.kickAts).toEqual([]);
+    expect(t.stepAts).toEqual([]);
+  });
+
+  it('全パターンにテーブルの行があり、時刻はスピンの後半〜着地前に収まる', () => {
+    for (const p of ROULETTE_PATTERNS) {
+      const t = ROULETTE_PATTERN_TIMING[p];
+      expect(t.nearAt).toBeGreaterThan(0.5);
+      expect(t.nearAt).toBeLessThan(1);
+      // veil が閉じ切る(46%)前にループ音を落とすパターンは無い —
+      // 高速域でカチカチが消えると「もう終わり?」と誤読される。
+      expect(t.quietAt).toBeGreaterThanOrEqual(0.46);
+      expect(t.quietAt).toBeLessThan(1);
+      for (const at of [...t.kickAts, ...t.stepAts]) {
+        expect(at).toBeGreaterThan(0);
+        expect(at).toBeLessThan(1);
+      }
+    }
+  });
+
+  it('キックと段の音は昇順(同時刻の連打を作らない)', () => {
+    for (const p of ROULETTE_PATTERNS) {
+      const t = ROULETTE_PATTERN_TIMING[p];
+      for (const ats of [t.kickAts, t.stepAts]) {
+        for (let i = 0; i + 1 < ats.length; i++) expect(ats[i]!).toBeLessThan(ats[i + 1]!);
+      }
+    }
+  });
+
+  it('衝撃と段の音は回転ループ音が止まったあとに鳴る(カラカラに埋もれさせない)', () => {
+    // blackout は暗転の瞬間に quiet と kick を同時に置くので >= で見る。
+    for (const p of ROULETTE_PATTERNS) {
+      const t = ROULETTE_PATTERN_TIMING[p];
+      for (const at of [...t.kickAts, ...t.stepAts]) {
+        expect(at).toBeGreaterThanOrEqual(t.quietAt);
+      }
+    }
+  });
+
+  it('「止まりそう」もループ音停止のあとに鳴る(slow と blackout は幾何都合の例外)', () => {
+    // slow: ループ音は 94% まで鳴り、k=1 到達(80%)が先に来る。
+    // blackout: 暗転(72%)でループ音を落とすが、k=1 到達は 64%。
+    // どちらも「合図は k=1 帯に入った瞬間」という幾何側の規則が優先。
+    for (const p of ROULETTE_PATTERNS) {
+      if (p === 'slow' || p === 'blackout') continue;
+      const t = ROULETTE_PATTERN_TIMING[p];
+      expect(t.nearAt).toBeGreaterThan(t.quietAt);
+    }
+  });
+
+  it('締めの一撃を持つパターンでは、最後のキックが「止まりそう」より後', () => {
+    // restart(再点火)と blackout(暗転)のキックは中盤の衝撃なので対象外。
+    for (const p of ['kick', 'overrun', 'doublefake', 'jackstop', 'jackback'] as const) {
+      const t = ROULETTE_PATTERN_TIMING[p];
+      expect(t.kickAts.at(-1)!).toBeGreaterThan(t.nearAt);
     }
   });
 });

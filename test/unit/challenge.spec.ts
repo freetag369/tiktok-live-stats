@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_LABEL_MAX, ROULETTE_QUEUE_MAX, ROULETTE_SEGMENTS_MAX, rouletteHeadline, ROULETTES_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
-import type { ChallengeConfig, ChallengeResult, ChallengeRouletteConfig } from '@shared/dto';
+import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteReelCount, rouletteReelPlan, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import type {
+  ChallengeConfig,
+  ChallengeEffect,
+  ChallengeResult,
+  ChallengeRouletteConfig,
+  RoulettePattern,
+  TapBoostConfig,
+  TapBoostRule,
+} from '@shared/dto';
+import { ROULETTE_PATTERNS } from '@shared/dto';
 import type { CommentEvent, GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
@@ -95,7 +104,9 @@ function comment(userId = 'c1', over: Partial<CommentEvent> = {}): CommentEvent 
 }
 
 function engine(c: ChallengeConfig = cfg(), now: () => number = () => NOW): ChallengeEngine {
-  const e = new ChallengeEngine(() => c, now);
+  // diag は no-op — ギフト判定の診断ログは実運用の採取用で、ここで出すと
+  // 370件ぶんの stdout にテスト結果が埋もれる(vitest は silent: false)。
+  const e = new ChallengeEngine(() => c, now, Math.random, Math.random, () => undefined);
   // テスト既定は「モニター窓が開いていてカットインを再生できる」状態 —
   // 凍結はこの許可(monitorOpen && fxCaps)が立つときだけ張られる。
   // 許可なしの挙動は専用の describe(カットイン凍結の許可ゲート)で検証する。
@@ -1701,6 +1712,120 @@ describe('drawRouletteIndex — 重み付き抽選', () => {
   });
 });
 
+describe('rouletteDrawCount / rouletteReelCount — 抽選回数と演出本数の分離', () => {
+  const on = cfg({ giftRepeatFx: { ...DEFAULT_GIFT_REPEAT_FX, max: 5, rouletteEnabled: true } });
+  const off = cfg({ giftRepeatFx: { ...DEFAULT_GIFT_REPEAT_FX, max: 5, rouletteEnabled: false } });
+
+  it('抽選回数は演出用の max では削らない(贈られた個数そのもの)', () => {
+    // v0.5.4 の不具合の中核: max=5 が値まで削っていた。
+    expect(rouletteDrawCount(17)).toBe(17);
+    expect(rouletteDrawCount(1)).toBe(1);
+    expect(rouletteDrawCount(0)).toBe(1); // 下限
+    expect(rouletteDrawCount(9999)).toBe(ROULETTE_DRAWS_MAX); // ハード上限のみ
+  });
+
+  it('リール本数だけが設定と尺で頭打ちになる', () => {
+    expect(rouletteReelCount(on, 17)).toBe(17);
+    expect(rouletteReelCount(on, 999)).toBe(ROULETTE_REELS_MAX);
+    expect(rouletteReelCount(off, 17)).toBe(1); // 「連打でも演出は1回」の設定
+    expect(rouletteReelCount(cfg({ giftRepeatFx: { ...DEFAULT_GIFT_REPEAT_FX, enabled: false } }), 17)).toBe(1);
+  });
+});
+
+describe('rouletteDraws / rouletteReelPlan — effect からの再生計画', () => {
+  function rlEffect(over: Partial<ChallengeEffect> = {}): ChallengeEffect {
+    return {
+      id: 1,
+      kind: 'roulette',
+      amount: 0,
+      valueAfter: 1000,
+      atMs: NOW,
+      rouletteSegments: [5, 10, 1000],
+      rouletteIndexes: [0, 2, 1],
+      rouletteIndex: 0,
+      roulettePatterns: ['slow', 'kick', 'pop'],
+      roulettePattern: 'slow',
+      ...over,
+    };
+  }
+
+  it('出目・パターン・1回ぶんの増減を復元する', () => {
+    expect(rouletteDraws(rlEffect())).toEqual([
+      { index: 0, pattern: 'slow', amount: 5 },
+      { index: 2, pattern: 'kick', amount: 1000 },
+      { index: 1, pattern: 'pop', amount: 10 },
+    ]);
+  });
+
+  it('rouletteDirection:"sub" では1回ぶんが負になる(amount は合計なので符号を引けない)', () => {
+    expect(rouletteDraws(rlEffect({ rouletteDirection: 'sub' })).map((d) => d.amount)).toEqual([
+      -5, -1000, -10,
+    ]);
+  });
+
+  it('rouletteIndexes を持たない古い effect は単発として扱う', () => {
+    const e = rlEffect({ rouletteIndexes: undefined, roulettePatterns: undefined, rouletteIndex: 2 });
+    expect(rouletteDraws(e)).toEqual([{ index: 2, pattern: 'slow', amount: 1000 }]);
+  });
+
+  it('盤面外の index は捨てる(盤面を編集した直後の古い effect への保険)', () => {
+    expect(rouletteDraws(rlEffect({ rouletteIndexes: [0, 99, -1, 1] })).map((d) => d.index)).toEqual([0, 1]);
+  });
+
+  it('rouletteReels を超えた分は rest として合算される(値は適用済み)', () => {
+    const plan = rouletteReelPlan(rlEffect({ rouletteReels: 1 }));
+    expect(plan.reels).toHaveLength(1);
+    expect(plan.restCount).toBe(2);
+    expect(plan.restAmount).toBe(1010);
+  });
+
+  it('rouletteReels 欠損(旧 worker)は全部回す', () => {
+    expect(rouletteReelPlan(rlEffect()).reels).toHaveLength(3);
+    expect(rouletteReelPlan(rlEffect()).restCount).toBe(0);
+  });
+});
+
+describe('sameRouletteBoard / mergeRoulette — キュー連結の規約', () => {
+  function rlEffect(id: number, over: Partial<ChallengeEffect> = {}): ChallengeEffect {
+    return {
+      id,
+      kind: 'roulette',
+      amount: 5,
+      valueAfter: 1000 + id,
+      atMs: NOW,
+      rouletteLabel: 'ハートミー',
+      rouletteSegments: [5, 10],
+      rouletteIndexes: [0],
+      rouletteIndex: 0,
+      roulettePatterns: ['slow'],
+      roulettePattern: 'slow',
+      rouletteReels: 1,
+      nickname: `u${id}`,
+      ...over,
+    };
+  }
+
+  it('盤面(表示名・出目・向き)が同じなら連結できる', () => {
+    expect(sameRouletteBoard(rlEffect(1), rlEffect(2))).toBe(true);
+    expect(sameRouletteBoard(rlEffect(1), rlEffect(2, { rouletteSegments: [5, 11] }))).toBe(false);
+    expect(sameRouletteBoard(rlEffect(1), rlEffect(2, { rouletteLabel: 'バラ' }))).toBe(false);
+    expect(sameRouletteBoard(rlEffect(1), rlEffect(2, { rouletteDirection: 'sub' }))).toBe(false);
+  });
+
+  it('連結は出目を並べ、値は合算し、見出しは先頭の人に残す', () => {
+    const m = mergeRoulette(rlEffect(1), rlEffect(2, { rouletteIndexes: [1], amount: 10 }));
+    expect(m.rouletteIndexes).toEqual([0, 1]);
+    expect(m.roulettePatterns).toHaveLength(2);
+    expect(m.rouletteReels).toBe(2);
+    expect(m.amount).toBe(15);
+    expect(m.valueAfter).toBe(1002); // 後発が現在値
+    expect(m.nickname).toBe('u1'); // 連結後の1本目が誰の分かと揃える
+    expect(m.coalesced).toBe(2);
+    expect(m.id).toBe(2);
+    expect(m.rouletteSegments).toEqual([5, 10]); // 盤面は落とさない
+  });
+});
+
 describe('matchRouletteTrigger — トリガーギフト判定', () => {
   it('ライブ経路の再現: canonical 未設定でも giftId 7934 で一致する(最重要)', () => {
     expect(matchRouletteTrigger(DEFAULT_ROULETTE, { giftId: '7934', giftName: 'Heart Me' })).toBe(true);
@@ -1746,6 +1871,40 @@ describe('validateChallengeConfig — rouletteSound', () => {
     });
     expect(v.rouletteSound.bgm).toBe(DEFAULT_ROULETTE_SOUND.bgm);
     expect(v.rouletteSound.spinSe).toBe('off');
+  });
+});
+
+describe('validateChallengeConfig — hideRouletteResultInLog', () => {
+  it('保存済み設定にキーが無くても既定(伏せる)になる — 移行段なしで効く', () => {
+    // モニターのリールは確定済みの出目の遅延再生なので、ログを伏せないと
+    // リールが止まる前に結果が読める。**欠損が true へ倒れること自体が移行の
+    // 代わり**で、settingsVersion が最新の保存済み設定(= 移行段を通らない)にも
+    // 届くことを固定する。既定値の書き換えでは保存済み settings.json に届かない。
+    const saved = { ...structuredClone(DEFAULT_CHALLENGE) } as Record<string, unknown>;
+    delete saved.hideRouletteResultInLog;
+    expect(validateChallengeConfig(saved).hideRouletteResultInLog).toBe(true);
+  });
+
+  it('false は保持する(真偽値の向きが `!== false` であることの回帰)', () => {
+    // ここを `=== true` で書くと既定が反転し、全ユーザーで出目が出たままになる。
+    expect(
+      validateChallengeConfig({ ...DEFAULT_CHALLENGE, hideRouletteResultInLog: false })
+        .hideRouletteResultInLog
+    ).toBe(false);
+    expect(
+      validateChallengeConfig({ ...DEFAULT_CHALLENGE, hideRouletteResultInLog: true })
+        .hideRouletteResultInLog
+    ).toBe(true);
+  });
+
+  it('型崩れは既定(伏せる)へ', () => {
+    for (const bad of ['no', 0, null, []]) {
+      const v = validateChallengeConfig({
+        ...DEFAULT_CHALLENGE,
+        hideRouletteResultInLog: bad,
+      } as unknown);
+      expect(v.hideRouletteResultInLog).toBe(true);
+    }
   });
 
   it('band の曲は回転BGMとして選べる(選択肢の連結仕様)', () => {
@@ -1868,6 +2027,41 @@ describe('validateChallengeConfig — roulettes', () => {
     expect(v.roulettes[0]!.giftName).toBe('heart me');
     expect(v.roulettes[0]!.canonical).toBe('heart_me');
   });
+
+  it('patterns 欠損(旧 settings.json)は全パターンへ倒す — 欠損フォールバックが移行代わり', () => {
+    const legacy = { ...DEFAULT_ROULETTE } as Record<string, unknown>;
+    delete legacy.patterns;
+    const v = validateChallengeConfig({ ...DEFAULT_CHALLENGE, roulettes: [legacy] });
+    expect(v.roulettes[0]!.patterns).toEqual([...ROULETTE_PATTERNS]);
+  });
+
+  it('patterns の未知値は除去し、重複は1つに、並びは正順へ正規化する', () => {
+    const v = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      roulettes: [{ ...DEFAULT_ROULETTE, patterns: ['kick', 'no-such', 'pop', 'kick'] }],
+    } as unknown);
+    // ROULETTE_PATTERNS の正順(pop が kick より先)。
+    expect(v.roulettes[0]!.patterns).toEqual(['pop', 'kick']);
+  });
+
+  it('patterns が空・非配列・全滅なら全パターンへ倒す(抽選不能を作らない)', () => {
+    for (const bad of [[], 'kick', ['no-such'], null]) {
+      const v = validateChallengeConfig({
+        ...DEFAULT_CHALLENGE,
+        roulettes: [{ ...DEFAULT_ROULETTE, patterns: bad }],
+      } as unknown);
+      expect(v.roulettes[0]!.patterns, JSON.stringify(bad)).toEqual([...ROULETTE_PATTERNS]);
+    }
+  });
+
+  it('patterns のサブセットはそのまま保持される', () => {
+    const subset: RoulettePattern[] = ['slow', 'blackout', 'jackback'];
+    const v = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      roulettes: [{ ...DEFAULT_ROULETTE, patterns: subset }],
+    });
+    expect(v.roulettes[0]!.patterns).toEqual(subset);
+  });
 });
 
 describe('matchRoulette — 複数登録の先勝ち', () => {
@@ -1976,11 +2170,24 @@ describe('ChallengeEngine — ギフトルーレット', () => {
   });
 
   it('終盤の演出パターンが effect に載る(モニターは自分で引き直さない)', () => {
-    // fxRand=0.999… → 'kick'。抽選の rand とは別の乱数源から引く。
+    // fxRand=0.999… → 末尾の 'jackback'。抽選の rand とは別の乱数源から引く。
     const e = rlEngine(cfg(), () => 0, () => 0.999999);
     e.start();
     e.handleEvent(heartMe({ diamonds: 1 }));
-    expect(e.get().recentEffects[0]!.roulettePattern).toBe('kick');
+    expect(e.get().recentEffects[0]!.roulettePattern).toBe('jackback');
+  });
+
+  it('行の patterns(チェック)で許可されたパターンからだけ引く', () => {
+    const c = cfg({
+      roulettes: [{ ...structuredClone(DEFAULT_ROULETTE), patterns: ['crawl'] as RoulettePattern[] }],
+    });
+    // fxRand がどこを指していても、許可が1つなら必ずそれになる。
+    for (const fx of [0, 0.5, 0.999999]) {
+      const e = rlEngine(c, () => 0, () => fx);
+      e.start();
+      e.handleEvent(heartMe({ diamonds: 1 }));
+      expect(e.get().recentEffects[0]!.roulettePattern).toBe('crawl');
+    }
   });
 
   it('演出パターンは出目に影響しない(乱数源が分かれている)', () => {
@@ -2468,6 +2675,62 @@ describe('ChallengeEngine — 凍結ドレインの演出合算(coalesce)', () =
     expect(hearts[0]).toMatchObject({ amount: 5, coalesced: 5, diamonds: 5, giftCount: 10 });
     expect(hearts[0]).not.toHaveProperty('fxBandClip');
     expect(s.value).toBe(1030 + 5);
+  });
+
+  it('ルーレットは盤面を落とさず出目を連結する(バナー退避にしない)', () => {
+    // 旧実装は「新しい3件だけ盤面つきで残し、古い分は盤面を削除」していた。
+    // 盤面の無い effect はモニターがバナーだけに退避するので、カットイン明けに
+    // リールが出ない(「演出が発生しない」の主因)。捨てずに連結して全部回す。
+    let t = NOW;
+    const e = engine(bandCfg({ initialValue: 1000 }), () => t);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // band 凍結
+    for (let i = 0; i < 5; i++) {
+      e.handleEvent(heartMe({ msgId: `rl-${i}`, repeatCount: 1, diamonds: 1 }));
+    }
+    t = NOW + 30_000;
+    e.drainIfChanged();
+    const s = e.get();
+    const rl = s.recentEffects.filter((x) => x.kind === 'roulette');
+    expect(rl).toHaveLength(1);
+    expect(rl[0]!.rouletteSegments).toBeDefined(); // 盤面は残る
+    expect(rl[0]!.rouletteIndexes).toHaveLength(5); // 5件ぶんの出目が連なる
+    expect(rl[0]!.roulettePatterns).toHaveLength(5);
+    expect(rl[0]!.coalesced).toBe(5);
+    expect(rouletteReelPlan(rl[0]!).reels).toHaveLength(5);
+    expect(s.stats.rouletteSpins).toBe(5);
+  });
+
+  it('盤面が違うルーレットは畳まない(出目 index の意味が変わるため)', () => {
+    let t = NOW;
+    const rose = {
+      ...structuredClone(DEFAULT_ROULETTE),
+      id: 'rl-rose',
+      label: 'バラ',
+      giftId: '5655',
+      giftName: 'rose',
+      canonical: '',
+      segments: [{ amount: 1, weight: 1 }, { amount: 999, weight: 1 }],
+    };
+    const e = engine(
+      bandCfg({ initialValue: 1000, roulettes: [structuredClone(DEFAULT_ROULETTE), rose] }),
+      () => t
+    );
+    e.start();
+    // 凍結役はどちらのルーレットにも当たらない giftId を使う(5655 はバラ行に食われる)。
+    e.handleEvent(gift({ giftId: '9999', giftName: 'Other', diamonds: 30 }));
+    e.handleEvent(heartMe({ msgId: 'h1', repeatCount: 1, diamonds: 1 }));
+    e.handleEvent(gift({ msgId: 'r1', giftId: '5655', giftName: 'Rose', diamonds: 1, repeatCount: 1 }));
+    e.handleEvent(heartMe({ msgId: 'h2', repeatCount: 1, diamonds: 1 }));
+    t = NOW + 30_000;
+    e.drainIfChanged();
+    const rl = e.get().recentEffects.filter((x) => x.kind === 'roulette');
+    // ハートミー2件は畳まれ、バラは別盤面なので単独で残る。
+    expect(rl).toHaveLength(2);
+    const byLabel = Object.fromEntries(rl.map((x) => [x.rouletteLabel, x]));
+    expect(byLabel['ハートミー']!.rouletteIndexes).toHaveLength(2);
+    expect(byLabel['バラ']!.rouletteIndexes).toHaveLength(1);
+    expect(byLabel['バラ']!.rouletteSegments).toEqual([1, 999]);
   });
 
   it('コメントは keyword 単位で畳まれる', () => {
@@ -3233,8 +3496,28 @@ describe('ChallengeEngine — 連打ギフトの反復スピン(rouletteEnabled)
     e.handleEvent(heartMe({ repeatCount: 3, diamonds: 3 }));
     const s = e.get();
     expect(s.stats.rouletteSpins).toBe(3);
-    expect(s.recentEffects.filter((x) => x.kind === 'roulette')).toHaveLength(3);
-    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 15); // rand=0 → +5 ×3
+    // 1ギフトメッセージ = 1 effect。出目は rouletteIndexes に並ぶ。
+    const rl = s.recentEffects.filter((x) => x.kind === 'roulette');
+    expect(rl).toHaveLength(1);
+    expect(rl[0]!.rouletteIndexes).toHaveLength(3);
+    expect(rl[0]!.roulettePatterns).toHaveLength(3);
+    expect(rl[0]!.amount).toBe(15); // rand=0 → +5 ×3(effect の amount は合計)
+    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 15);
+  });
+
+  it('演出用の max では抽選回数を削らない(贈られた個数ぶん値が動く)', () => {
+    // v0.5.4 の不具合の回帰テスト: giftRepeatFx.max = 5 で 17 連打が
+    // 5回ぶんしか値に反映されず、12個ぶんが消えていた。
+    const e = rlRepEngine({ max: 5, rouletteEnabled: true });
+    e.start();
+    e.handleEvent(heartMe({ repeatCount: 17, diamonds: 17 }));
+    const s = e.get();
+    expect(s.stats.rouletteSpins).toBe(17);
+    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 85); // rand=0 → +5 ×17
+    const rl = s.recentEffects.find((x) => x.kind === 'roulette')!;
+    expect(rl.rouletteIndexes).toHaveLength(17);
+    // リール本数だけは max ではなく ROULETTE_REELS_MAX で頭打ち(見た目の尺)。
+    expect(rl.rouletteReels).toBe(17);
   });
 
   it('出目は毎回引き直す(同じ出目の水増しではない)', () => {
@@ -3244,24 +3527,36 @@ describe('ChallengeEngine — 連打ギフトの反復スピン(rouletteEnabled)
     const e = rlRepEngine({ max: 5, rouletteEnabled: true }, () => seqRand[i++] ?? 0);
     e.start();
     e.handleEvent(heartMe({ repeatCount: 2, diamonds: 2 }));
-    const spins = e.get().recentEffects.filter((x) => x.kind === 'roulette');
-    expect(spins.map((x) => x.amount).sort((a, b) => a - b)).toEqual([5, 1000]);
+    const rl = e.get().recentEffects.find((x) => x.kind === 'roulette')!;
+    expect(rl.rouletteIndexes).toEqual([0, 5]);
+    expect(rouletteDraws(rl).map((d) => d.amount)).toEqual([5, 1000]);
+    expect(rl.amount).toBe(1005);
     expect(e.get().value).toBe(DEFAULT_CHALLENGE.initialValue + 1005);
   });
 
-  it('rouletteEnabled: false なら連打でも1イベント=1スピン(従来の不変条件)', () => {
+  it('rouletteEnabled: false でも抽選は個数ぶん。減るのはリール本数だけ', () => {
     const e = rlRepEngine({ max: 5, rouletteEnabled: false });
     e.start();
     e.handleEvent(heartMe({ repeatCount: 3, diamonds: 3 }));
-    expect(e.get().stats.rouletteSpins).toBe(1);
-    expect(e.get().value).toBe(DEFAULT_CHALLENGE.initialValue + 5);
+    expect(e.get().stats.rouletteSpins).toBe(3);
+    expect(e.get().value).toBe(DEFAULT_CHALLENGE.initialValue + 15);
+    const rl = e.get().recentEffects.find((x) => x.kind === 'roulette')!;
+    expect(rl.rouletteIndexes).toHaveLength(3);
+    expect(rl.rouletteReels).toBe(1); // リールは1本、残りは合算バナー
+    expect(rouletteReelPlan(rl).restCount).toBe(2);
+    expect(rouletteReelPlan(rl).restAmount).toBe(10);
   });
 
-  it('スピン数はモニターのキュー容量を超えない(溢れると値だけ動いてリールが出ない)', () => {
+  it('抽選回数はハード上限(ROULETTE_DRAWS_MAX)で頭打ち', () => {
     const e = rlRepEngine({ max: GIFT_FX_REPEAT_MAX, rouletteEnabled: true });
     e.start();
     e.handleEvent(heartMe({ repeatCount: 999, diamonds: 999 }));
-    expect(e.get().stats.rouletteSpins).toBeLessThanOrEqual(ROULETTE_QUEUE_MAX + 1);
+    expect(e.get().stats.rouletteSpins).toBe(ROULETTE_DRAWS_MAX);
+    const rl = e.get().recentEffects.find((x) => x.kind === 'roulette')!;
+    // リールはさらに ROULETTE_REELS_MAX で絞る(値は 200 回ぶん適用済み)。
+    expect(rl.rouletteReels).toBe(ROULETTE_REELS_MAX);
+    expect(rouletteReelPlan(rl).reels).toHaveLength(ROULETTE_REELS_MAX);
+    expect(rouletteReelPlan(rl).restCount).toBe(ROULETTE_DRAWS_MAX - ROULETTE_REELS_MAX);
   });
 });
 
@@ -3824,15 +4119,20 @@ describe('設定移行 — 全面カットの40行(SETTINGS_VERSION 3)', () => {
 
 describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   const BOOST_GIFT = '9999';
+  /** 新形式(rules[])のブースト設定。BOOST_GIFT の1行だけを持つ。 */
+  const tbCfg = (over: Partial<TapBoostRule> = {}): TapBoostConfig => ({
+    ...DEFAULT_TAP_BOOST,
+    rules: [{ ...DEFAULT_TAP_BOOST_RULE, giftId: BOOST_GIFT, ...over }],
+  });
   /** ブーストを giftId で有効化した設定(ウィンドウ5秒・倍率5の既定)。 */
   function boostCfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
-    return cfg({ tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT }, ...over });
+    return cfg({ tapBoost: tbCfg(), ...over });
   }
   const boostGift = () => gift({ giftId: BOOST_GIFT, giftName: 'Boost Gift', diamonds: 1 });
   const INTRO = TAP_BOOST_INTRO_MS; // 5000
   const COUNT = TAP_BOOST_COUNT_MS; // 3000
   const PRE = INTRO + COUNT; // 前置き演出(咆哮+カウントダウン)の総尺
-  const WINDOW = DEFAULT_TAP_BOOST.durationSec * 1000; // 5000
+  const WINDOW = DEFAULT_TAP_BOOST_RULE.durationSec * 1000; // 5000
 
   it('シネマティック発動: 値は動かず boost-start が焼き込まれ、総尺+清算予算+margin で凍結する', () => {
     const e = engine(boostCfg(), () => NOW);
@@ -3874,7 +4174,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     let t = NOW;
     const e = engine(
       boostCfg({
-        tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, resultClip: 'result-panther' },
+        tapBoost: tbCfg({ resultClip: 'result-panther' }),
       }),
       () => t
     );
@@ -3905,7 +4205,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   it("testEffect('tapBoost') にも結果段が焼き込まれる(▶実演で結果発表まで試写できる)", () => {
     const e = engine(
       boostCfg({
-        tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, resultClip: 'result-panther' },
+        tapBoost: tbCfg({ resultClip: 'result-panther' }),
       }),
       () => NOW
     );
@@ -3978,7 +4278,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     let t = NOW;
     const e = engine(
       boostCfg({
-        tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, resultClip: 'result-panther' },
+        tapBoost: tbCfg({ resultClip: 'result-panther' }),
       }),
       () => t
     );
@@ -3998,7 +4298,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   it("introClip/countClip の 'off' は段ごと尺を詰める(即ウィンドウ入り)", () => {
     const e = engine(
       boostCfg({
-        tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, introClip: 'off', countClip: 'off' },
+        tapBoost: tbCfg({ introClip: 'off', countClip: 'off' }),
       }),
       () => NOW
     );
@@ -4099,7 +4399,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
 
   it('ルーレットと同じギフトではブーストが勝つ(抽選も回らない)', () => {
     // 既定ルーレットのトリガー(heart_me / 7934)をブーストに登録する。
-    const c = cfg({ tapBoost: { ...DEFAULT_TAP_BOOST, giftId: '7934' } });
+    const c = cfg({ tapBoost: tbCfg({ giftId: '7934' }) });
     const e = engine(c, () => NOW);
     e.start();
     e.handleEvent(gift({ giftId: '7934', giftName: 'Heart Me', diamonds: 1 }));
@@ -4202,14 +4502,14 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   it('matchTapBoost: enabled=false とトリガー全空は一致しない', () => {
     expect(matchTapBoost(boostCfg(), { giftId: BOOST_GIFT })).not.toBeNull();
     expect(
-      matchTapBoost(cfg({ tapBoost: { ...DEFAULT_TAP_BOOST, giftId: BOOST_GIFT, enabled: false } }), {
+      matchTapBoost(cfg({ tapBoost: { ...tbCfg(), enabled: false } }), {
         giftId: BOOST_GIFT,
       })
     ).toBeNull();
     expect(matchTapBoost(cfg(), { giftId: BOOST_GIFT })).toBeNull(); // 既定はトリガー空
   });
 
-  it('validateTapBoost: 欠損は既定へ、clamp・小文字化・trim が効く', () => {
+  it('validateTapBoost: 旧・単一設定は rules[0] へ引き継がれ、clamp・小文字化・trim が効く', () => {
     const v = validateChallengeConfig({
       ...structuredClone(DEFAULT_CHALLENGE),
       tapBoost: {
@@ -4226,11 +4526,17 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
         flash: true,
       },
     });
-    expect(v.tapBoost).toEqual({
+    expect(v.tapBoost.enabled).toBe(true);
+    expect(v.tapBoost.rules).toHaveLength(1);
+    expect(v.tapBoost.rules[0]).toEqual({
+      id: 'boost-1',
+      label: '',
       enabled: true,
       giftId: '123',
       giftName: 'rose',
       canonical: 'heart_me',
+      // 旧設定は完全一致の概念を持たないので必ず false(= 従来の部分一致)。
+      exactName: false,
       multiplier: 1,
       durationSec: 15, // 30 → 上限 15 に clamp
       introClip: 'intro-panther',
@@ -4244,7 +4550,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       validateChallengeConfig({
         ...structuredClone(DEFAULT_CHALLENGE),
         tapBoost: { ...DEFAULT_TAP_BOOST, resultClip: 'unknown-clip' },
-      }).tapBoost.resultClip
+      }).tapBoost.rules[0]?.resultClip
     ).toBe('off');
     // キーごと無い旧 settings.json は既定へ
     const legacy = structuredClone(DEFAULT_CHALLENGE) as unknown as Record<string, unknown>;
@@ -4335,5 +4641,96 @@ describe('全面カットのトリガー修復移行(v4)', () => {
   it('入口(migrateChallengeConfig)から v3 の設定が修復される', () => {
     const after = migrateChallengeConfig(brokenCfg(), 3);
     expect(after.giftFullCut.rules.find((r) => r.id === 'fullcut-tensai')?.giftId).toBe('13523');
+  });
+});
+
+describe('全面カットのトリガー修復移行(v6 — 推定のまま外れていた行)', () => {
+  // v5 までが保存していた値。giftId は空で、英語ギフト名の**推定**だけが入っている。
+  const guessedCfg = (): ChallengeConfig => {
+    const c = structuredClone(DEFAULT_CHALLENGE);
+    c.giftFullCut = {
+      ...c.giftFullCut,
+      rules: c.giftFullCut.rules.map((r) =>
+        r.id === 'fullcut-mini-hanabi'
+          ? { ...r, giftId: '', giftName: 'mini fireworks', canonical: '', exactName: false }
+          : r
+      ),
+    };
+    return c;
+  };
+
+  it('推定のままの行は実データのトリガーへ寄る', () => {
+    const after = migrateChallengeGiftFullCutTriggersV5(guessedCfg(), 5);
+    const r = after.giftFullCut.rules.find((x) => x.id === 'fullcut-mini-hanabi');
+    expect(r?.giftId).toBe('134531');
+    expect(r?.giftName).toBe('firework');
+    expect(r?.exactName).toBe(true);
+  });
+
+  it('推定のままでは発火しなかったことを対照で示す', () => {
+    const cfg = { ...guessedCfg(), enabled: true };
+    expect(matchGiftFullCut(cfg, { giftId: '134531', giftName: 'Firework' })).toBeNull();
+  });
+
+  it('寄せた後は実際のギフトイベントで発火する', () => {
+    const cfg = { ...migrateChallengeGiftFullCutTriggersV5(guessedCfg(), 5), enabled: true };
+    expect(matchGiftFullCut(cfg, { giftId: '134531', giftName: 'Firework' })?.clip).toBe(
+      'cut-mini-hanabi'
+    );
+  });
+
+  it('「Fireworks Show」には誤爆しない(完全一致にした理由)', () => {
+    const cfg = { ...migrateChallengeGiftFullCutTriggersV5(guessedCfg(), 5), enabled: true };
+    expect(matchGiftFullCut(cfg, { giftId: '5783', giftName: 'Fireworks Show' })?.clip).not.toBe(
+      'cut-mini-hanabi'
+    );
+  });
+
+  it('利用者が書き換えた行は触らない', () => {
+    const c = guessedCfg();
+    c.giftFullCut.rules = c.giftFullCut.rules.map((r) =>
+      r.id === 'fullcut-mini-hanabi' ? { ...r, giftName: 'わたしの花火' } : r
+    );
+    const after = migrateChallengeGiftFullCutTriggersV5(c, 5);
+    const r = after.giftFullCut.rules.find((x) => x.id === 'fullcut-mini-hanabi');
+    expect(r?.giftName).toBe('わたしの花火');
+    expect(r?.giftId).toBe('');
+  });
+
+  it('enabled / durationSec / clip / 並び順は保つ', () => {
+    const c = guessedCfg();
+    c.giftFullCut.rules = c.giftFullCut.rules.map((r) =>
+      r.id === 'fullcut-mini-hanabi' ? { ...r, enabled: false, durationSec: 9 } : r
+    );
+    const after = migrateChallengeGiftFullCutTriggersV5(c, 5);
+    expect(after.giftFullCut.rules.map((r) => r.id)).toEqual(c.giftFullCut.rules.map((r) => r.id));
+    const r = after.giftFullCut.rules.find((x) => x.id === 'fullcut-mini-hanabi');
+    expect(r?.enabled).toBe(false);
+    expect(r?.durationSec).toBe(9);
+    expect(r?.giftId).toBe('134531'); // トリガーだけは寄る
+  });
+
+  it('冪等 — 二度通しても同じ', () => {
+    const once = migrateChallengeGiftFullCutTriggersV5(guessedCfg(), 5);
+    expect(migrateChallengeGiftFullCutTriggersV5(once, 5)).toEqual(once);
+  });
+
+  it('世代 6 以上には効かない', () => {
+    const c = guessedCfg();
+    expect(migrateChallengeGiftFullCutTriggersV5(c, 6)).toBe(c);
+  });
+
+  it('入口(migrateChallengeConfig)から v5 の設定が修復される', () => {
+    const after = migrateChallengeConfig(guessedCfg(), 5);
+    expect(after.giftFullCut.rules.find((r) => r.id === 'fullcut-mini-hanabi')?.giftId).toBe(
+      '134531'
+    );
+  });
+
+  it('ローザは giftId で一致する(今回は修正不要 — 回帰として固定)', () => {
+    const cfg = { ...structuredClone(DEFAULT_CHALLENGE), enabled: true };
+    expect(matchGiftFullCut(cfg, { giftId: '8913', giftName: 'Rosa' })?.clip).toBe('cut-rosa');
+    // rule[0] の cut-rose(canonical 'rose')に横取りされないこと。
+    expect(matchGiftFullCut(cfg, { giftId: '5655', giftName: 'Rose' })?.clip).toBe('cut-rose');
   });
 });

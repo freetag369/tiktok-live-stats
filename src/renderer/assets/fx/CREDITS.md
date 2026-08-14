@@ -655,3 +655,95 @@ ffmpeg -i raw.mp4 -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v 
 > 著作権の注意は `gift/` / `band/` と同じ — TikTok 本家のギフト演出の再現ではなく、
 > アイコンの題材を参照した完全オリジナル。生成物の利用条件は Higgsfield の
 > 利用規約(生成時のプラン: Plus)に従う。CC0 ではない。
+
+---
+
+# タップブースト(フィーバー)クリップ(`boost/` サブフォルダ)
+
+タップブーストのトリガーギフトが届いたときに再生される、段組みのフルスクリーン演出。
+**起動カットイン(5秒)→ カウントダウン(3秒)→ タップウィンドウ(5〜15秒・ループ)→
+結果カットシーン(4秒)** の4段で、段ごとに素材を選べる(`shared/challenge.ts` の
+`TAP_BOOST_*_CLIPS`)。再生中は worker がカウンタを凍結する(fxFreeze)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.5`(モード **オムニリファレンス**・参照画像あり) |
+| 生成日 | 黒豹セット 2026-08-14 / コーギーセット 2026-08-15 |
+| 出力 | 1280×720 (16:9) / 720P / H.264 / **AAC 音声トラックあり**(Dreamina が焼き込む) |
+| 参照画像 | 黒豹: TikTok ギフト「黒豹(限定ギフト)」アイコン / コーギー: `IMAGE/2026081402/S__108421123.jpg`(ギフト「コーギー」アイコン。キャプション帯を切り落として5倍に拡大したものを投入) |
+
+| ファイル | 段 | モチーフ | 尺 |
+|---|---|---|---|
+| `intro-panther.mp4` | 起動カットイン | 宇宙の霧から黒豹が現れて咆哮 | 5.000 秒 |
+| `count-321.mp4` | カウントダウン | 黒豹＋星雲に金の数字 3・2・1 | 3.000 秒 |
+| `loop-panther.mp4` | タップウィンドウ | 金の「FEVER」＋黒豹＋紫金の星雲 | 15.07 秒 |
+| `loop-pachinko.mp4` | タップウィンドウ | ゴールドFEVER(初代・**縦 9:16**) | 10.10 秒 |
+| `intro-corgi.mp4` | 起動カットイン | ピンクの星雲からコーギーが現れて吠える | 5.000 秒 |
+| `count-corgi.mp4` | カウントダウン | コーギー＋ピンク星雲に金の数字 3・2・1 | 3.000 秒 |
+| `loop-corgi.mp4` | タップウィンドウ | 金の「FEVER」＋コーギー＋ピンク星雲 | 15.07 秒 |
+| `result-corgi.mp4` | 結果カットシーン | コーギーが着地して決めポーズ→暗く収束 | 4.000 秒 |
+
+加工内容:
+- `loop-*.mp4` は**無加工**(Dreamina の書き出しをそのままリネームして格納)。
+- `intro-*` / `result-*` は**尺を契約値ちょうどに詰めるためだけに再エンコード**した
+  (Dreamina の出力は 5.056 / 4.064 秒。**頭を詰める** — 見せ場の白金フラッシュ・
+  暗転が末尾にあるため)。`-c:v libx264 -crf 18 -pix_fmt yuv420p -r 30 -fps_mode cfr`、
+  音声は `-c:a aac -b:a 192k -ar 44100 -ac 2`。
+- `count-*.mp4` は**背景だけを生成し、数字 3・2・1 は ffmpeg で後から合成**した。
+  AI 動画はフレーム精度の数字を描けないため。数字は PIL で作った RGBA の PNG
+  (Segoe UI Black・字高385px・縦グラデ `#FFEAB2`→`#FFB941`・輪郭 `#784900` 11px・
+  画面中央 640,360)を `overlay` + `enable='lt(t,1)'` / `'gte(t,1)*lt(t,2)'` / `'gte(t,2)'`
+  で焼いたもの。**`between(t,a,b)` は両端を含むので境界フレームが二重描画になる** —
+  使ってはいけない。
+
+> ## ⚠️ 不透明フルフレーム — screen 禁止・`.fx-clip-opaque`・音声は素材のもの
+>
+> `cut/*.mp4` と同族。黒背景発光体ではないので `mix-blend-mode: screen` 禁止、
+> `.fx-clip-opaque` で重ねる(配置は `.monitor-root` 直下・z-index なし)。
+>
+> **段の長さは素材ではなく定数が決める。** `TAP_BOOST_INTRO_MS`(5000)/
+> `TAP_BOOST_COUNT_MS`(3000)/ `TAP_BOOST_RESULT_MS`(4000、`shared/boost-settle.ts`)。
+> 素材の実尺がこれとズレると、映像だけ先に終わる/途中で切れる。
+> **`count-*` は 3・2・1 が映像焼き込みで、`1` の表示開始がタップ開始と同期する契約**
+> なので、数字の切り替わりは 1.000 / 2.000 秒ちょうどに載せること
+> (検算: `tblend=all_mode=difference` + `signalstats` の YAVG スパイクが `pts_time:1` と
+> `pts_time:2` に立つ)。
+>
+> **タップウィンドウ用の `loop-*` だけは 15 秒以上にする。** タップ窓の上限が
+> `TAP_BOOST_DURATION_MAX_SEC`(15秒)なので、15.07 秒あれば**実運用ではループが
+> 一周しない** = 継ぎ目が見えない(`loop-panther` / `loop-corgi` はどちらも先頭と末尾が
+> 一致していないが、これで実害が出ない)。
+>
+> 音声は**素材に焼き込まれたもの**をそのまま鳴らす(別 BGM は無い)。モニターは
+> `seEnabled` のとき `muted` を外し、音量は
+> `effectiveSeVolume(seVolume, seVolumes['boost-start'])` を当てる。
+>
+> 左上に Dreamina の **"AI" ウォーターマーク**が焼き込まれている(全8本共通)。
+> Web UI に非表示オプションが見当たらないため、既存素材と見た目を揃えてそのまま出荷している。
+
+## 生成プロンプト(全文)
+
+共通ガード: widescreen 16:9 / 参照画像の被写体を `exactly matching the reference image` で固定 /
+`Pure cinematic motion graphics` / 文字・数字・ロゴ・人物 禁止(**loop だけは例外で
+「FEVER」の金文字を出す**)/ 末尾に `Audio:` 句で音を指定。
+
+- **intro-panther.mp4**(黒豹の咆哮) — Epic cinematic space fantasy animation, widescreen 16:9. Deep space background with swirling dark violet and gold nebula, stars and galaxies. A majestic black panther with glowing amber eyes exactly matching the reference image emerges from cosmic smoke, fills the frame, then opens its jaws and roars powerfully toward the camera. The roar sends a golden shockwave rippling through space with camera shake and scattering stardust, energy building until the final frame ends on a bright golden flare. Pure cinematic motion graphics, no people, no logos, no text, no numbers, no captions. Audio: deep cosmic rumble, one powerful big-cat roar, escalating synth riser.
+- **count-321.mp4**(3・2・1・黒豹) — Cosmic FEVER countdown background, widescreen 16:9. A majestic black panther face with glowing amber eyes exactly matching the reference image looms large in the center of the frame, radiating power, surrounded by swirling golden and deep violet nebula energy, golden lightning arcs and rising sparks, intensity charging up like the last seconds before an explosion. The center of the frame stays clear and dark enough for a large overlay. Strictly NO text, NO numbers, NO letters, NO captions, no people, no coins, no slot machines. Constant escalating energy from first frame to last. Audio: tense escalating riser with deep pulsing heartbeat booms, one pulse per second.
+- **loop-panther.mp4**(黒豹コズミックFEVER) — High-energy FEVER TIME celebration loop animation, widescreen 16:9, cosmic black panther theme: a majestic black panther face with glowing amber eyes exactly matching the reference image looming large in the background radiating power, swirling golden and deep violet nebula energy, golden lightning arcs, rotating golden light rays, continuous bursts of golden sparks and confetti, and a huge glowing pulsing golden word FEVER at the top of the frame. No coins, no slot machines, no casino imagery, no people. Constant intensity from the first frame to the last frame so it loops seamlessly, no fade in, no fade out, no ending climax. Pure motion graphics. Audio: fast upbeat electronic festival music with taiko drums and bright bells, constant energy suitable for seamless looping, no ending cadence.
+- **intro-corgi.mp4**(コーギーの登場) — Epic cinematic space fantasy animation, widescreen 16:9. Deep space background with swirling hot pink, magenta and gold nebula, stars and galaxies. An adorable glossy 3D cartoon corgi with a big pale pink heart-shaped rear exactly matching the reference image emerges from cosmic pink smoke, fills the frame, then opens its mouth and barks joyfully toward the camera. The bark sends a pink and golden shockwave rippling through space with camera shake and scattering heart-shaped stardust, energy building until the final frame ends on a bright golden flare. Pure cinematic motion graphics, no people, no logos, no text, no numbers, no captions. Audio: deep cosmic rumble, one cheerful puppy bark, escalating synth riser.
+- **count-corgi.mp4**(3・2・1・コーギー / 背景のみ生成) — Cosmic FEVER countdown background, widescreen 16:9. An adorable glossy 3D cartoon corgi with a big pale pink heart-shaped rear exactly matching the reference image looms large in the center of the frame, radiating power, surrounded by swirling hot pink, magenta and golden nebula energy, golden lightning arcs and rising heart-shaped sparks, intensity charging up like the last seconds before an explosion. The center of the frame stays clear and dark enough for a large overlay. Strictly NO text, NO numbers, NO letters, NO captions, no people, no coins, no slot machines. Constant escalating energy from first frame to last. Audio: tense escalating riser with deep pulsing heartbeat booms, one pulse per second.
+- **loop-corgi.mp4**(コーギーFEVER) — High-energy FEVER TIME celebration loop animation, widescreen 16:9, cosmic corgi theme: an adorable glossy 3D cartoon corgi with a big pale pink heart-shaped rear exactly matching the reference image looming large in the background radiating power, swirling hot pink magenta and golden nebula energy, golden lightning arcs, rotating golden light rays, continuous bursts of golden sparks and heart-shaped confetti, and a huge glowing pulsing golden word FEVER at the top of the frame. No coins, no slot machines, no casino imagery, no people. Constant intensity from the first frame to the last frame so it loops seamlessly, no fade in, no fade out, no ending climax. Pure motion graphics. Audio: fast upbeat electronic festival music with taiko drums and bright bells, constant energy suitable for seamless looping, no ending cadence.
+- **result-corgi.mp4**(結果発表・コーギー) — Epic cinematic victory result animation, widescreen 16:9. An adorable glossy 3D cartoon corgi with a big pale pink heart-shaped rear exactly matching the reference image lands in the center of the frame out of a bright golden flash and strikes a proud triumphant pose. A single huge burst of pink and golden god rays sweeps out radially behind it, a dense shower of glowing pink hearts and golden confetti erupts upward and rains down through the frame, two shockwave rings snap outward. The spectacle peaks in the first half, then over the last second the confetti falls away, the rays dim and the frame settles into a calm deep magenta and gold glow with the corgi held proud in the center, ending dark and quiet rather than bright. Pure cinematic motion graphics, no people, no logos, no text, no numbers, no captions. Audio: triumphant fanfare with taiko drum impact and bright bells, decaying to silence in the final half second.
+
+`loop-pachinko.mp4` は初代の縦 9:16 素材で、**生成来歴の記録が残っていない**
+(横ステージでは大きくクロップされるため既定では使わない)。
+
+> **結果カットシーンは `result-corgi.mp4` が初の同梱素材。** カタログには
+> `result-panther` も在るが mp4 は未同梱で、選ぶと4秒の暗幕になる
+> (`boostClipUrl` は 0 件許容 glob なので落ちはしない)。黒豹行の既定が
+> `resultClip: 'off'` なのはこのため。
+
+> 著作権の注意は `gift/` / `band/` / `cut/` と同じ — TikTok 本家のギフト演出の再現ではなく、
+> アイコンの題材を参照した完全オリジナル。生成物の利用条件は Dreamina (CapCut) の
+> 利用規約に従う。CC0 ではない。**再エンコードした3本は Dreamina が埋める C2PA の
+> コンテンツ来歴(`uuid`/`jumb` ボックス)が落ちている**点に注意。

@@ -338,7 +338,8 @@ label.field {
 /* コメントを左に。配信中いちばん目で追う場所なので、視線の起点に置く。 */
 .dash {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) minmax(500px, 1.7fr) 310px;
+  /* 並びは JS が --dash-cols(パネル固有の幅を並び順に連結)で渡す。fallback は既定順。 */
+  grid-template-columns: var(--dash-cols, minmax(320px, 1fr) minmax(500px, 1.7fr) 310px);
   gap: 10px;
   height: 100%;
   padding: 10px;
@@ -352,11 +353,11 @@ label.field {
     grid-template-columns: minmax(280px, 1fr) minmax(360px, 1.4fr);
     grid-template-rows: minmax(0, 1fr) minmax(210px, auto);
   }
-  .dash > section:nth-child(3) {
+  .dash > [data-slot='3'] {
     grid-column: 1 / -1;
     max-height: 42vh;
   }
-  .dash > section:nth-child(3) .stats {
+  .dash > [data-slot='3'] .stats {
     grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   }
   /* 最終コメント欄はコメント側に同じ情報が出るので、狭いときは畳む。 */
@@ -376,7 +377,7 @@ label.field {
     grid-template-rows: minmax(220px, 1fr) minmax(220px, 1fr) minmax(210px, auto);
     overflow: auto;
   }
-  .dash > section:nth-child(3) {
+  .dash > [data-slot='3'] {
     grid-column: 1;
   }
 }
@@ -402,6 +403,39 @@ label.field {
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* ── パネルの並び替え ───────────────────────────────────────────────────── */
+/* 見出し帯のどこを掴んでもドラッグできる。ただし帯の中の操作系(検索・絞り込み・
+   チェックボックス)は今まで通り使えるよう、カーソルは戻す。 */
+.pane > header {
+  cursor: grab;
+}
+.pane > header input[type='search'],
+.pane > header input[type='text'],
+.pane > header textarea {
+  cursor: auto;
+}
+.pane > header select,
+.pane > header button,
+.pane > header label,
+.pane > header input[type='checkbox'] {
+  cursor: pointer;
+}
+/* 掴めることを示すだけの飾り。クリック対象ではない。 */
+.pane-grip {
+  color: var(--fg-faint);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: -1px;
+  user-select: none;
+}
+.pane.dragging {
+  opacity: 0.45;
+}
+.pane.drop-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
 }
 
 /* ── viewer table ──────────────────────────────────────────────────────── */
@@ -951,6 +985,26 @@ pre.doc {
   border-radius: 0 0 var(--radius) var(--radius);
   border-top: 0;
   box-shadow: 0 10px 18px -8px rgba(0, 0, 0, 0.75);
+  /* sticky 要素がスクロールポートより高いと、上端が貼り付いたまま下端(PUSH)に
+     スクロールで到達できなくなる。ライブ中は ch-warn / ログ / 統計行で高さが
+     伸びるため、body の高さで頭打ちにし、余剰はログだけを縮めて吸収する。
+     % は body(flex:1)の確定高さ基準 — ペインが内容追従(auto 行)で伸びる間は
+     解決されず素通しだが、その間はカード全体が見えているので害がない。
+     スクロールポートが固定される状況(通常3カラム / 42vh 制約)でだけ効く。
+     +10px は負マージンで上パディングへ食い込む分。overflow-y は「ログが無い
+     構成でも必ず PUSH に届く」ための最終保険。 */
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100% + 10px);
+  overflow-y: auto;
+}
+/* 縮めるのはログだけ。残数・進捗・PUSH・操作行は不動(筋肉記憶を守る)。 */
+.challenge-card.stuck > * {
+  flex-shrink: 0;
+}
+.challenge-card.stuck .ch-log {
+  flex: 0 1 auto;
+  min-height: 34px;
 }
 .challenge-card.cleared {
   border-color: var(--gold);

@@ -82,6 +82,9 @@ function toItem(e: NormalizedEvent, meta: FeedMeta): FeedItem | null {
         n,
         a: v.avatarUrl,
         gift: e.giftName ?? e.giftId,
+        // gift は名前が無いときだけ ID に落ちる表示用。gid は常に生の ID
+        // (設定へ写すための値なので、名前の有無で中身が変わってはいけない)。
+        gid: e.giftId,
         icon: e.iconUrl,
         cnt: e.repeatCount,
         dia: e.diamonds,

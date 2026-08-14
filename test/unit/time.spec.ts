@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  clampFutureMs,
   jstDayNumber,
   jstHour,
   jstWeekStart,
@@ -121,5 +122,18 @@ describe('wakeElapsedMs — 錨は now ではなく企画の開始時刻', () =>
 
   it('returns null for an invalid time so the monitor draws nothing', () => {
     expect(wakeElapsedMs('25:00', Date.now(), Date.now())).toBeNull();
+  });
+});
+
+describe('clampFutureMs — 時計の後方ステップで取り残された時刻の引き戻し', () => {
+  it('時計が単調な限りは恒等(前進はさせない)', () => {
+    expect(clampFutureMs(1000, 1000, 500)).toBe(1000);
+    expect(clampFutureMs(1400, 1000, 500)).toBe(1400); // 正当な先行(上限内)
+    expect(clampFutureMs(900, 1000, 500)).toBe(900); // 過去はそのまま
+  });
+
+  it('上限を超えた先行(後方ステップの痕跡)だけを上限まで引き戻す', () => {
+    expect(clampFutureMs(1000 + 600_000, 1000, 500)).toBe(1500);
+    expect(clampFutureMs(1000 + 600_000, 1000, 0)).toBe(1000); // 過去時刻の記録用(maxAhead 0)
   });
 });

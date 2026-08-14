@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 
 function makeSession(): SessionManager {
-  const challenge = new ChallengeEngine(() => DEFAULT_CHALLENGE);
+  const challenge = new ChallengeEngine(() => DEFAULT_CHALLENGE, Date.now, Math.random, Math.random, () => undefined);
   return new SessionManager({
     store,
     post: (m) => posts.push(m),

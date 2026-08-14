@@ -317,6 +317,13 @@ function GiftTab({ userId, totals }: { userId: string; totals: Array<{ giftName:
               <tr>
                 <th>日時</th>
                 <th>ギフト</th>
+                {/*
+                  giftId は「カットイン/ルーレットのトリガーに何を入れればいいか」を
+                  調べる唯一の手段。ギフト名はクライアント言語や表記ゆれで当てにならず
+                  (同名で別IDのギフトも実在する)、設定画面はここを見るよう案内している
+                  ので、名前が取れているときも必ず出す。
+                */}
+                <th>giftId</th>
                 <th className="n">個数</th>
                 <th className="n">💎</th>
               </tr>
@@ -328,6 +335,9 @@ function GiftTab({ userId, totals }: { userId: string; totals: Array<{ giftName:
                   <td>
                     {g.giftName ?? g.giftId}
                     {g.isBoxGift ? <span className="badge" title="ボックスギフトはダイヤ数が不正確な場合があります"> 箱</span> : null}
+                  </td>
+                  <td style={{ color: 'var(--fg-dim)', fontVariantNumeric: 'tabular-nums' }}>
+                    {g.giftId}
                   </td>
                   <td className="n">{num(g.repeatCount)}</td>
                   <td className="n">{num(g.diamonds)}</td>

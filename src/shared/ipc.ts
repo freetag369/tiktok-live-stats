@@ -294,6 +294,13 @@ export type FeedItem =
       n: string;
       a?: string;
       gift: string;
+      /**
+       * 生の giftId。**表示用ではなく設定を書くための値**で、お助け(ファンスタンプ)の
+       * 対象 giftId を配信中に拾うのに使う(Challenge 設定の GiftIdPicker)。
+       * ファンスタンプは配信者ごとのカスタムギフトなので事前に ID を知りようがなく、
+       * ギフト名は表記ゆれ・同名別IDがあって当てにならない — ここが唯一の入手経路。
+       */
+      gid: string;
       icon?: string;
       cnt: number;
       dia: number;

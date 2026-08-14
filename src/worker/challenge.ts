@@ -9,7 +9,8 @@ import type {
   ChallengeStatus,
   ChallengeStockSlot,
   ChallengeTestEffectSpec,
-  TapBoostConfig,
+  RoulettePattern,
+  TapBoostRule,
 } from '@shared/dto';
 import {
   CHALLENGE_EFFECTS_MAX,
@@ -19,9 +20,12 @@ import {
   GIFT_FX_FREEZE_MAX_MS,
   GIFT_FX_PENDING_OPS_MAX,
   LIKE_FX_WINDOW_MS,
+  ROULETTE_DRAWS_MAX,
   drawRouletteIndex,
   giftFxRepeat,
-  giftFxRouletteSpins,
+  rouletteBoardKey,
+  rouletteDrawCount,
+  rouletteReelCount,
   matchCommentRule,
   matchFanStamp,
   matchGiftBand,
@@ -33,8 +37,14 @@ import {
   TAP_BOOST_INTRO_MS,
 } from '@shared/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
+import { clampFutureMs } from '@shared/time';
 import { drawRoulettePattern } from '@shared/roulette-fx';
 import { BoundedSet } from '@shared/bounded-set';
+import {
+  FAN_STAMP_FX_WINDOW_MS,
+  FAN_STAMP_NAMES_MAX,
+  mergeFanStampName,
+} from '@shared/fan-stamp';
 
 /** runViewers の値。DTO(ChallengeRankRow)と違い、表示名は未確定のまま持つ。 */
 interface RunParticipant {
@@ -44,6 +54,32 @@ interface RunParticipant {
   avatarUrl?: string;
   diamonds: number;
   likes: number;
+}
+
+/**
+ * お助け(ファンスタンプ)合算窓のアキュムレータ。**見た目と音の材料だけ**を持つ —
+ * 値・統計・ランキングはイベントごとに適用済みで、ここには一切依存しない。
+ *
+ * 配列で effect を溜めずスカラに畳むのは fx-floats.ts の PendingFloat と同じ理由:
+ * 「窓内に何件来ても flush で出るバナーは必ず1枚」を構造で担保するため。
+ */
+interface FanStampAcc {
+  /** 畳んだ合計増減(バナーの ±N)。 */
+  amount: number;
+  /** 畳んだメッセージ件数(履歴ログの ×N = ChallengeEffect.coalesced)。 */
+  count: number;
+  /** 畳んだ総個数(各イベントの repeatCount の総和 = バナーの ×N)。 */
+  giftCount: number;
+  /** 畳んだ総ダイヤ数。 */
+  diamonds: number;
+  /** 1件でも flash 指定があれば照明を出す(finishDrain の merge と同じ規約)。 */
+  flash: boolean;
+  /** バナーに並べる表示名(最大 FAN_STAMP_NAMES_MAX 件)。 */
+  names: string[];
+  /** 重複排除した人数。 */
+  people: number;
+  /** 人数の重複排除キー。nickname は空や変化がありうるので **userId** で持つ。 */
+  seen: BoundedSet<UserId>;
 }
 
 /**
@@ -83,14 +119,11 @@ export class ChallengeEngine {
    * 二重適用される。start/reset でも消さない — 再開直後に再配信された古い
    * ギフトは新しいランにも数えてはいけない。
    */
-  private seenGiftMsgIds = new Set<string>();
-  private seenGiftMsgIdOrder: string[] = [];
+  private seenGiftMsgIds = new BoundedSet<string>(512);
   /** like の msgId 重複排除(gift と同じ再接続バックログ対策。高頻度なので容量大きめ)。 */
-  private seenLikeMsgIds = new Set<string>();
-  private seenLikeMsgIdOrder: string[] = [];
+  private seenLikeMsgIds = new BoundedSet<string>(1024);
   /** comment の msgId 重複排除(like と同じ再接続バックログ対策)。 */
-  private seenCommentMsgIds = new Set<string>();
-  private seenCommentMsgIdOrder: string[] = [];
+  private seenCommentMsgIds = new BoundedSet<string>(1024);
   /**
    * ラン中の参加者集計。CLEAR リザルトの TOP5 と、モニターに常時出るライブ TOP3
    * (ChallengeState.runRank)の**唯一のソース**。集計範囲は「開始→達成」の
@@ -100,18 +133,30 @@ export class ChallengeEngine {
    */
   private runViewers = new Map<UserId, RunParticipant>();
   /**
-   * ラン中のユニーク参加者の ID 集合。**参加者数は runViewers.size ではなくこれ**を使う
+   * ラン中のユニーク参加者**数**の権威。**runViewers.size ではなくこれ**を使う
    * — あちらは pruneRunViewers で「💎上位200 ∪ いいね上位200」まで間引かれるので、
    * 4000 ユニークを超えた配信では CLEAR リザルトもランキング盤も参加者数が
    * 約400で頭打ちになっていた(毎回ほぼ同じ数字が出るので壊れているのが丸わかりだった)。
-   *
-   * session.ts の seenIds / uniqueViewers(:90-99)と同じ「ID 集合を剪定対象の
-   * Map から切り離す」既決パターン。ID 文字列だけなので RunParticipant より
-   * 1桁軽く、剪定しない。Set なので**間引きで消えた人が戻っても二重に数えない**
-   * (単純なカウンタだと再訪のたびに +1 されて青天井に膨らむ)。
    * ライフサイクルは runViewers と完全に同じ — start/reset でクリア、stop では残す。
    */
-  private runParticipantIds = new Set<UserId>();
+  private runParticipants = 0;
+  /**
+   * 再訪 dedup(間引きで消えた人が戻っても二重に数えないため)。以前は素の
+   * Set<UserId> で 1 ランのユニーク数に比例して育つ唯一の無制限コレクション
+   * だった — BoundedSet 化(cap は seenFollowers と同じ 50,000)で耐久配信の
+   * ヒープ成長を止める。cap 内なら参加者数は厳密。超過後の副作用は「ここからも
+   * runViewers の剪定でも消えた最初期の参加者が再訪したときだけ +1 の過大計上」
+   * のみ(単調増加は保たれ、過少にはならない)。runViewers に生き残っている
+   * 上位者は Map ヒットが先にガードするので二重計上されない。
+   */
+  private runParticipantSeen = new BoundedSet<UserId>(50_000);
+  /**
+   * ランキングの材料(runViewers の行・表示名・剪定・start/reset)が変わるたびに
+   * 増える単調カウンタ。topRankCached がこれで再計算の要否を判定する。
+   */
+  private rankVersion = 0;
+  /** topRank の結果キャッシュ(`${key}:${n}` 別)。version 一致ならヒット。 */
+  private rankCache = new Map<string, { version: number; rows: ChallengeRankRow[] }>();
   /** CLEAR 時に1度だけ組み立てて凍結する。生成後は絶対に書き換えない。 */
   private result: ChallengeResult | null = null;
   /**
@@ -153,6 +198,16 @@ export class ChallengeEngine {
   /** effect 未表示のいいね加算分(LIKE_FX_WINDOW_MS 窓の合算)。 */
   private likeFxPending = 0;
   private likeFxLastMs = 0;
+  /**
+   * お助け(ファンスタンプ)の合算窓の期限。null = 窓なし(次の1件は「先頭」)。
+   *
+   * LIKE_FX_WINDOW_MS(固定長)と違い**期限を絶対時刻で直接持つ**のは、窓長が
+   * 可変だから — カットイン付きのお助けでは「凍結が明けるまで」がそのまま窓に
+   * なる(giftOp が fxFreezeUntilMs と max を取る)。
+   */
+  private fanStampFxUntilMs: number | null = null;
+  /** 窓内に届いたお助けの合算(effect 未表示ぶん)。null = 保留なし。 */
+  private fanStampFx: FanStampAcc | null = null;
   /**
    * ダイヤ帯域カットイン再生中のカウンタ凍結の期限。null = 凍結なし。
    * status は変えない — 'idle' は「停止」の意味で使われており(モニターの
@@ -258,7 +313,14 @@ export class ChallengeEngine {
      * 出目と相関してはいけない(相関するとキック=大当たりが学習されて予告になる)
      * ので、乱数源を分けておくほうが意図に忠実。
      */
-    private readonly fxRand: () => number = Math.random
+    private readonly fxRand: () => number = Math.random,
+    /**
+     * ギフト判定の診断ログの出口(now と同じ流儀で注入する)。
+     * 既定は stdout — main/worker-host.ts が `[worker]` を付けて中継し、
+     * diag-log.ts の KEEP_PREFIX が拾って logs/diag.log へ落とす。
+     * ユニットテストは no-op を渡す(370件ぶんの出力で結果が埋もれるため)。
+     */
+    private readonly diag: (message: string) => void = (m) => console.log(m)
   ) {
     this.value = this.getConfig().initialValue;
   }
@@ -275,12 +337,15 @@ export class ChallengeEngine {
     this.recentEffects = [];
     this.seenFollowers.clear();
     this.runViewers.clear();
-    this.runParticipantIds.clear();
+    this.runParticipants = 0;
+    this.runParticipantSeen.clear();
+    this.rankVersion++;
     this.result = null;
     // 新ランは空のランキングから始まる。出しっぱなしのボードを引き継ぐと
     // モニターが「全員 —」の全画面で始まってしまう。
     this.rankShown = false;
     this.resetLikeAccumulators();
+    this.resetFanStampFx();
     // 前ラン由来の保留分を新ランへ持ち込まない(値は initialValue で始める規約)。
     this.pendingOps = [];
     this.fxFreezeUntilMs = null;
@@ -316,6 +381,7 @@ export class ChallengeEngine {
     this.status = 'idle';
     // 停止後に合算待ちの演出が漏れないように捨てる(値には適用済み)。
     this.likeFxPending = 0;
+    this.resetFanStampFx();
     this.clearTestBoost();
     this.dirty = true;
     return this.get();
@@ -336,10 +402,13 @@ export class ChallengeEngine {
     this.recentEffects = [];
     this.seenFollowers.clear();
     this.runViewers.clear();
-    this.runParticipantIds.clear();
+    this.runParticipants = 0;
+    this.runParticipantSeen.clear();
+    this.rankVersion++;
     this.result = null;
     this.rankShown = false;
     this.resetLikeAccumulators();
+    this.resetFanStampFx();
     this.dirty = true;
     return this.get();
   }
@@ -480,11 +549,21 @@ export class ChallengeEngine {
         const fs = cfg.fanStamp;
         e = {
           kind: 'gift',
-          amount: fs.amountEach,
           ...(fs.flash ? { flash: true } : {}),
           fanStamp: true,
-          nickname: 'テスト',
           giftName: 'ファンスタンプ',
+          // 合算バナー(複数人ぶんを1枚に畳んだ形)の実演。実際の合算は worker の
+          // 窓でしか起きず設定画面からは再現できないので、印だけを焼き込んで見た目を出す。
+          ...(spec.multi
+            ? {
+                amount: fs.amountEach * 6,
+                nickname: 'たろう',
+                giftCount: 6,
+                coalesced: 6,
+                fanStampNames: ['たろう', 'はなこ', 'じろう'],
+                fanStampPeople: 5,
+              }
+            : { amount: fs.amountEach, nickname: 'テスト' }),
           // 演出 tier は t1(1ダイヤ)相当。実運用のファンスタンプも1ダイヤ。
           diamonds: 1,
         };
@@ -533,7 +612,11 @@ export class ChallengeEngine {
         // トリガー一致は評価しない(fanStamp と同じ — 未設定でも見た目を確認
         // できるのが目的)。凍結もブースト状態も作らない(testEffect の契約)—
         // モニターは e.test を見て、据え置きなしで前置き→ウィンドウ→着弾を試写する。
-        const tb = cfg.tapBoost;
+        // 行ごとの実演(ルーレットの rouletteId と同じ流儀)。未指定・対象行が
+        // 消えていたら最初の有効な行。1行も無ければ積む演出が無いので抜ける。
+        const tb =
+          cfg.tapBoost.rules.find((r) => r.id === spec.boostId) ?? cfg.tapBoost.rules.find((r) => r.enabled);
+        if (!tb) return;
         const durationMs = tb.durationSec * 1000;
         const introMs = tb.introClip !== 'off' ? TAP_BOOST_INTRO_MS : 0;
         const countMs = tb.countClip !== 'off' ? TAP_BOOST_COUNT_MS : 0;
@@ -575,13 +658,23 @@ export class ChallengeEngine {
         if (!rl) return;
         const idx = drawRouletteIndex(rl.segments, this.rand);
         const seg = rl.segments[idx]!;
+        // 効果音スロットの試聴は 'kick' を狙い撃ちしたいので spec の指定を優先する。
+        // spec.pattern は行のチェック(patterns)の**外でも通す** — 設定UIの
+        // パターン別 ▶ は「チェックする前に見てみたい」の道具なので、許可リストで
+        // 弾くと試し見ができなくなる。抽選に任せる経路だけ許可リストへ従う。
+        const pat = spec.pattern ?? drawRoulettePattern(this.fxRand, rl.patterns);
+        // 実演は常に1スピン。ライブ経路と同じ配列形で積む(モニターの再生経路を
+        // 分岐させない — 分岐すると実演では出るのに本番で出ない事故が起きる)。
         e = {
           kind: 'roulette',
           amount: rl.direction === 'sub' ? -seg.amount : seg.amount,
           rouletteSegments: rl.segments.map((s) => s.amount),
           rouletteIndex: idx,
-          // 効果音スロットの試聴は 'kick' を狙い撃ちしたいので spec の指定を優先する。
-          roulettePattern: spec.pattern ?? drawRoulettePattern(this.fxRand),
+          rouletteIndexes: [idx],
+          roulettePattern: pat,
+          roulettePatterns: [pat],
+          rouletteReels: 1,
+          ...(rl.direction === 'sub' ? { rouletteDirection: 'sub' as const } : {}),
           ...(rl.label !== '' ? { rouletteLabel: rl.label } : {}),
           nickname: 'テスト',
         };
@@ -640,12 +733,7 @@ export class ChallengeEngine {
     if (e.kind === 'comment') {
       // 再接続バックログの二重適用ガード(like と同じ)。規則ガードより前に通す —
       // 規則なしの間に届いた msgId も、後から規則を足した再配信では二重に数えない。
-      if (this.seenCommentMsgIds.has(e.msgId)) return false;
-      this.seenCommentMsgIds.add(e.msgId);
-      this.seenCommentMsgIdOrder.push(e.msgId);
-      while (this.seenCommentMsgIdOrder.length > 1024) {
-        this.seenCommentMsgIds.delete(this.seenCommentMsgIdOrder.shift()!);
-      }
+      if (!this.seenCommentMsgIds.add(e.msgId)) return false;
       // 規則は到着時点の cfg で確定させる(バンド判定と同じ規約 — 凍結明けに
       // 読み直すと、同じコメントの判定が設定変更のタイミングで揺れる)。
       const rule = matchCommentRule(cfg, e.content);
@@ -670,12 +758,7 @@ export class ChallengeEngine {
     if (e.kind === 'like') {
       // 再接続バックログの二重適用ガード(gift と同じ)。like は高頻度なので容量 1024。
       // 設定ガードより前に通す — いいね妨害が無効でもリザルトのランキングは集計する。
-      if (this.seenLikeMsgIds.has(e.msgId)) return false;
-      this.seenLikeMsgIds.add(e.msgId);
-      this.seenLikeMsgIdOrder.push(e.msgId);
-      while (this.seenLikeMsgIdOrder.length > 1024) {
-        this.seenLikeMsgIds.delete(this.seenLikeMsgIdOrder.shift()!);
-      }
+      if (!this.seenLikeMsgIds.add(e.msgId)) return false;
       // e.count は「このバッチのいいね数」(累計ではない — events.ts の契約)。
       const add = Math.max(0, e.count);
       if (add === 0) return false; // 件数ゼロのイベントで delta を出さない
@@ -707,6 +790,9 @@ export class ChallengeEngine {
         this.likeFxPending += amount;
         // 演出は合算窓ごとに1件だけ(窓内の分は flushLikeFx がまとめて出す)。
         const nowMs = this.now();
+        // 過去時刻の記録なので未来はあり得ない — 時計の後方ステップで未来に
+        // 取り残されると、演出がステップ幅ぶん抑止される(値は無事)。
+        this.likeFxLastMs = clampFutureMs(this.likeFxLastMs, nowMs, 0);
         if (nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
           this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
           this.likeFxPending = 0;
@@ -746,12 +832,7 @@ export class ChallengeEngine {
 
     if (e.kind === 'gift') {
       // 再接続バックログの二重適用ガード(DB の INSERT OR IGNORE と同じ役割)。
-      if (this.seenGiftMsgIds.has(e.msgId)) return false;
-      this.seenGiftMsgIds.add(e.msgId);
-      this.seenGiftMsgIdOrder.push(e.msgId);
-      while (this.seenGiftMsgIdOrder.length > 512) {
-        this.seenGiftMsgIds.delete(this.seenGiftMsgIdOrder.shift()!);
-      }
+      if (!this.seenGiftMsgIds.add(e.msgId)) return false;
       // ギフトランキングは規則に紐づかないギフトも数える — matchGiftRule の早期
       // return より前に置くこと(後ろに置くと、カウントに効かないギフトが
       // ランキングから消える)。dirty はここで立てる: モニターの TOP3 がこれを
@@ -763,12 +844,25 @@ export class ChallengeEngine {
         this.dirty = true;
       }
 
+      // 受信そのものの記録。**giftName は原文のまま**出すこと — 設定側は小文字で
+      // 保存する規約(validateGiftFullCut)なので、小文字化して出すと「実際に何が
+      // 届いたか」が分からなくなり、この行の唯一の存在意義が消える。
+      this.giftDiag(
+        `受信 giftId=${e.giftId} giftName=${JSON.stringify(e.giftName ?? null)}` +
+          ` type=${e.giftType ?? '-'} repeat=${e.repeatCount} 💎=${e.diamonds}` +
+          ` canonical=${e.canonical ?? '-'}`
+      );
+
       // ファンスタンプ(お助け)。ルーレット・giftRules・giftDefault の**どれよりも先**に
       // 評価し、一致したら増減の写像を丸ごと置き換える — ルーレットが giftRules に対して
       // 果たしているのと同じ「先勝ち」の役割(二重適用防止)。ルーレットより上に置くのは、
       // 同じ giftId を両方に登録された設定で「お助けのはずが数字が増える」という説明の
       // つかない挙動を作らないため。
       const fs = matchFanStamp(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+      // お助けは最初に評価され、一致すると増減の写像を丸ごと置き換える。設定した
+      // giftId が合っているかを配信中に確かめる唯一の手掛かりなので必ず記録する
+      // (ファンスタンプはカスタムギフトで、ID を取り違えても「効かない」としか見えない)。
+      if (fs) this.giftDiag(`→ お助け(ファンスタンプ)一致 1個あたり=${fs.amountEach}`);
 
       // タップブースト(フィーバー)。fanStamp の**次・ルーレットより先**に評価する
       // (matchTapBoost の規約 — 同じ giftId を両方に登録した誤設定では fanStamp が
@@ -778,6 +872,10 @@ export class ChallengeEngine {
       // ドレイン(前のブーストの清算後)で直列に発動する。
       const tb = fs ? null : matchTapBoost(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
       if (tb) {
+        // ここで return するので全面カットは**評価すらされない**。同じギフトを
+        // タップブーストと全面カットの両方に登録した設定で「カットインが出ない」
+        // と見える唯一の説明なので、必ず記録する。
+        this.giftDiag('→ タップブースト一致(全面カットは評価されません)');
         return this.applyOrQueue(() => this.activateBoost(tb, e));
       }
 
@@ -785,24 +883,31 @@ export class ChallengeEngine {
       //(matchRoulette の先勝ち)。トリガー一致時は giftRules/giftDefault を評価しない —
       // ルーレットが増減の写像を置き換える(既定の perDiamond +1 との二重適用防止)。
       // 抽選も値適用もここで即時確定し、モニターは「確定済みの出目」を演出として
-      // 遅延再生するだけ(like 着弾の据え置きと同じ解法)。連打でも1イベント=1スピン
-      // (heart_me は giftType 4 で1メッセージずつ届く。type 1 連打は normalize.ts が
-      // repeatEnd で1件に畳み済み)。
+      // 遅延再生するだけ(like 着弾の据え置きと同じ解法)。
+      //
+      // 連打(giftType 1: バラ・指ハート等)は normalize.ts が repeatEnd で1件に
+      // 畳んで repeatCount を載せてくるので、**1メッセージで repeatCount 回抽選する**。
+      // heart_me は giftType 4 で1メッセージずつ届くため repeatCount は常に 1。
       // お助け一致時は matchRoulette 自体を評価しない — 抽選(this.rand)を消費させない。
       const rl = fs
         ? null
         : matchRoulette(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
       if (rl) {
-        // 連打ギフトの反復スピン。ルーレットは抽選なので、反復するには出目を N 回
-        // 引くしかない — **ここだけは値の増減も回数ぶんになる**(他の演出反復は
-        // 見た目だけで値を動かさない)。既定トリガーの heart_me は giftType 4 で
-        // 1メッセージずつ届くため repeatCount は 1 で、実質 1 スピンのまま。
-        const spins = giftFxRouletteSpins(cfg, e.repeatCount);
+        // タップブーストと同じ理由で記録する — ルーレットに登録したギフトは
+        // 全面カットに同じ行を作っても永久に再生されない(先勝ちで早期 return)。
+        this.giftDiag(`→ ルーレット一致 id=${rl.id}(全面カットは評価されません)`);
+        // **抽選回数は贈られた個数そのもの**(rouletteDrawCount)。演出用の
+        // giftRepeatFx.max は掛けない — 掛けると視聴者が贈った個数ぶんの値が消える
+        // (v0.5.4 の不具合: バラ17連打が5回ぶんしか反映されなかった)。
+        const draws = rouletteDrawCount(e.repeatCount);
         return this.applyOrQueue(() => {
-          for (let i = 0; i < spins; i++) {
-            // ドレイン中に 0 到達したら残りは回さない(達成後のイベントは
-            // 元のタイムラインでも無視されるため — flushFxFreeze と同じ判断)。
-            if (i > 0 && this.status !== 'running') break;
+          // 出目は**1 effect にまとめて**載せる(dto.ts の rouletteIndexes 参照)。
+          // 1スピン1 effect にすると、17連打がリングバッファを一撃で溢れさせ、
+          // 履歴ログも1ギフトで17行に膨れる(「履歴ログは1件のまま」規約に反する)。
+          const idxs: number[] = [];
+          const pats: RoulettePattern[] = [];
+          let total = 0;
+          for (let i = 0; i < draws; i++) {
             const idx = drawRouletteIndex(rl.segments, this.rand);
             const seg = rl.segments[idx]!;
             const amount = rl.direction === 'sub' ? -seg.amount : seg.amount;
@@ -810,26 +915,43 @@ export class ChallengeEngine {
             else this.stats.giftUp += amount;
             this.stats.rouletteSpins++;
             this.value = Math.max(0, this.value + amount);
-            this.pushEffect({
-              kind: 'roulette',
-              amount,
-              rouletteSegments: rl.segments.map((s) => s.amount),
-              rouletteIndex: idx,
-              // 終盤の演出パターンも effect に載せる。**出目を引いたあとに、出目とは
-              // 無関係に引く** — 相関するとキック=大当たりが学習されて予告になる。
-              roulettePattern: drawRoulettePattern(this.fxRand),
-              // 表示名も effect に載せて自己完結させる(モニターの cfg は 120秒
-              // ポーリング(CFG_POLL_MS)で古くなりうる — rouletteSegments と同じ理由)。
-              ...(rl.label !== '' ? { rouletteLabel: rl.label } : {}),
-              nickname: e.viewer.nickname ?? e.viewer.displayId,
-              ...(e.giftName ? { giftName: e.giftName } : {}),
-              ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
-              ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
-              diamonds: e.diamonds,
-              atMs: this.now(),
-            });
-            this.maybeAchieve(this.now()); // direction:'sub' なら 0 到達しうる
+            total += amount;
+            idxs.push(idx);
+            // 終盤の演出パターンも effect に載せる。**出目を引いたあとに、出目とは
+            // 無関係に引く** — 相関するとキック=大当たりが学習されて予告になる。
+            // 行のチェック(patterns)で許可されたパターンからの一様抽選。
+            pats.push(drawRoulettePattern(this.fxRand, rl.patterns));
+            // 0 到達したら残りは回さない(達成後のイベントは元のタイムラインでも
+            // 無視されるため — flushFxFreeze と同じ判断)。direction:'sub' のみ起きる。
+            if (this.value === 0) break;
           }
+          this.pushEffect({
+            kind: 'roulette',
+            // amount は effect 全体の合計。1回ぶんの増減は rouletteDraws が
+            // rouletteSegments と rouletteDirection から復元する。
+            amount: total,
+            rouletteSegments: rl.segments.map((s) => s.amount),
+            rouletteIndex: idxs[0]!,
+            rouletteIndexes: idxs,
+            roulettePattern: pats[0]!,
+            roulettePatterns: pats,
+            // 見た目の尺だけ到着時点の cfg で確定させて焼き込む(fxRepeat と同じ流儀)。
+            // **値は idxs.length 回ぶん適用済み** — ここで削れるのはリール本数だけ。
+            rouletteReels: rouletteReelCount(cfg, idxs.length),
+            ...(rl.direction === 'sub' ? { rouletteDirection: 'sub' as const } : {}),
+            // 表示名も effect に載せて自己完結させる(モニターの cfg は 120秒
+            // ポーリング(CFG_POLL_MS)で古くなりうる — rouletteSegments と同じ理由)。
+            ...(rl.label !== '' ? { rouletteLabel: rl.label } : {}),
+            nickname: e.viewer.nickname ?? e.viewer.displayId,
+            ...(e.giftName ? { giftName: e.giftName } : {}),
+            ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+            ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+            diamonds: e.diamonds,
+            atMs: this.now(),
+          });
+          // 達成判定は pushEffect の**後**。先に呼ぶと achieved effect の id が
+          // ルーレットより小さくなり、モニターが CLEAR を先に再生してしまう。
+          this.maybeAchieve(this.now()); // direction:'sub' なら 0 到達しうる
           this.dirty = true;
         });
       }
@@ -870,6 +992,16 @@ export class ChallengeEngine {
         fs?.suppressBandFx === true || fullCut
           ? null
           : matchGiftBand(cfg, { canonical: e.canonical, giftId: e.giftId, diamonds: e.diamonds });
+      // 全面カットの成否。**外れたときこそ出す** — 42行のトリガーは giftId が空の
+      // ものが多く英語ギフト名の推定に頼っているので、「届いたのに一致しなかった」
+      // が分からないと直しようがない(v3 で40行が無言のまま死んでいた原因)。
+      this.giftDiag(
+        fs?.suppressBandFx === true
+          ? '→ お助け(suppressBandFx)によりカットインは抑止'
+          : fullCut
+            ? `→ 全面カット一致 id=${fullCut.id} clip=${fullCut.clip}`
+            : `→ 全面カット不一致 → 帯域=${band ? band.id : 'なし'}`
+      );
       if (!m && !band && !fullCut) return false;
       const giftOp = (allowBand: boolean): void => {
         const amount = m?.amount ?? 0;
@@ -931,10 +1063,53 @@ export class ChallengeEngine {
         if (cutClip && this.fxAllowed()) {
           this.fxFreezeUntilMs = atMs + fxDurationMs * rep + GIFT_FX_FREEZE_MARGIN_MS;
           this.armFreezeTimer();
+        } else if (cutClip) {
+          // 一致したのに再生も一時停止もされない唯一の経路。モニター窓が閉じている
+          // (または reduced-motion)ときで、症状は「設定は合っているのに何も起きない」。
+          this.giftDiag(`→ カットイン ${cutClip} は再生されません(モニター未表示 / 動きの抑制)`);
+        }
+        // お助け(ファンスタンプ)の合算窓を張る。**この1件の見た目が終わる時刻**が窓の終端:
+        // カットイン無しなら浮上バナーの尺、カットイン有りなら凍結明け(バナーは
+        // finishBandFx = カットイン終了時に出るので、そのぶん長い側が正しい)。
+        // 窓の中に届いた次のお助けは pushEffect も凍結もせず合算へ回る。
+        if (fs) {
+          this.fanStampFxUntilMs = Math.max(
+            atMs + FAN_STAMP_FX_WINDOW_MS,
+            this.fxFreezeUntilMs ?? 0
+          );
         }
         this.maybeAchieve(atMs);
         this.dirty = true;
       };
+      // お助けの合算窓の中なら「縮退 op」を渡す — 値・統計だけ適用し、演出(バナー/
+      // 効果音/簡易演出/カットイン)は撃たずに合算へ積む。見た目は flushFanStampFx が
+      // 窓明けに1件だけ出す。
+      //
+      // 判定は**到着時点**で行う(凍結中でも同じ)。凍結明けの実行時に判定すると、
+      // カットインが明けた瞬間に保留分が全員「先頭」に見えてカットインが N 本連鎖する —
+      // 直そうとしている症状そのもの。
+      //
+      // applyOrQueue の外側は一切変えない: 凍結中は縮退 op も pendingOps へ積まれ
+      // (「凍結中は値も保留」の既存契約を維持)、凍結明けの drain で到着順に走る。
+      // **縮退 op は凍結を張り直さない**ので flushFxFreeze のループが break せず、
+      // 保留分が1回のドレインで全部消化される = カットインは先頭の1本だけになる。
+      //
+      // fs が真なら m は必ず非 null(fs 一致時は m を必ず組み立てているので、
+      // 上の「!m && !band && !fullCut なら return false」を通らない)。
+      if (fs && this.fanStampFxUntilMs !== null) {
+        // 時計の後方ステップで窓が未来に固着すると、以後のお助けが延々と合算に
+        // 回り続ける(バナーが出ない)。正当な最大先行幅は「窓長」か「凍結明け」
+        // の長い方(:1072 の張り方と同じ形)— 短縮方向にのみ働く。
+        const gNow = this.now();
+        this.fanStampFxUntilMs = clampFutureMs(
+          this.fanStampFxUntilMs,
+          gNow,
+          Math.max(FAN_STAMP_FX_WINDOW_MS, (this.fxFreezeUntilMs ?? 0) - gNow)
+        );
+      }
+      if (fs && this.fanStampFxUntilMs !== null && this.now() < this.fanStampFxUntilMs) {
+        return this.applyOrQueue(() => this.fanStampCoalesceOp(e, m!.amount, m!.flash === true));
+      }
       // キュー溢れ時はカットイン(と再凍結)を捨てて値だけ適用する(値の正しさ優先)。
       return this.applyOrQueue(() => giftOp(true), () => giftOp(false));
     }
@@ -961,7 +1136,7 @@ export class ChallengeEngine {
     const cfg = this.getConfig();
     // モニター下部のライブランキング。result(TOP5)と違い走行中も載せる —
     // モニターにとって唯一のランキング情報源で、増えるアバターURL も3本だけ。
-    const runRank = this.topRank('diamonds', CHALLENGE_MONITOR_TOP_N);
+    const runRank = this.topRankCached('diamonds', CHALLENGE_MONITOR_TOP_N);
     return {
       status: this.status,
       value: this.value,
@@ -1039,7 +1214,15 @@ export class ChallengeEngine {
   drainIfChanged(): ChallengeState | null {
     // 2Hz tick が凍結解除の安全弁 — イベントが途絶えても最大 500ms 遅れで解除する。
     this.flushFxFreeze(this.now());
+    // ▶テスト実演の期限切れも tick で拾う — press() の lazy 掃除だけだと、press が
+    // 来ないまま期限が切れたとき get() が boost キーを黙って省くだけで dirty が
+    // 立たず、モニターが最後の delta の古いタップカウンタを保持し続ける。
+    if (this.testBoostUntilMs !== null && this.now() >= this.testBoostUntilMs) {
+      this.clearTestBoost();
+      this.dirty = true;
+    }
     this.flushLikeFx();
+    this.flushFanStampFx();
     if (!this.dirty) return null;
     this.dirty = false;
     return this.get();
@@ -1093,6 +1276,19 @@ export class ChallengeEngine {
   /** モニターの実効再生能力。両方 true のときだけカットイン凍結を張る。 */
   private fxAllowed(): boolean {
     return this.monitorOpen && this.monitorBandFx;
+  }
+
+  /**
+   * ギフト判定の診断ログ。**呼び出し元は handleEvent の gift 経路だけ**で、
+   * そこは冒頭の `status !== 'running'` で弾かれているので、チャレンジ実行中しか出ない。
+   *
+   * 出口は constructor の `diag`(既定は stdout)。出す内容は「実際に届いた値」と
+   * 「どの段で捕まったか」に限る。42行のトリガーは giftId が空のものが多く英語
+   * ギフト名の推定に頼っているので、外れたときに何も残らないのが最大の弱点だった
+   * (v3 で40行が無言のまま死んだ)。
+   */
+  private giftDiag(message: string): void {
+    this.diag(`[challenge/gift] ${message}`);
   }
 
   /**
@@ -1164,7 +1360,13 @@ export class ChallengeEngine {
           this.pendingOps = [];
           break;
         }
-        this.pendingOps.shift()!();
+        // 1件の失敗でドレインを止めない — throw を握らないと残りの保留分が次の
+        // 凍結発生まで孤児化し、例外は handleEvent の呼び出し元(onEvent)まで抜ける。
+        try {
+          this.pendingOps.shift()!();
+        } catch (err) {
+          this.diag(`[challenge] pending op failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
         if (this.fxFreezeUntilMs !== null) break;
       }
     } finally {
@@ -1172,6 +1374,10 @@ export class ChallengeEngine {
     }
     // 再凍結(ドレイン中断)なら次の期限で張り直し、解除完了なら外す。
     this.armFreezeTimer();
+    // ドレイン明けの合算バナーは tick を待たず即出す(finishDrain 済みなので
+    // pushEffect は ring へ直行し、id はドレインした演出より後になる)。
+    // 再凍結で中断していれば isFxFrozen() が真なのでガードで止まり次の解除へ持ち越す。
+    this.flushFanStampFx();
   }
 
   // ── タップブースト(フィーバー) ─────────────────────────────────────────
@@ -1182,7 +1388,7 @@ export class ChallengeEngine {
    * トリガーギフト自体は値を動かさない。設定(倍率/1タップの重み)はここで
    * 焼き込み、以後の設定変更の影響を受けない。
    */
-  private activateBoost(tb: TapBoostConfig, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
+  private activateBoost(tb: TapBoostRule, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
     const atMs = this.now();
     // 実発動が優先 — 実演のタップウィンドウが残っていたら破棄する(press が
     // テスト計数に吸われて実カウンタが動かない事故を防ぐ)。
@@ -1311,7 +1517,13 @@ export class ChallengeEngine {
     try {
       while (this.pendingOps.length > 0) {
         if (this.status !== 'running') break;
-        this.pendingOps.shift()!();
+        // flushFxFreeze と同じ理由 — stop の強制適用が1件の失敗で途切れると、
+        // 残りが適用されないまま直後の pendingOps = [] で消える。
+        try {
+          this.pendingOps.shift()!();
+        } catch (err) {
+          this.diag(`[challenge] pending op failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
         this.fxFreezeUntilMs = null;
       }
       this.pendingOps = [];
@@ -1327,9 +1539,14 @@ export class ChallengeEngine {
    * 畳み規則: press/like/follow/stock-full は全件→1件(amount 合算+coalesced)、
    * comment は keyword 単位、gift は canonical 単位(カットイン付きは畳まない —
    * ドレインを中断させた再凍結ギフトで、カットインは effect 1件で自己完結する
-   * 契約)、roulette は新しい3件を盤面つきで残し古い分を1件に(盤面なしは
-   * モニターがバナーのみ再生する既存フォールバックに乗る)、achieved は単独。
+   * 契約)、roulette は**同じ盤面どうしで出目を連結**(盤面が違えば index の意味が
+   * 違うので畳まない)、achieved は単独。
    * 1件だけのグループは原型のまま(coalesced を付けない)。
+   *
+   * ルーレットは以前「新しい3件だけ盤面つきで残し、古い分は盤面を削除」していた。
+   * 盤面の無い effect はモニターの rouletteWillSpin が false になりバナーだけに
+   * 退避するので、カットイン明けにリールが出ない(「演出が発生しない」の主因)。
+   * 出目を配列で持てるようになったので、捨てずに連結して全部回す。
    */
   private finishDrain(): void {
     const buf = this.drainFx;
@@ -1362,19 +1579,26 @@ export class ChallengeEngine {
         delete merged.fxRepeatIntervalMs;
       }
       if (last.kind === 'roulette') {
-        // 盤面を落としてバナーのみのフォールバックへ(リールを N 回逆再生しない)。
-        delete merged.rouletteSegments;
-        delete merged.rouletteIndex;
-        delete merged.roulettePattern;
+        // 盤面は同一(グループキーが盤面込み)なので、出目を到着順に連結するだけで
+        // モニターは全部のリールを回せる。盤面は落とさない。
+        const idxs = group.flatMap((e) => e.rouletteIndexes ?? []).slice(0, ROULETTE_DRAWS_MAX);
+        const pats = group.flatMap((e) => e.roulettePatterns ?? []).slice(0, ROULETTE_DRAWS_MAX);
+        merged.rouletteSegments = last.rouletteSegments;
+        merged.rouletteIndexes = idxs;
+        merged.roulettePatterns = pats;
+        merged.rouletteIndex = idxs[0] ?? last.rouletteIndex;
+        merged.roulettePattern = pats[0] ?? last.roulettePattern;
+        // 連結後の本数で引き直す(元の各 effect の rouletteReels は合計にならない)。
+        merged.rouletteReels = rouletteReelCount(this.getConfig(), idxs.length);
+        // 見出しは先頭の1件に合わせる(連結後の1本目が誰の分かと揃える)。
+        const head = group[0]!;
+        if (head.nickname != null) merged.nickname = head.nickname;
       }
       out.push(merged);
     };
     // グループ分け(到着順を保つ)。
     const groups = new Map<string, ChallengeEffect[]>();
     const singles: ChallengeEffect[] = [];
-    const ROULETTE_KEEP = 3;
-    const rouletteAll = buf.filter((e) => e.kind === 'roulette');
-    const rouletteOld = new Set(rouletteAll.slice(0, Math.max(0, rouletteAll.length - ROULETTE_KEEP)));
     for (const e of buf) {
       let key: string | null;
       switch (e.kind) {
@@ -1392,7 +1616,10 @@ export class ChallengeEngine {
           key = e.fxBandClip != null ? null : `gift:${e.canonical ?? e.giftName ?? ''}`;
           break;
         case 'roulette':
-          key = rouletteOld.has(e) ? 'roulette:old' : null;
+          // 盤面をキーに含める — 出目 index は盤面に対する位置なので、ハートミーと
+          // バラのように盤面が違うものを畳むと出目の意味が壊れる。判定はモニターの
+          // キュー連結と同じ rouletteBoardKey を共有する。
+          key = `roulette:${rouletteBoardKey(e)}`;
           break;
         default:
           key = null; // achieved / gauge-full 等は単独
@@ -1439,18 +1666,19 @@ export class ChallengeEngine {
   private touchParticipant(v: NormViewer): RunParticipant {
     let p = this.runViewers.get(v.userId);
     if (!p) {
-      // 参加者数の権威。**Map ⊆ Set が常に成り立つ**ので、ここ(map ミス時)だけで足りる
-      // — p が居る = 挿入時に追加済み、剪定は Map からしか消さない、start/reset は
-      // 両方まとめてクリアする。常連のいいねで毎回 Set.add するのを避ける形。
-      // **Set であることが必須**: 剪定で消えた人が戻ると再びここを通るので、
-      // 単純なカウンタだと再訪のたびに二重計上して青天井に膨らむ。
+      // 参加者数の集計。**Map ⊆ Seen が(cap 内では)常に成り立つ**ので、ここ
+      // (map ミス時)だけで足りる — p が居る = 挿入時に追加済み、剪定は Map から
+      // しか消さない、start/reset は両方まとめてクリアする。常連のいいねで毎回
+      // add するのを避ける形。**dedup 集合が必須**: 剪定で消えた人が戻ると再び
+      // ここを通るので、素のカウンタだと再訪のたびに二重計上して青天井に膨らむ。
+      // cap 超過時の精度は runParticipantSeen のコメント参照。
       //
       // コスト実測(bench: handleEvent like ×10,000 / 5,000 ユニーク = ミス率50%の最悪値):
       // Set なし 7.02〜7.08ms → あり 7.58〜7.85ms(**+約0.6ms / +8.5%**)。
       // 実配信のピークが数百件/秒なので 10,000 件 ≒ 30秒ぶん = デューティ比 0.002%。
       // 実際の常連比率ではミス率がこれよりずっと低い。壊れた参加者数(4000ユニークを
       // 超えると約400で頭打ち)を直す対価として妥当と判断した。
-      this.runParticipantIds.add(v.userId);
+      if (this.runParticipantSeen.add(v.userId)) this.runParticipants += 1;
       // 間引きは**挿入前**に回す。挿入後にやると、いま作った 0💎 の p が生存者に
       // 選ばれず Map から外れ、直後の加算が宙に浮く — 間引き直後に初参加した
       // 大口のギフトがランキングから永久に消える(常時見える TOP3 では実害)。
@@ -1461,6 +1689,9 @@ export class ChallengeEngine {
     if (v.nickname) p.nickname = v.nickname;
     if (v.displayId) p.displayId = v.displayId;
     if (v.avatarUrl) p.avatarUrl = v.avatarUrl;
+    // 呼び出し元は返り値の diamonds/likes を直後に加算する(表示名の上書きも行に
+    // 効く)ので、ここで必ずキャッシュを無効化する。再計算は次の topRankCached。
+    this.rankVersion++;
     return p;
   }
 
@@ -1479,6 +1710,7 @@ export class ChallengeEngine {
     const keep = new Map<UserId, RunParticipant>();
     for (const p of all) if (survivors.has(p)) keep.set(p.userId, p);
     this.runViewers = keep;
+    this.rankVersion++;
   }
 
   /**
@@ -1512,6 +1744,26 @@ export class ChallengeEngine {
   }
 
   /**
+   * topRank の rankVersion 連動キャッシュ。press 連打(ランキングの材料に触れない)
+   * では get() が press 1回につき2回走り(press の戻り値 + nudge の pushDelta)、
+   * rankShown 中は毎回 4000 件 ×3 本の全走査だった — キーリピート ~30/s で
+   * 12万走査/秒。材料が変わらない限り再計算しない。
+   *
+   * 再計算は既存 topRank をそのまま呼ぶので、並び規約(同数は先着勝ち・
+   * TOP3 = TOP5 の先頭3件)は 1 ビットも変わらない。行の参照共有は安全 —
+   * worker→main は postMessage の structuredClone を通り(result と同じ判断)、
+   * worker 内で ChallengeState を変異させる消費者はいない。
+   */
+  private topRankCached(key: 'diamonds' | 'likes', n: number): ChallengeRankRow[] {
+    const k = `${key}:${n}`;
+    const hit = this.rankCache.get(k);
+    if (hit !== undefined && hit.version === this.rankVersion) return hit.rows;
+    const rows = this.topRank(key, n);
+    this.rankCache.set(k, { version: this.rankVersion, rows });
+    return rows;
+  }
+
+  /**
    * CLEAR 時点で1度だけ組む。以後は不変(達成後はイベントを受け付けないので
    * 変わりようもない)。
    */
@@ -1519,9 +1771,9 @@ export class ChallengeEngine {
     return {
       atMs,
       startedMs: this.startedMs,
-      participants: this.runParticipantIds.size,
-      gifts: this.topRank('diamonds', CHALLENGE_RESULT_TOP_N),
-      likes: this.topRank('likes', CHALLENGE_RESULT_TOP_N),
+      participants: this.runParticipants,
+      gifts: this.topRankCached('diamonds', CHALLENGE_RESULT_TOP_N),
+      likes: this.topRankCached('likes', CHALLENGE_RESULT_TOP_N),
     };
   }
 
@@ -1574,10 +1826,123 @@ export class ChallengeEngine {
     // 解除後の次の tick(最大500ms)で出る。
     if (this.likeFxPending <= 0 || this.status !== 'running' || this.isFxFrozen()) return;
     const nowMs = this.now();
+    // 時計の後方ステップ対策(like 経路のクランプと同じ理由)。
+    this.likeFxLastMs = clampFutureMs(this.likeFxLastMs, nowMs, 0);
     if (nowMs - this.likeFxLastMs < LIKE_FX_WINDOW_MS) return;
     this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
     this.likeFxPending = 0;
     this.likeFxLastMs = nowMs;
+    this.dirty = true;
+  }
+
+  // ── お助け(ファンスタンプ)の合算 ─────────────────────────────────────
+
+  /** 合算窓を畳んで捨てる(値は適用済みなので、捨てるのは見た目だけ)。 */
+  private resetFanStampFx(): void {
+    this.fanStampFx = null;
+    this.fanStampFxUntilMs = null;
+  }
+
+  /**
+   * 合算窓の中に届いたお助け1件を積む。**値・統計はここでは触らない**
+   * (fanStampCoalesceOp が済ませている) — ここは見た目と音の材料だけ。
+   */
+  private accumulateFanStampFx(e: NormalizedEvent & { kind: 'gift' }, amount: number, flash: boolean): void {
+    const acc: FanStampAcc = this.fanStampFx ?? {
+      amount: 0,
+      count: 0,
+      giftCount: 0,
+      diamonds: 0,
+      flash: false,
+      names: [],
+      people: 0,
+      // 人数の重複排除。cap は「1枚のバナーが数える人数」の上限で、
+      // 溢れても「ほかN人」が実際より小さくなるだけ(値には無関係)。
+      seen: new BoundedSet<UserId>(512),
+    };
+    acc.amount += amount;
+    acc.count += 1;
+    acc.giftCount += Math.max(1, e.repeatCount);
+    acc.diamonds += e.diamonds;
+    if (flash) acc.flash = true;
+    // 人数は userId で数える — nickname は空や配信中に変わりうる。
+    if (acc.seen.add(e.viewer.userId)) {
+      acc.people += 1;
+      mergeFanStampName(acc.names, e.viewer.nickname ?? e.viewer.displayId ?? '', FAN_STAMP_NAMES_MAX);
+    }
+    this.fanStampFx = acc;
+  }
+
+  /**
+   * 合算窓が明けていたら、窓内に積んだお助けを **effect 1件** にまとめて出す。
+   * バナー・効果音(helper)・簡易演出・履歴ログがこれ1件で1回ずつになる。
+   *
+   * ガードは flushLikeFx と同型。force は「0 到達で achieved になる直前」専用で、
+   * achieved より id を先にするために窓と凍結を無視して吐き切る。
+   *
+   * **カットインは載せない**(fxBandClip 無し)— 先頭の1件が既に1本再生しており、
+   * ユーザー決定は「拍手が何個来てもカットインは1本」。
+   */
+  private flushFanStampFx(force = false): void {
+    const p = this.fanStampFx;
+    if (p === null) return;
+    if (!force) {
+      // 凍結中は出さない(「凍結中のイベントは演出も保留する」契約)。
+      if (this.status !== 'running' || this.isFxFrozen()) return;
+      if (this.fanStampFxUntilMs !== null) {
+        // 時計の後方ステップ対策(gift 経路のクランプと同じ理由・同じ上限)。
+        const gNow = this.now();
+        this.fanStampFxUntilMs = clampFutureMs(
+          this.fanStampFxUntilMs,
+          gNow,
+          Math.max(FAN_STAMP_FX_WINDOW_MS, (this.fxFreezeUntilMs ?? 0) - gNow)
+        );
+        if (gNow < this.fanStampFxUntilMs) return;
+      }
+    }
+    const nowMs = this.now();
+    this.fanStampFx = null;
+    this.pushEffect({
+      kind: 'gift',
+      fanStamp: true,
+      amount: p.amount,
+      ...(p.flash ? { flash: true as const } : {}),
+      // 「ほかN人」を読まない経路(履歴ログの entryFor)のために先頭の1人を入れる。
+      ...(p.names[0] != null ? { nickname: p.names[0] } : {}),
+      ...(p.giftCount > 1 ? { giftCount: p.giftCount } : {}),
+      ...(p.count > 1 ? { coalesced: p.count } : {}),
+      // 1人だけなら載せない — 従来の1人文言の経路へ倒して見た目を変えない。
+      ...(p.people > 1 ? { fanStampNames: p.names, fanStampPeople: p.people } : {}),
+      diamonds: p.diamonds,
+      atMs: nowMs,
+    });
+    // **窓を張り直す** — この合算バナー自身が浮上尺のあいだ画面に出るので、その間に
+    // 届いたぶんは「先頭」に戻さず次の1枚へ回す。張り直さないと
+    // 「カットイン → 尻バナー → 次が先頭 → またカットイン」で元の症状が周期的に再発する
+    // (拍手が鳴り止まない限りカットインは最初の1本だけ、はユーザー決定)。
+    this.fanStampFxUntilMs = nowMs + FAN_STAMP_FX_WINDOW_MS;
+    this.dirty = true;
+  }
+
+  /**
+   * 合算窓の中に届いたお助けの「縮退 op」。giftOp から **pushEffect / 凍結 /
+   * 連打反復の計算だけを抜いた**もので、値まわりは giftOp と一字一句同じにしてある
+   * (畳むのは見た目と音だけ、という全体規約)。
+   *
+   * ランキング(touchParticipant)は gift 分岐の冒頭・この op の外で済んでいるので
+   * 合算しても全件そのまま反映される。
+   */
+  private fanStampCoalesceOp(e: NormalizedEvent & { kind: 'gift' }, amount: number, flash: boolean): void {
+    if (amount < 0) this.stats.giftDown += -amount;
+    else if (amount > 0) this.stats.giftUp += amount;
+    this.value = Math.max(0, this.value + amount);
+    const atMs = this.now();
+    this.accumulateFanStampFx(e, amount, flash);
+    // 0 到達で achieved になる**前に**必ず吐き切る。後に回すと achieved より
+    // effect id が大きくなり、モニターが CLEAR の上へお助けバナーを出す
+    // (ルーレットの「達成判定は pushEffect の後」と同じ理由)。
+    if (this.value === 0) this.flushFanStampFx(true);
+    this.maybeAchieve(atMs);
     this.dirty = true;
   }
 

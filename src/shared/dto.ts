@@ -1,4 +1,5 @@
 import type { EndReason, Ms, QuotaInfo, UserId } from './events';
+import type { DashPaneKey } from './dash-layout';
 
 // ── Store lifecycle ──────────────────────────────────────────────────────────
 
@@ -438,12 +439,32 @@ export interface ChallengeGiftRule {
 }
 
 /**
- * ルーレット終盤の演出パターン。**出目とは独立に引く** — 相関した瞬間
+ * ルーレット終盤の演出パターンの全種。**出目とは独立に引く** — 相関した瞬間
  * 「キックが来たら大当たり」が学習されて演出が結果の予告になる。
- * 'slow' = 最後の3個をゆっくり / 'pop' = 3個をポンポン飛び移る /
- * 'kick' = ポンポン → 当選の1つ手前で止まったと見せてキックで1個ずれる。
+ * 値は CSS のクラス名(rl-p-*)とキーフレーム名(rl-run-*)の接尾辞になる。
+ * 各パターンの見せ方の設計は monitor.css のルーレット節の冒頭コメントに、
+ * SE のタイミングは roulette-fx.ts の ROULETTE_PATTERN_TIMING にある。
+ *
+ * ここ(dto)に置く理由: challenge.ts(既定値・検証)と roulette-fx.ts(演出幾何)の
+ * 両方が一覧を必要とするが、roulette-fx.ts は challenge.ts から import しているので
+ * challenge.ts → roulette-fx.ts の import は循環になる。dto は依存の根なので安全。
  */
-export type RoulettePattern = 'slow' | 'pop' | 'kick';
+export const ROULETTE_PATTERNS = [
+  'slow', //       じわじわ減速
+  'pop', //        ポンポン飛び移り
+  'kick', //       フェイク停止 → キックで1個ずれる
+  'overrun', //    当選を通り過ぎて隣に着地 → 巻き戻し
+  'crawl', //      超低速で這う(微停止つき)
+  'doublefake', // フェイク停止2回 → キック2発
+  'restart', //    途中失速 → 再加速
+  'teeter', //     当選との境界でシーソー
+  'stairs', //     5段の階段(保持が段々伸びる)
+  'blackout', //   終盤に暗転 → 明けたら止まっている
+  'jackstop', //   一番下の出目が完全に入って止まる → 蹴り出される
+  'jackslip', //   一番下の出目が寸前で震えて中央をすり抜ける
+  'jackback', //   一番下の出目が届かず後ろへ転がり戻る
+] as const;
+export type RoulettePattern = (typeof ROULETTE_PATTERNS)[number];
 
 /** ルーレットの出目1件。amount は表示値(絶対値)、適用方向は direction が決める。 */
 export interface ChallengeRouletteSegment {
@@ -483,6 +504,12 @@ export interface ChallengeRouletteConfig {
   segments: ChallengeRouletteSegment[];
   /** 'add' = カウント増(妨害・既定) / 'sub' = カウント減(応援)。 */
   direction: 'add' | 'sub';
+  /**
+   * このルーレットで使う終盤の演出パターン(チェック済みの中から一様に抽選)。
+   * 検証(validateRoulette)が空を許さないので最低1件。許可リストは設定であり
+   * 出目とは無相関 — パターン抽選の独立性(結果の予告にならない)は崩れない。
+   */
+  patterns: RoulettePattern[];
 }
 
 /**
@@ -705,7 +732,11 @@ export interface FanStampConfig {
  * canonical)は FanStampConfig と意味も '' = 無効の規約も同一で、判定は
  * matchGiftTrigger を共有する。
  */
-export interface TapBoostConfig {
+export interface TapBoostRule {
+  /** 行の識別子。UI の key と行ごとの実演(ChallengeTestEffectSpec.boostId)の対象特定に使う。 */
+  id: string;
+  /** 設定画面の行見出し。表示専用でマッチには使わない(GiftFullCutRule.label と同じ)。 */
+  label: string;
   enabled: boolean;
   /** トリガーギフトの giftId 直接一致。ライブ経路の本線(FanStampConfig と同じ理由)。 */
   giftId: string;
@@ -713,6 +744,13 @@ export interface TapBoostConfig {
   giftName: string;
   /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
   canonical: string;
+  /**
+   * giftName の照合を**完全一致**にする(既定 false = 従来どおり部分一致)。規約は
+   * GiftFullCutRule.exactName と同じだが、**ブーストの方が誤爆の代償が大きい** —
+   * 一致すると最長23秒カウンタが凍結し、そのギフトの全面カット・帯域・ルーレットは
+   * 評価すらされない。短いギフト名を使うときは立てるか、giftId で当てること。
+   */
+  exactName: boolean;
   /** ブースト中のタップ倍率。既定 5(clamp 1〜100)。 */
   multiplier: number;
   /**
@@ -735,6 +773,23 @@ export interface TapBoostConfig {
   resultClip: string;
   /** true ならモニターに照明フラッシュ演出。 */
   flash: boolean;
+}
+
+/**
+ * タップブースト(フィーバー)の設定。**上から順に評価し、最初に一致した1行だけ**を
+ * 使う(giftFullCut / roulettes と同じ先勝ち)。ギフトごとに倍率・尺・映像を変えられる。
+ *
+ * 旧・単一設定(giftId/multiplier/クリップをこの階層に直接持つ形)は
+ * validateTapBoost が rules[0] へ包み直す。**移行(migrate*)ではなく validate 側**に
+ * あるのは、migrateChallengeConfig が validateChallengeConfig の**後**に走るため
+ * (boot-settings.ts の loadSettings / loadChallengeDefault)— あちらは明示リテラル
+ * return なので、migrate の時点では旧キーはもう消えている。validateRoulettes が
+ * 旧単数キー roulette を roulettes[0] へ寄せるのと同じ手口。
+ */
+export interface TapBoostConfig {
+  /** 機能全体のスイッチ。false で全行が止まる(行ごとの enabled とは別)。 */
+  enabled: boolean;
+  rules: TapBoostRule[];
 }
 
 export interface ChallengeConfig {
@@ -783,6 +838,17 @@ export interface ChallengeConfig {
   roulettes: ChallengeRouletteConfig[];
   /** ルーレット回転中のBGM・ループ音。全ルーレット共通で1組。 */
   rouletteSound: RouletteSoundConfig;
+  /**
+   * ライブ画面の履歴ログでルーレット結果の数値を伏せる(既定 true)。
+   *
+   * 抽選も値の適用もギフト受信の瞬間に確定しており、モニターのリールは
+   * **確定済みの出目を遅れて再生しているだけ**(worker/challenge.ts の
+   * matchRoulette 参照)。伏せないとリールが止まる前にログで結果が読める。
+   *
+   * 完全な隠蔽ではない — 前後の行の残数の差分と、カード上部の大きな残数
+   * (モニターと違い据え置きが無い)からは逆算できる。
+   */
+  hideRouletteResultInLog: boolean;
   /** diamonds がこの値以上のギフトは規則に関係なく照明フラッシュ。null で無効。 */
   flashMinDiamonds: number | null;
   /** グローバルホットキー(Electron accelerator)。'' で無効。 */
@@ -940,14 +1006,53 @@ export interface ChallengeEffect {
    * 読む — effect 1件で自己完結させる。
    */
   rouletteSegments?: number[];
-  /** kind='roulette': 当選 index(rouletteSegments 内)。amount は符号適用後の実増減量。 */
+  /**
+   * kind='roulette': **1本目の**当選 index(rouletteSegments 内)。
+   * 連打ギフトは1メッセージで N 回抽選するので、全出目は rouletteIndexes に載る
+   * (ここは常に rouletteIndexes[0] と同値)。盤面が無い effect をバナーだけに
+   * 退避させる rouletteWillSpin の判定がこのフィールドを見るため、単発フィールドを
+   * 残してある。**amount は effect 全体の合計**で、1回ぶんの増減ではない。
+   */
   rouletteIndex?: number;
   /**
-   * kind='roulette': 終盤の演出パターン。rouletteSegments と同じ「effect 1件で
-   * 自己完結」の流儀 — モニター側で毎回引くと StrictMode の二重レンダーで
-   * 振り直され、演出が途中で切り替わる。欠損時は 'slow'(旧 worker 混在の保険)。
+   * kind='roulette': この effect が持つ全スピンの当選 index(到着順)。
+   *
+   * 「1ギフトメッセージ = 1 effect」の規約 — 連打ギフト(バラ等 giftType 1)は
+   * repeatCount ぶん抽選するが、effect を回数ぶん積むと 12→32 件のリングバッファを
+   * 一撃で溢れさせ、履歴ログも1ギフトで N 行に膨れる(「履歴ログは1件のまま」規約に
+   * 反する)。出目を配列で持たせて effect は1件に保つ。
+   * 凍結ドレインの畳み込み(finishDrain)は、**同じ盤面どうしに限り**この配列を
+   * 連結する — 盤面が違えば index の意味が違うので畳まない。
+   */
+  rouletteIndexes?: number[];
+  /**
+   * kind='roulette': **1本目の**終盤演出パターン(常に roulettePatterns[0] と同値)。
+   * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニター側で毎回引くと
+   * StrictMode の二重レンダーで振り直され、演出が途中で切り替わる。
+   * 欠損時は 'slow'(旧 worker 混在の保険)。
    */
   roulettePattern?: RoulettePattern;
+  /** kind='roulette': スピンごとの終盤演出パターン。rouletteIndexes と同じ長さ。 */
+  roulettePatterns?: RoulettePattern[];
+  /**
+   * kind='roulette': 実際にリールを回す本数(rouletteIndexes.length 以下)。
+   *
+   * **値は常に rouletteIndexes.length 回ぶん適用済み**で、ここは見た目の尺だけを
+   * 決める。worker が到着時点の cfg で確定させて焼き込み、モニターは読むだけ —
+   * モニターの cfg は 120秒ポーリング(CFG_POLL_MS)で古くなりうるので再判定させない
+   * (fxRepeat / fxBandClip と同じ「effect 1件で自己完結」の流儀)。
+   * 超過ぶんはモニターが合算バナー1枚で締める。欠損時は全部回す。
+   */
+  rouletteReels?: number;
+  /**
+   * kind='roulette': 出目の向きが 'sub'(数字が減る)であることの印。'add' では載せない。
+   *
+   * amount は effect 全体の合計になったので、**そこから1回ぶんの符号は引けない**
+   * (合計が 0 になる盤面もありうる)。モニターは
+   * `rouletteSegments[index] × (rouletteDirection === 'sub' ? -1 : 1)` で
+   * 1スピンぶんの増減を復元する(shared の rouletteDraws が唯一の実装)。
+   */
+  rouletteDirection?: 'sub';
   /**
    * kind='roulette': モニターの見出しに出す表示名(「{rouletteLabel} ○○がルーレット」)。
    * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニターの設定は 30秒
@@ -1032,6 +1137,21 @@ export interface ChallengeEffect {
    */
   coalesced?: number;
   /**
+   * kind='gift' かつ fanStamp: 合算バナーに並べる表示名(到着順・**userId で
+   * 重複排除済み**)。先頭 FAN_STAMP_NAMES_MAX 件までしか載せない — 全員ぶん
+   * 載せるとリングバッファと delta の IPC が人数に比例して膨らむ。
+   * 「ほかN人」の N は fanStampPeople - 並べた件数で出す(唯一の実装は
+   * shared/fan-stamp.ts の fanStampBannerParts)。**1人だけのときは載せない** —
+   * 従来どおり nickname を使う経路に倒して既存の文言を1ドットも変えないため。
+   */
+  fanStampNames?: string[];
+  /**
+   * kind='gift' かつ fanStamp: 重複排除した**人数**。coalesced(メッセージ件数)
+   * とも giftCount(総個数)とも別物 — 同じ人が3回押したら people=1 /
+   * coalesced=3 / giftCount=3 になる。2以上のときだけ載る。
+   */
+  fanStampPeople?: number;
+  /**
    * テスト再生(challenge.testEffect)由来。値・統計には影響しない演出だけの
    * effect — ダッシュボードの履歴ログはこれを積まない(演出とSEは再生する)。
    */
@@ -1059,13 +1179,25 @@ export type ChallengeTestEffectSpec =
    * 専用バナーを実演する — giftId が未設定でも(=まだ何にも一致しない状態でも)
    * 見た目だけは確認できるようにするため、トリガー一致は評価しない。
    */
-  | { kind: 'fanStamp' }
+  | {
+      kind: 'fanStamp';
+      /**
+       * 複数人ぶんを1枚に畳んだ合算バナーを実演する。省略 = 従来どおり1人ぶん。
+       * 合算は worker の窓(FAN_STAMP_FX_WINDOW_MS)でしか起きず設定画面からは
+       * 再現できないので、見た目の確認用に印だけを焼き込んだ effect を作る。
+       */
+      multi?: true;
+    }
   /**
    * タップブースト。設定中の multiplier/durationSec/clip をそのまま使って
    * カットイン+タップカウンタを実演する — fanStamp と同じくトリガー一致は
    * 評価しない(giftId 未設定でも見た目を確認できる)。値・凍結には触れない。
    */
-  | { kind: 'tapBoost' }
+  | {
+      kind: 'tapBoost';
+      /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
+      boostId?: string;
+    }
   | {
       kind: 'gift';
       /** tier(小〜特大)判定とフラッシュ判定に使うダイヤ数。 */
@@ -1324,8 +1456,12 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  *    ルーレットのキックと確定/ブーストのタップ開始と着弾/達成)の効果音を、
  *    Kenney の汎用ライブラリ音から演出ごとの専用録りへ差し替え
  *    (migrateChallengeSeSounds)。寄せるのは旧既定のままだったスロットだけ。
+ * 7: タップブーストを複数ルール化し、コーギー(gift 6267)の行を1回だけ追加
+ *    (migrateChallengeTapBoostCorgi)。単一→配列の入れ替え自体は validateTapBoost が
+ *    吸収するので世代印は不要だが、**既存の保存済み設定へ新しい行を配る**のは
+ *    validate ではできない(UI の cfg.set も通るので、消した行がその場で復活する)。
  */
-export const SETTINGS_VERSION = 5;
+export const SETTINGS_VERSION = 7;
 
 export interface AppSettings {
   eulerApiKey: string;
@@ -1345,6 +1481,8 @@ export interface AppSettings {
   zoomFactor: number;
   /** カウントダウンチャレンジ設定。ワーカー再起動不要 — settings メッセージで即時反映。 */
   challenge: ChallengeConfig;
+  /** ダッシュボード3カラムの並び。未設定・壊れた値は既定順へフォールバック(ワーカー再起動不要)。 */
+  dashLayout?: DashPaneKey[];
   /** 適用済みの設定世代。未設定(= SETTINGS_VERSION 導入前の settings.json)は 0 とみなす。 */
   settingsVersion?: number;
 }

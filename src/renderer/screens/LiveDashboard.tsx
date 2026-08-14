@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChallengeLogEntry, ViewerFilter, ViewerTableRow } from '@shared/dto';
 import type { FeedItem } from '@shared/ipc';
-import { VIEWER_PAGE_SIZE } from '@shared/constants';
+import { CFG_POLL_MS, VIEWER_PAGE_SIZE } from '@shared/constants';
+import { DEFAULT_DASH_LAYOUT, dashTemplate, moveDashPane, normalizeDashLayout, type DashPaneKey } from '@shared/dash-layout';
 import { compact, diamondsToJpy, num } from '@shared/format';
 import { formatDurationJa, relativeDayJa } from '@shared/time';
 import { rpc, rpcFire, useQuery, useDebounced } from '../ipc/client';
@@ -25,6 +26,109 @@ const FILTERS: Array<{ k: ViewerFilter; label: string }> = [
   { k: 'vip', label: 'VIP' },
   { k: 'gifter', label: 'ギフター' },
 ];
+
+/** ヘッダー内の操作系。ここを掴んだときは並び替えではなく本来の操作をさせる。 */
+const HEADER_CONTROLS = 'input, select, button, textarea, a, [contenteditable]';
+
+/**
+ * ダッシュボード3カラムの並び替え。
+ *
+ * DOM の記述順は動かさず CSS order だけを差し替える — 視聴者テーブルの仮想化と
+ * コメントの追従スクロールは、ノードが DOM 上を移動すると位置を失うため。
+ * 幅は位置ではなくパネルに紐づく(DASH_TRACK)ので、サマリーをどこへ動かしても 310px。
+ */
+function useDashLayout() {
+  const settings = useUi((s) => s.settings);
+  const [order, setOrder] = useState<DashPaneKey[]>(() => [...DEFAULT_DASH_LAYOUT]);
+  const [dragKey, setDragKey] = useState<DashPaneKey | null>(null);
+  const [overKey, setOverKey] = useState<DashPaneKey | null>(null);
+  const applied = useRef(false);
+
+  // 保存済みの並びは設定が最初に届いた一度だけ当てる(ZoomControls と同じ形)。
+  // 自分の保存が settings プッシュで返ってきても、ドラッグ直後の表示を上書きしない。
+  useEffect(() => {
+    if (!settings || applied.current) return;
+    applied.current = true;
+    setOrder(normalizeDashLayout(settings.dashLayout));
+  }, [settings]);
+
+  const drop = useCallback(
+    (from: DashPaneKey, to: DashPaneKey) => {
+      setDragKey(null);
+      setOverKey(null);
+      const next = moveDashPane(order, from, to);
+      // 動いていないなら書かない — moveDashPane は同じ並びなら元の配列を返す。
+      if (next === order) return;
+      setOrder(next);
+      void rpc('cfg.set', { dashLayout: next }).catch(() => undefined);
+    },
+    [order]
+  );
+
+  /** <section className="pane"> に展開する props。 */
+  const pane = (key: DashPaneKey) => {
+    const slot = order.indexOf(key);
+    const cls = ['pane'];
+    if (dragKey === key) cls.push('dragging');
+    if (overKey === key && dragKey !== key) cls.push('drop-over');
+    return {
+      className: cls.join(' '),
+      style: { order: slot } as React.CSSProperties,
+      // 狭い幅で「3枚目を下段全幅」にする CSS は、DOM 順ではなく見た目の位置で引く。
+      'data-slot': slot + 1,
+      onDragOver: (e: React.DragEvent<HTMLElement>) => {
+        // 掴んでいるのが自分のパネルでないなら受けない(外部からのファイル等)。
+        if (!dragKey) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        if (overKey !== key) setOverKey(key);
+      },
+      onDragLeave: (e: React.DragEvent<HTMLElement>) => {
+        // 子要素へ移っただけの dragleave でハイライトを消さない。
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setOverKey((k) => (k === key ? null : k));
+      },
+      onDrop: (e: React.DragEvent<HTMLElement>) => {
+        e.preventDefault();
+        const from = dragKey ?? (e.dataTransfer.getData('text/plain') as DashPaneKey);
+        if (from) drop(from, key);
+      },
+    };
+  };
+
+  /** 見出し帯(掴む場所)に展開する props。 */
+  const grab = (key: DashPaneKey) => ({
+    // draggable は掴んだ瞬間に決める。常時 true だと検索欄の文字を選択できなくなる。
+    // pointerdown → mousedown → dragstart の順なので、ここで間に合う。
+    onPointerDown: (e: React.PointerEvent<HTMLElement>) => {
+      const t = e.target as Element | null;
+      e.currentTarget.draggable = !(t instanceof Element && t.closest(HEADER_CONTROLS));
+    },
+    onDragStart: (e: React.DragEvent<HTMLElement>) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', key);
+      // ドラッグ中の影は既定のまま見出し帯そのもの — パネル全体だと画面を覆ってしまう。
+      // 何が動くかは元パネルの半透明(.dragging)と行き先の点線(.drop-over)で示す。
+      setDragKey(key);
+    },
+    onDragEnd: (e: React.DragEvent<HTMLElement>) => {
+      e.currentTarget.draggable = false;
+      setDragKey(null);
+      setOverKey(null);
+    },
+  });
+
+  return { order, pane, grab };
+}
+
+/** 掴めることを示すだけの飾り。 */
+function Grip(): React.JSX.Element {
+  return (
+    <span className="pane-grip" aria-hidden="true" title="見出しをドラッグすると配置を入れ替えられます">
+      ⠿
+    </span>
+  );
+}
 
 export function LiveDashboard(): React.JSX.Element {
   const sessionId = useLive((s) => s.sessionId);
@@ -63,12 +167,14 @@ export function LiveDashboard(): React.JSX.Element {
   const rows = data?.rows ?? EMPTY_ROWS;
 
   const jpy = settings?.diamondToJpy ?? 0.5;
+  const dash = useDashLayout();
 
   return (
-    <div className="dash">
+    <div className="dash" style={{ '--dash-cols': dashTemplate(dash.order) } as React.CSSProperties}>
       {/* ── comments (leftmost: the surface watched most during a stream) ── */}
-      <section className="pane">
-        <header>
+      <section {...dash.pane('comments')}>
+        <header {...dash.grab('comments')}>
+          <Grip />
           <strong>コメント</strong>
           <span className="faint" style={{ fontSize: 11 }}>
             新しい順
@@ -121,8 +227,9 @@ export function LiveDashboard(): React.JSX.Element {
       </section>
 
       {/* ── viewers ─────────────────────────────────────────────────────── */}
-      <section className="pane">
-        <header>
+      <section {...dash.pane('viewers')}>
+        <header {...dash.grab('viewers')}>
+          <Grip />
           <strong>視聴者</strong>
           {/* The table holds everyone ever recorded; saying just "361人" during a
               live stream reads as the room size and is wildly wrong. */}
@@ -161,8 +268,9 @@ export function LiveDashboard(): React.JSX.Element {
       </section>
 
       {/* ── alerts + totals + missions ──────────────────────────────────── */}
-      <section className="pane">
-        <header>
+      <section {...dash.pane('summary')}>
+        <header {...dash.grab('summary')}>
+          <Grip />
           <strong>入室 &amp; サマリー</strong>
         </header>
         <div className="body" style={{ padding: 10 }}>
@@ -310,8 +418,12 @@ function useNowTick(active: boolean): void {
   }, [active]);
 }
 
-/** ログ行の「何をされたか」。名前と増減量は行の上段が持つので、ここは中身だけ。 */
-function logWhat(e: ChallengeLogEntry): string {
+/**
+ * ログ行の「何をされたか」。名前と増減量は行の上段が持つので、ここは中身だけ。
+ *
+ * maskRoulette=true ならルーレットの出目を落とす(cfg.hideRouletteResultInLog)。
+ */
+function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
   switch (e.kind) {
     case 'press':
       return `ボタン ${num(e.count ?? 1)}回`;
@@ -341,6 +453,9 @@ function logWhat(e: ChallengeLogEntry): string {
       // 表示名が空の行は従来どおり実ギフト名で照合できるようにする。
       const label = e.rouletteLabel || e.giftName;
       const name = label ? `(${label})` : '';
+      // 伏せるときは「どのルーレットが回ったか」だけ残す — 回った事実まで
+      // 消すと、リールが止まったあとにログを辿れなくなる。
+      if (maskRoulette) return `ルーレット${name}`;
       return `ルーレット 出目${e.amount > 0 ? '+' : ''}${num(e.amount)}${name}`;
     }
     case 'boost-start': {
@@ -377,9 +492,18 @@ function LogIcon({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
   );
 }
 
-function ChallengeLogRow({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
+function ChallengeLogRow({
+  e,
+  maskRoulette,
+}: {
+  e: ChallengeLogEntry;
+  maskRoulette: boolean;
+}): React.JSX.Element {
   // 符号の規約は effect と同じ: 正=増える=妨害(赤) / 負=減る=前進(緑)。
   const dir = e.amount > 0 ? 'up' : e.amount < 0 ? 'down' : 'flat';
+  // ルーレットの結果を伏せる行。符号(と赤緑)は残す — 増減の向きは
+  // ルーレットごとの direction 設定で固定なので、符号からは何も漏れない。
+  const masked = maskRoulette && e.kind === 'roulette';
   const who =
     e.kind === 'press'
       ? 'PUSH'
@@ -393,18 +517,32 @@ function ChallengeLogRow({ e }: { e: ChallengeLogEntry }): React.JSX.Element {
               ? '達成!'
               : (e.nickname ?? '—');
   return (
-    <div className={`clog ${dir}${e.kind === 'achieved' ? ' clear' : ''}`}>
+    <div
+      className={`clog ${dir}${e.kind === 'achieved' ? ' clear' : ''}`}
+      // 「?」が何なのか説明が無いと不具合に見える。
+      title={masked ? 'ルーレットの結果は設定で伏せています(チャレンジ設定 → ギフトルーレット)' : undefined}
+    >
       <div className="clog-top">
         <span className="clog-time num">{hms(e.atMs)}</span>
         <LogIcon e={e} />
         <span className="clog-who">{who}</span>
         <span className="clog-amt num">
-          {e.kind === 'achieved' ? '' : e.amount > 0 ? `+${num(e.amount)}` : num(e.amount)}
+          {e.kind === 'achieved'
+            ? ''
+            : masked
+              ? e.amount > 0
+                ? '+?'
+                : e.amount < 0
+                  ? '-?'
+                  : '?'
+              : e.amount > 0
+                ? `+${num(e.amount)}`
+                : num(e.amount)}
         </span>
       </div>
       <div className="clog-sub">
-        <span className="clog-what">{logWhat(e)}</span>
-        <span className="clog-after num">→ {num(e.valueAfter)}</span>
+        <span className="clog-what">{logWhat(e, maskRoulette)}</span>
+        <span className="clog-after num">→ {masked ? '?????' : num(e.valueAfter)}</span>
       </div>
     </div>
   );
@@ -430,14 +568,29 @@ function ChallengeCard(): React.JSX.Element | null {
   const restartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const enabled = settings?.challenge.enabled ?? false;
 
+  // workerState を依存に入れ、worker 再起動(クラッシュ自動復帰・設定変更)で
+  // 'ready' へ戻るたびに取り直す。challenge は worker のメモリのみで、再起動で
+  // idle に戻っても delta は来ない — 取り直さないと「running 表示のまま押しても
+  // 無反応」「idle のまま PUSH が灰色固着」の両方が起きる。
+  const workerState = useLive((s) => s.workerState);
   useEffect(() => {
     if (!enabled) return;
-    void rpc('challenge.get', undefined).then(setChallenge).catch(() => undefined); // delta 経由で回復する
+    const refetch = (): void => {
+      void rpc('challenge.get', undefined).then(setChallenge).catch(() => undefined); // delta 経由で回復する
+    };
+    refetch();
     void rpc('monitor.status', undefined)
       .then((r) => setMonitorOpen(r.open))
       .catch(() => undefined); // onMonitorState 購読で回復する
-    return window.api.onMonitorState((s) => setMonitorOpen(s.open));
-  }, [enabled]);
+    // 保険ポーリング(MonitorView.tsx の CFG_POLL_MS と同じ)— イベント取りこぼし
+    // からの自己回復。ルート切替の再マウントに頼らず、開きっぱなしでも揃う。
+    const t = setInterval(refetch, CFG_POLL_MS);
+    const off = window.api.onMonitorState((s) => setMonitorOpen(s.open));
+    return () => {
+      clearInterval(t);
+      off();
+    };
+  }, [enabled, workerState]);
 
   // 効果音: モニターが開いている間はモニター側が鳴らす — こちらは active=false で
   // watermark だけ進め、閉じた瞬間に過去演出が一斉に鳴るのを防ぐ(early return より
@@ -581,8 +734,11 @@ function ChallengeCard(): React.JSX.Element | null {
           challengeLog(最大50件)を出す。ここだけが「後から辿れる」唯一の場所。 */}
       {log.length > 0 ? (
         <div className="ch-log" ref={logRef}>
+          {/* マスクは描画時に読む(ログ行へ焼き込まない)— like 行の likeEvery とは
+              逆の判断。伏せるかどうかはイベントの性質ではなく表示の好みで、
+              企画のあとにスイッチを切って答え合わせできるほうが目的に合う。 */}
           {log.map((e) => (
-            <ChallengeLogRow key={e.id} e={e} />
+            <ChallengeLogRow key={e.id} e={e} maskRoulette={settings.challenge.hideRouletteResultInLog} />
           ))}
         </div>
       ) : running ? (

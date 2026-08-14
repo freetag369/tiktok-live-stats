@@ -11,13 +11,16 @@ import type {
   ChallengeState,
   FanStampConfig,
   TapBoostConfig,
+  TapBoostRule,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
   GiftFxBand,
+  RoulettePattern,
   RouletteSoundConfig,
   GiftRepeatFxConfig,
 } from './dto';
+import { ROULETTE_PATTERNS } from './dto';
 import { WAKE_TIME_RE } from './time';
 import {
   FULL_CUT_CLIPS,
@@ -33,8 +36,16 @@ import {
  * ギフトは規則表で増減が決まる。既定はギフトも妨害(ダイヤ数ぶん増える)。
  */
 
-/** recentEffects リングバッファの上限。モニターの演出再生分だけあれば足りる。 */
-export const CHALLENGE_EFFECTS_MAX = 12;
+/**
+ * recentEffects リングバッファの上限。モニターの演出再生分だけあれば足りる。
+ *
+ * 12 では足りなかった: press は1回1 effect を積むので、ホットキーのキーリピート
+ * (~30/s)なら delta の 2Hz tick の間に12件を押し流し、直前に積まれたルーレットが
+ * モニターへ配られる前にリングから落ちる(「演出が発生しない」の一因)。
+ * ルーレットは「1ギフトメッセージ = 1 effect」(rouletteIndexes)にしたので
+ * 連打ぶんの圧力は無くなったが、press 側の余裕としてここを広げてある。
+ */
+export const CHALLENGE_EFFECTS_MAX = 32;
 
 /** CLEAR リザルト画面の各ランキング(ギフト/イイネ)の表示件数。 */
 export const CHALLENGE_RESULT_TOP_N = 5;
@@ -74,11 +85,35 @@ export const ROULETTE_REVEAL_FAST_MS = 450;
 /** キュー詰まり時の短縮スピン。連続トリガーでも体感が間延びしない長さ。 */
 export const ROULETTE_SPIN_FAST_MS = 900;
 /**
- * モニターの連続再生キュー上限。溢れた分は演出スキップ(値は worker が適用済み)。
- * 溢れは「値だけ動いてリールが出ない」= 数字だけ動く最悪の見え方になるので、
- * 連打ギフトの反復スピン(giftFxRouletteSpins)の上限ぶんは飲めるだけ確保する。
+ * **別のギフト**のスピンへ移るときの間合い(ms)。
+ *
+ * 以前はキューを間髪入れず短縮スピンで流していたため、別々の視聴者のハートミーが
+ * 6.9秒の窓に重なると「誰の分か読めない高速連鎖」になっていた(実測で3〜6連鎖が
+ * 常態)。確定バナーを読める長さをここで確保する。
+ * **同じギフト(コンボ)内のスピンには入れない** — 同一人物の連打なので誰の分かを
+ * 読み直す必要がなく、17連打が間合いぶん更に伸びるだけになる。
  */
-export const ROULETTE_QUEUE_MAX = 9;
+export const ROULETTE_CHAIN_GAP_MS = 600;
+/**
+ * モニターの連続再生キュー上限。**数えるのはスピン数ではなくギフト件数**
+ * (1ギフトメッセージ = 1 effect で、連打ぶんの出目は rouletteIndexes に入る)。
+ * 溢れた分は破棄せず末尾の同一盤面 effect へ連結するので、ここは
+ * 「盤面違いが何件まで並べるか」の上限として効く。
+ */
+export const ROULETTE_QUEUE_MAX = 24;
+/**
+ * 1ギフトメッセージあたりの**抽選回数**のハード上限。
+ * 演出用の giftRepeatFx.max とは別物 — あちらで削ると贈られた個数ぶんの値が
+ * 消える(v0.5.4 の不具合)。ここは CPU / effect サイズの番人でしかないので、
+ * 実在する最大コンボ(実測で repeatCount 100 のギフトがある)より十分大きく取る。
+ */
+export const ROULETTE_DRAWS_MAX = 200;
+/**
+ * 1ギフトメッセージあたり実際にリールを回す本数の上限。
+ * 20本で 6.9 + 19×1.35 ≒ 32秒。これを超える連打は残りを合算バナー1枚で締める
+ * (**値は抽選回数ぶん全部適用済み** — 削るのは見た目だけ)。
+ */
+export const ROULETTE_REELS_MAX = 20;
 /**
  * 据え置きの安全弁。onAnimationEnd が来なくても(タブ非表示等)この時刻で必ず
  * ラッチを解いて worker 値へ収束させる — startStrike の STRIKE_ABORT_MS と同じ役割。
@@ -426,6 +461,8 @@ export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
     { amount: 1000, weight: 1 },
   ],
   direction: 'add',
+  // 既定は全パターン許可 — 欠損キーの旧 settings.json もここへ倒れる(移行代わり)。
+  patterns: [...ROULETTE_PATTERNS],
 };
 
 /**
@@ -473,6 +510,13 @@ export const GIFT_FX_FREEZE_MAX_TOTAL_MS = 45_000;
 
 /** モニターの演出クリップ連続再生キューの上限(ROULETTE_QUEUE_MAX と同じ思想)。 */
 export const CLIP_QUEUE_MAX = 3;
+/**
+ * 他演出中に届いたカットイン(バンド/全面カット)の持ち越し上限。
+ * 連打ルーレットの連鎖は最長 ~32 秒(ROULETTE_REELS_MAX 本)続くので、その裏で
+ * 溜まるぶんを飲めるだけ確保する — 溢れるとそのギフトの演出が丸ごと消える。
+ * **上げたら FX_DRAIN_MAX_STEPS の見積もりも更新すること。**
+ */
+export const PENDING_BANDS_MAX = 4;
 /**
  * クリップの安全弁(ms)。onEnded が来ない素材・遮蔽ウィンドウで再生中フラグが
  * 固着すると、以後クリップが永久に出なくなる(直したいバグより悪い)。
@@ -688,46 +732,92 @@ export interface TapBoostClipDef {
 }
 export const TAP_BOOST_INTRO_CLIPS: readonly TapBoostClipDef[] = [
   { id: 'intro-panther', label: '黒豹の咆哮(宇宙)' },
+  { id: 'intro-corgi', label: 'コーギーの登場(ピンク宇宙)' },
 ];
 export const TAP_BOOST_COUNT_CLIPS: readonly TapBoostClipDef[] = [
   // 数字はフレーム精度で焼き込み(ジャスト1.000秒刻み — タップ開始と正確に同期)。
   { id: 'count-321', label: '3・2・1(黒豹・ジャスト1秒刻み)' },
+  { id: 'count-corgi', label: '3・2・1(コーギー・ジャスト1秒刻み)' },
 ];
 export const TAP_BOOST_LOOP_CLIPS: readonly TapBoostClipDef[] = [
   // 既定はコイン・スロットを含まない黒豹版(配信規約への配慮 — ユーザー要件)。
   // intro/count/loop-panther は横 16:9(Dreamina 生成)。loop-pachinko だけ
   // 初代の縦 9:16 素材で、横モニターでは大きくクロップされる。
   { id: 'loop-panther', label: '黒豹コズミックFEVER(15秒・コインなし)' },
+  { id: 'loop-corgi', label: 'コーギーFEVER(15秒・ピンク宇宙)' },
   { id: 'loop-pachinko', label: 'ゴールドFEVER(初代・縦動画)' },
 ];
 export const TAP_BOOST_RESULT_CLIPS: readonly TapBoostClipDef[] = [
   // 結果カットシーン(タップウィンドウ終了 → 減算発表の前置き)。実尺は
   // TAP_BOOST_RESULT_MS(shared/boost-settle.ts)で固定 — 素材はこの尺で揃える。
   // mp4 が未投入でも boostClipUrl は 0 件許容 glob なので暗幕で同じ尺を待つ。
-  { id: 'result-panther', label: '結果発表(黒豹)' },
+  { id: 'result-panther', label: '結果発表(黒豹・素材未同梱)' },
+  { id: 'result-corgi', label: '結果発表(コーギー)' },
 ];
 
 /**
- * タップブースト(フィーバー)の既定。giftId は空 — クリエイター固有の値なので
- * 既定を置きようがない(fanStamp と同じ判断)。トリガーが3つとも空の設定は
- * どのギフトにも一致しない(matchGiftTrigger)ので、enabled: true で配っても
- * 既存の settings.json の挙動は変わらない。
+ * 登録できるブースト行の上限。ROULETTES_MAX と同じ 8 — 1行が最長23秒の全画面
+ * シネマ一式を持つので実用は2〜3行だが、8 なら settings.json も UI も破綻しない。
+ * 溢れた行は validate が捨てる。
  */
-export const DEFAULT_TAP_BOOST: TapBoostConfig = {
+export const TAP_BOOST_RULES_MAX = 8;
+
+/**
+ * ブースト1行の既定。giftId は空 — クリエイター固有の値なので既定を置きようが
+ * ない(fanStamp と同じ判断)。トリガーが3つとも空の行は**どのギフトにも一致
+ * しない**(matchGiftTrigger)ので、enabled: true で配っても既存の settings.json の
+ * 挙動は変わらない。
+ *
+ * DEFAULT_TAP_BOOST.rules[0] とは別に export しているのは、tsconfig の
+ * noUncheckedIndexedAccess: true のせいで `DEFAULT_TAP_BOOST.rules[0]` の型が
+ * `TapBoostRule | undefined` になり、呼び出し側が全部 `!` を書く羽目になるため。
+ */
+export const DEFAULT_TAP_BOOST_RULE: TapBoostRule = {
+  id: 'boost-1',
+  label: '',
   enabled: true,
   giftId: '',
   giftName: '',
   canonical: '',
+  exactName: false,
   multiplier: 5,
   durationSec: 5,
   introClip: 'intro-panther',
   countClip: 'count-321',
   loopClip: 'loop-panther',
-  // 既定 'off' — result-* の mp4 素材は未同梱で、catalog id を既定にすると
-  // 全ユーザーが4秒の暗幕を見る。素材を同梱したらここを差し替える。
+  // 既定 'off' — 黒豹の result-* は素材未同梱で、catalog id を既定にすると
+  // 全ユーザーが4秒の暗幕を見る(コーギー行だけは result-corgi を指す)。
   // ロールアップ発表('-N' の桁回転→着弾)自体は 'off' でも常に出る。
   resultClip: 'off',
   flash: true,
+};
+
+/** タップブースト(フィーバー)の既定。空トリガーの1行だけを配る。 */
+export const DEFAULT_TAP_BOOST: TapBoostConfig = {
+  enabled: true,
+  rules: [structuredClone(DEFAULT_TAP_BOOST_RULE)],
+};
+
+/**
+ * コーギー(gift 6267 / 299💎)のブースト行。settingsVersion 7 の移行が
+ * 「まだ無ければ1回だけ」追加する実体で、同梱既定の追加行でもある。
+ * 倍率・尺は黒豹と同じ(×3 / 10秒)から始める — ユーザーが設定画面で調整する前提。
+ */
+export const CORGI_TAP_BOOST_RULE: TapBoostRule = {
+  ...structuredClone(DEFAULT_TAP_BOOST_RULE),
+  id: 'boost-corgi',
+  label: 'コーギー',
+  giftId: '6267',
+  // 名前一致は使わない(giftId が本線)。立てるだけなら実害は無いが、
+  // 'corgi' は実カタログで Corgi 1件だけなので部分一致でも衝突しない。
+  giftName: '',
+  multiplier: 3,
+  durationSec: 10,
+  introClip: 'intro-corgi',
+  countClip: 'count-corgi',
+  loopClip: 'loop-corgi',
+  // コーギーだけは result 素材が同梱されているので既定で出す。
+  resultClip: 'result-corgi',
 };
 
 /**
@@ -767,6 +857,9 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   giftDefault: { mode: 'perDiamond', amount: 1 },
   roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[],
   rouletteSound: { ...DEFAULT_ROULETTE_SOUND },
+  // モニターのリールは確定済みの出目の遅延再生なので、伏せないとログが
+  // 常にリールより先に答えを出す。既定でネタバレを止める。
+  hideRouletteResultInLog: true,
   flashMinDiamonds: 100,
   hotkey: 'F9',
   monitorDisplayId: null,
@@ -942,18 +1035,136 @@ export function giftFxRepeat(
   return rep;
 }
 
+// ── ルーレットの抽選回数と演出本数 ───────────────────────────────────────────
+//
+// 規約: **抽選回数は贈られた個数そのもの。演出の設定では絶対に削らない。**
+// ルーレットは抽選なので、連打ぶんを表すには出目を N 回引くしかなく、他の演出と
+// 違って**値の増減も回数ぶんになる**。v0.5.4 まではここに演出用の
+// giftRepeatFx.max(既定 5)が掛かっており、バラ17連打が5回ぶんしか値に反映
+// されなかった(視聴者が贈った12個ぶんが消える)。回数と見た目をここで分離する。
+
 /**
- * 連打ギフトでルーレットを何回まわすか。**これだけは値の増減も回数ぶんになる** —
- * ルーレットは抽選なので、反復するには出目を N 回引くしかないため。
- * モニターのキューに乗り切る数で頭打ちにする(溢れると「値だけ動いてリールが
- * 出ない」= 数字だけ動く最悪の見え方になる)。
+ * このギフト1メッセージで何回抽選するか。**値・統計はこの回数ぶん動く。**
+ * 上限はハードリミット(ROULETTE_DRAWS_MAX)だけ — 設定では削らない。
  */
-export function giftFxRouletteSpins(cfg: ChallengeConfig, repeatCount: number): number {
+export function rouletteDrawCount(repeatCount: number): number {
+  return Math.min(ROULETTE_DRAWS_MAX, Math.max(1, Math.round(repeatCount)));
+}
+
+/**
+ * そのうち実際にリールを回す本数。**見た目だけの clamp** で、値には影響しない
+ * (超過分はモニターが合算バナー1枚で締める)。
+ * giftRepeatFx.rouletteEnabled が false なら 1本 — 「連打でも演出は1回でいい」
+ * という設定の意味はここに残す(値は個数ぶんのまま)。
+ */
+export function rouletteReelCount(cfg: ChallengeConfig, draws: number): number {
+  const n = Math.max(1, Math.round(draws));
   const rf = cfg.giftRepeatFx;
   if (!rf.enabled || !rf.rouletteEnabled) return 1;
-  const cap = Math.min(GIFT_FX_REPEAT_MAX, Math.max(1, Math.round(rf.max)));
-  const rep = Math.min(cap, Math.max(1, Math.round(repeatCount)));
-  return Math.min(rep, ROULETTE_QUEUE_MAX + 1);
+  return Math.min(ROULETTE_REELS_MAX, n);
+}
+
+/**
+ * effect 1件 → スピンごとの {index, pattern, amount}。
+ *
+ * **MonitorView とテストがこれを共有する唯一の実装。** レンダラのテスト環境が
+ * このリポジトリに無いので、決定ロジックを純関数としてここへ置く
+ * (fx-drain.ts / appendChallengeLog と同じ流儀)。
+ *
+ * amount は effect 全体の合計なので符号を引けない — 1回ぶんの増減は
+ * `rouletteSegments[index] × (rouletteDirection === 'sub' ? -1 : 1)` で復元する。
+ * rouletteIndexes を持たない古い effect(worker 混在)は単発として扱う。
+ */
+export function rouletteDraws(
+  e: ChallengeEffect
+): Array<{ index: number; pattern: RoulettePattern; amount: number }> {
+  const segs = e.rouletteSegments ?? [];
+  if (segs.length === 0) return [];
+  const idxs = e.rouletteIndexes ?? (e.rouletteIndex != null ? [e.rouletteIndex] : []);
+  const pats = e.roulettePatterns ?? [];
+  const sign = e.rouletteDirection === 'sub' ? -1 : 1;
+  const out: Array<{ index: number; pattern: RoulettePattern; amount: number }> = [];
+  for (let i = 0; i < idxs.length; i++) {
+    // 盤面外の index は捨てる(盤面を編集した直後の古い effect への保険)。
+    const index = idxs[i]!;
+    if (index < 0 || index >= segs.length) continue;
+    out.push({
+      index,
+      pattern: pats[i] ?? e.roulettePattern ?? 'slow',
+      amount: segs[index]! * sign,
+    });
+  }
+  return out;
+}
+
+/**
+ * ルーレット effect の「盤面の同一性」キー。
+ *
+ * 出目 index は盤面に対する位置なので、**盤面が違う effect の出目は連結できない**
+ * (ハートミーの 3 番目とバラの 3 番目は別の額)。worker の凍結ドレイン畳み込みと
+ * モニターのキュー連結が同じ規約を使うための唯一の実装。
+ */
+export function rouletteBoardKey(e: ChallengeEffect): string {
+  return `${e.rouletteLabel ?? ''}|${e.rouletteDirection ?? 'add'}|${(e.rouletteSegments ?? []).join(',')}`;
+}
+
+/** 同じ盤面か(rouletteBoardKey の等値)。 */
+export function sameRouletteBoard(a: ChallengeEffect, b: ChallengeEffect): boolean {
+  return rouletteBoardKey(a) === rouletteBoardKey(b);
+}
+
+/**
+ * 同じ盤面のルーレット effect 2件を1件へ連結する(a が先、b が後)。
+ *
+ * 呼ぶ前に sameRouletteBoard で確かめること。値・統計は既に worker が両方ぶん
+ * 適用済みなので、ここで畳むのは**見た目と1行の履歴**だけ(finishDrain の規約と同じ)。
+ * 見出し(nickname)は先頭 a のものを残す — 連結後の1本目が誰の分かと揃える。
+ */
+export function mergeRoulette(a: ChallengeEffect, b: ChallengeEffect): ChallengeEffect {
+  const idxs = [...(a.rouletteIndexes ?? []), ...(b.rouletteIndexes ?? [])].slice(0, ROULETTE_DRAWS_MAX);
+  const pats = [...(a.roulettePatterns ?? []), ...(b.roulettePatterns ?? [])].slice(0, ROULETTE_DRAWS_MAX);
+  return {
+    ...b,
+    id: Math.max(a.id, b.id),
+    nickname: a.nickname,
+    amount: a.amount + b.amount,
+    // 到着順に適用済みなので、後発 b の valueAfter が現在値。
+    valueAfter: b.valueAfter,
+    coalesced: (a.coalesced ?? 1) + (b.coalesced ?? 1),
+    giftCount: (a.giftCount ?? 1) + (b.giftCount ?? 1),
+    diamonds: (a.diamonds ?? 0) + (b.diamonds ?? 0),
+    rouletteIndexes: idxs,
+    roulettePatterns: pats,
+    rouletteIndex: idxs[0] ?? a.rouletteIndex,
+    roulettePattern: pats[0] ?? a.roulettePattern,
+    // 連結後の本数で引き直す(元の rouletteReels は合計にならない)。
+    rouletteReels: Math.min(ROULETTE_REELS_MAX, idxs.length),
+  };
+}
+
+/**
+ * effect 1件 → モニターの再生計画。**renderer 側の唯一の clamp 点**
+ * (giftFxShots と同じ役割)。
+ *
+ * reels = 実際にリールを回すぶん、rest = 尺の都合で回さないぶんの合算。
+ * 値は全部適用済みなので、rest があるときはモニターが合算バナー1枚で締めて
+ * 「数字だけ黙って動く」を避ける。
+ */
+export function rouletteReelPlan(e: ChallengeEffect): {
+  reels: Array<{ index: number; pattern: RoulettePattern; amount: number }>;
+  restAmount: number;
+  restCount: number;
+} {
+  const all = rouletteDraws(e);
+  // 欠損(旧 worker 混在)は全部回す。上限は念のためここでも掛ける。
+  const n = Math.min(all.length, ROULETTE_REELS_MAX, Math.max(1, Math.round(e.rouletteReels ?? all.length)));
+  const reels = all.slice(0, n);
+  const rest = all.slice(n);
+  return {
+    reels,
+    restAmount: rest.reduce((s, d) => s + d.amount, 0),
+    restCount: rest.length,
+  };
 }
 
 /**
@@ -1139,6 +1350,53 @@ export function migrateChallengeGiftFullCutTriggers(
 }
 
 /**
+ * v5 まで配っていた**推定のまま外れていたトリガー**の実値。修復対象かの判定にだけ使う。
+ *
+ * v4 の修復で日本語名は英語名に寄せたが、giftId が '' の行は「未受領ゆえ英語名の推定」
+ * のままだった。ミニ花火は実受信で `giftId 134531` / `giftName 'Firework'`(単数形)と
+ * 判明 — 推定値 'mini fireworks' は部分一致でも一度も当たらなかった。
+ *
+ * ⚠ この表は**凍結する**。OLD_FULL_CUT_TRIGGERS_V3 と同じ理由で、FULL_CUT_CLIPS から
+ *   生成し直してはいけない(新旧が同値になり修復が空振る)。
+ */
+const OLD_FULL_CUT_TRIGGERS_V5: Readonly<
+  Record<string, { giftId: string; giftName: string; canonical: string; exactName: boolean }>
+> = {
+  'fullcut-mini-hanabi': { giftId: '', giftName: 'mini fireworks', canonical: '', exactName: false },
+};
+
+/**
+ * v5 までの外れた推定トリガーを、実受信で確認できた値へ寄せ直す。
+ * 判定も注意点も migrateChallengeGiftFullCutTriggers と同一 — **旧既定と完全に同じ行だけ**
+ * 書き換え、書き換えるのは giftId / giftName / canonical / exactName の4つだけ。
+ */
+export function migrateChallengeGiftFullCutTriggersV5(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 6) return cfg;
+  const fresh = new Map(FULL_CUT_CLIPS.map((c) => [`fullcut-${c.id.slice('cut-'.length)}`, c]));
+  let touched = 0;
+  const rules = cfg.giftFullCut.rules.map((r) => {
+    const old = OLD_FULL_CUT_TRIGGERS_V5[r.id];
+    const c = fresh.get(r.id);
+    if (old == null || c == null) return r;
+    if (
+      r.giftId !== old.giftId ||
+      r.giftName !== old.giftName ||
+      r.canonical !== old.canonical ||
+      (r.exactName === true) !== old.exactName
+    ) {
+      return r; // 手を入れてある行 — 尊重する
+    }
+    touched++;
+    return { ...r, giftId: c.giftId, giftName: c.giftName, canonical: c.canonical, exactName: c.exactName };
+  });
+  if (touched === 0) return cfg;
+  return { ...cfg, giftFullCut: { ...cfg.giftFullCut, rules } };
+}
+
+/**
  * 全面カットの既定行が増えた世代を、保存済み settings.json へ一度だけ配る。
  * **追加しかしない** — 既存行の順序も内容も enabled も触らず、まだ持っていない id を
  * 末尾へ足すだけ(先勝ちなので、ユーザーが自分で並べた優先度を壊さない)。
@@ -1167,10 +1425,42 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeGiftFullCutTriggers(
-    migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+  return migrateChallengeTapBoostCorgi(
+    migrateChallengeGiftFullCutTriggersV5(
+      migrateChallengeGiftFullCutTriggers(
+        migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+        fromVersion
+      ),
+      fromVersion
+    ),
     fromVersion
   );
+}
+
+/**
+ * v7: コーギー(gift 6267)のブースト行を**まだ無ければ1回だけ**足す。
+ *
+ * ⚠ validateTapBoost の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
+ * ユーザーが消した行がその場で復活する(migrateChallengeGiftFullCut と同じ理由)。
+ * 逆に「単一→配列」の構造変換の方は validate 側にある — あれは**現に在るデータの
+ * 詰め替え**で、移行では手遅れ(validate が先に走って旧キーを落とす)だから。
+ *
+ * giftId 一致で既存判定するので、ユーザーが自分でコーギー行を作っていれば二重に
+ * 増えない。行を消した人には二度と配らない(世代印が上がるのは1回だけ)。
+ * 上限に達している設定には足さない。
+ */
+export function migrateChallengeTapBoostCorgi(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 7) return cfg;
+  const rules = cfg.tapBoost.rules;
+  if (rules.some((r) => r.giftId === CORGI_TAP_BOOST_RULE.giftId)) return cfg;
+  if (rules.length >= TAP_BOOST_RULES_MAX) return cfg;
+  return {
+    ...cfg,
+    tapBoost: { ...cfg.tapBoost, rules: [...rules, structuredClone(CORGI_TAP_BOOST_RULE)] },
+  };
 }
 
 export function migrateChallengeSeSounds(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
@@ -1300,6 +1590,11 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     giftDefault,
     roulettes: validateRoulettes(raw),
     rouletteSound: validateRouletteSound(c.rouletteSound),
+    // 既定 true なので `!== false`(seEnabled と同じ向き。`=== true` にすると
+    // 既定が反転する)。保存済み settings.json にこのキーは無いが、
+    // **欠損が true へ倒れること自体が移行の代わり**になる
+    // (stockCutinVolume と同じ手口 — 既定値の書き換えは保存済みファイルに届かない)。
+    hideRouletteResultInLog: c.hideRouletteResultInLog !== false,
     flashMinDiamonds:
       c.flashMinDiamonds === null ? null : num(c.flashMinDiamonds, d.flashMinDiamonds ?? 100, 1, 9_999_999),
     hotkey: str(c.hotkey, d.hotkey),
@@ -1519,32 +1814,94 @@ function validateFanStamp(raw: unknown): FanStampConfig {
   };
 }
 
+/** 旧・単一 tapBoost の形。**export しない** — 読むのは validateTapBoost だけ。 */
+interface LegacyTapBoost {
+  giftId: string;
+  giftName: string;
+  canonical: string;
+  multiplier: number;
+  durationSec: number;
+  introClip: string;
+  countClip: string;
+  loopClip: string;
+  resultClip: string;
+  flash: boolean;
+}
+
 /**
  * タップブーストの検証。既存流儀どおり throw せずサニタイズする。
  * 旧 settings.json(tapBoost キー無し)は既定へ。giftName/canonical の小文字化と
  * 真偽値の向き(既定 true は `!== false`)は validateFanStamp と同じ規約。
+ *
+ * **旧・単一設定の引き継ぎ**: giftId/multiplier/クリップをこの階層に直接持つ形は
+ * rules[0] へ包み直す。**移行(migrate*)ではなく validate に置く**のは、
+ * migrateChallengeConfig が validateChallengeConfig の**後**に走るため
+ * (boot-settings.ts)— あちらは明示リテラル return なので、migrate の時点では
+ * 旧キーはもう消えている。validateRoulettes の legacy `roulette` と同型。
+ * 変換は冪等(rules が配列なら旧キーは見ない)で、settings.json / ユーザーの
+ * challenge-default.json / 同梱 resources/challenge-default.json の3経路すべてに
+ * 1箇所で効く — どのファイルも手で書き換える必要は無い。
  */
 function validateTapBoost(raw: unknown): TapBoostConfig {
   const d = DEFAULT_TAP_BOOST;
-  const c = raw as Partial<TapBoostConfig> | null | undefined;
+  const c = raw as (Partial<TapBoostConfig> & Partial<LegacyTapBoost>) | null | undefined;
   if (!c || typeof c !== 'object') return structuredClone(d);
+
+  // 旧形式の判定: rules が無く、旧キーが1つでもあれば単一設定とみなす。
+  const legacy =
+    !Array.isArray(c.rules) &&
+    (typeof c.giftId === 'string' ||
+      typeof c.multiplier === 'number' ||
+      typeof c.introClip === 'string');
+  const src: unknown[] | null = Array.isArray(c.rules) ? c.rules : legacy ? [c] : null;
+  // rules も旧キーも無い = 触られていない設定。既定の1行を配る。
+  if (src === null) return { enabled: c.enabled !== false, rules: structuredClone(d.rules) };
+
+  const out: TapBoostRule[] = [];
+  const seen = new Set<string>();
+  for (const r of src.slice(0, TAP_BOOST_RULES_MAX)) {
+    const v = validateTapBoostRule(r, legacy);
+    // 重複・欠損 id は振り直す — UI の key と行ごとの実演の対象特定がぶれるため
+    // (validateRoulettes と同じ理由・同じ式)。
+    const id =
+      v.id !== '' && !seen.has(v.id) ? v.id : v.id !== '' ? `${v.id}-${out.length}` : `boost-${out.length}`;
+    seen.add(id);
+    out.push({ ...v, id });
+  }
+  // 明示的な空配列は空のまま通す(全行消したユーザーの意思を尊重する)。
+  return { enabled: c.enabled !== false, rules: out };
+}
+
+/**
+ * ブースト1行の検証。未知のクリップ id は既定へ('off' は「この段を出さない」の
+ * 明示選択として通す)。legacy=true の行は id/label/exactName を持たないので既定を
+ * 与える — **exactName は必ず false**(旧挙動は部分一致。true にすると出荷済みの
+ * トリガーが一致しなくなる)。
+ */
+function validateTapBoostRule(raw: unknown, legacy: boolean): TapBoostRule {
+  const dr = DEFAULT_TAP_BOOST_RULE;
+  const r = raw as Partial<TapBoostRule> | null | undefined;
+  if (!r || typeof r !== 'object') return structuredClone(dr);
   const n = (v: unknown, fb: number, min: number, max: number): number =>
     typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
-  // 未知の id は既定へ('off' は「この段を出さない」の明示選択として通す)。
   const clip = (v: unknown, list: readonly TapBoostClipDef[], fb: string): string =>
     typeof v === 'string' && (v === 'off' || list.some((x) => x.id === v)) ? v : fb;
   return {
-    enabled: c.enabled !== false,
-    giftId: typeof c.giftId === 'string' ? c.giftId.trim() : d.giftId,
-    giftName: typeof c.giftName === 'string' ? c.giftName.trim().toLowerCase() : d.giftName,
-    canonical: typeof c.canonical === 'string' ? c.canonical.trim().toLowerCase() : d.canonical,
-    multiplier: n(c.multiplier, d.multiplier, TAP_BOOST_MULT_MIN, TAP_BOOST_MULT_MAX),
-    durationSec: n(c.durationSec, d.durationSec, TAP_BOOST_DURATION_MIN_SEC, TAP_BOOST_DURATION_MAX_SEC),
-    introClip: clip(c.introClip, TAP_BOOST_INTRO_CLIPS, d.introClip),
-    countClip: clip(c.countClip, TAP_BOOST_COUNT_CLIPS, d.countClip),
-    loopClip: clip(c.loopClip, TAP_BOOST_LOOP_CLIPS, d.loopClip),
-    resultClip: clip(c.resultClip, TAP_BOOST_RESULT_CLIPS, d.resultClip),
-    flash: c.flash !== false,
+    id: typeof r.id === 'string' ? r.id.trim() : legacy ? dr.id : '',
+    label: typeof r.label === 'string' ? r.label.trim() : '',
+    enabled: r.enabled !== false,
+    giftId: typeof r.giftId === 'string' ? r.giftId.trim() : dr.giftId,
+    giftName: typeof r.giftName === 'string' ? r.giftName.trim().toLowerCase() : dr.giftName,
+    canonical: typeof r.canonical === 'string' ? r.canonical.trim().toLowerCase() : dr.canonical,
+    // 旧設定は完全一致の概念を持たないので必ず false = 従来どおりの部分一致。
+    exactName: !legacy && typeof r.exactName === 'boolean' ? r.exactName : false,
+    multiplier: n(r.multiplier, dr.multiplier, TAP_BOOST_MULT_MIN, TAP_BOOST_MULT_MAX),
+    durationSec: n(r.durationSec, dr.durationSec, TAP_BOOST_DURATION_MIN_SEC, TAP_BOOST_DURATION_MAX_SEC),
+    introClip: clip(r.introClip, TAP_BOOST_INTRO_CLIPS, dr.introClip),
+    countClip: clip(r.countClip, TAP_BOOST_COUNT_CLIPS, dr.countClip),
+    loopClip: clip(r.loopClip, TAP_BOOST_LOOP_CLIPS, dr.loopClip),
+    resultClip: clip(r.resultClip, TAP_BOOST_RESULT_CLIPS, dr.resultClip),
+    flash: r.flash !== false,
   };
 }
 
@@ -1593,6 +1950,18 @@ function validateRoulettes(raw: unknown): ChallengeRouletteConfig[] {
 }
 
 /**
+ * 焦らしパターンの許可リストの検証。ROULETTE_PATTERNS を正としてフィルタする —
+ * 正順への正規化・未知値除去・重複除去が1本で済む。非配列(欠損キーの旧
+ * settings.json を含む)と全滅(全部外した/未知値だけ)は全パターンへ倒す —
+ * 抽選(drawRoulettePattern)が空で止まらないための二重防御の保存側。
+ */
+function sanitizeRoulettePatterns(raw: unknown): RoulettePattern[] {
+  if (!Array.isArray(raw)) return [...ROULETTE_PATTERNS];
+  const out = ROULETTE_PATTERNS.filter((p) => raw.includes(p));
+  return out.length > 0 ? out : [...ROULETTE_PATTERNS];
+}
+
+/**
  * ルーレット1件ぶんの検証。既存流儀どおり throw せずサニタイズする。
  * 有効な出目が 1 件も残らない/全 weight が 0 の盤面は抽選不能なので既定 segments に戻す。
  */
@@ -1633,6 +2002,7 @@ function validateRoulette(raw: unknown, fb: { id: string; label: string }): Chal
     canonical: typeof c.canonical === 'string' ? c.canonical.trim().toLowerCase() : d.canonical,
     segments: usable ? segments : structuredClone(d.segments),
     direction: c.direction === 'sub' ? 'sub' : 'add',
+    patterns: sanitizeRoulettePatterns(c.patterns),
   };
 }
 
@@ -1854,20 +2224,27 @@ export function matchFanStamp(
 }
 
 /**
- * ギフト → タップブースト行の写像。**fanStamp の次・ルーレットより先**に評価し、
- * 一致したら増減規則(roulettes/giftRules/giftDefault)を一切評価しない —
- * matchFanStamp と同じ「先勝ち」規約。同じ giftId を fanStamp と両方に登録した
- * 誤設定では fanStamp が勝つ(呼び出し側が fs 一致時は評価しない)。
+ * ギフト → タップブースト行の写像。**上から順に評価し、最初に一致した1行だけ**を
+ * 返す(giftFullCut / roulettes と同じ先勝ち)。**fanStamp の次・ルーレットより先**に
+ * 評価し、一致したら増減規則(roulettes/giftRules/giftDefault)を一切評価しない。
+ * 同じ giftId を fanStamp と両方に登録した誤設定では fanStamp が勝つ
+ * (呼び出し側が fs 一致時は評価しない)。
  *
- * 単一設定だが戻り値を boolean にしない(matchFanStamp と同じ将来配列化への備え)。
+ * 無効な行は飛ばすだけで**下の行の評価は続ける** — 上の行を一時的に切って
+ * 下の行を試す、が設定画面の自然な操作なので。クリップが全部 'off' の行は
+ * 飛ばさない(暗幕+カウンタだけのフィーバーは正当な設定)。
  */
 export function matchTapBoost(
   cfg: ChallengeConfig,
   g: { canonical?: string; giftId: string; giftName?: string }
-): TapBoostConfig | null {
+): TapBoostRule | null {
   const tb = cfg.tapBoost;
   if (!tb.enabled) return null;
-  return matchGiftTrigger(tb, g) ? tb : null;
+  for (const r of tb.rules) {
+    if (!r.enabled) continue;
+    if (matchGiftTrigger(r, g)) return r;
+  }
+  return null;
 }
 
 /**

@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppSettings, ChallengeEffect, ChallengeRankRow } from '@shared/dto';
+import type {
+  AppSettings,
+  ChallengeEffect,
+  ChallengeRankRow,
+  ChallengeSeSlot,
+  RoulettePattern,
+} from '@shared/dto';
 import {
   CHALLENGE_MINI_IDS,
   CHALLENGE_MONITOR_TOP_N,
@@ -7,10 +13,11 @@ import {
   CLIP_ABORT_MS,
   CLIP_QUEUE_MAX,
   FLOAT_ABORT_MS,
-  FLOAT_MAX,
   GIFT_FX_REPEAT_TIMERS_MAX,
   MINI_ABORT_MS,
   MINI_MAX,
+  PENDING_BANDS_MAX,
+  ROULETTE_CHAIN_GAP_MS,
   ROULETTE_QUEUE_MAX,
   SHAKE_ABORT_MS,
   rouletteAbortMs,
@@ -20,13 +27,24 @@ import {
   isChallengeEffectFresh,
   matchGiftClip,
   matchGiftMini,
+  mergeRoulette,
   miniForSlot,
   rouletteHeadline,
+  rouletteReelPlan,
+  sameRouletteBoard,
   tierForDiamonds,
 } from '@shared/challenge';
 import { num } from '@shared/format';
 import { CFG_POLL_MS } from '@shared/constants';
 import { runFxDrain, type FxDrainOrder } from '@shared/fx-drain';
+import {
+  BANNER_QUEUE_MAX,
+  bannerEndAtFor,
+  clampBannerEndAt,
+  enqueueBanner,
+  pickStageNext,
+  stageWaitMs,
+} from '@shared/fx-stage';
 import { boostStartTiming, planBoostStart, type BoostStartPlan } from '@shared/boost-start';
 import {
   mergePendingFloat,
@@ -35,6 +53,7 @@ import {
   type FloatHoldState,
   type PendingFloat,
 } from '@shared/fx-floats';
+import { fanStampBannerParts } from '@shared/fan-stamp';
 import {
   STRIKE_TRAVEL_MAX_MS,
   STRIKE_TRAVEL_MIN_MS,
@@ -81,6 +100,30 @@ interface FloatItem {
   /** 表示内容。ギフトカード等のリッチな中身も入るので文字列に限定しない。 */
   node: React.ReactNode;
   cls: string;
+}
+/**
+ * 舞台の順番待ちに積まれた ±N 浮上バナー1枚。
+ * `se` は「映像と同時に鳴らす効果音スロット」— 到着時に鳴らすと、順番待ちのぶん
+ * 音だけ先に出てズレる(useChallengeSe の stageSynced と対)。
+ */
+/** runDrain のフック。予約(pendingDrain)に載せるので型名を付ける。 */
+interface DrainHooks {
+  onNext?: (kind: 'roulette' | 'boost' | 'band') => void;
+  onIdle?: () => void;
+}
+interface QueuedBanner {
+  node: React.ReactNode;
+  cls: string;
+  se: ChallengeSeSlot | null;
+  /**
+   * バナーに随伴する演出(フラッシュ / シェイク / 粒子 / 簡易演出)。
+   * **到着時に撃ってはいけない** — バナーだけ順番待ちに載ると、光と揺れだけが
+   * 先に走って再生中の演出に重なる(直そうとしている症状そのもの)。
+   * fxRef はこの中で読み直すこと(canvas が remount されると入口の参照は死ぬ)。
+   */
+  onShow?: (() => void) | undefined;
+  /** 積まれた時刻。飢餓弁(pickStageNext)の判定に使う。 */
+  atMs: number;
 }
 interface FlashItem {
   key: number;
@@ -198,21 +241,47 @@ const STOCK_CUTIN_FADE_MS = 400;
 const STOCK_CUTIN_ABORT_MS = STOCK_CUTIN_MS + 2000;
 
 /**
+ * 着弾チェーンが飛行中で舞台を明け渡せないときの再確認間隔。チェーンの終端
+ * (impactStrike / revealStock / abortStrike)は必ずしも pumpStage を呼ばないので、
+ * 「順番待ちのバナーがあるのにチェーンが終わって誰も進めない」を最大この長さの
+ * 遅れへ落とすためだけのポーリング。チェーンと行列が両方ある間しか張られない。
+ */
+const STAGE_RECHECK_MS = 400;
+
+/**
+ * 名前入りバナーの下段。ギフト名 / ニックネーム / 動作を**必ず別の行**に割る。
+ *
+ * 1 本の文を .f-txt に流して CSS だけで折り返させると、"柚木茜(search)" のような
+ * 名前が行またぎで裂けて「誰の通知か」が読めなくなる(overflow-wrap:anywhere は
+ * 区切りの無い名前を平気で途中で切る)。行そのものを分けてしまえば裂けようがない。
+ *
+ * 各行は nowrap + 末尾 "…"(monitor.css の .f-line)。gift は省略可 —
+ * ギフト名の前置きが要るのはルーレットだけで、フォロー等は 2 行になる。
+ */
+function nameLines(p: { gift?: string; who: string; act: string }): React.JSX.Element {
+  // rouletteHeadline の prefix は区切りの空白を末尾に含む(1 本の文だった名残)。
+  const gift = (p.gift ?? '').trim();
+  return (
+    <span className="f-txt f-lines">
+      {gift !== '' ? <span className="f-line f-gift">{gift}</span> : null}
+      <span className="f-line f-who">{p.who}</span>
+      <span className="f-line f-act">{p.act}</span>
+    </span>
+  );
+}
+
+/**
  * ルーレット確定バナーの中身。回転パネル(RouletteFx)と同じ文言にするため、
  * 前置き/後置きは shared の rouletteHeadline から取る。リールを出す通常経路と、
  * 盤面が無い/動きの抑制設定でリールを諦める経路の2箇所で使う。
  */
-function rouletteBanner(e: ChallengeEffect): React.JSX.Element {
+function rouletteBanner(e: ChallengeEffect, amount: number = e.amount): React.JSX.Element {
   const head = rouletteHeadline(e);
-  const sign = e.amount < 0 ? `${num(e.amount)}` : `+${num(e.amount)}`;
+  const sign = amount < 0 ? `${num(amount)}` : `+${num(amount)}`;
   return (
     <>
       <span className="f-amt">{sign}</span>
-      <span className="f-txt">
-        {head.prefix}
-        <b>{e.nickname ?? ''}</b>
-        {head.suffix}
-      </span>
+      {nameLines({ gift: head.prefix, who: e.nickname ?? '', act: head.suffix })}
     </>
   );
 }
@@ -262,7 +331,26 @@ function fxWarn(reason: string, detail?: unknown): void {
  * になる — 譲る判定と playEffect のフォールバック判定は必ずこれを共有する。
  */
 function rouletteWillSpin(e: ChallengeEffect): boolean {
-  return (e.rouletteSegments?.length ?? 0) > 0 && e.rouletteIndex != null && !prefersReducedMotion();
+  return rouletteReelPlan(e).reels.length > 0 && !prefersReducedMotion();
+}
+
+/**
+ * 尺の都合で回さなかったぶんの合算バナー。**値は worker が適用済み**なので、
+ * これを出さないと「数字だけ黙って動く」最悪の見え方になる。
+ */
+function rouletteRestBanner(e: ChallengeEffect, amount: number, count: number): React.JSX.Element {
+  const head = rouletteHeadline(e);
+  const sign = amount < 0 ? `${num(amount)}` : `+${num(amount)}`;
+  return (
+    <>
+      <span className="f-amt">{sign}</span>
+      {nameLines({
+        gift: head.prefix,
+        who: e.nickname ?? '',
+        act: `${head.suffix}(残り${count}回ぶん)`,
+      })}
+    </>
+  );
 }
 
 /**
@@ -372,6 +460,15 @@ export function MonitorView(): React.JSX.Element {
     return () => window.removeEventListener('resize', fit);
   }, []);
 
+  // タイマー(armBannerTimer → 張った時点のレンダーの pumpStage → showBannerNow)
+  // 越しに呼ばれる関数が state を直読みすると、タイマーを張った時点の値で固まる
+  // (ステールクロージャ)。ref を毎レンダー同期し、タイマー越しに読まれる
+  // playSeSlot / playMini だけこちらを使う(clipKey と同じ「同期は ref」の流儀)。
+  const cfgRef = useRef<AppSettings | null>(null);
+  cfgRef.current = cfg;
+  const landscapeRef = useRef(false);
+  landscapeRef.current = landscape;
+
   // 演出レイヤの揮発状態(store は汚さない)。
   const lastPlayed = useRef<number | null>(null);
   const [floats, setFloats] = useState<FloatItem[]>([]);
@@ -395,6 +492,25 @@ export function MonitorView(): React.JSX.Element {
   const miniTimers = useRef<number[]>([]);
   /** フロートバナーの安全弁タイマー(発火時に自己削除するので配列は有界)。 */
   const floatTimers = useRef<number[]>([]);
+  /*
+   * ── 舞台(stage)の占有 ────────────────────────────────────────────────
+   * ±N 浮上バナーは「同時に1枚だけ」「消えてから次(バナーでも演出でも)」。
+   * 判定は shared/fx-stage.ts の純関数、状態はこの3本だけ。
+   *
+   * bannerEndAt は【時刻ラッチ】— boolean にしてはいけない。遮蔽ウィンドウで
+   * setTimeout が絞られたり animationend が届かなかったりするとフラグが立ちっ
+   * ぱなしになり、以後すべての演出が永久にキューされる(モニターの全死)。
+   * 絶対時刻なら誰も何もしなくても「今」が過ぎた瞬間に解放される。
+   * 0 = 遥か過去 = 空き、が初期値としてそのまま機能する。
+   */
+  const bannerEndAt = useRef(0);
+  const bannerQueue = useRef<QueuedBanner[]>([]);
+  /** 舞台を進める唯一のタイマー。常に1本だけ(張り直しは clearBannerTimer 経由)。 */
+  const bannerTimer = useRef<number | null>(null);
+  /** finish* が予約したドレイン。間合いが明けたら pumpStage が実行する。 */
+  const pendingDrain = useRef<{ order: FxDrainOrder; hooks?: DrainHooks } | null>(null);
+  /** pumpStage の同期再入ガード(runDrain → start* → … から戻ってくる経路がある)。 */
+  const pumping = useRef(false);
   /** tickGauge の強制レイアウトを次フレームへ逃がす rAF。0 = 予約なし。 */
   const gaugeTickRaf = useRef(0);
   /** 連打ギフトの反復ショットのタイマー。値には一切効かないので安全弁は不要。 */
@@ -474,7 +590,17 @@ export function MonitorView(): React.JSX.Element {
   // 再生は同時に1件(並行するとリールが読めない)。演出中の再トリガーはキューへ。
   // worker は値を即時適用済みなので、ここは heldValue で数字を据え置き、リール
   // 停止の瞬間に worker 値へ収束させる(like 着弾と同じ「一時上書き」の解法)。
-  const [roulette, setRoulette] = useState<{ key: number; effect: ChallengeEffect; fast: boolean; spin: number } | null>(null);
+  // effect 1件が複数スピンを持つ(連打ギフト)。at はその何本目を回しているか。
+  const [roulette, setRoulette] = useState<{
+    key: number;
+    effect: ChallengeEffect;
+    fast: boolean;
+    spin: number;
+    /** この effect の何本目のリールか(0 始まり)。 */
+    at: number;
+    /** 実際に回す1本ぶんの出目・パターン・増減量(rouletteDraws の 1 要素)。 */
+    draw: { index: number; pattern: RoulettePattern; amount: number };
+  } | null>(null);
   const rouletteQueue = useRef<ChallengeEffect[]>([]);
   /** 据え置きの持ち主がルーレットである印。値変化 effect の strike/punch を黙らせる。 */
   const rouletteHold = useRef(false);
@@ -620,6 +746,9 @@ export function MonitorView(): React.JSX.Element {
    */
   useEffect(() => {
     maybeFlushDeferredFloats();
+    // 全カットインが終わった瞬間に舞台も進める。fxHoldBusy は state 由来なので
+    // 解除で必ず再レンダーが走る = 予約タイマーが遮蔽で失われていても復帰する。
+    pumpStage();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fxHoldBusy]);
 
@@ -748,10 +877,7 @@ export function MonitorView(): React.JSX.Element {
     // 盤面欠損・未知クリップ id・動きの抑制で始まらない effect に譲ると、
     // 譲った先が何も出さず、着弾もパンチも丸ごと消える(誰も再生しない)。
     const yieldToCutin =
-      rouletteHold.current ||
-      bandHold.current ||
-      stockCutinHold.current ||
-      boostHold.current ||
+      anyCutinHold() ||
       // watermark 未確立(lastPlayed=null)では譲らない — 直後の watermark 初期化が
       // 全件を「再生済み」に倒すので、譲った先は誰も再生しない。鮮度は playEffect と
       // 同じ isChallengeEffectFresh(test 演出は 15 秒)— 生の 5000 を置くと、
@@ -791,6 +917,34 @@ export function MonitorView(): React.JSX.Element {
         queueStrike(likeDelta, stockDelta);
       }
       return;
+    }
+
+    /*
+     * ±N 浮上バナーが出ている(または消え際の間合い中)なら、いいねゲージ/ストックの
+     * 着弾チェーンは始めない — 「バナーが消えてから演出」の対象。ここに来た時点で
+     * カットインもチェーンも居ない(上の2つで return 済み)ので、塞いでいるのは
+     * バナーだけ。
+     *
+     * **数字は「まだ見せていないぶん」を引いた値で据え置く。** 素通しすると、いったん
+     * worker 値まで進んでから、演出の開始時にその増減ぶんだけ**巻き戻って**見える
+     * (実機ハーネスで実測: 1050 → 1030 → 1050)。ルーレットではさらに悪く、リールが
+     * 回る前に数字が答えを出す(出目の先漏れ)。
+     * 据え置きは delta のたびに張り直すので、待っている間の押下(値の変化)は
+     * そのまま反映され、パンチも出る。持ち主は「舞台待ちの持ち越し」— 解除は
+     * 各 start* の張り直しか flushStrike(null 代入)で、舞台が空けば次の delta が
+     * 必ず flushStrike を通るので、従来どおり必ず worker 値へ収束する。
+     */
+    if (stageBusy()) {
+      if ((likeDelta > 0 || stockDelta > 0) && challenge.status === 'running') {
+        queueStrike(likeDelta, stockDelta);
+      }
+      if (applyStageHold()) {
+        if (prevV !== challenge.value) {
+          setPunchDir(challenge.value < prevV ? 'down' : 'up');
+          setPunchKey((k) => k + 1);
+        }
+        return;
+      }
     }
 
     const canStrike =
@@ -833,6 +987,7 @@ export function MonitorView(): React.JSX.Element {
       clearRepeatTimers();
       clearMiniTimers();
       clearFloatTimers();
+      clearBannerTimer();
       if (gaugeTickRaf.current !== 0) cancelAnimationFrame(gaugeTickRaf.current);
       clearClipTimer();
       clearStrikeClipTimer();
@@ -856,6 +1011,11 @@ export function MonitorView(): React.JSX.Element {
       // 着弾待ちのバナーも捨てる — 停止/リセット後に古い通知を出さない。
       pendingLikeFloats.current = null;
       pendingStockFloats.current = null;
+      // 舞台の順番待ちとドレイン予約も同じ理由で捨てる。**bannerEndAt は戻さない** —
+      // 表示中のバナーは自分のアニメで消えるので、ラッチも自然に切れるのが正しい。
+      clearBannerTimer();
+      bannerQueue.current = [];
+      pendingDrain.current = null;
       // 再生中のギフトクリップ・着弾クリップ・簡易演出・フラッシュも片付ける —
       // clipQueue だけ空にして再生中の1本を残すのは非対称だった(リセット直後に
       // 前ランの演出が流れ続ける)。floats は自アニメ終了で消えるので触らない。
@@ -913,6 +1073,8 @@ export function MonitorView(): React.JSX.Element {
     volume: cfg?.challenge.seVolume ?? 70,
     sounds: cfg?.challenge.seSounds,
     volumes: cfg?.challenge.seVolumes,
+    // 舞台の直列化中はバナー/リールの実際の再生点で鳴らす(到着時だと先走る)。
+    stageSynced: true,
     mountPlaysTest: true,
   });
 
@@ -939,16 +1101,132 @@ export function MonitorView(): React.JSX.Element {
     }
     lastPlayed.current = next;
     for (const e of play) playEffect(e);
+    // 【最後の砦】遮蔽ウィンドウでは setTimeout が 1Hz 以下に絞られ、舞台を進める
+    // 予約タイマーが実質失われる。worker の delta が届く限りここで回復するので、
+    // 固着は「永久」ではなく「最大 500ms の遅れ」に落ちる。
+    pumpStage();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [challenge?.recentEffects, cfgTried]);
 
-  function pushFloat(node: React.ReactNode, cls: string): void {
+  // ── 舞台(stage)の排他 ────────────────────────────────────────────────
+  // 判定は shared/fx-stage.ts の純関数、状態は bannerEndAt / bannerQueue /
+  // pendingDrain の3本だけ。ここから下の述語は**すべて ref を同期に読む** —
+  // fxHoldBusy(state 由来)とは役割が違う(あちらは再レンダーの引き金)。
+
+  /** 不透明フルフレームが被さっている(この下に描いても見えない)。 */
+  function opaqueCutinActive(): boolean {
+    return bandHold.current || stockCutinHold.current || boostHold.current;
+  }
+  /** カットイン(= 据え置きの持ち主)が居る。 */
+  function anyCutinHold(): boolean {
+    return rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current;
+  }
+  /** 着弾チェーンが飛行中。 */
+  function chainActive(): boolean {
+    return strikeTimers.current.length > 0;
+  }
+  /**
+   * 演出(ルーレット / 帯域・全面カット / 着弾チェーン / ストック / ブースト)を
+   * 今すぐ始めてよいか。**±N 浮上バナーが出ている間と、消えた直後の間合い中は false** —
+   * これが「バナーが消えてから演出」の本体。
+   *
+   * 着弾チェーンは含めない — カットインがチェーンを横取りする既存規約
+   * (start* 冒頭の flushStrike(true))を壊さないため。
+   */
+  function stageBusy(): boolean {
+    // 読み取り側もクランプを通す — 時計の後方ステップでラッチが未来に固着すると
+    // ここが true を返し続け、演出が全死する。current への書き込みは pumpStage の
+    // 1箇所だけに保つ(こちらは読み取り専用のクランプ)。
+    const now = Date.now();
+    return anyCutinHold() || stageWaitMs(clampBannerEndAt(bannerEndAt.current, now), now, 'cutin') > 0;
+  }
+  /**
+   * 舞台待ちの演出が「まだ見せていない」増減量の合計。worker は値を即時適用するので、
+   * これを差し引かずに表示すると **結果が先漏れする** — ルーレットなら出目が回る前に
+   * 数字が答えを出し、開始時に巻き戻って見える(実機ハーネスで実測)。
+   * 符号はそのまま合算して `value - withheld` を据え置く(減算ギフトは held > value)。
+   */
+  function pendingStageAmount(): number {
+    const p = pendingStrike.current;
+    let n = p ? p.like + p.stock : 0;
+    for (const e of rouletteQueue.current) {
+      const plan = rouletteReelPlan(e);
+      n += plan.reels.reduce((sum, d) => sum + d.amount, 0) + plan.restAmount;
+    }
+    for (const e of pendingBands.current) n += e.amount;
+    return n;
+  }
+
+  /**
+   * 舞台待ちの持ち越しぶんを差し引いて数字を据え置く。**2箇所から呼ぶ必要がある** —
+   * 持ち越しを積むのは playEffect だが、値を反映する値変化 effect はそれより先に
+   * 走るので、値変化 effect だけでは同じ delta の中で結果が1フレーム漏れる。
+   * もう一方は pumpStage(= playEffect の直後に必ず通る)。
+   * 同一フラッシュ内の setState は React が畳むので、見た目の往復は起きない。
+   */
+  function applyStageHold(): boolean {
+    if (anyCutinHold() || chainActive()) return false; // 据え置きの持ち主が別に居る
+    if (stageWaitMs(bannerEndAt.current, Date.now(), 'cutin') === 0) return false;
+    const withheld = pendingStageAmount();
+    const v = prevValue.current;
+    if (withheld === 0 || v === null) return false;
+    setHeldValue(Math.max(0, v - withheld));
+    return true;
+  }
+
+  /** 持ち主が居なくなった据え置きを解く(worker 値へ収束させる唯一の後始末)。 */
+  function releaseOrphanHold(): void {
+    if (anyCutinHold() || chainActive()) return;
+    setHeldValue((h) => (h === null ? h : null));
+  }
+
+  /** ドレインすべき持ち越しがあるか(pumpStage が drain を選ぶ条件)。 */
+  function stageQueuesPending(): boolean {
+    return (
+      pendingAchieved.current !== null ||
+      pendingBoosts.current.length > 0 ||
+      pendingBands.current.length > 0 ||
+      rouletteQueue.current.length > 0 ||
+      pendingStrike.current !== null
+    );
+  }
+  function clearBannerTimer(): void {
+    if (bannerTimer.current !== null) window.clearTimeout(bannerTimer.current);
+    bannerTimer.current = null;
+  }
+  function armBannerTimer(ms: number): void {
+    clearBannerTimer();
+    bannerTimer.current = window.setTimeout(() => {
+      bannerTimer.current = null;
+      pumpStage();
+    }, Math.max(0, ms));
+  }
+  /**
+   * 演出と同時に鳴らす効果音(到着時に鳴らすと順番待ちのぶんズレるスロット)。
+   * cfg は ref 経由で読む — バナータイマー越しに呼ばれるので、state 直読みだと
+   * タイマーを張った時点の音量・有効設定で鳴ってしまう。
+   */
+  function playSeSlot(slot: ChallengeSeSlot): void {
+    const c = cfgRef.current;
+    if (!c?.challenge.seEnabled) return;
+    playSe(
+      c.challenge.seSounds[slot],
+      effectiveSeVolume(c.challenge.seVolume, c.challenge.seVolumes[slot])
+    );
+  }
+
+  /** バナーを実際に舞台へ出す。ラッチを伸ばし、随伴演出と効果音を撃ち、次の番を予約する。 */
+  function showBannerNow(b: QueuedBanner): void {
     // key は updater の**外**で採番する — StrictMode は updater を二重実行するので、
     // 中で ++fxKey すると下のタイマーが存在しない key を掴む。
     const key = ++fxKey;
-    setFloats((f) => [...f.slice(-(FLOAT_MAX - 1)), { key, node, cls }]);
-    // 安全弁: floats だけ安全弁を持っていなかった。遮蔽ウィンドウで animationend が
-    // 届かないとバナーが固着し、FLOAT_MAX=3 の枠を食って以後のバナーが出なくなる。
+    // **常に1枚へ置き換える**。積むと `.floats` の column flex がそのまま縦2〜3段に
+    // なる(ユーザーの言う「2列」)。順番待ちは bannerQueue が持つので取りこぼさない。
+    setFloats([{ key, node: b.node, cls: b.cls }]);
+    bannerEndAt.current = bannerEndAtFor(bannerEndAt.current, Date.now(), b.cls);
+    if (b.se !== null) playSeSlot(b.se);
+    b.onShow?.();
+    // 安全弁: 遮蔽ウィンドウで animationend が届かないとバナーが固着する。
     // playMini と同じ自己削除方式 — 配列は FLOAT_ABORT_MS 窓で自然に有界。
     const tid = window.setTimeout(() => {
       const a = floatTimers.current;
@@ -957,7 +1235,127 @@ export function MonitorView(): React.JSX.Element {
       setFloats((s2) => s2.filter((x) => x.key !== key));
     }, FLOAT_ABORT_MS);
     floatTimers.current.push(tid);
+    // 消えた瞬間に次を出すための予約。ラッチが権威なので、このタイマーが遮蔽で
+    // 失われても次の pumpStage(delta 到着・ウォッチドッグ)で自然に回復する。
+    armBannerTimer(stageWaitMs(bannerEndAt.current, Date.now(), 'banner'));
   }
+
+  /**
+   * ±N 浮上バナーの唯一の入口。舞台が空いていればその場で出し、塞がっていれば
+   * 順番待ちへ積む(1件も捨てない・尺は常に一定 = ユーザー決定)。
+   * 呼び出し側13箇所は原則そのまま — 下の2つだけ immediate を渡す。
+   *
+   * @param opts.immediate 順番待ちを飛ばして即座に出す。**演出そのもののビートに
+   *   同期していなければならないバナー専用**:
+   *   (a) ルーレットの確定バナー。コンボ中は rouletteHold が張られたままなので、
+   *       積むとチェーンが全部終わるまで1枚も出ず、額とリールの対応が読めなくなる。
+   *   (b) 着弾チェーンの通知(flushPendingFloat)。飛行中に積むとパンチ・粒子・SE から
+   *       切り離され、「アニメーション → 通知」の規約(fx-floats.ts)が逆向きに壊れる。
+   * @param opts.se 表示と同時に鳴らす効果音スロット。
+   */
+  function pushFloat(
+    node: React.ReactNode,
+    cls: string,
+    opts?: { immediate?: boolean; se?: ChallengeSeSlot; onShow?: () => void }
+  ): void {
+    const now = Date.now();
+    const item: QueuedBanner = {
+      node,
+      cls,
+      se: opts?.se ?? null,
+      onShow: opts?.onShow,
+      atMs: now,
+    };
+    const free =
+      bannerQueue.current.length === 0 &&
+      !anyCutinHold() &&
+      !chainActive() &&
+      stageWaitMs(bannerEndAt.current, now, 'banner') === 0;
+    if (opts?.immediate === true || free) {
+      showBannerNow(item);
+      return;
+    }
+    const { dropped } = enqueueBanner(bannerQueue.current, item, BANNER_QUEUE_MAX);
+    if (dropped > 0) {
+      fxWarn(`バナーの順番待ちが上限(${BANNER_QUEUE_MAX}件)— 最古を${dropped}件破棄`);
+    } else if (bannerQueue.current.length >= 8) {
+      fxWarn(`バナーの順番待ちが渋滞(${bannerQueue.current.length}件)`);
+    }
+    pumpStage();
+  }
+
+  /**
+   * 舞台を1歩進める唯一の合流点。「次に何を出すか」を決めるのはここだけ。
+   * 呼ばれるのは: バナー投入 / バナー消滅(タイマー・animationend)/ finish* の
+   * ドレイン予約 / 全カットイン終了のウォッチドッグ / delta 到着(2Hz の最後の砦)。
+   */
+  function pumpStage(): void {
+    // runDrain → start* → … から同期で戻ってくる経路があるので再入を止める。
+    if (pumping.current) return;
+    pumping.current = true;
+    try {
+      clearBannerTimer();
+      // 時計の後方ステップ(NTP/スリープ復帰)でラッチが未来に固着すると舞台が
+      // 全死する — 不変条件の上限まで引き戻す。pumpStage は舞台を進める唯一の
+      // 合流点で 2Hz の delta 到着からも呼ばれるので、ここ1箇所の書き込みで
+      // 最大 2.2s+間合いで自然回復する(fx-stage.ts の clampBannerEndAt 参照)。
+      bannerEndAt.current = clampBannerEndAt(bannerEndAt.current, Date.now());
+      // カットイン中は何もしない — その finish* が必ず scheduleDrain で戻ってくる。
+      if (anyCutinHold()) return;
+      // 直前に playEffect が積んだ持ち越しぶんを数字から差し引く(結果の先漏れ防止)。
+      applyStageHold();
+      const now = Date.now();
+      const q = bannerQueue.current;
+      const pick = pickStageNext({
+        hasDrain: pendingDrain.current !== null || stageQueuesPending(),
+        queuedCount: q.length,
+        oldestQueuedAtMs: q.length > 0 ? q[0]!.atMs : null,
+        nowMs: now,
+      });
+      if (pick === 'idle') {
+        // 待っている演出がもう無い = 舞台待ちの据え置きも役目を終えた。
+        releaseOrphanHold();
+        return;
+      }
+      // 間合い(前のバナーが消えるまで + 息継ぎ)。時刻ラッチなので必ず切れる。
+      const wait = stageWaitMs(bannerEndAt.current, now, pick === 'drain' ? 'cutin' : 'banner');
+      if (wait > 0) return armBannerTimer(wait);
+      if (pick === 'drain') {
+        const d = pendingDrain.current;
+        // **runDrain より前に必ず落とす** — 再入で同じドレインを二度走らせない。
+        pendingDrain.current = null;
+        if (runDrain(d?.order ?? 'standard', d?.hooks)) {
+          // カットインが始まったならその finish* が scheduleDrain で戻ってくる。
+          // 着弾チェーンだけが立った場合は誰も戻さないので、順番待ちがあるときは
+          // 自分で再確認を予約する(2Hz の最後の砦より早く復帰させる)。
+          if (q.length > 0 && !anyCutinHold()) armBannerTimer(STAGE_RECHECK_MS);
+          return;
+        }
+        // 何も始まらなかった(全部断られた等)。据え置きの持ち主が居なくなるので解く。
+        releaseOrphanHold();
+        // そのままバナーへ落ちる。
+      }
+      // 飛行中の着弾チェーンは自分の通知(flushPendingFloat)を出し切るまで待つ。
+      // チェーンの終端は必ずしも pumpStage を呼ばないので、ここだけ再確認を張る。
+      if (chainActive()) return armBannerTimer(STAGE_RECHECK_MS);
+      const b = q.shift();
+      if (b) showBannerNow(b);
+    } finally {
+      pumping.current = false;
+    }
+  }
+
+  /**
+   * finish*(リール / カットイン / ブースト / ストック)からのドレイン予約。
+   * 直前に出した ±N バナーが消えるまで待ってから runDrain する — これが
+   * 「±N 浮上バナーが消えたら演出を発生させる」の本体。
+   * 予約が重なったら後勝ち(演出は同時に1つなので実際には重ならない)。
+   */
+  function scheduleDrain(order: FxDrainOrder, hooks?: DrainHooks): void {
+    pendingDrain.current = { order, hooks };
+    pumpStage();
+  }
+
   function clearFloatTimers(): void {
     for (const t of floatTimers.current) window.clearTimeout(t);
     floatTimers.current = [];
@@ -1086,8 +1484,10 @@ export function MonitorView(): React.JSX.Element {
       fxWarn('未知の簡易演出 id — スキップ', id);
       return;
     }
-    const stageW = landscape ? STAGE_LW : STAGE_W;
-    const stageH = landscape ? STAGE_LH : STAGE_H;
+    // タイマー越しに呼ばれるので ref 経由で読む(playSeSlot と同じ理由 —
+    // 窓の回転直後に古い向きの座標で出さない)。
+    const stageW = landscapeRef.current ? STAGE_LW : STAGE_W;
+    const stageH = landscapeRef.current ? STAGE_LH : STAGE_H;
     const d = fxRef.current?.pointFor(countdownRef.current?.querySelector('.seg-digit') ?? null);
     const c = fxRef.current?.pointFor(countdownRef.current);
     // エンジン未接続 / 測れないときは、縦横それぞれのだいたいの数字位置へ退避。
@@ -1147,7 +1547,9 @@ export function MonitorView(): React.JSX.Element {
     const p = ref.current;
     if (p === null) return;
     ref.current = null;
-    pushFloat(render(p.amount), 'bad like-float');
+    // 着弾の瞬間に出すのが仕様(「アニメーション → 通知」)。順番待ちへ積むと
+    // パンチ・粒子・SE から切り離されて規約が逆向きに壊れる。
+    pushFloat(render(p.amount), 'bad like-float', { immediate: true });
   }
 
   /**
@@ -1275,10 +1677,7 @@ export function MonitorView(): React.JSX.Element {
    * achieved(CLEAR)は「再生」— 開始スロットを消費せず次演出と並走する。
    * hooks はルーレット BGM の後始末(finishRoulette だけが使う)。
    */
-  function runDrain(
-    order: FxDrainOrder,
-    hooks?: { onNext?: (kind: 'roulette' | 'boost' | 'band') => void; onIdle?: () => void }
-  ): void {
+  function runDrain(order: FxDrainOrder, hooks?: DrainHooks): boolean {
     const queues = {
       achieved: pendingAchieved.current,
       boosts: pendingBoosts.current,
@@ -1290,10 +1689,15 @@ export function MonitorView(): React.JSX.Element {
       playAchieved: (e) => playEffect(e),
       start: (kind, e) => {
         if (kind === 'roulette') {
-          // startRoulette は戻り値を持たず、必ず rouletteHold を張る = 断れない。
+          // 断るのは「盤面が無くて回す出目が1本も無い」ときだけ(playEffect の
+          // rouletteWillSpin で弾いているので通常は来ない)。断る相手のために
+          // onNext(ルーレット BGM の即断)を撃たないよう、判定を先に済ませる。
+          if (rouletteReelPlan(e).reels.length === 0) {
+            fxWarn('ドレイン: ルーレットを開始できない — 次の持ち越しへ');
+            return false;
+          }
           hooks?.onNext?.('roulette');
-          startRoulette(e, true);
-          return true;
+          return startRoulette(e, true);
         }
         if (kind === 'band') {
           // 断る条件は startBandFx の入口ガードと同じ述語を先に見る — 断る相手の
@@ -1335,11 +1739,13 @@ export function MonitorView(): React.JSX.Element {
         return startBoostFx(e, plan);
       },
     });
-    if (r.started) return;
+    if (r.started) return true;
     hooks?.onIdle?.();
     // 次演出を始めないパスの最後だけ — start* の冒頭 flushStrike に出したばかりの
     // チェーンを畳ませない(従来の finish* 各所にあった規約)。
     drainPendingStrike();
+    // 着弾チェーンが立ったなら舞台は埋まった(バナーはその着弾通知を待つ)。
+    return chainActive();
   }
 
   function clearRouletteTimers() {
@@ -1359,8 +1765,24 @@ export function MonitorView(): React.JSX.Element {
     rouletteBgm.current = null;
   }
 
-  /** ルーレットを開始し、リールが止まるまで数字を出目適用前の値で据え置く。 */
-  function startRoulette(e: ChallengeEffect, fast: boolean) {
+  /**
+   * ルーレットを開始し、リールが止まるまで数字を出目適用前の値で据え置く。
+   *
+   * at = この effect の何本目か。連打ギフト(バラ等)は1 effect が N 本の出目を
+   * 持つので、finishRoulette が at+1 で自分を呼び直して同じ effect の中を進む。
+   * 2本目以降は必ず短縮スピン — 同一人物の連打なので間合いも入れない
+   * (別ギフトへ移るときだけ ROULETTE_CHAIN_GAP_MS を挟む)。
+   */
+  function startRoulette(e: ChallengeEffect, fast: boolean, at = 0): boolean {
+    const plan = rouletteReelPlan(e);
+    const draw = plan.reels[at];
+    if (!draw) {
+      // 盤面欠損などで回すものが無い。**false を返して呼び出し側に断る** —
+      // hold を張らないまま true を返すと runFxDrain が「始まった」と誤認し、
+      // 誰も演出していないのに保留着弾(pendingStrike)が宙に浮く。
+      fxWarn('ルーレットのリール開始不可 — 回す出目が無い', { at, reels: plan.reels.length });
+      return false;
+    }
     // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。handoff=true —
     // 直後にこの演出が始まるので、保留バナーは出さずに持ち越す(演出明けの着弾で出る)。
     flushStrike(true);
@@ -1375,19 +1797,34 @@ export function MonitorView(): React.JSX.Element {
     if (rouletteSpinSe.current === null) {
       rouletteSpinSe.current = playBandBgm(snd?.spinSe, snd?.spinSeVolume ?? 0);
     }
-    // 据え置き値は worker が確定させた valueAfter から出目を戻した「適用前」。
+    // 回転開始のジングルは**ギフト1件につき1回**(連打で N 本のリールでも1回)。
+    // useChallengeSe は stageSynced のとき鳴らさないので、ここが唯一の再生点。
+    if (at === 0) playSeSlot('roulette');
+    // 据え置き値は worker が確定させた valueAfter から**まだ見せていない出目**を
+    // 戻した「このリールの適用前」。連打では1本止まるごとに数字が段階的に動く。
     // renderer での再計算はこの1箇所だけ — 表示上の演出のためで、解除後は必ず
-    // worker の権威ある値に収束する。
-    setHeldValue(Math.max(0, e.valueAfter - e.amount));
+    // worker の権威ある値に収束する(回さない rest ぶんも valueAfter に入っている
+    // ので、最後のリールが止まれば残りごと正しい値になる)。
+    // 原点は e.valueAfter ではなく prevValue(= 適用済みの現在値)。バナー待ちや
+    // 持ち越しで遅れて始まると valueAfter は古く、据え置きが過去へ巻き戻る。
+    const notYetShown = plan.reels.slice(at).reduce((s, d) => s + d.amount, 0) + plan.restAmount;
+    setHeldValue(Math.max(0, (prevValue.current ?? e.valueAfter) - notYetShown));
     // spin は開始時に確定して state にも焼き込む。onDone で ref を読み直すと
     // 「呼ばれた時点の世代」と常に一致してしまい、世代チェックが素通りする。
     const spin = ++rouletteSpinId.current;
-    setRoulette({ key: ++fxKey, effect: e, fast, spin });
+    setRoulette({ key: ++fxKey, effect: e, fast: fast || at > 0, spin, at, draw });
     // 安全弁: バックグラウンドで onAnimationEnd が来なくても必ず解除して収束させる。
     // 尺は fast で変わるので rouletteAbortMs に一本化する(片方だけ見て調整すると
-    // もう片方が必ず壊れる)。
+    // もう片方が必ず壊れる)。連鎖の間合いぶんも足す — 間合い中は hold を張った
+    // ままなので、間合いのタイマーが失われると据え置きが固着する。
     clearRouletteTimers();
-    rouletteTimers.current.push(window.setTimeout(() => finishRoulette(e, spin), rouletteAbortMs(fast)));
+    rouletteTimers.current.push(
+      window.setTimeout(
+        () => finishRoulette(e, spin, at),
+        rouletteAbortMs(fast || at > 0) + ROULETTE_CHAIN_GAP_MS
+      )
+    );
+    return true;
   }
 
   /**
@@ -1403,7 +1840,10 @@ export function MonitorView(): React.JSX.Element {
     }
   }
 
-  /** キック(パターン3のフェイク停止からの一撃)。衝撃音と画面の揺れを足す。 */
+  /**
+   * キック級の衝撃(キックの一撃・巻き戻し・再点火・暗転)。衝撃音と画面の揺れを
+   * 足す。doublefake は1スピンで2回来る — playSe も pushShake も冪等なので素通し。
+   */
   function kickRoulette() {
     if (cfg?.challenge.seEnabled) {
       playSe(
@@ -1414,25 +1854,46 @@ export function MonitorView(): React.JSX.Element {
     pushShake('shake');
   }
 
+  /**
+   * 段・ホップ・微停止への到達の「コツン」。'roulette-near' の音を弱く(×0.55)
+   * 使い回す — 専用素材を足すと se-catalog(実ファイル突合)と設定UIのスロットが
+   * 1個ずつ増えるが、段の音は near と同族なので流用で十分。揺れは足さない。
+   */
+  function stepRoulette() {
+    if (cfg?.challenge.seEnabled) {
+      playSe(
+        cfg.challenge.seSounds['roulette-near'],
+        effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['roulette-near']) * 0.55
+      );
+    }
+  }
+
   /** リール停止(または安全弁)— ここで初めて数字が動いて見える。 */
-  function finishRoulette(e: ChallengeEffect, spin: number) {
+  function finishRoulette(e: ChallengeEffect, spin: number, at = 0) {
     // 二重発火の遮断。素通りさせると (a) 確定音とバナーが2回、(b) キューが1本
     // 余計に消え、(c) 次のスピン開始後に走ると新しいリールを消してしまう。
     // finishBandFx と同じ自衛を、世代の一致判定つきで行う。
     if (!rouletteHold.current || spin !== rouletteSpinId.current) return;
     clearRouletteTimers();
-    rouletteHold.current = false;
+    const plan = rouletteReelPlan(e);
+    // このリール1本ぶんの増減(effect 全体の合計ではない — 連打では別物)。
+    const amount = plan.reels[at]?.amount ?? e.amount;
+    // 同じ effect にまだリールが残っていれば、据え置きは次のスピンへ引き継ぐ。
+    const more = at + 1 < plan.reels.length;
+    if (!more) {
+      rouletteHold.current = false;
+      setHeldValue(null);
+    }
     setRoulette(null);
-    setHeldValue(null);
-    setPunchDir(e.amount < 0 ? 'down' : 'up');
+    setPunchDir(amount < 0 ? 'down' : 'up');
     setPunchKey((k) => k + 1);
-    const big = Math.abs(e.amount) >= 1000;
+    const big = Math.abs(amount) >= 1000;
     pushShake(big ? 'shake-strong' : 'shake');
 
     const fx = fxRef.current;
     const r = fx?.pointFor(countdownRef.current);
     if (fx && r) {
-      const hue = e.amount < 0 ? 140 : 0;
+      const hue = amount < 0 ? 140 : 0;
       fx.ringWave(r.x, r.y, { hue, radius: Math.max(r.w, r.h) * 0.62 });
       fx.sparkBurst(r.x, r.y, big ? 48 : 26, { hue, speed: big ? 680 : 560 });
       if (big) {
@@ -1446,13 +1907,45 @@ export function MonitorView(): React.JSX.Element {
         effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['roulette-hit'])
       );
     }
-    pushFloat(rouletteBanner(e), `${e.amount < 0 ? 'good' : 'bad'} banner-roulette`);
+    // 確定バナーはリールが止まった瞬間の額そのものなので**順番待ちを飛ばす** —
+    // コンボ中は rouletteHold が張られたままで、積むとチェーン終了まで1枚も出ず、
+    // どのリールの額なのか読めなくなる。1枚に置き換わるので「2列」にはならない。
+    pushFloat(rouletteBanner(e, amount), `${amount < 0 ? 'good' : 'bad'} banner-roulette`, {
+      immediate: true,
+    });
+
+    if (more) {
+      // 同一ギフトのコンボ内。**間合いを入れない** — 同じ人の連打なので誰の分かを
+      // 読み直す必要がなく、17連打が間合いぶん更に伸びるだけになる。hold は
+      // 張ったまま次のリールへ渡す(値の据え置きの持ち主を切らさない)。
+      if (startRoulette(e, true, at + 1)) return;
+      // 断られた(到達しないはず — more は次のリールの存在から計算している)。
+      // hold を張ったまま抜けると据え置きが固着するので、必ず解いてドレインへ落とす。
+      rouletteHold.current = false;
+      setHeldValue(null);
+    }
+    // 尺の都合で回さなかったぶんは合算バナーで締める(値は適用済み)。
+    if (plan.restCount > 0) {
+      pushFloat(
+        rouletteRestBanner(e, plan.restAmount, plan.restCount),
+        `${plan.restAmount < 0 ? 'good' : 'bad'} banner-roulette`
+      );
+    }
 
     // 持ち越しのドレイン(達成 → 短縮スピン連鎖 → ブースト → カットイン → 着弾。
-    // 順序は shared/fx-drain.ts の 'roulette-first' が権威)。BGM は次が短縮スピン
-    // なら鳴りっぱなし、ブースト/カットインなら即断(bandBgm と重ねない)、
-    // 何も始めないなら 400ms フェード(バンドBGMの終端と同じ尺)。
-    runDrain('roulette-first', {
+    // 順序は shared/fx-drain.ts の 'roulette-first' が権威)。実行は確定バナーが
+    // 消えてから — 間合いは scheduleDrain / bannerEndAt が一手に引き受けるので、
+    // かつてここにあった自前の ROULETTE_CHAIN_GAP_MS の待ちは持たない
+    // (待ちはバナー尺 1.6s + 間合い 0.5s = 2.1s で、旧 600ms より必ず長い)。
+    //
+    // **BGM の即断だけは間合いの前に済ませる** — 音のタイミングを従来と 1:1 に保つ。
+    // 次が短縮スピンなら鳴りっぱなし、ブースト/カットインなら即断(bandBgm と
+    // 重ねない)、何も始めないなら 400ms フェード(バンドBGMの終端と同じ尺)。
+    if (rouletteQueue.current.length === 0) {
+      const cutinNext = pendingBoosts.current.length > 0 || pendingBands.current.length > 0;
+      stopRouletteSound(cutinNext ? 0 : 400);
+    }
+    scheduleDrain('roulette-first', {
       onNext: (kind) => {
         if (kind !== 'roulette') stopRouletteSound(0);
       },
@@ -1520,7 +2013,9 @@ export function MonitorView(): React.JSX.Element {
     bandHold.current = true;
     bandEffect.current = e;
     // 据え置き値は startRoulette と同じ「worker 確定の valueAfter から適用前へ戻す」。
-    setHeldValue(Math.max(0, e.valueAfter - e.amount));
+    // 原点は prevValue(= 適用済みの現在値)。pendingBands / バナー待ちで遅れて
+    // 始まると e.valueAfter は古く、カットイン開始で数字が過去へ飛ぶ。
+    setHeldValue(Math.max(0, (prevValue.current ?? e.valueAfter) - e.amount));
     setBandClip({ key: ++fxKey, url, durationMs, out: false, fullCut: e.fxFullCut === true });
     // BGM。曲 id は effect が権威(worker が bgmEnabled/'off' を判定済み)、
     // 音量だけ cfg から読む(roulette-hit 等と同じ 120 秒ポーリング(CFG_POLL_MS)許容)。
@@ -1582,7 +2077,7 @@ export function MonitorView(): React.JSX.Element {
     // カットイン中に届いた持ち越しのドレイン(達成 → ブースト → カットイン →
     // スピン → 着弾。順序は shared/fx-drain.ts の 'standard' が権威)。
     // bandHold はすでに false なので次のカットインへ再入して問題ない。
-    runDrain('standard');
+    scheduleDrain('standard');
   }
 
   /** reset/stop 用の全破棄。据え置きもタイマーもBGMも捨てて worker 値へ戻す。 */
@@ -1643,7 +2138,7 @@ export function MonitorView(): React.JSX.Element {
     boostTestTapRef.current = 0;
     // テスト再生は据え置かない(testEffect は値を変えない契約 — 実タップで値が
     // 動いたときに表示が固まって見えるのを避ける)。
-    if (!e.test) setHeldValue(Math.max(0, e.valueAfter - e.amount));
+    if (!e.test) setHeldValue(Math.max(0, (prevValue.current ?? e.valueAfter) - e.amount));
     if (e.flash) pushFlash('gift-t3');
     const push = (ms: number, fn: () => void) => {
       boostTimers.current.push(window.setTimeout(fn, ms));
@@ -1757,7 +2252,7 @@ export function MonitorView(): React.JSX.Element {
           setHeldValue(null); // ここで初めて数字が一括減算後の値へ動く
           impactBoostVisuals(e);
           // ブースト中に届いた演出の持ち越しをドレインする(finishBandFx と同順)。
-          runDrain('standard');
+          scheduleDrain('standard');
         }, travel)
       );
       return;
@@ -1836,7 +2331,7 @@ export function MonitorView(): React.JSX.Element {
         setHeldValue(null); // ここで初めて数字が一括減算後の値へ動く
         impactBoostVisuals(e);
         // ブースト中に届いた演出の持ち越しをドレインする(finishBandFx と同順)。
-        runDrain('standard');
+        scheduleDrain('standard');
       });
     });
   }
@@ -1925,7 +2420,7 @@ export function MonitorView(): React.JSX.Element {
     setBoostClip(null);
     setBoostSettle(null);
     setHeldValue(null);
-    runDrain('standard');
+    scheduleDrain('standard');
   }
 
   /**
@@ -2145,7 +2640,7 @@ export function MonitorView(): React.JSX.Element {
     setStockCutin(null); // unmount = 焼き込み音声も止まる
     revealStock(delta);
     // カットイン中に届いた演出の持ち越しをドレインする(finishBandFx と同順)。
-    runDrain('standard');
+    scheduleDrain('standard');
   }
 
   /** ストック分の reveal — 据え置き全解除+着弾演出(パンチ/シェイク/粒子/SE)。 */
@@ -2221,7 +2716,7 @@ export function MonitorView(): React.JSX.Element {
     // カットイン再生中の反復(shot > 0)は撃たない — 反復は startBandFx が映像・BGM・
     // bandBlast の直列再生で面倒を見ており、ここ由来のフラッシュ/クリップ/粒子は
     // 不透明動画の前面に重なって「カットイン → 通知」の順序を壊すだけ。
-    if (shot > 0 && (bandHold.current || stockCutinHold.current || boostHold.current)) return;
+    if (shot > 0 && opaqueCutinActive()) return;
     // ダイヤ帯域カットイン。effect 側の fxBandClip が権威(worker が判定済み・
     // 凍結も開始済み)なので cfg は見ない — 120 秒ポーリング(CFG_POLL_MS)の古い設定に
     // 依存しない。開始できたら通常クリップ・簡易演出は出さない(全画面を
@@ -2233,12 +2728,14 @@ export function MonitorView(): React.JSX.Element {
     // 持ち越しキューへ積むと、解除時の startBandFx が false を返してそのギフトの
     // 演出が丸ごと消える。始まらないなら最初から通常クリップ経路へ落とす。
     if (shot === 0 && e.fxBandClip != null && bandWillStart(e)) {
-      if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
+      if (stageBusy()) {
         // bandHold を見ずに startBandFx を再入すると clearBandTimers が1本目の
         // finishBandFx を消し、据え置きが解けないまま数字が固まる。
         // 持ち越しキューが満杯なら banded は立てない — 立てると通常クリップも
         // 簡易演出も出ず、そのギフトの演出が丸ごと消える。
-        if (pendingBands.current.length < 2) {
+        // 上限 4: 連打ルーレットの連鎖(最長 ~32秒)の裏で溜まるぶんを飲めるだけ
+        // 確保する(2 のままだと長い連鎖のたびにカットインが落ちる)。
+        if (pendingBands.current.length < PENDING_BANDS_MAX) {
           pendingBands.current.push(e);
           banded = true;
         }
@@ -2279,40 +2776,81 @@ export function MonitorView(): React.JSX.Element {
    */
   function giftImpactVisuals(e: ChallengeEffect, shot: number): void {
     const tier = tierForDiamonds(e.diamonds ?? 0);
-    const fx = fxRef.current;
-    // 「照明」= 画面フラッシュ。flash 指定は「確実に見える t2 相当」を保証
-    // するだけで tier を偽らない(旧実装は小額 flash ギフトが t3 に化けた)。
-    pushFlash(`gift-t${Math.max(tier, e.flash ? 2 : 1)}`);
-    // shake は反復しない — .monitor-root の className に載せて data 属性だけ key で
-    // 変える作りなので、同じクラスの連続 shake は CSS アニメが再スタートせず1回しか
-    // 揺れない(直すには remove→reflow→add が要る。既知の制限)。
-    if (shot === 0 && tier >= 2) pushShake(tier >= 4 ? 'shake-strong' : 'shake');
+    // 照明と粒子は**バナーと同時**に撃つ(shot 0 は onShow 経由)。バナーが順番待ちに
+    // 回ったときにここで撃つと、光・揺れ・紙吹雪だけが先走って再生中の演出に重なる。
+    const lighting = (): void => {
+      // 「照明」= 画面フラッシュ。flash 指定は「確実に見える t2 相当」を保証
+      // するだけで tier を偽らない(旧実装は小額 flash ギフトが t3 に化けた)。
+      pushFlash(`gift-t${Math.max(tier, e.flash ? 2 : 1)}`);
+      // shake は反復しない — .monitor-root の className に載せて data 属性だけ key で
+      // 変える作りなので、同じクラスの連続 shake は CSS アニメが再スタートせず1回しか
+      // 揺れない(直すには remove→reflow→add が要る。既知の制限)。
+      if (shot === 0 && tier >= 2) pushShake(tier >= 4 ? 'shake-strong' : 'shake');
+    };
+    /** お助けの粒はコメント応援と同じ緑 — 「応援」の色をギフトの金と混ぜない。 */
+    const helperSparks = (): void => {
+      const o = fxOrigin();
+      fxRef.current?.sparkBurst(o.x, o.y, 14, { hue: 140, speed: 420 });
+    };
+    const tierSparks = (): void => {
+      const fx = fxRef.current;
+      if (!fx) return;
+      const o = fxOrigin();
+      // 反復は粒子を1段落として粒数も半減する — t4 は1発で紙吹雪 240 粒なので、
+      // 素で5連発するとエンジン(上限2000粒)が詰まって全体が重くなる。
+      const t = shot === 0 ? tier : Math.max(1, tier - 1);
+      const half = shot === 0 ? 1 : 0.5;
+      if (t >= 4) {
+        fx.rays(o.x, o.y, { count: 12, hue: 45 });
+        fx.fireworkVolley(o.x, o.y, { count: 3, hue: 45 });
+        fx.confettiRain(Math.round(240 * half), { gold: true });
+      } else if (t === 3) {
+        fx.rays(o.x, o.y, { count: 10, hue: 45 });
+        fx.sparkBurst(o.x, o.y, 40, { hue: 45, speed: 640 });
+        fx.confettiRain(Math.round(120 * half));
+      } else if (t === 2) {
+        fx.sparkBurst(o.x, o.y, 26, { hue: 45, speed: 540 });
+        fx.confettiRain(Math.round(40 * half));
+      } else {
+        fx.sparkBurst(o.x, o.y, 12, { hue: 45, speed: 420 });
+      }
+    };
     // お助け(ファンスタンプ)は専用バナー。ギフトカードも tier の金色粒子も出さない —
     // 1ダイヤ・高頻度で届くので両方出すと上限3枠(FLOAT_MAX)を食い潰し、フォロー/いいねの行が
     // 押し流される。判定は effect の焼き込み(cfg は 120 秒ポーリング(CFG_POLL_MS)で古くなりうる)。
     if (e.fanStamp) {
       if (shot === 0) {
+        // 文言の決定は shared/fan-stamp.ts が唯一の実装(レンダラにテスト環境が無いので
+        // 決定ロジックは shared の純関数へ出す規約)。ここは JSX を組むだけ。
         // 既定は減算(お助け)だが amountEach は正にもできる設定なので符号で言い換える。
-        const sign = e.amount > 0 ? `+${num(e.amount)}` : e.amount < 0 ? `${num(e.amount)}` : '±0';
-        const what = e.amount < 0 ? 'がお助け!' : e.amount > 0 ? 'が妨害!' : 'がファンスタンプ!';
+        const p = fanStampBannerParts(e);
+        const sign = p.amount > 0 ? `+${num(p.amount)}` : p.amount < 0 ? `${num(p.amount)}` : '±0';
         // 連打は amount へ畳み込み済み(worker 規約)。×N を出さないと
         // 「1個 −3 の設定なのに −30」が読めない。
-        const times = (e.giftCount ?? 1) > 1 ? ` ×${num(e.giftCount ?? 1)}` : '';
+        // 複数人ぶんの合算バナーでは出さない — 「ほかN人」と ×N が並ぶと桁が2つ出て
+        // 読み違える(総個数は −N の数字が語る)。
+        const times = !p.multi && p.giftCount > 1 ? ` ×${num(p.giftCount)}` : '';
+        // 名前は who 行、「ほかN人がお助け!」は act 行 — 行ごとに "…" が付くので、
+        // 長い名前でも動作("がお助け!")が消えない(nameLines の設計意図)。
+        const others = p.othersCount > 0 ? `ほか${num(p.othersCount)}人` : '';
         pushFloat(
           <>
             <span className="f-heart">💖</span>
             <span className="f-amt">{sign}</span>
-            <span className="f-txt">
-              <b>{e.nickname ?? ''}</b> {what}
-              {times}
-            </span>
+            {nameLines({ who: p.names.join('・'), act: `${others}${p.what}${times}` })}
           </>,
-          `banner-helper ${e.amount > 0 ? 'bad' : 'good'}`
+          `banner-helper ${p.multi ? 'multi ' : ''}${e.amount > 0 ? 'bad' : 'good'}`,
+          {
+            onShow: () => {
+              lighting();
+              helperSparks();
+            },
+          }
         );
+        return;
       }
-      // 粒はコメント応援と同じ緑 — 「応援」の色をギフトの金と混ぜない。
-      const o = fxOrigin();
-      fx?.sparkBurst(o.x, o.y, 14, { hue: 140, speed: 420 });
+      lighting();
+      helperSparks();
       return;
     }
     if (shot === 0) {
@@ -2340,30 +2878,18 @@ export function MonitorView(): React.JSX.Element {
           </span>
           <span className="gc-amt">{sign}</span>
         </>,
-        `gift-card t${tier} ${e.amount > 0 ? 'bad' : 'good'}`
+        `gift-card t${tier} ${e.amount > 0 ? 'bad' : 'good'}`,
+        {
+          onShow: () => {
+            lighting();
+            tierSparks();
+          },
+        }
       );
+      return;
     }
-    if (fx) {
-      const o = fxOrigin();
-      // 反復は粒子を1段落として粒数も半減する — t4 は1発で紙吹雪 240 粒なので、
-      // 素で5連発するとエンジン(上限2000粒)が詰まって全体が重くなる。
-      const t = shot === 0 ? tier : Math.max(1, tier - 1);
-      const half = shot === 0 ? 1 : 0.5;
-      if (t >= 4) {
-        fx.rays(o.x, o.y, { count: 12, hue: 45 });
-        fx.fireworkVolley(o.x, o.y, { count: 3, hue: 45 });
-        fx.confettiRain(Math.round(240 * half), { gold: true });
-      } else if (t === 3) {
-        fx.rays(o.x, o.y, { count: 10, hue: 45 });
-        fx.sparkBurst(o.x, o.y, 40, { hue: 45, speed: 640 });
-        fx.confettiRain(Math.round(120 * half));
-      } else if (t === 2) {
-        fx.sparkBurst(o.x, o.y, 26, { hue: 45, speed: 540 });
-        fx.confettiRain(Math.round(40 * half));
-      } else {
-        fx.sparkBurst(o.x, o.y, 12, { hue: 45, speed: 420 });
-      }
-    }
+    lighting();
+    tierSparks();
   }
 
   function playEffect(e: ChallengeEffect): void {
@@ -2377,23 +2903,30 @@ export function MonitorView(): React.JSX.Element {
         return;
       }
       case 'follow': {
-        pushFlash('follow');
-        pushShake('shake');
+        // フラッシュ・シェイク・粒子・簡易演出・効果音は**バナーと同時**に出す。
+        // 連続フォローではバナーが順番待ちに回るので、ここで撃つと光と揺れだけが
+        // 先走って再生中の演出に重なる(要望そのもの)。
         pushFloat(
           <>
             <span className="f-amt">+{num(e.amount)}</span>
-            <span className="f-txt">
-              <b>{e.nickname ?? ''}</b> がフォロー!
-            </span>
+            {nameLines({ who: e.nickname ?? '', act: 'がフォロー!' })}
           </>,
-          'bad banner-follow'
+          'bad banner-follow',
+          {
+            se: 'follow',
+            onShow: () => {
+              pushFlash('follow');
+              pushShake('shake');
+              const o = fxOrigin();
+              // バナーが 2 倍になったぶん、粒の数だけでなく大きさも上げる — 数だけ
+              // 増やすと 203px のバナーに対して 10〜30px の粒が砂粒に見えてしまう。
+              const g = fxRef.current;
+              g?.sparkBurst(o.x, o.y, 40, { hue: 0, speed: 700, size: 1.6 });
+              g?.heartBurst(o.x, o.y, 18, { hue: 0, size: 1.6 });
+              if (cfg) playMini(miniForSlot(cfg.challenge, 'follow'), e.amount);
+            },
+          }
         );
-        const o = fxOrigin();
-        // バナーが 2 倍になったぶん、粒の数だけでなく大きさも上げる — 数だけ
-        // 増やすと 203px のバナーに対して 10〜30px の粒が砂粒に見えてしまう。
-        fx?.sparkBurst(o.x, o.y, 40, { hue: 0, speed: 700, size: 1.6 });
-        fx?.heartBurst(o.x, o.y, 18, { hue: 0, size: 1.6 });
-        if (cfg) playMini(miniForSlot(cfg.challenge, 'follow'), e.amount);
         return;
       }
       case 'like': {
@@ -2431,15 +2964,21 @@ export function MonitorView(): React.JSX.Element {
         pushFloat(
           <>
             <span className="f-amt">+{num(e.amount)}</span>
-            <span className="f-txt">
-              <b>{e.nickname ?? ''}</b> が{e.commentKeyword ? `「${e.commentKeyword}」` : 'コメント'}!
-            </span>
+            {nameLines({
+              who: e.nickname ?? '',
+              act: `が${e.commentKeyword ? `「${e.commentKeyword}」` : 'コメント'}!`,
+            })}
           </>,
-          'bad'
+          'bad',
+          {
+            se: 'comment',
+            onShow: () => {
+              const o = fxOrigin();
+              fxRef.current?.sparkBurst(o.x, o.y, 14, { hue: 0, speed: 420 });
+              if (cfg) playMini(miniForSlot(cfg.challenge, 'comment'), e.amount);
+            },
+          }
         );
-        const o = fxOrigin();
-        fx?.sparkBurst(o.x, o.y, 14, { hue: 0, speed: 420 });
-        if (cfg) playMini(miniForSlot(cfg.challenge, 'comment'), e.amount);
         return;
       }
       case 'gauge-full': {
@@ -2550,9 +3089,25 @@ export function MonitorView(): React.JSX.Element {
         // カットイン据え置き中も積む。ここで走らせると、直後に finishBandFx が
         // setHeldValue(null) を実行して回転中に数字が最終値へ飛ぶ(= 出目が先漏れ)。
         // playGiftVisual の busy 判定と同じ形に揃える。
-        if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
-          // 再生中はキューへ。溢れた分は演出スキップ(数字は解除時に一括で合う)。
-          if (rouletteQueue.current.length < ROULETTE_QUEUE_MAX) rouletteQueue.current.push(e);
+        if (stageBusy()) {
+          // 再生中はキューへ。**溢れても捨てない** — 捨てると「値だけ動いてリールが
+          // 出ない」最悪の見え方になる(以前の挙動)。同じ盤面の末尾へ出目を連結して
+          // 1件ぶんの枠で全部回す(worker の finishDrain と同じ畳み方)。
+          if (rouletteQueue.current.length < ROULETTE_QUEUE_MAX) {
+            rouletteQueue.current.push(e);
+            return;
+          }
+          const tail = rouletteQueue.current[rouletteQueue.current.length - 1];
+          if (tail && sameRouletteBoard(tail, e)) {
+            rouletteQueue.current[rouletteQueue.current.length - 1] = mergeRoulette(tail, e);
+            return;
+          }
+          // 盤面違いで連結できない(出目 index の意味が変わる)。ここだけは諦めるが、
+          // 値が動いた事実はバナーで残す。
+          fxWarn('ルーレット: キュー満杯で盤面違い — バナーのみ出す', {
+            queued: rouletteQueue.current.length,
+          });
+          pushFloat(rouletteBanner(e), `${e.amount < 0 ? 'good' : 'bad'} banner-roulette`);
           return;
         }
         startRoulette(e, false);
@@ -2562,7 +3117,7 @@ export function MonitorView(): React.JSX.Element {
         // 他演出の再生中は持ち越す(pendingBands と同型・2件上限)。テストは
         // 持ち越さずスキップ — ▶ は今すぐ見たいもので、数十秒後に因果不明の
         // 再生が始まるほうが混乱する。
-        if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
+        if (stageBusy()) {
           if (e.test) {
             fxWarn('tapBoost 実演: 他演出の再生中 — スキップ');
             return;
@@ -2589,9 +3144,7 @@ export function MonitorView(): React.JSX.Element {
           pushFloat(
             <>
               <span className="f-amt">×{num(e.boostMultiplier ?? 1)}</span>
-              <span className="f-txt">
-                <b>{e.nickname ?? ''}</b> がフィーバー発動!
-              </span>
+              {nameLines({ who: e.nickname ?? '', act: 'がフィーバー発動!' })}
             </>,
             'good banner-boost'
           );
@@ -2635,7 +3188,7 @@ export function MonitorView(): React.JSX.Element {
         // ルーレットのリール/カットインの再生中は持ち越す — 出目・演出を見せる前に
         // CLEAR のフラッシュが走ると何で達成したのか読めない。
         // finishRoulette / finishBandFx / finishBoostFx が再生する。
-        if (rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current) {
+        if (stageBusy()) {
           pendingAchieved.current = e;
           return;
         }
@@ -3081,13 +3634,16 @@ export function MonitorView(): React.JSX.Element {
             <RouletteFx
               key={roulette.key}
               segments={roulette.effect.rouletteSegments ?? []}
-              index={roulette.effect.rouletteIndex ?? 0}
-              amount={roulette.effect.amount}
+              index={roulette.draw.index}
+              amount={roulette.draw.amount}
               fast={roulette.fast}
-              pattern={roulette.effect.roulettePattern ?? 'slow'}
-              seed={roulette.effect.id}
+              pattern={roulette.draw.pattern}
+              // 同じ effect の全リールが同じ走行ジッタで走らないよう at を混ぜる
+              // (出目とは無関係の見た目パラメータ — 相関させない規約は変えない)。
+              seed={roulette.effect.id * 31 + roulette.at}
               onNearStop={nearStopRoulette}
               onKick={kickRoulette}
+              onStep={stepRoulette}
               onSpinQuiet={() => {
                 // 終盤の段(保持・フェイク停止)ではリールが止まって見える —
                 // ループ音だけ先に閉じる。BGM は連鎖の終端(finishRoulette)まで流す。
@@ -3098,7 +3654,7 @@ export function MonitorView(): React.JSX.Element {
               rouletteLabel={roulette.effect.rouletteLabel}
               giftName={roulette.effect.giftName}
               giftIconUrl={roulette.effect.giftIconUrl}
-              onDone={() => finishRoulette(roulette.effect, roulette.spin)}
+              onDone={() => finishRoulette(roulette.effect, roulette.spin, roulette.at)}
             />
           </div>
         ) : null}
@@ -3165,6 +3721,11 @@ export function MonitorView(): React.JSX.Element {
                 // Electron 43.2.0 / Chrome 150 で実測確認済み。
                 if (ev.target !== ev.currentTarget || ev.pseudoElement) return;
                 setFloats((s) => s.filter((x) => x.key !== f.key));
+                // 実際に消えた = 舞台が空いた。ラッチは**短縮方向にだけ**倒す
+                // (伸ばす方向に使うと、遮蔽で animationend が届かないときに
+                // 舞台が永久に開かない = モニターの全死になる)。
+                bannerEndAt.current = Math.min(bannerEndAt.current, Date.now());
+                pumpStage();
               }}
             >
               {f.node}

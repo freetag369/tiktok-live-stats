@@ -19,6 +19,20 @@ export function normaliseTs(raw: unknown, now = Date.now()): { ts: number; sourc
   return { ts, source: 'server' };
 }
 
+/**
+ * 時計の後方ステップ(NTP 巻き戻し・サスペンド/レジューム)で「未来に取り残された」
+ * 絶対時刻を、正当な最大先行幅までクランプする。**短縮方向にのみ働く**(前進は
+ * させない)ので、時計が単調な限りは恒等関数。
+ *
+ * worker の演出合算窓(likeFxLastMs / fanStampFxUntilMs)が主な適用先 — これらは
+ * 巻き戻り後に未来値のまま残ると、値は無事でも演出がステップ幅ぶん抑止される。
+ * (fxFreezeUntilMs には適用しない — あちらは armFreezeTimer の張り直しで
+ * 「時計が追いつけば収束する」設計が既にコメントで明文化されている。)
+ */
+export function clampFutureMs(value: number, nowMs: number, maxAheadMs: number): number {
+  return Math.min(value, nowMs + maxAheadMs);
+}
+
 /** Start-of-day in JST, returned as epoch ms. JST has no DST, so integer maths is exact. */
 export function jstDayStart(ms: number): number {
   return Math.floor((ms + JST_OFFSET_MS) / DAY_MS) * DAY_MS - JST_OFFSET_MS;

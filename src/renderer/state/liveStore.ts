@@ -143,7 +143,13 @@ export function resetLive(): void {
   lastRowsPruneMs = 0;
   // 保留中のフラッシュを捨てる: 直前 delta の totals/feed が rAF でクリア直後に
   // 復活する(配信開始 = status 'live' と delta が近接する瞬間に起きる)のを防ぐ。
-  for (const k of Object.keys(pendingPatch)) delete (pendingPatch as Record<string, unknown>)[k];
+  // ただし challenge はセッションから独立した寿命を持つ(上の setState でも消して
+  // いない)ので温存する — 捨てると worker 側は dirty 消費済みで再送せず、
+  // status のずれ(running/achieved)が固定化して PUSH が効かなくなる。
+  for (const k of Object.keys(pendingPatch)) {
+    if (k === 'challenge' || k === 'challengeLog') continue;
+    delete (pendingPatch as Record<string, unknown>)[k];
+  }
   useLive.setState({
     version: 0,
     totals: EMPTY_TOTALS,

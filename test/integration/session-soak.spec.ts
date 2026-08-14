@@ -101,7 +101,7 @@ describe('ソーク — レイド級レートの実取り込み経路', () => {
     const fixture = join(dir, 'raid.ndjson');
     writeRaidFixture(fixture);
 
-    const challenge = new ChallengeEngine(() => ({ ...structuredClone(DEFAULT_CHALLENGE), enabled: true }));
+    const challenge = new ChallengeEngine(() => ({ ...structuredClone(DEFAULT_CHALLENGE), enabled: true }), Date.now, Math.random, Math.random, () => undefined);
     challenge.start();
     sm = new SessionManager({
       store,

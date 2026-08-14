@@ -152,19 +152,23 @@ describe('replay — ハートミー', () => {
     const engine = new ChallengeEngine(
       () => ({ ...structuredClone(DEFAULT_CHALLENGE), enabled: true }),
       () => Date.UTC(2026, 6, 28, 12, 0, 0),
-      () => 0 // 既定盤面の先頭 = 出目 +5
+      () => 0, // 既定盤面の先頭 = 出目 +5
+      Math.random,
+      () => undefined
     );
     engine.start();
     for (const e of events) engine.handleEvent(e);
 
     const s = engine.get();
-    // The fixture is 2 gift messages carrying 3 taps (repeatCount 2 then 1), and
-    // giftRepeatFx.rouletteEnabled is on by default -> one spin per tap = 3 spins
-    // of +5 each. The default perDiamond rule must still NOT stack on top.
+    // The fixture is 2 gift messages carrying 3 taps (repeatCount 2 then 1) ->
+    // one DRAW per tap = 3 draws of +5 each, but only 2 effects (one per message:
+    // the first carries 2 draws, the second 1). The default perDiamond rule must
+    // still NOT stack on top.
     expect(s.stats.rouletteSpins).toBe(3);
     expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 15);
     const spins = s.recentEffects.filter((e) => e.kind === 'roulette');
-    expect(spins).toHaveLength(3);
+    expect(spins).toHaveLength(2);
+    expect(spins.flatMap((e) => e.rouletteIndexes!)).toHaveLength(3);
     expect(spins[0]!.rouletteSegments![spins[0]!.rouletteIndex!]).toBe(5);
     // The monitor headline reads "ハートミー ○○がルーレット". The label rides on the
     // effect (self-contained) — the live path never carries canonical, so a
@@ -172,10 +176,49 @@ describe('replay — ハートミー', () => {
     expect(spins[0]!.rouletteLabel).toBe('ハートミー');
   });
 
-  it('falls back to one spin per message when giftRepeatFx.rouletteEnabled is off', async () => {
-    // 連打反復を切ったときは旧来の不変条件「連打でも1イベント=1スピン」へ戻る。
-    // ルーレットは反復すると増減量も回数ぶんになる唯一の演出なので、切り戻しが
-    // 効くことをライブ経路で固定しておく。
+  it('draws once per gift in a 17-rose combo, and applies every one to the value', async () => {
+    // 実運用DBで観測された最大コンボ(バラ17連打)の回帰テスト。v0.5.4 では
+    // 演出用の giftRepeatFx.max(既定 5)が抽選回数まで削っており、17個ぶん
+    // 贈られたのに5回ぶんしか値が動かなかった(12個ぶんが消える)。
+    const sid = newSession();
+    const events = await replay('synth-rose-combo.ndjson', sid);
+    // normalize が中間ティックを畳むので、届くギフトは repeatCount=17 の1通だけ。
+    expect(events.filter((e) => e.kind === 'gift')).toHaveLength(1);
+
+    const base = structuredClone(DEFAULT_CHALLENGE);
+    const engine = new ChallengeEngine(
+      () => ({
+        ...base,
+        enabled: true,
+        // 既定はハートミー行だけなので、バラ用の行を足す(実出荷の既定と同じ構成)。
+        roulettes: [
+          ...base.roulettes,
+          { ...base.roulettes[0]!, id: 'rl-rose', label: 'バラ', giftId: '5655', giftName: 'rose', canonical: '' },
+        ],
+      }),
+      () => Date.UTC(2026, 6, 28, 12, 0, 0),
+      () => 0, // 盤面の先頭 = +5
+      Math.random,
+      () => undefined
+    );
+    engine.start();
+    for (const e of events) engine.handleEvent(e);
+
+    const s = engine.get();
+    expect(s.stats.rouletteSpins).toBe(17);
+    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 85); // +5 ×17
+    // 1ギフトメッセージ = 1 effect。リングバッファを17件で食い潰さない。
+    const rl = s.recentEffects.filter((e) => e.kind === 'roulette');
+    expect(rl).toHaveLength(1);
+    expect(rl[0]!.rouletteIndexes).toHaveLength(17);
+    expect(rl[0]!.rouletteReels).toBe(17); // 17本とも回る(ROULETTE_REELS_MAX=20 以内)
+    expect(rl[0]!.giftCount).toBe(17);
+  });
+
+  it('still draws once per gift when giftRepeatFx.rouletteEnabled is off', async () => {
+    // rouletteEnabled を切っても**抽選回数と値は個数ぶんのまま**。減るのはモニターが
+    // 回すリールの本数だけ(rouletteReels)。演出設定で視聴者のギフトぶんの値が
+    // 消えていた v0.5.4 の不具合の回帰テスト。
     const sid = newSession();
     const events = await replay('synth-heart-me.ndjson', sid);
 
@@ -187,14 +230,20 @@ describe('replay — ハートミー', () => {
         giftRepeatFx: { ...base.giftRepeatFx, rouletteEnabled: false },
       }),
       () => Date.UTC(2026, 6, 28, 12, 0, 0),
-      () => 0
+      () => 0,
+      Math.random,
+      () => undefined
     );
     engine.start();
     for (const e of events) engine.handleEvent(e);
 
     const s = engine.get();
-    expect(s.stats.rouletteSpins).toBe(2);
-    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 10);
+    expect(s.stats.rouletteSpins).toBe(3);
+    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 15);
+    // 2連打のメッセージは 2 抽選ぶんの値が入っているが、リールは1本だけ回す。
+    const first = s.recentEffects.filter((e) => e.kind === 'roulette').at(-1)!;
+    expect(first.rouletteIndexes).toHaveLength(2);
+    expect(first.rouletteReels).toBe(1);
   });
 });
 

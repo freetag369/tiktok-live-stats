@@ -2,6 +2,7 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import { DEFAULT_ZOOM_FACTOR, SETTINGS_VERSION, type AppSettings, type ChallengeConfig } from '@shared/dto';
 import { DEFAULT_CHALLENGE, migrateChallengeConfig, validateChallengeConfig } from '@shared/challenge';
+import { DEFAULT_DASH_LAYOUT, normalizeDashLayout } from '@shared/dash-layout';
 import { DEFAULT_SCORING, validateScoringConfig } from '@shared/scoring';
 import { configDirIn, dbPathIn, resourcesDir } from './paths';
 
@@ -25,6 +26,7 @@ export function defaultSettings(dataDir: string): AppSettings {
     alertMinTier: 1,
     giftAlertDiamonds: 100,
     zoomFactor: DEFAULT_ZOOM_FACTOR,
+    dashLayout: [...DEFAULT_DASH_LAYOUT],
     // デフォ保存(challenge-default.json)があればそれが既定 — 新しいPCへファイルを
     // コピーするだけで、初回起動からその内容で立ち上がる。
     challenge: loadChallengeDefault(dataDir) ?? { ...structuredClone(DEFAULT_CHALLENGE), hotkey: defaultHotkey() },
@@ -65,6 +67,8 @@ export function sanitizeSettings(base: AppSettings, raw: Partial<AppSettings>): 
     giftAlertDiamonds: Number.isFinite(raw.giftAlertDiamonds) ? Number(raw.giftAlertDiamonds) : base.giftAlertDiamonds,
     // A corrupt value here would render the app unusable, so clamp rather than trust.
     zoomFactor: Number.isFinite(raw.zoomFactor) ? Math.min(2.5, Math.max(0.6, Number(raw.zoomFactor))) : base.zoomFactor,
+    // 壊れた並びでダッシュボードのパネルが消えるより、既定順へ戻る方がまし。
+    dashLayout: normalizeDashLayout(raw.dashLayout ?? base.dashLayout),
     // 手編集された値をそのままエンジンへ入れない — throw せずサニタイズ。
     challenge: validateChallengeConfig(raw.challenge ?? base.challenge),
   };

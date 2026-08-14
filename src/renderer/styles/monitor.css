@@ -22,7 +22,7 @@
 @property --seg-off {
   syntax: '<color>';
   inherits: true;
-  initial-value: rgba(255, 45, 45, 0.08);
+  initial-value: rgba(255, 45, 45, 0);
 }
 @property --seg-glow {
   syntax: '<color>';
@@ -37,7 +37,8 @@
 
 :root {
   --seg-on: #ff2d2d;
-  --seg-off: rgba(255, 45, 45, 0.08);
+  /* 消灯セグメントは描画しない(アルファ0)。変数は segup の色補間のため残す。 */
+  --seg-off: rgba(255, 45, 45, 0);
   --seg-glow: rgba(255, 45, 45, 0.55);
   /* lowblink の減光側。色替え中も追従させるため変数に出してある。 */
   --seg-dim: rgba(255, 45, 45, 0.35);
@@ -206,13 +207,13 @@ body {
   71% {
     /* var(--ch-up) の実値。登録済み custom property の keyframe なので直値で置く。 */
     --seg-on: #4ad991;
-    --seg-off: rgba(74, 217, 145, 0.1);
+    --seg-off: rgba(74, 217, 145, 0);
     --seg-glow: rgba(74, 217, 145, 0.6);
     --seg-dim: rgba(74, 217, 145, 0.35);
   }
   100% {
     --seg-on: #ff2d2d;
-    --seg-off: rgba(255, 45, 45, 0.08);
+    --seg-off: rgba(255, 45, 45, 0);
     --seg-glow: rgba(255, 45, 45, 0.55);
     --seg-dim: rgba(255, 45, 45, 0.35);
   }
@@ -863,7 +864,7 @@ body {
   grid-area: elapsed;
   text-align: center;
   color: var(--fg-dim);
-  font-family: var(--mono);
+  font-family: var(--num);
   font-size: 36px;
   font-variant-numeric: tabular-nums;
 }
@@ -939,7 +940,7 @@ body {
   grid-area: wake;
   text-align: left;
   color: var(--fg-dim);
-  font-family: var(--mono);
+  font-family: var(--num);
   font-size: 34px;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
@@ -1567,9 +1568,20 @@ body {
   /* ← ここ 1 行が全バナーの大きさ */
   --float-scale: 2;
   position: absolute;
-  /* 2 段組みで背が高くなったぶん開始位置を上げる。FLOAT_MAX 枚が縦 960px に
-     収まる上限がこのあたり(ギフトカード 3 枚でおよそ 950px)。 */
-  top: 14%;
+  /*
+   * 2 段組みで背が高くなったぶん開始位置を上げる。FLOAT_MAX 枚が縦 960px に
+   * 収まる上限がこのあたり(ギフトカード 3 枚でおよそ 950px)。
+   *
+   * 名前入りバナーを行組み(.f-lines)にして文言の段が 1 行 65px から
+   * フォロー等 2 行 ≒ 108px / ルーレット 3 行 ≒ 150px へ伸びたので、旧 14% では
+   * 「ルーレット 1 + フォロー 2」の重なりが 960px をわずかに超えて
+   * .fx-layer の overflow:hidden に無言で切られる。
+   *
+   * 実測(倍率 2 / 540×960): ルーレット 290px・フォロー等 249px。現実の最悪は
+   * 「ルーレット確定 + 残りN回ぶん + もう1枚」= 845px(gap 込み)なので、8%
+   * (77px)まで下げて 922px に収める。ここを戻すときは必ず 3 枚重ねて実測すること。
+   */
+  top: 8%;
   width: 100%;
   display: flex;
   flex-direction: column;
@@ -1752,7 +1764,7 @@ body {
 }
 
 .float .f-amt {
-  font-family: var(--mono);
+  font-family: var(--num);
   font-size: calc(48px * var(--float-scale));
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -1804,6 +1816,82 @@ body {
 
 .float .f-txt b {
   color: #ffd7e8;
+}
+
+/*
+ * 【名前入りバナーの行組み】ギフト名 / ニックネーム / 動作を別々の行に割る。
+ *
+ * 1 本の文を上の .f-txt に流すと、overflow-wrap:anywhere が区切りの無い名前を
+ * 平気で途中で切り、"ハートミー 柚木茜 / (search)がルーレット" のように名前が
+ * 行またぎで裂ける。行数は JSX(MonitorView の nameLines)が決めるので、
+ * ここでは -webkit-line-clamp を明示的に外す。
+ */
+.float .f-txt.f-lines {
+  /*
+   * -webkit-box を解除しないと子の .f-line が行として立たない。
+   * 【block ではなく flex】block だと隣り合う .f-line の負マージン(下の注記)が
+   * **相殺されずに畳まれ**(margin collapsing は絶対値の大きい方を採る)、逃げに
+   * 使った padding のぶんだけ段が 1 行 16px ずつ背伸びする。flex の子は
+   * マージンが畳まれないので padding と負マージンがきっちり打ち消し合う。
+   */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  -webkit-line-clamp: none;
+  line-clamp: none;
+  /*
+   * 3 行ぶんの背を抑える(.floats の高さ予算の注記を参照)。基底 .f-txt の 1.3 を
+   * ここまで詰められるのは、和文の下ぶくれを .f-line の padding-block が
+   * 逃がしているから — 1.3 の理由(descender が overflow で削れる)は解消済み。
+   */
+  line-height: 1.1;
+  /* 切るのは行ごと。ここで切ると各行の text-shadow のにじみまで箱で削れる。 */
+  overflow: visible;
+  /*
+   * 【min-width:0 必須】.f-txt は .float の flex アイテムでもあり、既定の
+   * min-width:auto だと中身(長い英字ニックネーム)がそのまま最小幅になって
+   * バナー幅 520px を突き抜ける。すると .f-line の max-width:100% が
+   * 伸びた親を基準にしてしまい "…" が出ず、.float の overflow:hidden に
+   * 字の途中で切られる(= 直そうとした症状に逆戻り)。
+   */
+  min-width: 0;
+  width: 100%;
+}
+
+.float .f-line {
+  display: block;
+  max-width: 100%;
+  /* 名前は絶対に折らない。入らないぶんは末尾 "…" で落とす。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /*
+   * overflow:hidden は text-shadow(黒の落とし込み + 金の照り返し)も箱で切る。
+   * 上下に逃げを作って同じ量の負マージンで打ち消す — 段の高さは変えないまま
+   * にじみだけが箱の外に残る。左右は ellipsis の都合でそのまま切らせる。
+   */
+  padding-block: calc(8px * var(--float-scale));
+  margin-block: calc(-8px * var(--float-scale));
+}
+
+/*
+ * ギフト名は前置き。.roulette-panel .rl-head .rl-gift と同じ理由で一段控えめに
+ * して主役(名前)を食わない。ラベルは 24 文字まで許される(ROULETTE_LABEL_MAX)
+ * ので、この大きさでも入り切らないぶんは .f-line の "…" に落ちる。
+ */
+.float .f-gift {
+  font-size: calc(18px * var(--float-scale));
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* 主役。旧 `.f-txt b` のピンクをそのまま引き継ぐ。 */
+.float .f-who {
+  color: #ffd7e8;
+}
+
+/* 「がルーレット」「がフォロー!」。名前より控えめ + 3 行ぶんの高さ調整も兼ねる。 */
+.float .f-act {
+  font-size: calc(20px * var(--float-scale));
 }
 
 /*
@@ -1888,6 +1976,25 @@ body {
 }
 
 /*
+ * 複数人ぶんを 1 枚に畳んだお助けバナー(worker の合算窓が作る 1 件の effect)。
+ * 「たろう・はなこ ほか3人がお助け!」のように名前を並べるぶん文言が長くなるので、
+ * 基底 .f-txt の 2 行クランプだと末尾の「がお助け!」ごと黙って消える。
+ * 字を一段落として 3 行まで許す。
+ *
+ * 並べる人数と 1 人あたりの文字数の上限は **shared/fan-stamp.ts** が持つ
+ * (FAN_STAMP_NAMES_MAX / FAN_STAMP_NAME_CHARS / FAN_STAMP_NAMES_BUDGET)。
+ * ここを緩めても入り切らないなら、まずあちらの予算を下げること。
+ */
+.float.banner-helper.multi {
+  --float-text: 20px;
+}
+
+.float.banner-helper.multi .f-txt {
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+/*
  * ギフトカード。上段=アイコン + ギフト名/送り主、下段=±N。
  * 幅は他のバナーより一回り小さく取ってある — t4 が scale:1.12 で一段大きく
  * なるため、素の幅を 96% にすると t4 だけステージからはみ出して切れる。
@@ -1954,7 +2061,7 @@ body {
   /* .f-txt と同じ理屈で下段へ送る。 */
   flex-basis: 100%;
   text-align: center;
-  font-family: var(--mono);
+  font-family: var(--num);
   font-size: calc(46px * var(--float-scale));
   font-weight: 900;
   font-variant-numeric: tabular-nums;
@@ -2238,17 +2345,48 @@ body {
  * (旧実装は 138 + 6×2 = 150 を CSS と TS の両方に書いていて手動同期が要った)。
  * 尺(--rl-ms)と走行距離(--rl-run)も TS から入る。
  *
- * ── 終盤の3パターン ──────────────────────────────────────────────────────
- * .rl-p-slow  最後の3個をゆっくり移動して止まる
- * .rl-p-pop   最後の3個をポンポンと飛び移って決まる
- * .rl-p-kick  ポンポン → 当選の1つ手前で止まったと見せ、キックで1個ずれて決まる
- * .rl-p-fast  キュー消化の短縮スピン。段は入れず単調に減速する(900ms に保持や
- *             フェイク停止は入らず、入れても「止まりかけて再加速」になるだけ)
+ * ── 終盤の13パターン(shared/dto.ts の ROULETTE_PATTERNS と同順) ─────────
+ * .rl-p-slow        じわじわ減速 — 段々遅くなって最後に粘る
+ * .rl-p-pop         ポンポン — 4段ホップ、保持が段々長くなる
+ * .rl-p-kick        フェイク停止(1.14秒)→ キックで1個ずれて決まる
+ * .rl-p-overrun     当選を通過して隣へ整数着地(フェイク)→ 巻き戻しで戻ってくる
+ * .rl-p-crawl       超低速で這う。非整数位置の微停止3回=「惰性で止まりかけ」
+ * .rl-p-doublefake  フェイク停止2回(k=2 → k=1)→ キック2発
+ * .rl-p-restart     途中で失速して止まったと見せ、再点火して駆け抜ける
+ * .rl-p-teeter      当選との境界(k=0.5)でシーソー → こてんと当選側へ倒れる
+ * .rl-p-stairs      5段の階段。各段の保持が 180→510ms と伸びていく
+ * .rl-p-blackout    終盤に暗転(.rl-blackout)→ 暗闇で着地 → 明けたら止まっている
+ * .rl-p-jackstop    ゴースト(下記)が中央に完全着地 → 1.32秒静止 → 蹴り出される
+ * .rl-p-jackslip    ゴーストが寸前で震え、スローで中央をすり抜ける
+ * .rl-p-jackback    ゴーストが届かず後ろへ転がり戻り、再加速で突き抜ける
+ * .rl-p-fast        キュー消化の短縮スピン。段は入れず単調に減速する(900ms に保持や
+ *                   フェイク停止は入らず、入れても「止まりかけて再加速」になるだけ)
  *
  * 段の位置は「当選の k 個手前」= calc(var(--rl-shift) + var(--rl-w) * k)。
  * 保持(止まって見える間)は同じ値の隣接キーフレームで表現し、緩急はキーフレーム内の
  * animation-timing-function で作る(要素側は linear)。
- * **着地は3パターンとも同一の var(--rl-shift)** — worker が決めた出目から動かない。
+ * **着地は全パターン同一の var(--rl-shift)** — worker が決めた出目から動かない。
+ * 行き過ぎ(負の k)は最大 1.08 ブロックまで(shared/roulette-fx.ts の
+ * ROULETTE_MAX_OVERSHOOT が権威。超えるとストリップ右端の空白が窓に入る)。
+ * どのパターンも k=3 以下の段へ入るのは 48% 以降(veil が 46% で閉じ切ってから)。
+ *
+ * ── cue マーカー(SE との機械同期) ──────────────────────────────────────
+ * SE を鳴らす瞬間のキーフレーム行に cue コメントを付ける:
+ *   X% { ... cue:near(止まりそう) / cue:quiet(ループ音停止) /
+ *            cue:kick(衝撃+揺れ。溜めの入りに置く) / cue:step(段到達のコツン)
+ * shared/roulette-fx.ts の ROULETTE_PATTERN_TIMING と 1:1 で、
+ * test/unit/roulette-css.spec.ts が突合する — 片方だけ動かすとテストが落ちる。
+ * cue を置くキーフレームのセレクタは単一パーセント表記にすること(「0%, 30%」の
+ * 連記にはマーカーを置かない — 抽出正規表現が単一値を前提にする)。
+ *
+ * ── ゴーストブロック(.rl-jack、jackstop/jackslip/jackback 専用) ─────────
+ * 「設定の一番下の出目が入りそうになる」を、**当選と無相関のまま**見せる仕掛け。
+ * リール内の strip[TARGET-1](当選の1つ手前)の真上に固定した被せブロックで、
+ * 表示値は常に盤面の最終行(RouletteFx.tsx が入れる)。素直に実位置で狙うと
+ * その位置が当選 index の関数になり DOM から出目が逆算できてしまう。
+ * 本物と見分けが付かないよう .rl-block と同一見た目(色・発光なし)。
+ * veil-out(答え合わせ)で実際の隣の値と食い違って見えないよう、rl-jack-fade で
+ * 97% までに消す。
  *
  * MiniFx と同じく mix-blend-mode を使わないので .fx-layer の中で良い。
  * 配置はフロート帯より少し上の中央 — 7セグ(数字)を覆わない位置。
@@ -2535,16 +2673,21 @@ body {
 
 @keyframes rl-zoom {
   0% {
-    filter: blur(2.4px) saturate(0.8);
-    transform: scale(1.008);
+    filter: blur(2.6px) saturate(0.78);
+    transform: scale(1.006);
   }
+  /* 47% = veil 閉鎖(46%)の直後にピントが合う、の同期は従来のまま。 */
   47% {
     filter: blur(0) saturate(1);
     transform: scale(1.012);
   }
+  86% {
+    filter: blur(0) saturate(1);
+    transform: scale(1.03);
+  }
   100% {
     filter: blur(0) saturate(1);
-    transform: scale(1.035);
+    transform: scale(1.05);
   }
 }
 
@@ -2604,6 +2747,7 @@ body {
   display: flex;
   height: 100%;
   align-items: center;
+  position: relative; /* ゴースト(.rl-jack)の絶対配置の基準 */
   width: max-content; /* 窓幅に押し潰されない(flex-shrink 対策とセット) */
   /*
    * fill-mode: both — forwards だけだと開始前の1フレームがストリップ先頭
@@ -2623,6 +2767,36 @@ body {
 .rl-p-kick .roulette-reel {
   animation-name: rl-run-kick;
 }
+.rl-p-overrun .roulette-reel {
+  animation-name: rl-run-overrun;
+}
+.rl-p-crawl .roulette-reel {
+  animation-name: rl-run-crawl;
+}
+.rl-p-doublefake .roulette-reel {
+  animation-name: rl-run-doublefake;
+}
+.rl-p-restart .roulette-reel {
+  animation-name: rl-run-restart;
+}
+.rl-p-teeter .roulette-reel {
+  animation-name: rl-run-teeter;
+}
+.rl-p-stairs .roulette-reel {
+  animation-name: rl-run-stairs;
+}
+.rl-p-blackout .roulette-reel {
+  animation-name: rl-run-blackout;
+}
+.rl-p-jackstop .roulette-reel {
+  animation-name: rl-run-jackstop;
+}
+.rl-p-jackslip .roulette-reel {
+  animation-name: rl-run-jackslip;
+}
+.rl-p-jackback .roulette-reel {
+  animation-name: rl-run-jackback;
+}
 
 /* 短縮スピン(キュー消化)。段は入れず、末速 0 まで単調に減速するだけ。 */
 @keyframes rl-run-fast {
@@ -2635,7 +2809,10 @@ body {
   }
 }
 
-/* パターン1「ゆっくり」— 最後の3個を一段ずつ遅く通り、あと一歩で溜めて着地。 */
+/*
+ * パターン「じわじわ減速」— 最後の3個を一段ずつ遅く通り、あと一歩で溜めて着地。
+ * 保持(96→97.5% = 210ms)は旧版(120ms)から伸ばして「止まった?」の疑いを強くした。
+ */
 @keyframes rl-run-slow {
   0% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
@@ -2654,20 +2831,24 @@ body {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
   }
-  80% {
+  80% { /* cue:near */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
     animation-timing-function: cubic-bezier(0.55, 0.35, 0.45, 1);
   }
-  94% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.1));
+  91% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.22));
+    animation-timing-function: cubic-bezier(0.3, 0.65, 0.4, 1);
+  }
+  94% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.08));
     animation-timing-function: linear;
   }
-  96% {
+  97.5% {
     /* 保持 — 94% と同値。「あと一歩で止まった?」の間。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.1));
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.08));
     animation-timing-function: cubic-bezier(0.25, 0.9, 0.35, 1);
   }
-  99% {
+  99.5% {
     transform: translateX(var(--rl-shift));
     animation-timing-function: linear;
   }
@@ -2676,7 +2857,10 @@ body {
   }
 }
 
-/* パターン2「ポンポン」— 最後の3個を保持つきで飛び移る。最後の間がいちばん長い。 */
+/*
+ * パターン「ポンポン」— 保持つきで飛び移る。旧版の3段から4段(k=4 から)に増やし、
+ * 保持を 5% → 6% → 7% → 10.5%(630ms)と段々伸ばす。最後の間がいちばん長い。
+ */
 @keyframes rl-run-pop {
   0% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
@@ -2686,38 +2870,46 @@ body {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
     animation-timing-function: cubic-bezier(0.06, 0.66, 0.2, 1);
   }
-  50% {
+  50% { /* cue:quiet */
     /* 末速ほぼ 0 = いったん完全に止まったように見せる。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
+    animation-timing-function: linear;
+  }
+  55% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  58% { /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: linear;
   }
-  58% {
+  64% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3)); /* 保持 */
     animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
   }
-  62% {
+  67% { /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
   }
-  70% {
+  74% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2)); /* 保持 */
     animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
   }
-  74% {
+  77% { /* cue:near */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
     animation-timing-function: linear;
   }
-  84% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1)); /* 保持(最長) */
+  87.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1)); /* 保持(最長 630ms) */
     animation-timing-function: cubic-bezier(0.3, 0.9, 0.3, 1);
   }
-  88% {
-    /* 行き過ぎ。ここが着地の衝撃 — rl-cam-pop の跳ねと同時刻。 */
-    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.06));
+  90% {
+    /* 行き過ぎ(旧 0.06 → 0.09 へ強化)。ここが着地の衝撃 — rl-cam-pop と同時刻。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.09));
     animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1);
   }
-  92% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
+  92.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.03));
     animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
   }
   95% {
@@ -2730,11 +2922,11 @@ body {
 }
 
 /*
- * パターン3「キック」— ポンポン飛び移り → **当選の1つ手前で完全静止**(フェイク)
+ * パターン「キック」— ポンポン飛び移り → **当選の1つ手前で完全静止**(フェイク)
  * → 予備動作 → キックで1個ずれて着地。
  * 着地点は他パターンと完全に同一の var(--rl-shift) = worker が決めた出目。
- * フェイク停止は他の保持(7%)の 2 倍以上に取る — 明確に「終わった」長さにしないと
- * ただの間に見えてキックの落差が出ない。
+ * フェイク停止は他の保持の 2 倍以上に取る — 明確に「終わった」長さにしないと
+ * ただの間に見えてキックの落差が出ない(旧 960ms → 1,140ms へ延長)。
  */
 @keyframes rl-run-kick {
   0% {
@@ -2745,44 +2937,109 @@ body {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
     animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
   }
-  48% {
+  48% { /* cue:quiet */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: linear;
   }
-  55% {
+  54% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3)); /* 保持 */
     animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
   }
-  59% {
+  58% { /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
   }
-  66% {
+  64% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2)); /* 保持 */
     animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
   }
-  70% {
+  68% { /* cue:near */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
     animation-timing-function: linear;
   }
-  86% {
-    /* フェイク停止。70% と同値のまま引っ張る(6秒スピンなら約 960ms)。 */
+  87% { /* cue:kick */
+    /* フェイク停止。68% と同値のまま引っ張る(6秒スピンで 1,140ms)。 */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
-  }
-  87.5% {
-    /* 予備動作。右へ 0.05 ブロック引いて「溜め」を作る。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.05));
     animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
   }
-  90.5% {
-    /* キック本体。当選を 0.1 ブロック行き過ぎるまで一気に叩き込む。 */
-    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.1));
+  89% {
+    /* 予備動作。右へ 0.07 ブロック引いて「溜め」を作る(旧 0.05 から強化)。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.07));
     animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
   }
-  93% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.025));
+  91.5% {
+    /* キック本体。当選を 0.12 ブロック行き過ぎるまで一気に叩き込む。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.12));
     animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+  }
+  93.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.03));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+  }
+  96% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「行き過ぎ巻き戻し」— 当選を止まらず通過し、**隣(-1)に整数着地**して
+ * 静止(フェイク)→ 溜め → 逆回転で巻き戻り、当選を少し通り過ぎてから収まる。
+ * フェイク着地は必ず整数 — 非整数で止まると枠とズレた着地になり、常連に
+ * 「ズレ停止=巻き戻し予告」を学習される。溜めの -1.08 が全パターンの最深
+ * (ROULETTE_MAX_OVERSHOOT 1.2 の内側)。
+ */
+@keyframes rl-run-overrun {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.05, 0.6, 0.3, 0.95);
+  }
+  50% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  60% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  68% { /* cue:near */
+    /* 当選の1つ手前 — だが止まらずに滑り抜ける。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.45, 0.15, 0.5, 1);
+  }
+  72% {
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.45));
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+  76% {
+    /* フェイク着地 — 本物と見分けの付かない整数位置。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 1));
+    animation-timing-function: linear;
+  }
+  85% { /* cue:kick */
+    /* フェイク着地のまま静止(540ms)。ここから巻き戻しの溜めに入る。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.1, 0.85, 0.2, 1);
+  }
+  86.5% {
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 1.08));
+    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
+  }
+  90% {
+    /* 逆回転が当選を 0.12 通り過ぎる — 巻き戻しにも慣性がある。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.12));
+    animation-timing-function: cubic-bezier(0.3, 0.7, 0.3, 1);
+  }
+  92.5% {
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.03));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
   }
   95.5% {
     transform: translateX(var(--rl-shift));
@@ -2794,8 +3051,589 @@ body {
 }
 
 /*
+ * パターン「超低速」— k=3 から先を全部這う。微停止は**非整数**位置(2.15 等)で
+ * 取る — 整数で止まるとフェイク着地に見えてしまう。「惰性で止まりかけた」の
+ * 読み味は非整数にしか出ない。カメラ・衝撃なし — 静けさが本体。
+ */
+@keyframes rl-run-crawl {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.05, 0.62, 0.28, 0.9);
+  }
+  48% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: cubic-bezier(0.2, 0.7, 0.4, 1);
+  }
+  56% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2.15));
+    animation-timing-function: linear;
+  }
+  59% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2.15)); /* 微停止 */
+    animation-timing-function: cubic-bezier(0.25, 0.75, 0.35, 1);
+  }
+  66% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.35));
+    animation-timing-function: linear;
+  }
+  69% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.35)); /* 微停止 */
+    animation-timing-function: cubic-bezier(0.25, 0.75, 0.35, 1);
+  }
+  72% { /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: linear;
+  }
+  76% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.7));
+    animation-timing-function: linear;
+  }
+  79.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.7)); /* 微停止 */
+    animation-timing-function: cubic-bezier(0.3, 0.7, 0.35, 1);
+  }
+  88% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.22));
+    animation-timing-function: linear;
+  }
+  91% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.06));
+    animation-timing-function: linear;
+  }
+  95% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.06)); /* 微停止(最長) */
+    animation-timing-function: cubic-bezier(0.25, 0.9, 0.35, 1);
+  }
+  98% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「二段フェイク」— k=2 でフェイク停止(720ms)→ キック1 で k=1 へ
+ * 1個ずれる → そこでもう一度フェイク停止(750ms)→ キック2 で着地。
+ * 「またキックだろ」と読んだ視聴者にもう1回同じ落差を食らわせる。
+ */
+@keyframes rl-run-doublefake {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
+  }
+  48% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  53% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  58% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  70% { /* cue:kick */
+    /* フェイク停止1(720ms)。ここから1発目の溜め。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
+  }
+  71.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2.06));
+    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
+  }
+  74% {
+    /* キック1。k=1 を 0.05 だけ行き過ぎる。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.95));
+    animation-timing-function: cubic-bezier(0.2, 0.9, 0.3, 1);
+  }
+  76.5% { /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: linear;
+  }
+  89% { /* cue:kick */
+    /* フェイク停止2(750ms)。1発目より長い — 「今度こそ終わった」を作る。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
+  }
+  90.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.07));
+    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
+  }
+  93% {
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.1));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+  }
+  95.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
+  }
+  97% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「失速→再加速」— 中盤で k=4.55(非整数 = 中途半端)に失速して
+ * 「え、もう終わり?」と思わせ、溜めてから再点火して駆け抜ける。
+ * 失速の底は 60% — veil 閉鎖(46%)の時点ではまだ k≈6.5 で移動中なので、
+ * 「k=3 以下へは 48% 以降」の規約はそもそも踏まない。
+ */
+@keyframes rl-run-restart {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.1, 0.6, 0.3, 0.95);
+  }
+  47% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 6.5));
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.5, 1);
+  }
+  56% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4.8));
+    animation-timing-function: cubic-bezier(0.25, 0.8, 0.35, 1);
+  }
+  60% { /* cue:quiet */
+    /* 失速の底。中途半端な位置で止まる = 故障めいた不穏。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4.55));
+    animation-timing-function: linear;
+  }
+  65.5% { /* cue:kick */
+    /* 停止のまま 330ms。ここから再点火の溜め(一瞬逆戻り)。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4.55));
+    animation-timing-function: cubic-bezier(0.55, 0, 0.75, 0.5);
+  }
+  67% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4.72));
+    animation-timing-function: cubic-bezier(0.3, 0.1, 0.4, 1);
+  }
+  74.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: cubic-bezier(0.3, 0.4, 0.3, 1);
+  }
+  80% { /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.5, 0.3, 0.45, 1);
+  }
+  89% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.15));
+    animation-timing-function: linear;
+  }
+  92% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.05));
+    animation-timing-function: linear;
+  }
+  95.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.05)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.25, 0.9, 0.35, 1);
+  }
+  98.5% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「境界シーソー」— 当選と隣の**ちょうど境界**(k=0.5)で静止し、
+ * どちらに倒れるか分からないシーソーを4往復。veil で左右半ブロックずつしか
+ * 見えないので「どっちだ!?」が成立する。最後はこてんと当選側へ倒れる。
+ */
+@keyframes rl-run-teeter {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.05, 0.62, 0.28, 0.9);
+  }
+  48% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  57% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  65% { /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.3, 0.7, 0.4, 1);
+  }
+  68% {
+    /* 境界ピタリ。隣か当選か読めない位置で一旦静止。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.5));
+    animation-timing-function: linear;
+  }
+  71% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.5)); /* 静止 */
+    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+  }
+  74% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.78));
+    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+  }
+  78% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.26));
+    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+  }
+  82% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.62));
+    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+  }
+  86% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.4));
+    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+  }
+  89.5% { /* cue:step */
+    /* 境界で再静止 — 振れ幅が小さくなって「均衡した」と思わせる。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.52));
+    animation-timing-function: linear;
+  }
+  92.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.52)); /* 静止 */
+    animation-timing-function: cubic-bezier(0.5, 0, 0.7, 0.4);
+  }
+  94.5% {
+    /* こてんと当選側へ倒れる。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.06));
+    animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1);
+  }
+  96.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
+  }
+  98% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「階段落ち」— k=5 から5段の階段。各段の保持を
+ * 3% → 4% → 5% → 6.5% → 8.5%(180 → 510ms)と伸ばしていく — 等間隔だと
+ * リズムが読めて焦れないが、伸びていくと「次はもっと長いのか?」になる。
+ */
+@keyframes rl-run-stairs {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.06, 0.66, 0.2, 1);
+  }
+  48% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5));
+    animation-timing-function: linear;
+  }
+  51% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5)); /* 保持 3% */
+    animation-timing-function: cubic-bezier(0.2, 0.9, 0.25, 1);
+  }
+  54% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
+    animation-timing-function: linear;
+  }
+  58% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4)); /* 保持 4% */
+    animation-timing-function: cubic-bezier(0.2, 0.9, 0.25, 1);
+  }
+  61.5% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  66.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3)); /* 保持 5% */
+    animation-timing-function: cubic-bezier(0.2, 0.9, 0.25, 1);
+  }
+  70% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  76.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2)); /* 保持 6.5% */
+    animation-timing-function: cubic-bezier(0.2, 0.9, 0.25, 1);
+  }
+  80% { /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: linear;
+  }
+  88.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1)); /* 保持 8.5% */
+    animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1);
+  }
+  91% {
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.07));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
+  }
+  93.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
+  }
+  95.5% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「暗転」— あと 0.55 ブロックの瞬間に窓が暗転(.rl-blackout)し、
+ * 着地は暗闇の中で済ませる。明けたときには止まっている — 「見てない間に
+ * 決まった」の焦らし。衝撃と揺れは cue:kick(暗転の瞬間)が担い、カメラは
+ * 付けない。89% の cue:step は点灯の合図(同値の番キーフレーム = 動きに影響なし)。
+ */
+@keyframes rl-run-blackout {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.05, 0.62, 0.28, 0.9);
+  }
+  48% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  56% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  64% { /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.4, 0.3, 0.5, 1);
+  }
+  70% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.62));
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.4, 1);
+  }
+  72% { /* cue:quiet */ /* cue:kick */
+    /* 暗転の瞬間。ループ音も同時に落とす(真っ暗でカラカラだけ鳴ると安っぽい)。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.55));
+    animation-timing-function: linear;
+  }
+  84% {
+    /* 暗闇の中でゆっくり着地 — 見えないところで済ませる。 */
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  89% { /* cue:step */
+    /* 点灯の合図(同値の番キーフレーム)。rl-blackout の 89% と同期。 */
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「大当たり寸止め」— ゴースト(.rl-jack = 一番下の出目)が窓の中央に
+ * **完全に着地して止まる**(1,320ms — 全パターン最長のフェイク)。誰もが
+ * 「入った」と思ったところで蹴り出され、実際の出目が飛び込んでくる。
+ * 幾何はキックと同型(k=1 = ゴースト中央)だがフェイクが 1.5 倍長い。
+ */
+@keyframes rl-run-jackstop {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
+  }
+  48% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  54% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  58% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  63% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2)); /* 保持 */
+    animation-timing-function: cubic-bezier(0.2, 0.95, 0.25, 1);
+  }
+  66% { /* cue:near */
+    /* ゴーストが中央に完全着地。ここから 1,320ms のフェイク停止。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: linear;
+  }
+  88% { /* cue:kick */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
+  }
+  89.5% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.07));
+    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
+  }
+  92% {
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.12));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+  }
+  94% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.03));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+  }
+  96% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「大当たりすり抜け」— ゴーストが中央の寸前(+0.12)で 1 秒あまり
+ * わなわな震え、入りきれないままスローで中央を**すり抜けて**いく。
+ * 一瞬だけ中央に完全に重なる(通過中)のが一番むごい。カメラなし — 震えは
+ * リール側が担う。
+ */
+@keyframes rl-run-jackslip {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.05, 0.62, 0.28, 0.9);
+  }
+  48% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  58% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  70% { /* cue:near */
+    /* あと 0.12 でゴーストが入る位置。ここから震え。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.12));
+    animation-timing-function: cubic-bezier(0.3, 0.7, 0.4, 1);
+  }
+  76% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.05));
+    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+  }
+  82% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.16));
+    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
+  }
+  88% { /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.08));
+    animation-timing-function: cubic-bezier(0.4, 0, 0.5, 1);
+  }
+  97% {
+    /* スローの通過。88→97% で 1.13 ブロック = 秒速 0.19 ブロックのスローモーション。 */
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.05));
+    animation-timing-function: cubic-bezier(0.25, 0.9, 0.35, 1);
+  }
+  98.5% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
+ * パターン「大当たり届かず」— ゴーストが中央まであと 0.15 に迫って失速し、
+ * **力尽きて後ろへ転がり戻る**(+0.5 ブロック)。静寂の間のあと再加速して
+ * 突き抜け、実際の出目で止まる。「戻る」はスロットの負け演出の定番。
+ */
+@keyframes rl-run-jackback {
+  0% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+  }
+  3% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
+    animation-timing-function: cubic-bezier(0.05, 0.6, 0.3, 0.95);
+  }
+  50% { /* cue:quiet */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  60% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: linear;
+  }
+  68% { /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.35));
+    animation-timing-function: cubic-bezier(0.35, 0.6, 0.45, 1);
+  }
+  74% { /* cue:step */
+    /* じり寄りの果て。あと 0.15 — ここで力尽きる。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.15));
+    animation-timing-function: linear;
+  }
+  80% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.15)); /* 失速静止 */
+    animation-timing-function: cubic-bezier(0.4, 0.1, 0.6, 0.9);
+  }
+  85% {
+    /* 後ろへ転がり戻る — ゴーストが遠ざかっていく。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.65));
+    animation-timing-function: linear;
+  }
+  88% { /* cue:kick */
+    /* 静寂の間(180ms)。ここから再加速。 */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.65));
+    animation-timing-function: cubic-bezier(0.5, 0, 0.65, 0.4);
+  }
+  93% {
+    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.08));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+  }
+  95% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
+  }
+  96.5% {
+    transform: translateX(var(--rl-shift));
+    animation-timing-function: linear;
+  }
+  100% {
+    transform: translateX(var(--rl-shift));
+  }
+}
+
+/*
  * 窓のカメラ揺れ。着地の衝撃をリールではなく「窓が殴られた」側で表現する。
- * キックだけは反作用としてリールと逆向きへ弾く。段の無いパターンには付けない。
+ * キック系は反作用としてリールと逆向きへ、overrun の巻き戻しは逆に順方向へ弾く。
+ * 静けさが本体のパターン(slow/crawl/blackout/jackslip)には付けない。
  */
 .rl-p-pop .rl-window {
   animation: rl-cam-pop var(--rl-ms) linear both;
@@ -2803,33 +3641,61 @@ body {
 .rl-p-kick .rl-window {
   animation: rl-cam-kick var(--rl-ms) linear both;
 }
+.rl-p-overrun .rl-window {
+  animation: rl-cam-overrun var(--rl-ms) linear both;
+}
+.rl-p-doublefake .rl-window {
+  animation: rl-cam-doublefake var(--rl-ms) linear both;
+}
+.rl-p-restart .rl-window {
+  animation: rl-cam-restart var(--rl-ms) linear both;
+}
+.rl-p-teeter .rl-window {
+  animation: rl-cam-teeter var(--rl-ms) linear both;
+}
+.rl-p-stairs .rl-window {
+  animation: rl-cam-stairs var(--rl-ms) linear both;
+}
+.rl-p-jackstop .rl-window {
+  animation: rl-cam-jackstop var(--rl-ms) linear both;
+}
+.rl-p-jackback .rl-window {
+  animation: rl-cam-jackback var(--rl-ms) linear both;
+}
 
 @keyframes rl-cam-pop {
   0%,
-  61% {
+  57% {
     transform: translateX(0);
   }
-  63% {
+  59% {
     transform: translateX(-2.2px);
   }
-  66%,
-  73% {
+  62%,
+  66% {
     transform: translateX(0);
   }
-  75% {
+  68% {
     transform: translateX(-2.6px);
   }
-  78%,
-  87% {
+  71%,
+  76% {
     transform: translateX(0);
   }
-  89% {
+  78% {
+    transform: translateX(-3px);
+  }
+  81%,
+  88% {
+    transform: translateX(0);
+  }
+  90% {
     transform: translateX(-6px);
   }
-  91% {
+  92% {
     transform: translateX(4px);
   }
-  93% {
+  94% {
     transform: translateX(-2px);
   }
   96%,
@@ -2840,34 +3706,267 @@ body {
 
 @keyframes rl-cam-kick {
   0%,
-  58% {
+  56% {
     transform: translateX(0);
   }
-  60% {
+  58% {
     transform: translateX(-2px);
   }
-  62%,
-  86% {
+  60%,
+  87% {
     /* フェイク停止の間は完全な凪。静寂を作ってキックの落差を最大にする。 */
     transform: translateX(0);
   }
-  87.5% {
+  89% {
     transform: translateX(2px); /* 溜め(リールと同方向へ引かれる) */
   }
-  90.5% {
-    transform: translateX(-14px); /* 反作用。リールと逆向きへ弾ける */
+  91.5% {
+    transform: translateX(-16px); /* 反作用。リールと逆向きへ弾ける(旧 -14px から強化) */
   }
-  92.5% {
+  93.5% {
     transform: translateX(9px);
   }
-  94.5% {
+  95.5% {
     transform: translateX(-5px);
   }
-  96.5% {
+  97.5% {
     transform: translateX(2.4px);
   }
-  98.5% {
+  99% {
     transform: translateX(-1px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-overrun {
+  0%,
+  70% {
+    transform: translateX(0);
+  }
+  73% {
+    transform: translateX(-3px); /* 当選を通過する風圧 */
+  }
+  76%,
+  85% {
+    transform: translateX(0); /* フェイク着地の凪 */
+  }
+  86.5% {
+    transform: translateX(-2px); /* 巻き戻しの溜め */
+  }
+  90% {
+    transform: translateX(12px); /* 反作用 — キックと逆向き(巻き戻しなので) */
+  }
+  92% {
+    transform: translateX(-7px);
+  }
+  94% {
+    transform: translateX(3px);
+  }
+  96% {
+    transform: translateX(-1px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-doublefake {
+  0%,
+  71% {
+    transform: translateX(0); /* フェイク1の間も凪 */
+  }
+  74% {
+    transform: translateX(-10px); /* キック1の衝撃(2発目より軽い) */
+  }
+  76% {
+    transform: translateX(6px);
+  }
+  78% {
+    transform: translateX(-3px);
+  }
+  80%,
+  90.5% {
+    transform: translateX(0); /* フェイク2の凪 */
+  }
+  93% {
+    transform: translateX(-14px); /* キック2の衝撃 */
+  }
+  95% {
+    transform: translateX(8px);
+  }
+  96.5% {
+    transform: translateX(-4px);
+  }
+  98% {
+    transform: translateX(2px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-restart {
+  0%,
+  65.5% {
+    transform: translateX(0); /* 失速中は凪 — 「終わった」空気を作る */
+  }
+  67% {
+    transform: translateX(1.5px); /* 再点火の溜め */
+  }
+  70% {
+    transform: translateX(-2px); /* 再加速の振動 */
+  }
+  73% {
+    transform: translateX(2px);
+  }
+  76% {
+    transform: translateX(-1.5px);
+  }
+  80%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-teeter {
+  0%,
+  71% {
+    transform: translateX(0);
+  }
+  74% {
+    transform: translateX(1.5px); /* シーソーと逆位相の揺れ */
+  }
+  78% {
+    transform: translateX(-1.5px);
+  }
+  82% {
+    transform: translateX(1.5px);
+  }
+  86% {
+    transform: translateX(-1px);
+  }
+  89.5%,
+  92.5% {
+    transform: translateX(0); /* 均衡の静止 */
+  }
+  95% {
+    transform: translateX(-4px); /* 倒れ込みの着地 */
+  }
+  97% {
+    transform: translateX(2px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-stairs {
+  0%,
+  53% {
+    transform: translateX(0);
+  }
+  55% {
+    transform: translateX(-2px); /* 段の着地。1段ごとに少しずつ重く */
+  }
+  57%,
+  60.5% {
+    transform: translateX(0);
+  }
+  62.5% {
+    transform: translateX(-2.4px);
+  }
+  64.5%,
+  69% {
+    transform: translateX(0);
+  }
+  71% {
+    transform: translateX(-2.8px);
+  }
+  73%,
+  79% {
+    transform: translateX(0);
+  }
+  81% {
+    transform: translateX(-3.2px);
+  }
+  83%,
+  88.5% {
+    transform: translateX(0);
+  }
+  91% {
+    transform: translateX(-5px); /* 最後の落下 */
+  }
+  93% {
+    transform: translateX(3px);
+  }
+  95% {
+    transform: translateX(-1px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-jackstop {
+  0%,
+  56% {
+    transform: translateX(0);
+  }
+  58% {
+    transform: translateX(-2px);
+  }
+  60%,
+  88% {
+    transform: translateX(0); /* 「入った」錯覚の間は完全な凪 */
+  }
+  89.5% {
+    transform: translateX(2px);
+  }
+  92% {
+    transform: translateX(-16px); /* 蹴り出しの衝撃(キックと同格) */
+  }
+  94% {
+    transform: translateX(9px);
+  }
+  96% {
+    transform: translateX(-5px);
+  }
+  98% {
+    transform: translateX(2.4px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes rl-cam-jackback {
+  0%,
+  79% {
+    transform: translateX(0);
+  }
+  82% {
+    transform: translateX(2px); /* 転がり戻りに引かれる */
+  }
+  85%,
+  88% {
+    transform: translateX(3px); /* 戻りきった緊張のまま保持 */
+  }
+  90% {
+    transform: translateX(-3px); /* 再加速の初動 */
+  }
+  93% {
+    transform: translateX(-14px); /* 突き抜けの衝撃 */
+  }
+  95% {
+    transform: translateX(8px);
+  }
+  96.5% {
+    transform: translateX(-4px);
+  }
+  98% {
+    transform: translateX(2px);
   }
   100% {
     transform: translateX(0);
@@ -2892,7 +3991,7 @@ body {
     inset 0 0 0 2px rgba(255, 214, 90, 0.4),
     inset 0 0 0 3px rgba(0, 0, 0, 0.5),
     inset 0 10px 16px -12px rgba(255, 255, 255, 0.45);
-  font-family: var(--mono);
+  font-family: var(--num);
   font-size: 40px;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
@@ -2901,6 +4000,42 @@ body {
     0 2px 8px rgba(0, 0, 0, 0.7),
     0 0 12px rgba(255, 200, 120, 0.25);
   white-space: nowrap;
+}
+
+/*
+ * ゴーストブロック(jackstop/jackslip/jackback 専用) — 「一番下の出目が入りそうに
+ * なる」の主役。strip[TARGET-1] の真上に固定した被せブロックで、リールの transform
+ * に乗って一緒に動く(left は RouletteFx.tsx がインラインで入れる)。
+ * .rl-block を併用して本物と同一見た目にし、絶対配置ぶんだけここで上書きする。
+ * 色・発光は付けない — 本物と見分けが付いたらフェイクにならない。
+ */
+.roulette-reel .rl-jack {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  margin: 0;
+  width: calc(var(--rl-w) - var(--rl-gap) * 2);
+}
+
+/*
+ * ゴーストの消灯。着地後の veil-out(答え合わせ)で左スロットの実際の値と
+ * 食い違って見えないよう、走行の終盤(97%)までに消す。
+ */
+.rl-p-jackstop .rl-jack,
+.rl-p-jackslip .rl-jack,
+.rl-p-jackback .rl-jack {
+  animation: rl-jack-fade var(--rl-ms) linear both;
+}
+
+@keyframes rl-jack-fade {
+  0%,
+  95% {
+    opacity: 1;
+  }
+  97%,
+  100% {
+    opacity: 0;
+  }
 }
 
 /*
@@ -2930,7 +4065,10 @@ body {
   30% {
     opacity: 0;
   }
-  /* 高速域が終わって段に入る手前で閉じきる(どのパターンも 48% までに k=3 へ着く)。 */
+  /*
+   * 高速域が終わって段に入る手前で閉じきる — どのパターンも k=3 以下の段へ
+   * 入るのは 48% 以降(restart は 60% の失速まで k>4 に留まるのでなお安全)。
+   */
   46%,
   100% {
     opacity: 1;
@@ -2944,6 +4082,52 @@ body {
 
 @keyframes rl-veil-out {
   to {
+    opacity: 0;
+  }
+}
+
+/*
+ * 暗転レイヤ(blackout 専用。DOM は RouletteFx.tsx がパターン時のみ出す)。
+ * veil・ポインタより後 = 最前面で窓を丸ごと呑む。着地(rl-run-blackout の
+ * 72→84%)は真っ暗の中で済ませ、89% の消灯で「もう止まっている」リールを見せる。
+ * チラつき(73.5% / 90.5%)は蛍光灯の点滅 — 消え際・点き際を汚すことで
+ * フェードではなく「電源が落ちた」に見せる。
+ */
+.rl-p-blackout .rl-blackout {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: rgba(2, 1, 6, 0.99);
+  opacity: 0;
+  animation: rl-blackout var(--rl-ms) linear both;
+}
+
+@keyframes rl-blackout {
+  0%,
+  71% {
+    opacity: 0;
+  }
+  72% {
+    opacity: 0.65;
+  }
+  73.5% {
+    opacity: 0.3;
+  }
+  75%,
+  86% {
+    opacity: 1;
+  }
+  87.5% {
+    opacity: 0.7;
+  }
+  89% {
+    opacity: 0;
+  }
+  90.5% {
+    opacity: 0.25;
+  }
+  92%,
+  100% {
     opacity: 0;
   }
 }
@@ -3243,10 +4427,11 @@ body {
 
 /* タップ数の大型数字。key=tapCount の再マウントでパンチが毎タップ再生される。 */
 .boost-count {
-  font-family: var(--mono);
+  font-family: var(--num);
   font-size: 168px;
   line-height: 1;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   color: #ffe9a8;
   text-shadow:
     0 0 18px rgba(255, 214, 90, 0.9),
@@ -3359,10 +4544,11 @@ body {
 
 /* 減算量の大型数字。roll 中の桁文字は rAF が textContent 直書きで回す。 */
 .boost-settle-amt {
-  font-family: var(--mono);
+  font-family: var(--num);
   font-size: 190px;
   line-height: 1;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   color: #ffd9a8;
   text-shadow:
     0 0 20px rgba(255, 140, 60, 0.95),

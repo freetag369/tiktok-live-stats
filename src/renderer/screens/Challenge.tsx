@@ -11,18 +11,22 @@ import type {
   ChallengeTestEffectSpec,
   FanStampConfig,
   TapBoostConfig,
+  TapBoostRule,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
   GiftFxBand,
   GiftRepeatFxConfig,
+  RoulettePattern,
 } from '@shared/dto';
+import { ROULETTE_PATTERNS } from '@shared/dto';
 import {
   CHALLENGE_MINI_IDS,
   CHALLENGE_SE_SLOTS,
   COMMENT_RULES_MAX,
   DEFAULT_FAN_STAMP,
   DEFAULT_TAP_BOOST,
+  DEFAULT_TAP_BOOST_RULE,
   DEFAULT_GIFT_BAND_FX,
   DEFAULT_GIFT_FULL_CUT,
   DEFAULT_GIFT_REPEAT_FX,
@@ -35,6 +39,7 @@ import {
   DEFAULT_ROULETTE,
   DEFAULT_SE_VOLUMES,
   ROULETTE_LABEL_MAX,
+  ROULETTE_REELS_MAX,
   ROULETTE_SEGMENTS_MAX,
   ROULETTES_MAX,
   TAP_BOOST_COUNT_CLIPS,
@@ -45,6 +50,7 @@ import {
   TAP_BOOST_INTRO_MS,
   TAP_BOOST_LOOP_CLIPS,
   TAP_BOOST_MULT_MAX,
+  TAP_BOOST_RULES_MAX,
   TAP_BOOST_MULT_MIN,
   TAP_BOOST_RESULT_CLIPS,
   effectiveSeVolume,
@@ -53,6 +59,7 @@ import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { useConfirm } from '../components/ConfirmDialog';
 import { setSettings, toast } from '../state/uiStore';
+import { useLive } from '../state/liveStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
 import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
 import { FX_CLIPS, FX_CLIP_GROUPS, isFullCutClip } from '../lib/fx';
@@ -99,7 +106,7 @@ const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   helper: 'お助け(ファンスタンプ)',
   roulette: 'ルーレット回転',
   'roulette-near': 'ルーレット 止まりそう(あと1個の溜め)',
-  'roulette-kick': 'ルーレット キック(フェイク停止からの一撃)',
+  'roulette-kick': 'ルーレット キック(衝撃系パターンの一撃)',
   'roulette-hit': 'ルーレット確定',
   'boost-start': 'ブースト タップ開始',
   'boost-end': 'ブースト着弾(一括減算)',
@@ -235,7 +242,8 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
       // 1回のスピンで回転開始音・止まりそう・確定音がまとめて確認できる。
       return { kind: 'roulette' };
     case 'roulette-kick':
-      // キック音はパターン3でしか鳴らないので、演出を狙い撃ちで再生する。
+      // キック音は衝撃系パターン(キック・巻き戻し等)でしか鳴らないので、
+      // 代表して「キック」を狙い撃ちで再生する。
       return { kind: 'roulette', pattern: 'kick' };
     case 'boost-start':
     case 'boost-end':
@@ -1050,7 +1058,11 @@ function GiftClipsSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
 /**
  * 連打ギフト(コンボ)の演出反復。TikTok は同じギフトの連打を1メッセージに畳んで
  * 送るため、素だと「10連打でも演出1回」になる。ここはその回数ぶん演出を撃ち直す設定。
- * 値・統計・履歴は動かさない(ルーレットだけは抽選をやり直すので増減も回数ぶん)。
+ * 値・統計・履歴は動かさない。
+ *
+ * **ルーレットだけは別枠**: 抽選回数と増減は常に個数ぶん(ここの max では削らない)。
+ * rouletteEnabled が決めるのは「リールを何本見せるか」だけ。演出用の上限で値まで
+ * 削っていたのが v0.5.4 の不具合だったので、ここは分けたまま保つこと。
  */
 function GiftRepeatFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
   const rf = cfg.giftRepeatFx;
@@ -1138,12 +1150,16 @@ function GiftRepeatFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
           disabled={!rf.enabled}
           onChange={(e) => patchRf({ rouletteEnabled: e.target.checked })}
         />
-        <span>ギフトルーレットも回数ぶん回す</span>
+        <span>ギフトルーレットのリールも回数ぶん回す</span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
-        ルーレットは抽選なので、繰り返すには出目を引き直すことになります。つまり
-        <b>これだけはカウントの増減も回数ぶんになります</b>(3連打なら3回転ぶん)。
-        企画のバランスが変わるので、変えたくないときは外してください。
+        ルーレットは抽選なので、<b>抽選回数とカウントの増減は常に贈られた個数ぶん</b>です
+        (17連打なら17回転ぶん)。上の「最大の繰り返し回数」でも減りません — 減らすと
+        視聴者が贈ったギフトぶんがカウントに反映されなくなるためです。
+        <br />
+        このチェックが変えるのは<b>リールを何本見せるか</b>だけ。外すとリールは1本になり、
+        残りは「残り◯回ぶん」の合算バナーでまとめて出ます(カウントの動きは同じ)。
+        リールは最大 {ROULETTE_REELS_MAX} 本まで(それ以上は同じく合算バナー)。
       </div>
       <div className="row">
         <button className="btn small" onClick={() => patchRf({ ...DEFAULT_GIFT_REPEAT_FX })}>
@@ -1693,6 +1709,19 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
         複数登録できますが、<b>上から順に評価し、最初に一致した1件だけ</b>が回ります。
         トリガーに一致したギフトは「ギフト増減」規則を通りません。
       </div>
+      <label className="row" style={{ marginTop: 8, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={cfg.hideRouletteResultInLog}
+          onChange={(e) => onPatch({ hideRouletteResultInLog: e.target.checked })}
+        />
+        <span>ライブ画面のログでルーレットの結果を伏せる(ネタバレ防止)</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        モニターのリールは確定した出目を遅れて再生しているだけなので、伏せないとリールが止まる前に
+        ログで結果が読めてしまいます。伏せた行は「+?」「→ ?????」になります。切ると過去の行も数字が戻ります。
+        ただしカード上部の大きな残数はギフト到着と同時に動くので、完全には隠せません。
+      </div>
       <div
         style={{
           border: '1px solid rgba(255,255,255,.12)',
@@ -1802,6 +1831,7 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
                   canonical: '',
                   segments: structuredClone(DEFAULT_ROULETTE.segments),
                   direction: 'add',
+                  patterns: [...ROULETTE_PATTERNS],
                 },
               ],
             })
@@ -1819,6 +1849,26 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
     </>
   );
 }
+
+/**
+ * 焦らしパターンの表示名と説明(チェックボックスのラベルと title)。
+ * 一覧と並び順の出所は shared/dto.ts の ROULETTE_PATTERNS。
+ */
+const ROULETTE_PATTERN_LABELS: Record<RoulettePattern, { label: string; hint: string }> = {
+  slow: { label: 'じわじわ減速', hint: '段々遅くなり、あと一歩で粘ってから止まる' },
+  pop: { label: 'ポンポン', hint: '4段飛び移り。間が段々長くなる' },
+  kick: { label: 'フェイク→キック', hint: '1つ手前で止まったと見せて、キックで1個ずれる' },
+  overrun: { label: '行き過ぎ巻き戻し', hint: '当選を通り過ぎて隣に着地→巻き戻して戻ってくる' },
+  crawl: { label: '超低速', hint: '最後の3個を這うように進む。微停止3回' },
+  doublefake: { label: '二段フェイク', hint: 'フェイク停止2回→キック2発' },
+  restart: { label: '失速→再加速', hint: '途中で止まったと見せて、再点火して駆け抜ける' },
+  teeter: { label: '境界シーソー', hint: '当選と隣の境界でシーソー→こてんと倒れる' },
+  stairs: { label: '階段落ち', hint: '5段の階段。段の間が 180ms→510ms と伸びる' },
+  blackout: { label: '暗転', hint: '終盤に真っ暗→明けたらもう止まっている' },
+  jackstop: { label: '大当たり寸止め', hint: '一番下の出目が完全に入って止まる→蹴り出される' },
+  jackslip: { label: '大当たりすり抜け', hint: '一番下の出目が寸前で震えて、スローですり抜ける' },
+  jackback: { label: '大当たり届かず', hint: '一番下の出目が届かず、後ろへ転がり戻る' },
+};
 
 /** ルーレット1件ぶんの設定行。トリガー・出目・確率をここで完結させる。 */
 function RouletteRow({
@@ -1904,6 +1954,67 @@ function RouletteRow({
       <div className="faint" style={{ fontSize: 11, marginTop: 4, marginBottom: 6 }}>
         モニターには「{rl.label.trim() !== '' ? rl.label.trim() : 'ギフト名'} ○○がルーレット」と出ます
         (○○ = 送信者の名前)。表示名が空のときは TikTok から届く実際のギフト名を使います。
+      </div>
+      <div
+        style={{
+          border: '1px solid rgba(255,255,255,.12)',
+          borderRadius: 8,
+          padding: '8px 10px',
+          marginBottom: 8,
+        }}
+      >
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+          焦らしパターン
+          <span className="faint" style={{ fontWeight: 400, marginLeft: 8, fontSize: 11 }}>
+            回るたびにチェックした中から均等に抽選。▶ でそのパターンを狙って試し回し。
+          </span>
+        </div>
+        <div className="row" style={{ flexWrap: 'wrap', gap: '6px 14px', alignItems: 'center' }}>
+          {ROULETTE_PATTERNS.map((p) => {
+            const checked = rl.patterns.includes(p);
+            // 全部外すと回れない(保存側は validateRoulette が全許可へ倒すが、
+            // UI では最後の1つを外せなくして「なぜか全部戻った」の混乱を防ぐ)。
+            const last = checked && rl.patterns.length <= 1;
+            const info = ROULETTE_PATTERN_LABELS[p];
+            return (
+              <span key={p} className="row" style={{ gap: 3, alignItems: 'center', whiteSpace: 'nowrap' }}>
+                <label
+                  className="row faint"
+                  style={{ fontSize: 11, cursor: last ? 'not-allowed' : 'pointer', gap: 3, whiteSpace: 'nowrap' }}
+                  title={last ? '最低1つは必要です' : info.hint}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={last}
+                    onChange={(e) =>
+                      onPatch({
+                        // ROULETTE_PATTERNS の正順へ正規化して持つ — validateRoulette の
+                        // 正規化と揃え、保存後に draft と差分が出る「保存したのに未保存
+                        // マーク」を防ぐ。
+                        patterns: e.target.checked
+                          ? ROULETTE_PATTERNS.filter((q) => q === p || rl.patterns.includes(q))
+                          : rl.patterns.filter((q) => q !== p),
+                      })
+                    }
+                  />
+                  {info.label}
+                </label>
+                <MonitorTestBtn
+                  spec={{ kind: 'roulette', rouletteId: rl.id, pattern: p }}
+                  onTest={onTest}
+                  busy={testBusy}
+                  label="▶"
+                  title={`「${info.label}」を狙ってモニターで試し回しします(チェックの有無に関係なく再生できます)`}
+                />
+              </span>
+            );
+          })}
+        </div>
+        <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+          「大当たり〜」の3つは、盤面の<b>一番下の出目</b>が入りそうになる超焦らし演出です
+          (どれが当たるかは変わりません)。連打のキュー消化中の短縮スピンには焦らしは入りません。
+        </div>
       </div>
       {rl.segments.map((s, i) => (
         <div className="row" key={i} style={{ gap: 8, alignItems: 'center' }}>
@@ -2171,6 +2282,63 @@ function CommentRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
  * giftId は文字列比較(normalize.ts の idStr)なので type="text" で扱う —
  * type="number" にすると前置ゼロや長い ID が壊れる(RouletteRow と同じ理由)。
  */
+/**
+ * 配信中に届いたギフトから giftId を拾って設定へ写すピッカー。
+ *
+ * ファンスタンプは**配信者ごとのカスタムギフト**なので既定値も一覧も存在せず、
+ * ID を事前に知る方法が無い。ギフト名での指定は表記ゆれと同名別IDで外れるため、
+ * 「実際に届いた1件の giftId をそのまま写す」のが唯一確実な入手経路になる。
+ *
+ * 出所はライブフィード(useLive の feed)— worker が gid を載せている。
+ * 同じギフトが連続で並ぶので giftId で名寄せし、新しい順に数件だけ出す。
+ * 未接続やギフト未着でフィードが空のときは、その旨だけ出して何も描かない。
+ */
+function GiftIdPicker({
+  selected,
+  onPick,
+}: {
+  selected: string;
+  onPick: (giftId: string) => void;
+}): React.JSX.Element {
+  const feed = useLive((s) => s.feed);
+  // フィードは新しい順。giftId で重複を畳んで先頭 8 件。
+  const seen = new Set<string>();
+  const gifts: Array<{ gid: string; name: string; dia: number }> = [];
+  for (const f of feed) {
+    if (f.k !== 'g' || f.gid === '' || seen.has(f.gid)) continue;
+    seen.add(f.gid);
+    gifts.push({ gid: f.gid, name: f.gift, dia: f.dia });
+    if (gifts.length >= 8) break;
+  }
+
+  return (
+    <label className="field" style={{ marginBottom: 8 }}>
+      最近届いたギフトから取得（クリックで上の「対象 giftId」に入ります）
+      {gifts.length === 0 ? (
+        <div className="faint" style={{ fontSize: 11, paddingTop: 6 }}>
+          配信に接続してギフトが届くと、ここに giftId 付きで並びます。
+        </div>
+      ) : (
+        <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+          {gifts.map((g) => (
+            <button
+              key={g.gid}
+              type="button"
+              className={g.gid === selected ? 'active' : ''}
+              title={`giftId ${g.gid} を対象に設定します（${g.dia}💎）`}
+              onClick={() => onPick(g.gid)}
+              style={{ fontSize: 11 }}
+            >
+              {g.name}
+              <span style={{ color: 'var(--fg-dim)' }}> {g.gid}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </label>
+  );
+}
+
 function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
   const fs = cfg.fanStamp;
   // fanStamp はネストしたオブジェクト — 丸ごと差し替える(patchBf と同じ作法)。
@@ -2223,6 +2391,7 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
               />
             </label>
           </div>
+          <GiftIdPicker selected={fs.giftId} onPick={(giftId) => patchFs({ giftId })} />
           <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
             負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)。10連打なら この値 × 10 です。
           </div>
@@ -2327,6 +2496,13 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
               label="▶ お助け演出をテスト"
               title="モニターウィンドウでお助けバナーを実演再生します(giftId 未設定でも確認できます)"
             />
+            <MonitorTestBtn
+              spec={{ kind: 'fanStamp', multi: true }}
+              onTest={onTest}
+              busy={testBusy}
+              label="▶ まとめて届いたとき"
+              title="複数人ぶんを1枚にまとめた合算バナーを実演再生します"
+            />
           </div>
 
           <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
@@ -2362,6 +2538,9 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
   const patchTb = (p: Partial<TapBoostConfig>): void => {
     onPatch({ tapBoost: { ...tb, ...p } });
   };
+  const patchRule = (i: number, p: Partial<TapBoostRule>): void => {
+    patchTb({ rules: tb.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
   const introSec = Math.round(TAP_BOOST_INTRO_MS / 1000);
   const countSec = Math.round(TAP_BOOST_COUNT_MS / 1000);
   const resultSec = Math.round(TAP_BOOST_RESULT_MS / 1000);
@@ -2385,123 +2564,189 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
 
       {tb.enabled ? (
         <>
-          <div className="row" style={{ gap: 8 }}>
-            <label className="field" style={{ width: 160 }}>
-              対象 giftId
-              <input
-                type="text"
-                placeholder="例: 5655"
-                value={tb.giftId}
-                onChange={(e) => patchTb({ giftId: e.target.value.trim() })}
+          {tb.rules.map((r, i) => (
+            <div className="challenge-rule" key={r.id}>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 60 }}
+                title="この行だけ一時的に止めます(下の行の判定は続きます)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.enabled}
+                  onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  有効
+                </span>
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="コーギー"
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                対象 giftId
+                <input
+                  type="text"
+                  placeholder="例: 6267"
+                  value={r.giftId}
+                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
+                />
+              </label>
+              <div style={{ width: 150 }}>
+                <label className="field">
+                  ギフト名(IDの保険)
+                  <input
+                    type="text"
+                    value={r.giftName}
+                    placeholder="corgi"
+                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                  />
+                </label>
+                <label
+                  className="row"
+                  style={{ cursor: 'pointer', marginTop: 2 }}
+                  title="オンにするとギフト名が完全に一致したときだけ発動します。オフ(既定)は部分一致で、たとえば「panther」は「Panther Paw」にも当たります。ブーストは一致すると最長23秒カウントが止まるので、短い名前を使うときはオンにしてください。"
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.exactName}
+                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    完全一致
+                  </span>
+                </label>
+              </div>
+              <label className="field" style={{ width: 90 }}>
+                タップ倍率
+                <input
+                  type="number"
+                  min={TAP_BOOST_MULT_MIN}
+                  max={TAP_BOOST_MULT_MAX}
+                  value={r.multiplier}
+                  onChange={(e) => patchRule(i, { multiplier: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                ウィンドウ(秒)
+                <input
+                  type="number"
+                  min={TAP_BOOST_DURATION_MIN_SEC}
+                  max={TAP_BOOST_DURATION_MAX_SEC}
+                  value={r.durationSec}
+                  onChange={(e) => patchRule(i, { durationSec: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field" style={{ width: 150 }}>
+                起動カットイン({introSec}秒)
+                <select value={r.introClip} onChange={(e) => patchRule(i, { introClip: e.target.value })}>
+                  {TAP_BOOST_INTRO_CLIPS.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                  <option value="off">出さない(この段をスキップ)</option>
+                </select>
+              </label>
+              <label className="field" style={{ width: 150 }}>
+                カウントダウン({countSec}秒)
+                <select value={r.countClip} onChange={(e) => patchRule(i, { countClip: e.target.value })}>
+                  {TAP_BOOST_COUNT_CLIPS.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                  <option value="off">出さない(この段をスキップ)</option>
+                </select>
+              </label>
+              <label className="field" style={{ width: 150 }}>
+                タップウィンドウの映像
+                <select value={r.loopClip} onChange={(e) => patchRule(i, { loopClip: e.target.value })}>
+                  {TAP_BOOST_LOOP_CLIPS.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                  <option value="off">出さない(暗幕+カウンタのみ)</option>
+                </select>
+              </label>
+              <label className="field" style={{ width: 150 }}>
+                結果カットシーン({resultSec}秒)
+                <select value={r.resultClip} onChange={(e) => patchRule(i, { resultClip: e.target.value })}>
+                  {TAP_BOOST_RESULT_CLIPS.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                  <option value="off">出さない(この段をスキップ)</option>
+                </select>
+              </label>
+              <label className="row" style={{ cursor: 'pointer', width: 76 }}>
+                <input
+                  type="checkbox"
+                  checked={r.flash}
+                  onChange={(e) => patchRule(i, { flash: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  フラッシュ
+                </span>
+              </label>
+              <MonitorTestBtn
+                spec={{ kind: 'tapBoost', boostId: r.id }}
+                onTest={onTest}
+                busy={testBusy}
+                label="▶ この行"
+                title="モニターウィンドウで、この行の設定(倍率・秒数・映像)のまま起動カットイン→3・2・1→タップウィンドウ→結果カットシーン→減算発表→着弾を実演再生します(giftId 未設定でも確認できます)。カウント値は変わりません"
               />
-            </label>
-            <label className="field" style={{ flex: 1 }}>
-              ギフト名(部分一致・IDが変わった時の保険)
-              <input
-                type="text"
-                placeholder="例: ローズ"
-                value={tb.giftName}
-                onChange={(e) => patchTb({ giftName: e.target.value.toLowerCase() })}
-              />
-            </label>
-          </div>
-          <div className="row" style={{ gap: 8, marginTop: 6 }}>
-            <label className="field" style={{ width: 140 }}>
-              タップ倍率
-              <input
-                type="number"
-                min={TAP_BOOST_MULT_MIN}
-                max={TAP_BOOST_MULT_MAX}
-                value={tb.multiplier}
-                onChange={(e) => patchTb({ multiplier: Number(e.target.value) })}
-              />
-            </label>
-            <label className="field" style={{ width: 200 }}>
-              タップウィンドウ(秒・{TAP_BOOST_DURATION_MIN_SEC}〜{TAP_BOOST_DURATION_MAX_SEC})
-              <input
-                type="number"
-                min={TAP_BOOST_DURATION_MIN_SEC}
-                max={TAP_BOOST_DURATION_MAX_SEC}
-                value={tb.durationSec}
-                onChange={(e) => patchTb({ durationSec: Number(e.target.value) })}
-              />
-            </label>
-          </div>
-          <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
-            例: 倍率5・1回の減少量1で、ウィンドウ中に20回タップすると <b>−100</b> がまとめて反映されます。
-            起動{introSec}秒・カウントダウン{countSec}秒は固定です(3・2・1 が映像に焼き込まれているため)。
-          </div>
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchTb({ rules: tb.rules.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
 
-          <div className="row" style={{ gap: 8, marginTop: 6 }}>
-            <label className="field" style={{ flex: 1 }}>
-              起動カットイン({introSec}秒)
-              <select value={tb.introClip} onChange={(e) => patchTb({ introClip: e.target.value })}>
-                {TAP_BOOST_INTRO_CLIPS.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-                <option value="off">出さない(この段をスキップ)</option>
-              </select>
-            </label>
-            <label className="field" style={{ flex: 1 }}>
-              カウントダウン({countSec}秒)
-              <select value={tb.countClip} onChange={(e) => patchTb({ countClip: e.target.value })}>
-                {TAP_BOOST_COUNT_CLIPS.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-                <option value="off">出さない(この段をスキップ)</option>
-              </select>
-            </label>
-            <label className="field" style={{ flex: 1 }}>
-              タップウィンドウの映像
-              <select value={tb.loopClip} onChange={(e) => patchTb({ loopClip: e.target.value })}>
-                {TAP_BOOST_LOOP_CLIPS.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-                <option value="off">出さない(暗幕+カウンタのみ)</option>
-              </select>
-            </label>
-            <label className="field" style={{ flex: 1 }}>
-              結果カットシーン({resultSec}秒)
-              <select value={tb.resultClip} onChange={(e) => patchTb({ resultClip: e.target.value })}>
-                {TAP_BOOST_RESULT_CLIPS.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-                <option value="off">出さない(この段をスキップ)</option>
-              </select>
-            </label>
-          </div>
-          <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
-            「スキップ」にした段はその秒数ごと飛ばします(例: 起動とカウントダウンを両方スキップで
-            ギフト到着後すぐタップウィンドウ)。映像は素材を assets/fx/boost に追加すると選択肢を
-            増やせます(素材が無い段は暗幕で同じ秒数を待ちます)。結果カットシーンをスキップしても
-            <b>減算量「-N」のドラムロール発表と着弾は必ず出ます</b>。
-          </div>
-
-          <label className="row" style={{ cursor: 'pointer' }}>
-            <input type="checkbox" checked={tb.flash} onChange={(e) => patchTb({ flash: e.target.checked })} />
-            <span>発動時の照明フラッシュ</span>
-          </label>
-
-          <div className="row" style={{ marginTop: 10 }}>
-            <MonitorTestBtn
-              spec={{ kind: 'tapBoost' }}
-              onTest={onTest}
-              busy={testBusy}
-              label="▶ ブースト演出をテスト"
-              title="モニターウィンドウで起動カットイン→3・2・1→タップウィンドウ→結果カットシーン→減算発表→着弾を実演再生します(giftId 未設定でも確認できます)。ウィンドウ中にモニターをクリック/Spaceするとタップカウンタが動き、タップ数に応じた発表まで試写できます(カウント値は変わりません)"
-            />
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={tb.rules.length >= TAP_BOOST_RULES_MAX}
+              onClick={() =>
+                patchTb({
+                  rules: [
+                    ...tb.rules,
+                    {
+                      ...structuredClone(DEFAULT_TAP_BOOST_RULE),
+                      id: `boost-${Date.now().toString(36)}-${clipSeq++}`,
+                    },
+                  ],
+                })
+              }
+            >
+              ブーストを追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {TAP_BOOST_RULES_MAX} 件(現在 {tb.rules.length} 件)
+            </span>
           </div>
 
           <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
-            giftId が空のあいだは何にも一致しません(この機能はオフと同じです)。
+            例: 倍率5・1回の減少量1で、ウィンドウ中に20回タップすると <b>−100</b> がまとめて反映されます。
+            起動{introSec}秒・カウントダウン{countSec}秒は固定です(3・2・1 が映像に焼き込まれているため)。
+            「スキップ」にした段はその秒数ごと飛ばします。映像は素材を assets/fx/boost に追加すると
+            選択肢を増やせます(素材が無い段は暗幕で同じ秒数を待ちます)。結果カットシーンをスキップしても
+            <b>減算量「-N」のドラムロール発表と着弾は必ず出ます</b>。
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。giftId で当てるのが最も確実です。
+            トリガーが3つとも空の行は何にも一致しません(その行はオフと同じ)。
             演出中はモニターの数字が止まり、<b>画面中央にタップ数のカウンタ</b>が出ます。
             モニターを閉じているとき(演出が出せないとき)はカウントを止めず、
             タップのたびに倍率ぶんが即時反映されます。効果音は「効果音」タブの

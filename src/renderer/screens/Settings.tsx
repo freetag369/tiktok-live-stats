@@ -3,6 +3,7 @@ import type { AppSettings, ScoringConfig } from '@shared/dto';
 import { bytes, num } from '@shared/format';
 import { formatDateJa } from '@shared/time';
 import { DEFAULT_SCORING } from '@shared/scoring';
+import { DEFAULT_DASH_LAYOUT } from '@shared/dash-layout';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { go, setSettings, toast, useUi } from '../state/uiStore';
 
@@ -30,7 +31,9 @@ export function Settings(): React.JSX.Element {
     try {
       // challenge はチャレンジ画面が編集する。ここから送るとあちらの保存を
       // 古い draft で上書きしてしまうため除外する(cfg.set は main 側で浅いマージ)。
-      const { challenge: _omit, ...rest } = draft;
+      // dashLayout も同じ — draft はこの画面を開いた時点の写しなので、開いたまま
+      // ダッシュボードで並び替えた結果を、保存ボタンが古い並びへ巻き戻してしまう。
+      const { challenge: _omit, dashLayout: _omitLayout, ...rest } = draft;
       const r = await rpc('cfg.set', rest);
       setSettings(await rpc('cfg.get', undefined));
       toast({
@@ -38,6 +41,21 @@ export function Settings(): React.JSX.Element {
         msgJa: r.workerRestarted ? '保存しました（記録エンジンを再起動しました）。' : '保存しました。',
       });
       reloadDiag();
+    } catch (e) {
+      toast({ level: 'error', msgJa: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+
+  async function resetDashLayout(): Promise<void> {
+    setBusy(true);
+    try {
+      await rpc('cfg.set', { dashLayout: [...DEFAULT_DASH_LAYOUT] });
+      setSettings(await rpc('cfg.get', undefined));
+      // ライブ画面はタブを離れると unmount されるので、戻った時点で新しい並びを読む。
+      toast({ level: 'info', msgJa: 'ダッシュボードの配置を既定に戻しました。' });
     } catch (e) {
       toast({ level: 'error', msgJa: (e as Error).message });
     } finally {
@@ -155,6 +173,13 @@ export function Settings(): React.JSX.Element {
           <div className="faint" style={{ fontSize: 11 }}>
             これ以上のギフトは、流れるコメント欄ではなく右側に大きく表示されます。お礼を言い逃さないためです。
           </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 14 }}>
+            ライブ画面の「コメント」「視聴者」「入室 &amp; サマリー」は、見出し帯をドラッグすると
+            並び順を入れ替えられます。幅はパネルごとに決まっているので、動かしても中身は崩れません。
+          </div>
+          <button className="btn small" style={{ marginTop: 6 }} onClick={resetDashLayout} disabled={busy}>
+            ダッシュボードの配置を既定に戻す
+          </button>
         </div>
 
         <div className="card">

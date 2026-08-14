@@ -10,13 +10,23 @@ import {
 } from '@shared/challenge';
 import { playSe } from './se';
 
-/** null = effect 到着時には鳴らさない(着弾の瞬間にモニターが直接鳴らすスロット)。 */
-function slotFor(e: ChallengeEffect): ChallengeSeSlot | null {
+/**
+ * null = effect 到着時には鳴らさない(着弾の瞬間にモニターが直接鳴らすスロット)。
+ *
+ * @param stageSynced モニターが「舞台(stage)」で演出を1件ずつ直列化している。
+ *   ±N 浮上バナーは順番待ちで最大数秒遅れて出るので、到着時に鳴らすと音だけが
+ *   先走る。true のとき follow / comment / roulette も null にして、モニター側の
+ *   実際の再生点(showBannerNow / startRoulette)へ寄せる。
+ *   **モニターを閉じているときは false** — ダッシュボードが従来どおり到着時に
+ *   鳴らす(LiveDashboard は active: enabled && !monitorOpen なので二重にならない)。
+ */
+function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | null {
   switch (e.kind) {
     case 'press':
       return 'press';
+    // 舞台の直列化中は、±N 浮上バナーが実際に出る瞬間にモニターが鳴らす。
     case 'follow':
-      return 'follow';
+      return stageSynced ? null : 'follow';
     case 'like':
       return 'like';
     // 'gauge-full'(実演専用)の音は着弾の瞬間にモニターが直接鳴らす(impactStrikeVisuals)。
@@ -27,7 +37,7 @@ function slotFor(e: ChallengeEffect): ChallengeSeSlot | null {
     case 'stock-full':
       return null;
     case 'comment':
-      return 'comment';
+      return stageSynced ? null : 'comment';
     case 'gift':
       // ダイヤ帯域カットイン付きのギフトはジングルを鳴らさない — カットインの
       // BGM(MonitorView の playBandBgm)が主役で、重ねると音が濁る。
@@ -43,8 +53,11 @@ function slotFor(e: ChallengeEffect): ChallengeSeSlot | null {
       return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
     // 到着時 = 回転開始音。確定音('roulette-hit')はモニターがリール停止の瞬間に
     // 直接鳴らす(gauge-full の impactStrike と同型)。
+    // **ギフト1件につき1回**で正しい — 連打(1 effect に N 本のリール)でも
+    // ここは1回。リールごとの回転ループ音と確定音はモニターが1本ずつ鳴らす。
     case 'roulette':
-      return 'roulette';
+      // 舞台の直列化中はリールが実際に回り出す瞬間(startRoulette の at===0)。
+      return stageSynced ? null : 'roulette';
     // ブーストの音はモニターが直接鳴らす: 起動カットインは音声焼き込み動画、
     // 'boost-start' スロットはタップウィンドウ開始の合図として window 入りの瞬間、
     // 'boost-end' スロットは着弾の瞬間(stock-full と同型)。ここで鳴らすと
@@ -78,6 +91,12 @@ export function useChallengeSe(
     sounds?: Record<ChallengeSeSlot, string>;
     /** スロット→個別音量 0-100(%)。未指定・欠損スロットは 100(= volume そのまま)。 */
     volumes?: Record<ChallengeSeSlot, number>;
+    /**
+     * モニターが演出を1件ずつ直列化している(舞台)。true にすると follow /
+     * comment / roulette の音を鳴らさず、モニター側の実際の再生点へ委ねる。
+     * モニターだけ true — ダッシュボードは従来どおり到着時に鳴らす。
+     */
+    stageSynced?: boolean;
     /**
      * マウント直後の最初のスナップショットに含まれる test 演出(▶ 実演再生)を
      * 鳴らす。モニターだけ true — 実演がモニターのマウントより先に push されると
@@ -114,7 +133,7 @@ export function useChallengeSe(
     const sounds = o.sounds ?? DEFAULT_SE_SOUNDS;
     for (const e of play) {
       if (!o.active || !o.enabled) continue; // watermark は進めるが音は出さない
-      const slot = slotFor(e);
+      const slot = slotFor(e, o.stageSynced === true);
       if (slot === null) continue; // 着弾側(モニター)が直接鳴らすスロット
       // 音量は arm 時に確定させる — 連打の途中でスライダを触っても、予約済みの
       // 2発目以降だけ音量が変わる、という不整合を作らない(entryFor と同じ流儀)。

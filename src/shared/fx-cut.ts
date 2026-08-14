@@ -67,7 +67,10 @@ export const FULL_CUT_CLIPS_V1: readonly FullCutClipDef[] = [
  */
 export const FULL_CUT_CLIPS_V3: readonly FullCutClipDef[] = [
   { id: 'cut-subarashii', label: '素晴らしい', ruleLabel: '素晴らしい', giftId: '15232', giftName: 'awesome', canonical: '', exactName: false },
-  { id: 'cut-mini-hanabi', label: 'ミニ花火', ruleLabel: 'ミニ花火', giftId: '', giftName: 'mini fireworks', canonical: '', exactName: false },
+  // ⚠ 実受信で確認: giftId 134531 / 名前は 'Firework'(**単数形・"mini" は付かない**)。
+  //   v3〜v5 の推定 'mini fireworks' は一度も一致しなかった。部分一致に戻すと
+  //   「Fireworks Show」(5783, 1099💎)に誤爆するので完全一致必須。
+  { id: 'cut-mini-hanabi', label: 'ミニ花火', ruleLabel: 'ミニ花火', giftId: '134531', giftName: 'firework', canonical: '', exactName: true },
   { id: 'cut-neko-ashi', label: '猫の足', ruleLabel: '猫の足', giftId: '', giftName: 'cat paw', canonical: '', exactName: false },
   // ⚠ 'tiktok' は「TikTok Universe」「TikTok Stars」の部分文字列。完全一致必須。
   { id: 'cut-tiktok', label: 'TikTok', ruleLabel: 'TikTok', giftId: '5269', giftName: 'tiktok', canonical: '', exactName: true },

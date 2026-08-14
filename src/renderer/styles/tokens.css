@@ -40,4 +40,13 @@
 
   --font: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', system-ui, sans-serif;
   --mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+
+  /*
+   * 大型の数字表示専用。--mono(Cascadia Mono / Consolas)のゼロは
+   * カウンターが斜めの棒で二分される「スラッシュゼロ」字形で、モニターの
+   * 巨大な字だと「0 の中に点がある」ように見えてしまう。数字を大きく見せる
+   * 面では等幅である必要はないので、素直なゼロを持つ本文フォントを使い、
+   * 桁幅は font-variant-numeric: tabular-nums 側で揃える。
+   */
+  --num: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', system-ui, sans-serif;
 }

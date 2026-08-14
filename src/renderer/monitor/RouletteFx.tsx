@@ -4,9 +4,7 @@ import { rouletteHeadline, rouletteRevealMs, rouletteSpinMs } from '@shared/chal
 import {
   ROULETTE_BLOCK_GAP,
   ROULETTE_BLOCK_W,
-  ROULETTE_KICK_AT,
-  ROULETTE_NEAR_STOP_AT,
-  ROULETTE_SPIN_SE_END_AT,
+  ROULETTE_PATTERN_TIMING,
   ROULETTE_TARGET_BLOCK,
   rouletteRun,
   rouletteStrip,
@@ -28,15 +26,13 @@ import { num } from '@shared/format';
  * - 当選ブロックの目印(.win)と符号(+/-)は **.hit が付くまで DOM に出さない**。
  *   旧実装は当選ブロックにマウント時点から色が付いており、減速して近づいてくる
  *   「一番緊張してほしい瞬間」に答えが見えていた。
- * - 終盤は窓の左右を覆い(.rl-veil)、隣のブロックを読ませない。パターン3の
- *   キックは、暗がりから当選ブロックが蹴り出されてくる見せ方になる。
+ * - 終盤は窓の左右を覆い(.rl-veil)、隣のブロックを読ませない。キック系は、
+ *   暗がりから当選ブロックが蹴り出されてくる見せ方になる。
  * - 走行距離も着地位置も index に依存しない(roulette-fx.ts の解説を参照)。
+ * - 超焦らし系(jackstop/jackslip/jackback)のゴーストブロック(.rl-jack)は、
+ *   当選の1つ手前の固定スロットに「盤面の一番下の出目」を被せる — 値も位置も
+ *   当選と無相関なので、これ自体は何も漏らさない(monitor.css の解説を参照)。
  */
-
-/** キックの効果音を鳴らすまでの猶予。CSS の rl-run-kick の予備動作の入りと揃える。 */
-function kickDelayMs(spinMs: number): number {
-  return Math.round(spinMs * ROULETTE_KICK_AT);
-}
 
 export function RouletteFx({
   segments,
@@ -51,6 +47,7 @@ export function RouletteFx({
   giftIconUrl,
   onNearStop,
   onKick,
+  onStep,
   onSpinQuiet,
   onDone,
 }: {
@@ -73,13 +70,21 @@ export function RouletteFx({
   giftName?: string;
   giftIconUrl?: string;
   /**
-   * 「止まりそう」の瞬間(当選の1つ手前に着いて溜めに入るところ)。全パターン共通で
+   * 「止まりそう」の瞬間(当選の1つ手前の帯に入るところ)。全パターン共通で
    * 1スピンにつき1回だけ呼ぶ。呼び出し側がスイッチ音を足す。短縮スピンでは呼ばない
    * (段が無く、鳴らすと確定音とほぼ同時になる)。
    */
   onNearStop?: () => void;
-  /** キックの瞬間(パターン3のみ)。呼び出し側が衝撃音と揺れを足す。 */
+  /**
+   * キック級の衝撃の瞬間(キック・巻き戻し・再点火・暗転など)。呼び出し側が
+   * 衝撃音と揺れを足す。doublefake は2回呼ばれる — 冪等な実装にすること。
+   */
   onKick?: () => void;
+  /**
+   * 段・ホップ・微停止への到達(ROULETTE_PATTERN_TIMING.stepAts)。呼び出し側が
+   * 「コツン」の弱い音を足す。最大4回/スピン。
+   */
+  onStep?: () => void;
   /**
    * 回転ループ音を止めてよい時刻(終盤の段に入るところ)。保持やフェイク停止で
    * リールが止まって見えるのにカラカラ鳴り続けると錯覚が音で割れるため、
@@ -111,6 +116,9 @@ export function RouletteFx({
   // 入れると「止まりかけて再加速する」カクつきになるだけ(通常スピンとは別尺の
   // キーフレームを当てる)。
   const key = fast ? 'fast' : pattern;
+  // 超焦らし系はゴーストブロック(一番下の出目の被せ)を出す。fast では key が
+  // 'fast' になるので自然に消える(段が無いスピンにフェイクの主役は出せない)。
+  const jack = key === 'jackstop' || key === 'jackslip' || key === 'jackback';
   const strip = rouletteStrip(segments, index);
   const run = rouletteRun(seed, segments.length, fast);
   const shift = -(ROULETTE_TARGET_BLOCK - 1) * ROULETTE_BLOCK_W;
@@ -127,22 +135,30 @@ export function RouletteFx({
     timers.current.push(window.setTimeout(onDone, rouletteRevealMs(fast)));
   }
 
-  // 「止まりそう」の合図・キックの衝撃音・回転ループ音の消灯。壁時計とアニメーション時計はフレームが
-  // 出ない窓ではズレるが、音が数十 ms 前後するだけで破綻はしない(完了検知は
-  // animationend が本線)。
+  // SE の合図(止まりそう・衝撃・段のコツン・ループ音の消灯)をテーブル駆動で発火。
+  // 壁時計とアニメーション時計はフレームが出ない窓ではズレるが、音が数十 ms
+  // 前後するだけで破綻はしない(完了検知は animationend が本線)。
   useEffect(() => {
-    // 「止まりそう」。fast は段が無いので番兵 1 で弾かれる。
-    const nearAt = ROULETTE_NEAR_STOP_AT[key];
-    if (onNearStop && nearAt < 1) {
-      timers.current.push(window.setTimeout(onNearStop, Math.round(spinMs * nearAt)));
+    const t = ROULETTE_PATTERN_TIMING[key];
+    // 「止まりそう」。fast は番兵 1 で弾かれる。
+    if (onNearStop && t.nearAt < 1) {
+      timers.current.push(window.setTimeout(onNearStop, Math.round(spinMs * t.nearAt)));
     }
-    if (key === 'kick' && onKick) {
-      timers.current.push(window.setTimeout(onKick, kickDelayMs(spinMs)));
+    // キック級の衝撃(doublefake は2発)。
+    if (onKick) {
+      for (const at of t.kickAts) {
+        timers.current.push(window.setTimeout(onKick, Math.round(spinMs * at)));
+      }
+    }
+    // 段・ホップ・微停止の「コツン」。
+    if (onStep) {
+      for (const at of t.stepAts) {
+        timers.current.push(window.setTimeout(onStep, Math.round(spinMs * at)));
+      }
     }
     // 終盤の段に入るところでループ音を閉じる(fast は 1 = finish に任せる)。
-    const quietAt = ROULETTE_SPIN_SE_END_AT[key];
-    if (onSpinQuiet && quietAt < 1) {
-      timers.current.push(window.setTimeout(onSpinQuiet, Math.round(spinMs * quietAt)));
+    if (onSpinQuiet && t.quietAt < 1) {
+      timers.current.push(window.setTimeout(onSpinQuiet, Math.round(spinMs * t.quietAt)));
     }
     // マウント時に1回だけ。key/spinMs はこのマウントの間ずっと不変。タイマーは
     // 共有の timers 配列に積むのでアンマウント時の一括 cleanup が回収する。
@@ -188,12 +204,31 @@ export function RouletteFx({
                 {num(v)}
               </div>
             ))}
+            {/*
+             * ゴーストブロック(超焦らし系のみ)。当選の1つ手前 strip[TARGET-1] の
+             * 真上に「盤面の一番下の出目」を被せる。値は盤面の最終行で固定・位置も
+             * 定数 — どちらも当選と無相関なので DOM に出ても何も漏れない(素直に
+             * 実位置で狙うと当選 index が逆算できてしまう。monitor.css の解説参照)。
+             * 見た目は .rl-block と同一。消灯は rl-jack-fade(97% までに opacity 0)。
+             */}
+            {jack ? (
+              <div
+                className="rl-block rl-jack"
+                style={{
+                  left: `calc(var(--rl-w) * ${ROULETTE_TARGET_BLOCK - 1} + var(--rl-gap))`,
+                }}
+              >
+                {num(segments[segments.length - 1] ?? 0)}
+              </div>
+            ) : null}
           </div>
         </div>
         {/* 終盤に左右を覆って隣のブロックを読ませない目隠し。 */}
         <div className="rl-veil" />
         <div className="rl-pointer rl-pointer-top">▼</div>
         <div className="rl-pointer rl-pointer-bottom">▲</div>
+        {/* 暗転レイヤ(blackout のみ)。veil・ポインタより後 = 最前面で窓を呑む。 */}
+        {key === 'blackout' ? <div className="rl-blackout" /> : null}
       </div>
     </div>
   );

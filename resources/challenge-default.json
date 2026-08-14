@@ -94,6 +94,7 @@
     "spinSe": "spin-reel2",
     "spinSeVolume": 100
   },
+  "hideRouletteResultInLog": true,
   "flashMinDiamonds": 100,
   "hotkey": "F9",
   "monitorDisplayId": null,
