@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { DEFAULT_ZOOM_FACTOR, SETTINGS_VERSION, type AppSettings, type ChallengeConfig } from '@shared/dto';
 import { DEFAULT_CHALLENGE, migrateChallengeConfig, validateChallengeConfig } from '@shared/challenge';
 import { DEFAULT_SCORING, validateScoringConfig } from '@shared/scoring';
-import { configDirIn, dbPathIn } from './paths';
+import { configDirIn, dbPathIn, resourcesDir } from './paths';
 
 /**
  * A small JSON file read BEFORE the worker starts, because it decides where the
@@ -105,23 +105,32 @@ export function saveSettings(dataDir: string, s: AppSettings): void {
  * - 「チャレンジ設定をすべて既定に戻す」の戻り先になる(自分好みの既定)。
  * - ファイルを**他のPCの同じ場所へコピーするだけ**で、そのPCでも同じ内容が
  *   既定になる(初回起動はこの内容で立ち上がる)。
+ *
+ * さらに resources/challenge-default.json(リポジトリ同梱・GitHub 公開)を
+ * 第2候補として読む — 配布物だけで公開デフォが全ユーザーに行き渡る。
+ * ユーザー自身のデフォ保存は常にそれより優先される。
  */
 export function challengeDefaultPath(dataDir: string): string {
   return join(configDirIn(dataDir), 'challenge-default.json');
 }
 
 export function loadChallengeDefault(dataDir: string): ChallengeConfig | null {
-  const p = challengeDefaultPath(dataDir);
-  if (!existsSync(p)) return null;
-  try {
-    const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<ChallengeConfig> & { settingsVersion?: number };
-    // 世代印は settings.json と同じ扱い — 古いアプリで作られたファイルにも新既定の移行を配る。
-    const from = typeof raw.settingsVersion === 'number' ? raw.settingsVersion : 0;
-    return migrateChallengeConfig(validateChallengeConfig(raw as ChallengeConfig), from);
-  } catch {
-    // 壊れたファイルで起動不能にしない — 同梱既定へフォールバック。
-    return null;
+  // 優先順: ①ユーザーのデフォ保存(config/) → ②同梱の公開デフォ(resources/、
+  // リポジトリにコミットされ GitHub・全配布物に入る)→ ③null(= DEFAULT_CHALLENGE)。
+  // ②があるので、配布物を受け取った人は初回起動から公開デフォで立ち上がる。
+  const candidates = [challengeDefaultPath(dataDir), join(resourcesDir(), 'challenge-default.json')];
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    try {
+      const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<ChallengeConfig> & { settingsVersion?: number };
+      // 世代印は settings.json と同じ扱い — 古いアプリで作られたファイルにも新既定の移行を配る。
+      const from = typeof raw.settingsVersion === 'number' ? raw.settingsVersion : 0;
+      return migrateChallengeConfig(validateChallengeConfig(raw as ChallengeConfig), from);
+    } catch {
+      // 壊れたファイルで起動不能にしない — 次の候補へフォールバック。
+    }
   }
+  return null;
 }
 
 /** 検証(clamp)してから書く。戻り値は保存先パス(トーストでユーザーに見せる)。 */

@@ -1,0 +1,809 @@
+{
+  "settingsVersion": 5,
+  "enabled": true,
+  "title": "0まで寝ないぜ★",
+  "initialValue": 1000,
+  "pressStep": 1,
+  "followStep": 50,
+  "likeEvery": 50,
+  "likeStep": 25,
+  "likeStockCount": 9,
+  "likeStockStep": 25,
+  "commentRules": [],
+  "giftRules": [],
+  "giftDefault": {
+    "mode": "perDiamond",
+    "amount": 1
+  },
+  "roulettes": [
+    {
+      "id": "rl-heart_me",
+      "label": "ハートミー",
+      "enabled": true,
+      "giftId": "7934",
+      "giftName": "heart me",
+      "canonical": "heart_me",
+      "segments": [
+        {
+          "amount": 10,
+          "weight": 30
+        },
+        {
+          "amount": 20,
+          "weight": 25
+        },
+        {
+          "amount": 30,
+          "weight": 20
+        },
+        {
+          "amount": 50,
+          "weight": 15
+        },
+        {
+          "amount": 100,
+          "weight": 9
+        },
+        {
+          "amount": 1000,
+          "weight": 1
+        }
+      ],
+      "direction": "add"
+    },
+    {
+      "id": "rl-mss8yj5e-1",
+      "label": "バラ",
+      "enabled": true,
+      "giftId": "5655",
+      "giftName": "rose",
+      "canonical": "",
+      "segments": [
+        {
+          "amount": 1,
+          "weight": 30
+        },
+        {
+          "amount": 1,
+          "weight": 25
+        },
+        {
+          "amount": 1,
+          "weight": 20
+        },
+        {
+          "amount": 1,
+          "weight": 15
+        },
+        {
+          "amount": 1,
+          "weight": 9
+        },
+        {
+          "amount": 1000,
+          "weight": 1
+        }
+      ],
+      "direction": "add"
+    }
+  ],
+  "rouletteSound": {
+    "bgm": "off",
+    "bgmVolume": 100,
+    "spinSe": "spin-reel2",
+    "spinSeVolume": 100
+  },
+  "flashMinDiamonds": 100,
+  "hotkey": "F9",
+  "monitorDisplayId": null,
+  "monitorWindowed": true,
+  "wakeEnabled": true,
+  "wakeTime": null,
+  "lowThreshold": 10,
+  "seEnabled": true,
+  "seVolume": 70,
+  "seSounds": {
+    "press": "bong",
+    "follow": "follow-jam",
+    "like": "confirm-1",
+    "gauge-full": "gauge-burst",
+    "stock-full": "stock-burst",
+    "comment": "comment-jam",
+    "gift-t1": "confirm-1",
+    "gift-t2": "confirm-2",
+    "gift-t3": "jingle-hit",
+    "gift-t4": "jingle-steel",
+    "helper": "helper-stamp",
+    "roulette": "pluck",
+    "roulette-near": "reel-stop",
+    "roulette-kick": "reel-kick",
+    "roulette-hit": "reel-hit",
+    "boost-start": "boost-tap",
+    "boost-end": "boost-hit",
+    "achieved": "clear-fanfare"
+  },
+  "seVolumes": {
+    "press": 100,
+    "follow": 57,
+    "like": 17,
+    "gauge-full": 38,
+    "stock-full": 16,
+    "comment": 73,
+    "gift-t1": 100,
+    "gift-t2": 100,
+    "gift-t3": 100,
+    "gift-t4": 100,
+    "helper": 78,
+    "roulette": 100,
+    "roulette-near": 100,
+    "roulette-kick": 88,
+    "roulette-hit": 25,
+    "boost-start": 90,
+    "boost-end": 94,
+    "achieved": 100
+  },
+  "fxClipsEnabled": true,
+  "giftClips": [
+    {
+      "id": "clip-universe_plus",
+      "canonical": "universe_plus",
+      "clip": "universe_plus",
+      "mini": "off"
+    },
+    {
+      "id": "clip-universe",
+      "canonical": "universe",
+      "clip": "universe",
+      "mini": "off"
+    },
+    {
+      "id": "clip-tiktok_stars",
+      "canonical": "tiktok_stars",
+      "clip": "tiktok_stars",
+      "mini": "off"
+    },
+    {
+      "id": "clip-white_pegasus",
+      "canonical": "white_pegasus",
+      "clip": "white_pegasus",
+      "mini": "off"
+    },
+    {
+      "id": "clip-pegasus",
+      "canonical": "pegasus",
+      "clip": "pegasus",
+      "mini": "off"
+    },
+    {
+      "id": "clip-fire_phoenix",
+      "canonical": "fire_phoenix",
+      "clip": "fire_phoenix",
+      "mini": "off"
+    },
+    {
+      "id": "clip-thunder_falcon",
+      "canonical": "thunder_falcon",
+      "clip": "thunder_falcon",
+      "mini": "off"
+    },
+    {
+      "id": "clip-dragon",
+      "canonical": "dragon",
+      "clip": "dragon",
+      "mini": "off"
+    },
+    {
+      "id": "clip-lion_charge",
+      "canonical": "lion_charge",
+      "clip": "lion_charge",
+      "mini": "off"
+    },
+    {
+      "id": "clip-leon_lion",
+      "canonical": "leon_lion",
+      "clip": "leon_lion",
+      "mini": "off"
+    },
+    {
+      "id": "clip-lion",
+      "canonical": "lion",
+      "clip": "lion",
+      "mini": "off"
+    },
+    {
+      "id": "clip-palace",
+      "canonical": "palace",
+      "clip": "palace",
+      "mini": "off"
+    },
+    {
+      "id": "clip-whale_mirage",
+      "canonical": "whale_mirage",
+      "clip": "whale_mirage",
+      "mini": "off"
+    },
+    {
+      "id": "clip-whale_sam",
+      "canonical": "whale_sam",
+      "clip": "whale_sam",
+      "mini": "off"
+    },
+    {
+      "id": "clip-seal_whale",
+      "canonical": "seal_whale",
+      "clip": "seal_whale",
+      "mini": "off"
+    },
+    {
+      "id": "clip-adams_dream",
+      "canonical": "adams_dream",
+      "clip": "adams_dream",
+      "mini": "off"
+    }
+  ],
+  "miniFxEnabled": true,
+  "miniFx": {
+    "press": "off",
+    "follow": "panic",
+    "like": "shock",
+    "gauge-full": "off",
+    "stock-full": "off",
+    "comment": "off",
+    "gift-t1": "off",
+    "gift-t2": "off",
+    "gift-t3": "off",
+    "gift-t4": "off",
+    "helper": "stamp",
+    "roulette": "off",
+    "roulette-near": "off",
+    "roulette-kick": "off",
+    "roulette-hit": "off",
+    "boost-start": "off",
+    "boost-end": "off",
+    "achieved": "off"
+  },
+  "giftFullCut": {
+    "enabled": true,
+    "volume": 70,
+    "rules": [
+      {
+        "id": "fullcut-rose",
+        "label": "バラ",
+        "giftId": "5655",
+        "giftName": "rose",
+        "canonical": "rose",
+        "exactName": false,
+        "clip": "cut-rose",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-rosa",
+        "label": "ローザ",
+        "giftId": "8913",
+        "giftName": "rosa",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-rosa",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-subarashii",
+        "label": "素晴らしい",
+        "giftId": "15232",
+        "giftName": "awesome",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-subarashii",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-mini-hanabi",
+        "label": "ミニ花火",
+        "giftId": "",
+        "giftName": "mini fireworks",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-mini-hanabi",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-neko-ashi",
+        "label": "猫の足",
+        "giftId": "",
+        "giftName": "cat paw",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-neko-ashi",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-tiktok",
+        "label": "TikTok",
+        "giftId": "5269",
+        "giftName": "tiktok",
+        "canonical": "",
+        "exactName": true,
+        "clip": "cut-tiktok",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-gg",
+        "label": "GG",
+        "giftId": "6064",
+        "giftName": "gg",
+        "canonical": "",
+        "exactName": true,
+        "clip": "cut-gg",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-shoken",
+        "label": "初見です",
+        "giftId": "12202",
+        "giftName": "nice to meet u",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-shoken",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-hakushu",
+        "label": "拍手",
+        "giftId": "231956",
+        "giftName": "clap clap",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-hakushu",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-daisuki",
+        "label": "大好き",
+        "giftId": "15231",
+        "giftName": "love you so much",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-daisuki",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-soft-cream",
+        "label": "ソフトクリーム",
+        "giftId": "",
+        "giftName": "ice cream cone",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-soft-cream",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-uchiwa",
+        "label": "うちわ",
+        "giftId": "15563",
+        "giftName": "fan",
+        "canonical": "",
+        "exactName": true,
+        "clip": "cut-uchiwa",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-yakyu",
+        "label": "野球",
+        "giftId": "7897",
+        "giftName": "baseball",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-yakyu",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-love-letter",
+        "label": "ラブレター",
+        "giftId": "14113",
+        "giftName": "love letter",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-love-letter",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-ai-no-kaori",
+        "label": "愛の香り",
+        "giftId": "919386",
+        "giftName": "love in scent",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-ai-no-kaori",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-finger-heart",
+        "label": "フィンガーハート",
+        "giftId": "5487",
+        "giftName": "finger heart",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-finger-heart",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-nyao",
+        "label": "ニャオ",
+        "giftId": "",
+        "giftName": "nyao",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-nyao",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-yell",
+        "label": "エール",
+        "giftId": "12238",
+        "giftName": "support",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-yell",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-honki",
+        "label": "本気",
+        "giftId": "13521",
+        "giftName": "seriously",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-honki",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-omamori",
+        "label": "おまもり",
+        "giftId": "",
+        "giftName": "omamori",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-omamori",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-nebaaru",
+        "label": "ねば〜る君",
+        "giftId": "",
+        "giftName": "ねば",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-nebaaru",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-fukka",
+        "label": "ふっかちゃん",
+        "giftId": "",
+        "giftName": "ふっか",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-fukka",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-udon-no",
+        "label": "うどん脳",
+        "giftId": "",
+        "giftName": "うどん脳",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-udon-no",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-ice-bar",
+        "label": "アイスバー",
+        "giftId": "",
+        "giftName": "ice bar",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-ice-bar",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-journey-pass",
+        "label": "ジャーニーパス",
+        "giftId": "",
+        "giftName": "journey pass",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-journey-pass",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-oshi-shosan",
+        "label": "推しへの称賛",
+        "giftId": "",
+        "giftName": "applause",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-oshi-shosan",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-kosui",
+        "label": "香水",
+        "giftId": "5658",
+        "giftName": "perfume",
+        "canonical": "perfume",
+        "exactName": false,
+        "clip": "cut-kosui",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-goat-busker",
+        "label": "G.O.A.T.バスカー",
+        "giftId": "",
+        "giftName": "busker",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-goat-busker",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-donut",
+        "label": "ドーナッツ",
+        "giftId": "5879",
+        "giftName": "doughnut",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-donut",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-tensai",
+        "label": "天才",
+        "giftId": "13523",
+        "giftName": "genius",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-tensai",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-boshi-hige",
+        "label": "帽子と口ひげ",
+        "giftId": "",
+        "giftName": "hat and moustache",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-boshi-hige",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-utau-kinoko",
+        "label": "歌うキノコ",
+        "giftId": "170506",
+        "giftName": "singing mushroom",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-utau-kinoko",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-pearl-chime",
+        "label": "パールチャイム",
+        "giftId": "",
+        "giftName": "pearl chime",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-pearl-chime",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-flower-melody",
+        "label": "フラワーメロディ",
+        "giftId": "",
+        "giftName": "flower melody",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-flower-melody",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-groove-guitar",
+        "label": "グルーヴギター",
+        "giftId": "",
+        "giftName": "groove guitar",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-groove-guitar",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-fiesta-accordion",
+        "label": "フィエスタアコーディオン",
+        "giftId": "",
+        "giftName": "fiesta accordion",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-fiesta-accordion",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-heart-pose",
+        "label": "ハートポーズ",
+        "giftId": "5660",
+        "giftName": "",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-heart-pose",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-hand-heart",
+        "label": "ハンドハート",
+        "giftId": "8343",
+        "giftName": "",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-hand-heart",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-mischka-bear",
+        "label": "ミシカベア",
+        "giftId": "",
+        "giftName": "mischka",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-mischka-bear",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-cracker",
+        "label": "クラッカー",
+        "giftId": "",
+        "giftName": "party popper",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-cracker",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-koi-megane",
+        "label": "恋のメガネ",
+        "giftId": "19168",
+        "giftName": "love glasses",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-koi-megane",
+        "durationSec": 5,
+        "enabled": true
+      },
+      {
+        "id": "fullcut-tempo-flute",
+        "label": "テンポフルート",
+        "giftId": "",
+        "giftName": "tempo flute",
+        "canonical": "",
+        "exactName": false,
+        "clip": "cut-tempo-flute",
+        "durationSec": 5,
+        "enabled": true
+      }
+    ]
+  },
+  "giftBandFx": {
+    "enabled": true,
+    "bands": [
+      {
+        "id": "band1",
+        "min": 1,
+        "max": 50,
+        "clip": "gift-band1",
+        "durationSec": 6,
+        "enabled": true,
+        "bgm": "bgm-band1"
+      },
+      {
+        "id": "band2",
+        "min": 51,
+        "max": 100,
+        "clip": "gift-band2",
+        "durationSec": 6,
+        "enabled": true,
+        "bgm": "bgm-band2"
+      },
+      {
+        "id": "band3",
+        "min": 101,
+        "max": 600,
+        "clip": "gift-band3",
+        "durationSec": 8,
+        "enabled": true,
+        "bgm": "bgm-band3"
+      },
+      {
+        "id": "band4",
+        "min": 601,
+        "max": 1000,
+        "clip": "gift-band4",
+        "durationSec": 10,
+        "enabled": true,
+        "bgm": "bgm-band4"
+      }
+    ],
+    "excludeGiftIds": [
+      "7934"
+    ],
+    "overflow": "top",
+    "bgmEnabled": true,
+    "bgmVolume": 70
+  },
+  "giftRepeatFx": {
+    "enabled": true,
+    "max": 5,
+    "intervalMs": 700,
+    "bandEnabled": true,
+    "rouletteEnabled": true
+  },
+  "fanStamp": {
+    "enabled": true,
+    "giftId": "",
+    "giftName": "",
+    "canonical": "",
+    "amountEach": -1,
+    "suppressBandFx": false,
+    "flash": true
+  },
+  "tapBoost": {
+    "enabled": true,
+    "giftId": "723500",
+    "giftName": "黒豹(限定ギフト)",
+    "canonical": "",
+    "multiplier": 3,
+    "durationSec": 10,
+    "introClip": "intro-panther",
+    "countClip": "count-321",
+    "loopClip": "loop-panther",
+    "resultClip": "off",
+    "flash": true
+  }
+}
