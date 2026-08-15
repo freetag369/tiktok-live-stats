@@ -104,6 +104,16 @@ export function getMonitorWindow(): BrowserWindow | null {
   return monitor && !monitor.isDestroyed() ? monitor : null;
 }
 
+/**
+ * 診断メトリクス用 — モニター窓レンダラの OS pid(窓が無ければ null)。
+ * getAppMetrics の一覧は type='Tab' が並ぶだけなので、どれがモニター窓かは
+ * この pid を突き合わせて初めて分かる(metrics.ts)。
+ */
+export function getMonitorWindowPid(): number | null {
+  const win = getMonitorWindow();
+  return win ? win.webContents.getOSProcessId() : null;
+}
+
 /** 配信中の HDMI 抜け対策 — ディスプレイ構成が変わったら置き直す。 */
 export function repositionMonitor(displayId: number | null, windowed: boolean): void {
   const win = getMonitorWindow();

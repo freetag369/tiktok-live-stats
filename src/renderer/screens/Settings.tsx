@@ -347,6 +347,14 @@ export function Settings(): React.JSX.Element {
                   <td>コメント全文検索</td>
                   <td className="n">{diag.capabilities.fts5 ? '有効' : '簡易検索'}</td>
                 </tr>
+                {/*
+                  drainLoopLagMaxMs は読み出しリセット式で、Licenses 画面も q.diagnostics を
+                  叩くため値が食い合う。「直近読み出し区間」とラベルに明記して仕様として許容する。
+                */}
+                <tr>
+                  <td>worker 停止最大（直近読み出し区間）</td>
+                  <td className="n">{num(diag.loopLagMaxMs)} ms</td>
+                </tr>
                 <tr>
                   <td>未対応イベント</td>
                   <td className="n">

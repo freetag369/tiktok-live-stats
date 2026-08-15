@@ -5,9 +5,10 @@ import type { AppSettings, ChallengeConfig, CsvExportSpec } from '@shared/dto';
 import { CH_MONITOR_STATE, CH_SETTINGS_PUSH, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
 import { clearChallengeDefault, defaultSettings, loadChallengeDefault, loadSettings, needsWorkerRestart, sanitizeSettings, saveChallengeDefault, saveSettings } from './boot-settings';
 import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
-import { closeMonitorWindow, getMonitorWindow, openMonitorWindow, repositionMonitor } from './monitor-window';
+import { closeMonitorWindow, getMonitorWindow, getMonitorWindowPid, openMonitorWindow, repositionMonitor } from './monitor-window';
 import { configDirIn, defaultDataDir, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
 import { attachConsoleCapture, diagLogDir, initDiagLog, recentDiag, report } from './diag-log';
+import { startMetricsSampler, stopMetricsSampler } from './metrics';
 import { WorkerHost } from './worker-host';
 import { resetAutoRecoverBudget, tryAutoRecoverMonitor, watchDashboardWindow, watchMonitorWindow } from './window-health';
 import { createWindow } from './window';
@@ -500,6 +501,17 @@ async function boot(): Promise<void> {
   });
 
   attachConsoleCapture(win.webContents, 'dashboard');
+
+  // 診断メトリクス: 60秒ごとに各プロセスの RSS/CPU を logs/diag.log へ。
+  // 配布先の「何時間目からどのプロセスが太るか」をログだけで追うため。
+  // getAppMetrics ごと deps 注入なのは metrics.ts を electron 非依存に保つため。
+  startMetricsSampler({
+    getAppMetrics: () => app.getAppMetrics(),
+    getMainWindowPid: () => (win && !win.isDestroyed() ? win.webContents.getOSProcessId() : null),
+    getMonitorWindowPid,
+    getWorkerPid: () => host?.pid ?? null,
+  });
+
   watchDashboardWindow(win, {
     toast,
     onRepeatCrash: (reason) => {
@@ -560,6 +572,7 @@ app.on('before-quit', (e) => {
 });
 
 app.on('will-quit', () => {
+  stopMetricsSampler(); // unref 済みだが、終了処理中の採取(半壊状態の getAppMetrics)を避ける
   globalShortcut.unregisterAll();
 });
 

@@ -51,6 +51,11 @@ export class WorkerHost {
 
   constructor(private readonly deps: WorkerHostDeps) {}
 
+  /** 診断メトリクス用 — 現在の worker の OS pid(未起動・停止中・spawn 失敗は null)。 */
+  get pid(): number | null {
+    return this.proc?.pid ?? null;
+  }
+
   start(boot: {
     dbPath: string;
     userDataDir: string;

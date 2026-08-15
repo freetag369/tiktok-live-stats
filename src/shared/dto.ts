@@ -1555,6 +1555,11 @@ export interface DiagnosticsInfo {
   unknownEventCounts: Array<{ libType: string; count: number }>;
   dbSizeBytes: number;
   rowCounts: Record<string, number>;
+  /**
+   * worker イベントループの最大停止時間(ms)。読み出しリセット式なので
+   * 「前回どこかが q.diagnostics を読んでから今回まで」の区間の最大値。
+   */
+  loopLagMaxMs: number;
   quota: QuotaInfo | null;
   gitSha: string;
   buildTime: string;

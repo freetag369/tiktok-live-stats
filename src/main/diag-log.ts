@@ -57,6 +57,23 @@ export function report(scope: DiagScope, level: DiagLevel, message: string): voi
   const fresh = ring.push({ atMs, scope, level, message });
   // 同一メッセージの連発でファイルを膨らませない(リング側で件数は数えている)。
   if (!fresh) return;
+  enqueueLine(atMs, scope, level, message);
+}
+
+/**
+ * ファイルにだけ書く(リングを経由しない)。
+ *
+ * 毎分のプロセスメトリクス(metrics.ts)のような定期行をリングへ積むと、
+ * RING_CAP=300 の有界リングが定期行だけで埋まり、肝心の fxWarn・例外を
+ * 押し流してしまう。時系列の事後解析は logs/diag.log 側で行い、設定画面の
+ * リングは異常の要約専用に保つ。書き出しは report と同じ非同期バッチ。
+ */
+export function reportFileOnly(scope: DiagScope, level: DiagLevel, message: string): void {
+  enqueueLine(Date.now(), scope, level, message);
+}
+
+/** ファイル書き出しキューへ積み、バッチフラッシュを予約する(report と共用)。 */
+function enqueueLine(atMs: number, scope: DiagScope, level: DiagLevel, message: string): void {
   pending.push(`${new Date(atMs).toISOString()}\t${scope}\t${level}\t${message.replace(/\n/g, '\\n')}`);
   if (pending.length >= FLUSH_MAX) {
     void flush();

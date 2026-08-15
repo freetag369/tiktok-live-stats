@@ -250,6 +250,24 @@ const STOCK_CUTIN_ABORT_MS = STOCK_CUTIN_MS + 2000;
 const STAGE_RECHECK_MS = 400;
 
 /**
+ * ホールド固着の番犬。各ホールド(roulette/band/stockCutin/boost)の解除は自前の
+ * 安全弁タイマーが本線だが、タイマー消失やコールバック内の例外で孤児化すると
+ * anyCutinHold() が立ちっぱなしになり pumpStage が全死する(数字も演出も止まる)。
+ * MonitorView に時間ベースの脱出口はこの番犬だけ。期限は各 start* が自分の
+ * 安全弁と同じ権威尺 + FX_HOLD_GRACE_MS で書くので、正当な長尺演出(連打バンドの
+ * 直列再生・連鎖リール等)では発火しない。**hold を true にする箇所は必ず直後に
+ * fxHoldDeadlines へ期限を書くこと**(番犬は hold が真の間しか期限を読まない)。
+ */
+const FX_HOLD_WATCHDOG_MS = 10_000;
+/** 番犬の猶予。既存の安全弁より必ず後に発火させる(本線の解除を横取りしない)。 */
+const FX_HOLD_GRACE_MS = 5000;
+/**
+ * ブースト安全弁の余白。startBoostFx(boost-end 待ち)と finishBoostFx(清算発表の
+ * 再アーム)の両方が同じ値を使う — 片方だけ調整すると他方の守備範囲が壊れる。
+ */
+const BOOST_EXPIRE_MARGIN_MS = 3000;
+
+/**
  * 名前入りバナーの下段。ギフト名 / ニックネーム / 動作を**必ず別の行**に割る。
  *
  * 1 本の文を .f-txt に流して CSS だけで折り返させると、"柚木茜(search)" のような
@@ -712,6 +730,13 @@ export function MonitorView(): React.JSX.Element {
    */
   const stockCutinDelta = useRef(0);
 
+  /**
+   * ホールド番犬の期限(絶対時刻 ms、0 = 未使用)。各 start* が hold を立てた直後に
+   * 自分の安全弁と同じ権威尺から書き、hold が偽の間は読まれない(解除側で 0 に
+   * 戻す義務は無い — hold を立てる側が必ず上書きする)。判定は番犬 interval。
+   */
+  const fxHoldDeadlines = useRef({ roulette: 0, band: 0, stock: 0, boost: 0 });
+
   // CLEAR リザルトへの切り替えタイマー。演出ホールド中は張らない —
   // achieved は pendingAchieved で持ち越され、finish* が再生した時点で
   // achievedFxAt が更新されて再実行される(state 依存)。これが無いと、
@@ -813,6 +838,39 @@ export function MonitorView(): React.JSX.Element {
       mq.removeEventListener('change', sendCaps);
       clearInterval(t2);
     };
+  }, []);
+
+  // ── ホールド番犬(時間ベースの最後の脱出口) ─────────────────────────────
+  // 各ホールドの解除は自前の安全弁タイマーが本線。それでもタイマー消失・
+  // コールバック内の例外でホールドが孤児化すると anyCutinHold() が立ちっぱなしに
+  // なり、pumpStage が毎回 return して数字も演出も永久に止まる(実配信で
+  // 「ブースト明けに突然固まる」として観測された壊れ方)。ここは期限超過を検知して
+  // 既存の expire/finish 経路で強制解除する保険 — 期限は各 start* が権威尺
+  // + FX_HOLD_GRACE_MS で書くので、正当な演出中には発火しない。出口は必ず既存の
+  // 締め関数を使うこと(新規のクリーンアップをここに書くと後始末が二重管理になる)。
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = Date.now();
+      const d = fxHoldDeadlines.current;
+      if (boostHold.current && d.boost !== 0 && now > d.boost) {
+        fxWarn('ホールド番犬: boost が期限超過 — 強制解除', { overdueMs: now - d.boost });
+        expireBoostFx();
+      }
+      if (bandHold.current && d.band !== 0 && now > d.band) {
+        fxWarn('ホールド番犬: band が期限超過 — 強制解除', { overdueMs: now - d.band });
+        finishBandFx();
+      }
+      if (stockCutinHold.current && d.stock !== 0 && now > d.stock) {
+        fxWarn('ホールド番犬: stockCutin が期限超過 — 強制解除', { overdueMs: now - d.stock });
+        abortStrike();
+      }
+      if (rouletteHold.current && d.roulette !== 0 && now > d.roulette) {
+        fxWarn('ホールド番犬: roulette が期限超過 — 強制解除', { overdueMs: now - d.roulette });
+        expireRoulette();
+      }
+    }, FX_HOLD_WATCHDOG_MS);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1830,12 +1888,10 @@ export function MonitorView(): React.JSX.Element {
     // もう片方が必ず壊れる)。連鎖の間合いぶんも足す — 間合い中は hold を張った
     // ままなので、間合いのタイマーが失われると据え置きが固着する。
     clearRouletteTimers();
-    rouletteTimers.current.push(
-      window.setTimeout(
-        () => finishRoulette(e, spin, at),
-        rouletteAbortMs(fast || at > 0) + ROULETTE_CHAIN_GAP_MS
-      )
-    );
+    const abortAfterMs = rouletteAbortMs(fast || at > 0) + ROULETTE_CHAIN_GAP_MS;
+    // 番犬の期限は安全弁と同じ権威尺から導く(連鎖では1本ごとに張り直される)。
+    fxHoldDeadlines.current.roulette = Date.now() + abortAfterMs + FX_HOLD_GRACE_MS;
+    rouletteTimers.current.push(window.setTimeout(() => finishRoulette(e, spin, at), abortAfterMs));
     return true;
   }
 
@@ -1978,6 +2034,21 @@ export function MonitorView(): React.JSX.Element {
     setHeldValue(null);
   }
 
+  /**
+   * 番犬専用の締め(スピンの安全弁タイマーごと失われた異常系)。abortRoulette と
+   * 違い rouletteQueue / pendingAchieved は捨てず、finish 系と同じドレインで
+   * 持ち越し(CLEAR・キュー済みスピン/カットイン/ブースト)を必ず流す。
+   */
+  function expireRoulette() {
+    if (!rouletteHold.current) return;
+    clearRouletteTimers();
+    stopRouletteSound(0);
+    rouletteHold.current = false;
+    setRoulette(null);
+    setHeldValue(null);
+    scheduleDrain('roulette-first');
+  }
+
   // ── ダイヤ帯域カットイン ─────────────────────────────────────────────────
 
   function clearRepeatTimers() {
@@ -2023,6 +2094,8 @@ export function MonitorView(): React.JSX.Element {
     flushStrike(true);
     clearBandTimers();
     bandHold.current = true;
+    // 番犬の期限は下の二重安全弁(totalMs+2000)と同じ権威尺から導く。
+    fxHoldDeadlines.current.band = Date.now() + totalMs + 2000 + FX_HOLD_GRACE_MS;
     bandEffect.current = e;
     // 据え置き値は startRoulette と同じ「worker 確定の valueAfter から適用前へ戻す」。
     // 原点は prevValue(= 適用済みの現在値)。pendingBands / バナー待ちで遅れて
@@ -2145,6 +2218,9 @@ export function MonitorView(): React.JSX.Element {
     flushStrike(true);
     clearBoostTimers();
     boostHold.current = true;
+    // 番犬の期限は下の安全弁(totalMs + BOOST_EXPIRE_MARGIN_MS)と同じ権威尺から導く。
+    // boost-end 受信後は finishBoostFx が清算発表の尺で張り直す。
+    fxHoldDeadlines.current.boost = Date.now() + totalMs + BOOST_EXPIRE_MARGIN_MS + FX_HOLD_GRACE_MS;
     boostEffect.current = e;
     boostTest.current = e.test === true;
     boostTestTapRef.current = 0;
@@ -2191,7 +2267,7 @@ export function MonitorView(): React.JSX.Element {
     } else {
       // 安全弁: boost-end が届かない(worker 再起動等)なら強制解除。
       // abort ではなく expire — 持ち越しキューを捨てずにドレインする。
-      push(totalMs + 3000, expireBoostFx);
+      push(totalMs + BOOST_EXPIRE_MARGIN_MS, expireBoostFx);
     }
     return true;
   }
@@ -2229,6 +2305,9 @@ export function MonitorView(): React.JSX.Element {
    * を経て、着弾で据え置きを解除して worker の一括減算値へ収束させる。
    * タップ 0 は従来どおり軽い着弾だけで畳む(worker 側の凍結引き戻しと対)。
    * 全ビートは boostTimers に積む — abort/expire の clearBoostTimers で一掃できる。
+   * 冒頭の clearBoostTimers は startBoostFx が張った expire 安全弁も消すため、
+   * plan 確定直後に必ず張り直す(bandTimers の二重弁と同じ思想)— これが無いと
+   * ビート1つの消失で boostHold が孤児化し、舞台(pumpStage)ごと全死する。
    */
   function finishBoostFx(e: ChallengeEffect | null) {
     if (!boostHold.current) return;
@@ -2245,6 +2324,12 @@ export function MonitorView(): React.JSX.Element {
     const resultMs = e?.boostResultMs ?? (isTest ? (startE?.boostResultMs ?? 0) : 0);
     const resultClip = e?.boostResultClip ?? (isTest ? startE?.boostResultClip : undefined);
     const plan = planBoostSettle({ amount: amountAbs, tapCount: tap, resultMs });
+    // 安全弁の再アーム。ここから先は素の setTimeout 連鎖だけなので、1拍でも失われる
+    // と据え置きが永久固着する。余白は着弾の飛翔(≤ STRIKE_TRAVEL_MAX_MS)込みで覆う。
+    // 正常完走後の遅発は expireBoostFx 冒頭の boostHold ガードで no-op
+    // (次の start/abort の clearBoostTimers でも消える)。
+    boostTimers.current.push(window.setTimeout(expireBoostFx, plan.totalMs + BOOST_EXPIRE_MARGIN_MS));
+    fxHoldDeadlines.current.boost = Date.now() + plan.totalMs + BOOST_EXPIRE_MARGIN_MS + FX_HOLD_GRACE_MS;
     const fx = fxRef.current;
 
     if (plan.totalMs === 0) {
@@ -2632,6 +2717,8 @@ export function MonitorView(): React.JSX.Element {
    */
   function startStockCutin(stockDelta: number) {
     stockCutinHold.current = true;
+    // 番犬の期限は下の安全弁(STOCK_CUTIN_ABORT_MS)と同じ権威尺から導く。
+    fxHoldDeadlines.current.stock = Date.now() + STOCK_CUTIN_ABORT_MS + FX_HOLD_GRACE_MS;
     stockCutinDelta.current = stockDelta;
     setStockCutin({ key: ++fxKey, out: false });
     const push = (ms: number, fn: () => void) => {

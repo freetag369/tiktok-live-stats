@@ -15,6 +15,11 @@ export interface RpcDeps {
   configDir: string;
   resourcesDir: string;
   appInfo: { gitSha: string; buildTime: string; appVersion: string };
+  /**
+   * worker イベントループの直近最大停止(ms)。読み出しリセット式(loop-lag.ts の
+   * drainLoopLagMaxMs)。関数注入なのは循環 import(rpc-server → index)回避のため。
+   */
+  loopLagMaxMs: () => number;
 }
 
 /**
@@ -129,6 +134,7 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
     },
     'q.diagnostics': async () => ({
       ...store.diagnostics(),
+      loopLagMaxMs: deps.loopLagMaxMs(),
       quota: session.quota,
       gitSha: deps.appInfo.gitSha,
       buildTime: deps.appInfo.buildTime,
