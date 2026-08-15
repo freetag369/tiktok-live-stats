@@ -355,6 +355,11 @@ export function Settings(): React.JSX.Element {
                   <td>worker 停止最大（直近読み出し区間）</td>
                   <td className="n">{num(diag.loopLagMaxMs)} ms</td>
                 </tr>
+                {/* こちらは累積の最大。停止最大と並んで跳ねていたら犯人はディスク。 */}
+                <tr>
+                  <td>DBフラッシュ最大（起動からの累計）</td>
+                  <td className="n">{num(Math.round(diag.ingest.maxFlushMs))} ms</td>
+                </tr>
                 <tr>
                   <td>未対応イベント</td>
                   <td className="n">

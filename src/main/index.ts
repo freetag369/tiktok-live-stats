@@ -9,6 +9,7 @@ import { closeMonitorWindow, getMonitorWindow, getMonitorWindowPid, openMonitorW
 import { configDirIn, defaultDataDir, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
 import { attachConsoleCapture, diagLogDir, initDiagLog, recentDiag, report } from './diag-log';
 import { startMetricsSampler, stopMetricsSampler } from './metrics';
+import { startLoopLagMeter } from '../worker/loop-lag';
 import { WorkerHost } from './worker-host';
 import { resetAutoRecoverBudget, tryAutoRecoverMonitor, watchDashboardWindow, watchMonitorWindow } from './window-health';
 import { createWindow } from './window';
@@ -427,6 +428,13 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
 async function boot(): Promise<void> {
   // 設定より先に — loadSettings 中の警告も拾えるようにする。
   initDiagLog(dataDir);
+  // main 側の停止メーター(worker/loop-lag と同じ実装。別バンドルなので状態も別)。
+  // worker の「イベントループが Nms 停止」と時刻を突き合わせることで、停止が
+  // worker 単独(DB/コード)かマシン全体(ディスク・AV・スリープ)かを diag.log
+  // だけで切り分ける — 実配信で観測した21秒停止の原因特定のための計器。
+  startLoopLagMeter((lagMs) => {
+    report('main', 'error', `[diag] main イベントループが ${lagMs}ms 停止しました(worker 側の警告と時刻を突き合わせる)`);
+  });
   settings = loadSettings(dataDir);
 
   await app.whenReady();

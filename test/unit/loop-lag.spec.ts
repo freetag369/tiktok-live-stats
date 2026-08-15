@@ -50,3 +50,28 @@ describe('loop-lag — 最大値保持と読み出しリセット', () => {
     expect(String(vi.mocked(console.warn).mock.calls[0]?.[0])).toContain('650ms');
   });
 });
+
+describe('loop-lag — warn コールバックの差し替え(main プロセスの再利用口)', () => {
+  it('warn を渡すと console ではなくコールバックへ遅延(ms)が渡る', async () => {
+    // 新しいモジュールインスタンスで検証する(上の describe はモジュール状態を
+    // 使い切っており、lastLagWarnMs のスロットルが残っているため)。
+    vi.resetModules();
+    const mod = await import('@worker/loop-lag');
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    let now = 5_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const con = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = vi.fn();
+    try {
+      mod.startLoopLagMeter(warn); // expected = 5_001_000
+      now = 5_002_000; // 1000ms 遅れ
+      vi.advanceTimersByTime(1000);
+      expect(warn).toHaveBeenCalledWith(1000);
+      expect(con).not.toHaveBeenCalled(); // 既定の stdout 出力は差し替えで黙る
+      expect(mod.drainLoopLagMaxMs()).toBe(1000); // 計測自体は従来どおり
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+});

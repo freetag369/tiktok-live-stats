@@ -3,6 +3,16 @@ import type { NormalizedEvent } from '@shared/events';
 import type { Store } from './store/index';
 
 /**
+ * これを超える flush はディスク側の停止(AVスキャン・スリープ復帰・低速ストレージ)
+ * の疑い。worker は単一スレッド+同期 sqlite なので、この時間はそのまま
+ * 「ボタンが効かない時間」になる — loop-lag の警告と時刻を突き合わせられるよう、
+ * 同じ流儀(閾値+30秒スロットルの1行)で吐く。実配信で観測した21秒停止の
+ * 犯人が DB フラッシュかどうかを、次の発生時に diag.log だけで確定させるための計器。
+ */
+const FLUSH_WARN_MS = 1000;
+const FLUSH_WARN_EVERY_MS = 30_000;
+
+/**
  * Individual auto-commit inserts run at ~200–1,000 rows/s; the same rows inside
  * one transaction exceed 100,000/s. Batching is the only ingest optimisation
  * that actually matters — everything else is noise beside it.
@@ -11,6 +21,7 @@ export class Batcher {
   private pending: NormalizedEvent[] = [];
   private timer: NodeJS.Timeout | null = null;
   private sessionId: number | null = null;
+  private lastFlushWarnMs = 0;
 
   /** Diagnostics surfaced in 設定 when something looks wrong. */
   readonly stats = { flushes: 0, applied: 0, duplicates: 0, dropped: 0, errors: 0, maxFlushMs: 0, queueHigh: 0 };
@@ -76,6 +87,12 @@ export class Batcher {
     }
     const dt = performance.now() - t0;
     if (dt > this.stats.maxFlushMs) this.stats.maxFlushMs = dt;
+    if (dt >= FLUSH_WARN_MS && Date.now() - this.lastFlushWarnMs >= FLUSH_WARN_EVERY_MS) {
+      this.lastFlushWarnMs = Date.now();
+      console.warn(
+        `[worker] DBフラッシュが ${Math.round(dt)}ms かかりました(ディスク停止の疑い — この間ボタンの操作は届きません)`
+      );
+    }
     this.stats.flushes++;
   }
 

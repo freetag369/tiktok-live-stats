@@ -1560,6 +1560,22 @@ export interface DiagnosticsInfo {
    * 「前回どこかが q.diagnostics を読んでから今回まで」の区間の最大値。
    */
   loopLagMaxMs: number;
+  /**
+   * 取り込み(Batcher)の統計スナップショット。maxFlushMs が跳ねていたら worker の
+   * 停止は DB フラッシュ(= ディスク)が犯人 — loopLagMaxMs と突き合わせて読む。
+   * loopLagMaxMs と違い**累積値**(読み出しでリセットされない)。
+   */
+  ingest: {
+    flushes: number;
+    applied: number;
+    duplicates: number;
+    dropped: number;
+    errors: number;
+    maxFlushMs: number;
+    queueHigh: number;
+    queue: number;
+    capture: number;
+  };
   quota: QuotaInfo | null;
   gitSha: string;
   buildTime: string;

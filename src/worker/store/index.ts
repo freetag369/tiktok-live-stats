@@ -550,8 +550,8 @@ export class Store {
     rebuildLifetime(this.db);
   }
 
-  // loopLagMaxMs は store の外(loop-lag.ts)の計測なので rpc-server 側で合成する。
-  diagnostics(): Omit<D.DiagnosticsInfo, 'quota' | 'gitSha' | 'buildTime' | 'appVersion' | 'loopLagMaxMs'> {
+  // loopLagMaxMs / ingest は store の外(loop-lag.ts / batcher)の計測なので rpc-server 側で合成する。
+  diagnostics(): Omit<D.DiagnosticsInfo, 'quota' | 'gitSha' | 'buildTime' | 'appVersion' | 'loopLagMaxMs' | 'ingest'> {
     const tables = [
       'viewer',
       'stream_session',

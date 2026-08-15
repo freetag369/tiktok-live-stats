@@ -29,7 +29,12 @@ export function drainLoopLagMaxMs(): number {
   return v;
 }
 
-export function startLoopLagMeter(): void {
+/**
+ * @param warn 警告の出力先の差し替え(既定は stdout)。main プロセスが同じ計測を
+ *   使うための口 — main は別バンドル = モジュール状態も別インスタンスなので、
+ *   worker 側の drainLoopLagMaxMs と混ざることはない。
+ */
+export function startLoopLagMeter(warn?: (lagMs: number) => void): void {
   let expected = Date.now() + LOOP_LAG_TICK_MS;
   const t = setInterval(() => {
     const now = Date.now();
@@ -39,7 +44,8 @@ export function startLoopLagMeter(): void {
     if (lag > loopLagMaxMs) loopLagMaxMs = lag;
     if (lag >= LOOP_LAG_WARN_MS && now - lastLagWarnMs >= LOOP_LAG_WARN_EVERY_MS) {
       lastLagWarnMs = now;
-      console.warn(`[worker] イベントループが ${lag}ms 停止しました(この間ボタンの操作は届きません)`);
+      if (warn) warn(lag);
+      else console.warn(`[worker] イベントループが ${lag}ms 停止しました(この間ボタンの操作は届きません)`);
     }
   }, LOOP_LAG_TICK_MS);
   t.unref?.();

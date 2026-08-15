@@ -135,6 +135,9 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
     'q.diagnostics': async () => ({
       ...store.diagnostics(),
       loopLagMaxMs: deps.loopLagMaxMs(),
+      // Batcher 統計のスナップショット(累積)。maxFlushMs と loopLagMaxMs を
+      // 並べて読めば「worker 停止の犯人が DB フラッシュか」が一発で分かる。
+      ingest: session.ingestStats,
       quota: session.quota,
       gitSha: deps.appInfo.gitSha,
       buildTime: deps.appInfo.buildTime,
