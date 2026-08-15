@@ -23,7 +23,7 @@ function state(effects: ChallengeEffect[], over: Partial<ChallengeState> = {}): 
     title: 'テスト',
     startedMs: NOW,
     achievedMs: null,
-    stats: { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, rouletteSpins: 0 },
+    stats: { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 },
     recentEffects: effects,
     likeGauge: null,
     result: null,

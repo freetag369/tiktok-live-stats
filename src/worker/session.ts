@@ -390,8 +390,12 @@ export class SessionManager {
     // DB first — the record is the product; the UI is a view of it.
     this.batcher.push(e);
 
+    // 入室ルーレット(challenge)の初見判定。metaOf のメモリキャッシュだけを読む —
+    // alerts の初見経路(consider)と同じくレイド時に同期 SQL を増やさない。
+    let firstEver = false;
     if ('viewer' in e) {
       const m = this.metaOf(e.viewer.userId);
+      firstEver = m.firstEver;
       this.agg.observe(e, { firstEver: m.firstEver, vipTier: m.vipTier, visits: m.visits });
       this.feed.add(e, {
         vipTier: m.vipTier,
@@ -411,7 +415,7 @@ export class SessionManager {
 
     // カウントダウンチャレンジ — DB に書かない第5の消費者。フォロー/ギフトの
     // 増減は 2Hz tick を待たず即時に配る(モニターの演出が遅れると企画が死ぬ)。
-    if (this.deps.challenge.handleEvent(e)) this.pushDelta(false);
+    if (this.deps.challenge.handleEvent(e, firstEver)) this.pushDelta(false);
 
     if (e.kind === 'roomControl' && (e.action === 'ended' || e.action === 'suspended')) {
       this.safeStop(e.action === 'suspended' ? 'suspended' : 'streamEnd');

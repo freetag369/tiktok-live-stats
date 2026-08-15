@@ -19,6 +19,7 @@ import {
   GIFT_FX_FREEZE_MARGIN_MS,
   GIFT_FX_FREEZE_MAX_MS,
   GIFT_FX_PENDING_OPS_MAX,
+  JOIN_ROULETTE_MIN_GAP_MS,
   LIKE_FX_WINDOW_MS,
   ROULETTE_DRAWS_MAX,
   drawRouletteIndex,
@@ -103,7 +104,7 @@ export class ChallengeEngine {
   private value: number;
   private startedMs: number | null = null;
   private achievedMs: number | null = null;
-  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, rouletteSpins: 0 };
+  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
   private recentEffects: ChallengeEffect[] = [];
   /** reset でも巻き戻さない — モニターの冪等再生(既再生 id 比較)が壊れるため。 */
   private nextEffectId = 1;
@@ -113,6 +114,17 @@ export class ChallengeEngine {
    * 5万人超の後に最初期のフォロワーの付け外しがもう一度効くだけ)。
    */
   private seenFollowers = new BoundedSet<UserId>(50_000);
+  /**
+   * 入室ルーレットはチャレンジ1回につきユーザー1度だけ(再入室・再接続バック
+   * ログの再配信対策)。target が first/all のどちらでも適用する。容量は
+   * seenFollowers と同じ判断(溢れの副作用も同じ — 最初期の入室者がもう一度効くだけ)。
+   */
+  private seenJoiners = new BoundedSet<UserId>(50_000);
+  /**
+   * 直近の入室ルーレット発火時刻。JOIN_ROULETTE_MIN_GAP_MS 未満の連続入室は
+   * 値ごと黙って捨てる(レイド対策 — shared/challenge.ts の定数コメント参照)。
+   */
+  private joinRouletteLastMs = 0;
   /**
    * ギフトの msgId 重複排除。手動での停止→再接続は processInitialData: true で
    * バックログを再配信するため(adapter.ts 参照)、これが無いと直前のギフトが
@@ -333,9 +345,13 @@ export class ChallengeEngine {
     this.value = cfg.initialValue;
     this.startedMs = this.now();
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, rouletteSpins: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
     this.seenFollowers.clear();
+    this.seenJoiners.clear();
+    // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
+    // チャレンジで、開始直後の入室が黙って捨てられるのを防ぐ。
+    this.joinRouletteLastMs = 0;
     this.runViewers.clear();
     this.runParticipants = 0;
     this.runParticipantSeen.clear();
@@ -398,9 +414,13 @@ export class ChallengeEngine {
     this.value = this.getConfig().initialValue;
     this.startedMs = null;
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, rouletteSpins: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
     this.seenFollowers.clear();
+    this.seenJoiners.clear();
+    // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
+    // チャレンジで、開始直後の入室が黙って捨てられるのを防ぐ。
+    this.joinRouletteLastMs = 0;
     this.runViewers.clear();
     this.runParticipants = 0;
     this.runParticipantSeen.clear();
@@ -653,8 +673,12 @@ export class ChallengeEngine {
       case 'roulette': {
         // 行ごとの実演。未指定・対象行が消えていたら最初の有効な行(GiftBandFx の
         // bandId と同じ流儀)。1件も無ければ積む演出が無いのでそのまま抜ける。
-        const rl =
-          cfg.roulettes.find((r) => r.id === spec.rouletteId) ?? cfg.roulettes.find((r) => r.enabled);
+        // spec.join は入室ルーレットの試写 — 単一設定なので行解決は不要。enabled は
+        // 見ない(既存の試写規約: 「チェックする前に見てみたい」の道具)。
+        const rl = spec.join
+          ? cfg.joinRoulette
+          : (cfg.roulettes.find((r) => r.id === spec.rouletteId) ??
+            cfg.roulettes.find((r) => r.enabled));
         if (!rl) return;
         const idx = drawRouletteIndex(rl.segments, this.rand);
         const seg = rl.segments[idx]!;
@@ -697,8 +721,15 @@ export class ChallengeEngine {
 
   // ── TikTok イベント ──────────────────────────────────────────────────────
 
-  /** 戻り値 true = 状態が変わった(呼び出し側が即時 delta を送る)。 */
-  handleEvent(e: NormalizedEvent): boolean {
+  /**
+   * 戻り値 true = 状態が変わった(呼び出し側が即時 delta を送る)。
+   *
+   * joinFirstEver は join イベントの初見判定(session.ts の metaOf 由来)。
+   * 省略可能なのは呼び出し互換のため — リプレイ/テストの1引数呼び出しでは
+   * 常に false になり、target:'first' の入室ルーレットは発火しない(正しい挙動:
+   * リプレイの視聴者は既に DB に記録済みで初見ではない)。
+   */
+  handleEvent(e: NormalizedEvent, joinFirstEver = false): boolean {
     if (this.status !== 'running') return false;
     // 凍結期限が来ていればここで解除する(2Hz tick と並ぶ lazy 解除の入口)。
     this.flushFxFreeze(this.now());
@@ -723,6 +754,63 @@ export class ChallengeEngine {
           nickname: e.viewer.nickname ?? e.viewer.displayId,
           atMs: this.now(),
         });
+        this.dirty = true;
+      });
+    }
+
+    // 入室ルーレット。入室(action=1)で自動的に1スピン回り、出目をカウントへ
+    // 即時適用する(ギフトルーレット同様、モニターのリールは確定済みの出目の
+    // 遅延再生)。target:'first' なら初見さん(joinFirstEver)のみ、'all' なら誰でも。
+    if (e.kind === 'join') {
+      // action=1 のみ(events.ts の契約: 3 は SUBSCRIBED)。join に msgId は無いが、
+      // seenJoiners の dedup が再接続バックログの二重適用ガードを兼ねる。
+      if (e.action !== 1) return false;
+      const jr = cfg.joinRoulette;
+      if (!jr.enabled) return false;
+      if (jr.target === 'first' && !joinFirstEver) return false;
+      // dedup はクールダウンより先・凍結中も即時(seenFollowers と同じ規約)。
+      // 逆順にすると「窓で捨てられた人が再入室で当たる」の非決定が生まれる。
+      if (this.seenJoiners.has(e.viewer.userId)) return false;
+      this.seenJoiners.add(e.viewer.userId);
+      // レイド対策: 窓内の超過分は値ごと黙って捨てる(演出起点の機能なので値の
+      // 完全性は要らない)。キューに積まない = モニターのルーレットキューと
+      // リングバッファを入室だけで食い潰さない。窓は op の外で即時更新する —
+      // 凍結中の保留に載った分も窓を進めないと、解除の瞬間にまとめて回る。
+      const nowMs = this.now();
+      if (nowMs - this.joinRouletteLastMs < JOIN_ROULETTE_MIN_GAP_MS) return false;
+      this.joinRouletteLastMs = nowMs;
+      const nickname = e.viewer.nickname ?? e.viewer.displayId;
+      return this.applyOrQueue(() => {
+        // ギフトルーレットと同じ骨格(抽選→値適用→pushEffect→maybeAchieve)。
+        // 常に1スピン1リール — 連打の概念が無いので rouletteDrawCount は通さない。
+        const idx = drawRouletteIndex(jr.segments, this.rand);
+        const seg = jr.segments[idx]!;
+        const amount = jr.direction === 'sub' ? -seg.amount : seg.amount;
+        if (amount < 0) this.stats.joinDown += -amount;
+        else this.stats.joinUp += amount;
+        this.stats.rouletteSpins++;
+        this.value = Math.max(0, this.value + amount);
+        // 終盤の演出パターンは**出目を引いたあとに、出目とは無関係に引く**
+        // (ギフト経路と同じ — 相関すると演出が結果の予告になる)。
+        const pat = drawRoulettePattern(this.fxRand, jr.patterns);
+        this.pushEffect({
+          kind: 'roulette',
+          amount,
+          rouletteSegments: jr.segments.map((s) => s.amount),
+          rouletteIndex: idx,
+          rouletteIndexes: [idx],
+          roulettePattern: pat,
+          roulettePatterns: [pat],
+          rouletteReels: 1,
+          ...(jr.direction === 'sub' ? { rouletteDirection: 'sub' as const } : {}),
+          // label は validateJoinRoulette が空を許さないので必ず載る —
+          // rouletteBoardKey がギフトルーレットと衝突しないのはこの label のおかげ。
+          rouletteLabel: jr.label,
+          nickname,
+          atMs: this.now(),
+        });
+        // 達成判定は pushEffect の**後**(ギフト経路と同じ id 順契約)。
+        this.maybeAchieve(this.now()); // direction:'sub' なら 0 到達しうる
         this.dirty = true;
       });
     }

@@ -641,6 +641,25 @@ function ChallengeCard(): React.JSX.Element | null {
       setWakeDraft(null);
     }
   }, []);
+
+  /**
+   * 入室ルーレットのライブ中トグル。enabled は設定(settings.json)が唯一の権威 —
+   * toggleRank のような worker 内フラグにしない(再起動で消える揮発状態と違い
+   * 「機能を使うか」の設定なので、配信のたびに入れ直させない)。cfg.set は worker へ
+   * 即時プッシュされるので反映もその場で効く。read-modify-write は commitWake と
+   * 同じ理由(challenge はトップレベル丸ごと置換)。
+   */
+  const commitJoinRoulette = useCallback(async (on: boolean): Promise<void> => {
+    try {
+      const cur = await rpc('cfg.get', undefined);
+      await rpc('cfg.set', {
+        challenge: { ...cur.challenge, joinRoulette: { ...cur.challenge.joinRoulette, enabled: on } },
+      });
+      setSettings(await rpc('cfg.get', undefined));
+    } catch (e) {
+      toast({ level: 'error', msgJa: (e as Error).message });
+    }
+  }, []);
   useEffect(() => {
     const p = challenge?.stats.presses;
     if (p == null) return;
@@ -848,6 +867,20 @@ function ChallengeCard(): React.JSX.Element | null {
           }
         >
           {rankShown ? 'ランキングを消す' : 'ランキング表示'}
+        </button>
+        {/* 入室ルーレットのオン/オフ。値・統計には触らないので確認は不要
+            (連打しても cfg.set は冪等)。対象(初見のみ/全入室)や盤面の編集は
+            設定画面のルーレットタブ。 */}
+        <button
+          className={`btn small${settings.challenge.joinRoulette.enabled ? ' primary' : ''}`}
+          onClick={() => void commitJoinRoulette(!settings.challenge.joinRoulette.enabled)}
+          title={
+            settings.challenge.joinRoulette.enabled
+              ? `入室ルーレットが有効です(対象: ${settings.challenge.joinRoulette.target === 'all' ? 'すべての入室' : '初見さんのみ'})。押すと止まります。盤面や対象は設定画面で変更できます`
+              : '視聴者の入室で自動的にルーレットが回ります。盤面や対象(初見さんのみ/すべての入室)は設定画面で変更できます'
+          }
+        >
+          入室ルーレット{settings.challenge.joinRoulette.enabled ? ' ON' : ' OFF'}
         </button>
         <button
           className="btn small"

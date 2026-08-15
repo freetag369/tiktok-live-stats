@@ -94,6 +94,8 @@ function runningChallenge(): ChallengeState {
       likeUp: 0,
       likeStockUp: 0,
       commentUp: 0,
+      joinDown: 0,
+      joinUp: 0,
       rouletteSpins: 0,
     },
     recentEffects: [],

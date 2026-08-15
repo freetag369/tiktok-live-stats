@@ -17,6 +17,7 @@ import type {
   GiftFullCutRule,
   GiftFxBand,
   GiftRepeatFxConfig,
+  JoinRouletteConfig,
   RoulettePattern,
 } from '@shared/dto';
 import { ROULETTE_PATTERNS } from '@shared/dto';
@@ -36,6 +37,7 @@ import {
   GIFT_FX_REPEAT_MIN_MS,
   DEFAULT_GIFT_CLIPS,
   DEFAULT_MINI_FX,
+  DEFAULT_JOIN_ROULETTE,
   DEFAULT_ROULETTE,
   DEFAULT_SE_VOLUMES,
   ROULETTE_LABEL_MAX,
@@ -1846,6 +1848,106 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
           既定(ハートミー1件)に戻す
         </button>
       </div>
+      <JoinRouletteSection cfg={cfg} onPatch={onPatch} onTest={onTest} testBusy={testBusy} />
+    </>
+  );
+}
+
+/**
+ * 入室ルーレットの設定。ギフトルーレットと違い**単一設定でトリガーギフトを
+ * 持たない** — 視聴者の入室(初見さんのみ / すべて)で自動的に1スピン回る。
+ * 回転中のサウンドは上の「全ルーレット共通」をそのまま使う。
+ */
+function JoinRouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const jr = cfg.joinRoulette;
+  const patch = (p: Partial<JoinRouletteConfig>): void => onPatch({ joinRoulette: { ...jr, ...p } });
+
+  return (
+    <>
+      <div className="row" style={{ marginTop: 18 }}>
+        <h3 style={{ margin: 0 }}>入室ルーレット</h3>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 10 }}>
+        視聴者が入室するとモニターでルーレットが回り、出目が数字に加算(または減算)されます。
+        対象「初見さんのみ」は、このツールで初めて記録された視聴者だけに回ります。
+        同じ人はチャレンジ1回につき1度だけ。直前の発火から10秒以内の入室は間引かれます
+        (レイド対策)。ライブ画面のボタンからもオン/オフできます。
+      </div>
+      <div
+        style={{
+          border: '1px solid rgba(255,255,255,.12)',
+          borderRadius: 8,
+          padding: '10px 12px',
+          marginBottom: 10,
+        }}
+      >
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <label className="row" style={{ cursor: 'pointer', gap: 4 }}>
+            <input
+              type="checkbox"
+              checked={jr.enabled}
+              onChange={(e) => patch({ enabled: e.target.checked })}
+            />
+            <span>有効</span>
+          </label>
+          <div className="spacer" />
+          <MonitorTestBtn
+            spec={{ kind: 'roulette', join: true }}
+            onTest={onTest}
+            busy={testBusy}
+            label="▶ モニターで回す"
+            title="この盤面で抽選してモニターのルーレットを実演再生します(カウントは変わりません)"
+          />
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 8 }}>
+          <label className="field" style={{ width: 170 }}>
+            対象
+            <select
+              value={jr.target}
+              onChange={(e) => patch({ target: e.target.value as 'first' | 'all' })}
+            >
+              <option value="first">初見さんのみ</option>
+              <option value="all">すべての入室</option>
+            </select>
+          </label>
+          <label className="field" style={{ width: 170 }}>
+            表示名(モニター)
+            <input
+              type="text"
+              placeholder={`例: ${DEFAULT_JOIN_ROULETTE.label}`}
+              maxLength={ROULETTE_LABEL_MAX}
+              value={jr.label}
+              onChange={(e) => patch({ label: e.target.value })}
+            />
+          </label>
+          <label className="field" style={{ width: 150 }}>
+            出目の方向
+            <select
+              value={jr.direction}
+              onChange={(e) => patch({ direction: e.target.value as 'add' | 'sub' })}
+            >
+              <option value="add">増やす(妨害)</option>
+              <option value="sub">減らす(応援)</option>
+            </select>
+          </label>
+        </div>
+        <div className="faint" style={{ fontSize: 11, marginTop: 4, marginBottom: 6 }}>
+          モニターには「{jr.label.trim() !== '' ? jr.label.trim() : DEFAULT_JOIN_ROULETTE.label}{' '}
+          ○○がルーレット」と出ます(○○ = 入室した人の名前)。空で保存すると「
+          {DEFAULT_JOIN_ROULETTE.label}」に戻ります。
+          {jr.target === 'all'
+            ? ' 対象が「すべての入室」のときは表示名の変更をおすすめします(例: ようこそ)。'
+            : ''}
+        </div>
+        <RoulettePatternPicker
+          patterns={jr.patterns}
+          onChange={(patterns) => patch({ patterns })}
+          makeSpec={(p) => ({ kind: 'roulette', join: true, pattern: p })}
+          onTest={onTest}
+          testBusy={testBusy}
+        />
+        <RouletteSegmentsEditor segments={jr.segments} onChange={(segments) => patch({ segments })} />
+      </div>
     </>
   );
 }
@@ -1870,6 +1972,146 @@ const ROULETTE_PATTERN_LABELS: Record<RoulettePattern, { label: string; hint: st
   jackback: { label: '大当たり届かず', hint: '一番下の出目が届かず、後ろへ転がり戻る' },
 };
 
+/**
+ * 焦らしパターンのチェックリスト。ギフトルーレット(RouletteRow)と入室ルーレット
+ * (JoinRouletteSection)で共用する — 正順への正規化・「最後の1つは外せない」
+ * ガード・パターン別 ▶ の試写を1実装に保つため。
+ */
+function RoulettePatternPicker({
+  patterns,
+  onChange,
+  makeSpec,
+  onTest,
+  testBusy,
+}: {
+  patterns: RoulettePattern[];
+  onChange: (patterns: RoulettePattern[]) => void;
+  /** パターン別 ▶ の試写 spec。行の rouletteId / 入室の join は呼び元が焼き込む。 */
+  makeSpec: (p: RoulettePattern) => ChallengeTestEffectSpec;
+  onTest: OnTest;
+  testBusy: boolean;
+}): React.JSX.Element {
+  return (
+    <div
+      style={{
+        border: '1px solid rgba(255,255,255,.12)',
+        borderRadius: 8,
+        padding: '8px 10px',
+        marginBottom: 8,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+        焦らしパターン
+        <span className="faint" style={{ fontWeight: 400, marginLeft: 8, fontSize: 11 }}>
+          回るたびにチェックした中から均等に抽選。▶ でそのパターンを狙って試し回し。
+        </span>
+      </div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: '6px 14px', alignItems: 'center' }}>
+        {ROULETTE_PATTERNS.map((p) => {
+          const checked = patterns.includes(p);
+          // 全部外すと回れない(保存側は sanitizeRoulettePatterns が全許可へ倒すが、
+          // UI では最後の1つを外せなくして「なぜか全部戻った」の混乱を防ぐ)。
+          const last = checked && patterns.length <= 1;
+          const info = ROULETTE_PATTERN_LABELS[p];
+          return (
+            <span key={p} className="row" style={{ gap: 3, alignItems: 'center', whiteSpace: 'nowrap' }}>
+              <label
+                className="row faint"
+                style={{ fontSize: 11, cursor: last ? 'not-allowed' : 'pointer', gap: 3, whiteSpace: 'nowrap' }}
+                title={last ? '最低1つは必要です' : info.hint}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={last}
+                  onChange={(e) =>
+                    onChange(
+                      // ROULETTE_PATTERNS の正順へ正規化して持つ — 保存側の正規化と
+                      // 揃え、保存後に draft と差分が出る「保存したのに未保存
+                      // マーク」を防ぐ。
+                      e.target.checked
+                        ? ROULETTE_PATTERNS.filter((q) => q === p || patterns.includes(q))
+                        : patterns.filter((q) => q !== p)
+                    )
+                  }
+                />
+                {info.label}
+              </label>
+              <MonitorTestBtn
+                spec={makeSpec(p)}
+                onTest={onTest}
+                busy={testBusy}
+                label="▶"
+                title={`「${info.label}」を狙ってモニターで試し回しします(チェックの有無に関係なく再生できます)`}
+              />
+            </span>
+          );
+        })}
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+        「大当たり〜」の3つは、盤面の<b>一番下の出目</b>が入りそうになる超焦らし演出です
+        (どれが当たるかは変わりません)。連打のキュー消化中の短縮スピンには焦らしは入りません。
+      </div>
+    </div>
+  );
+}
+
+/** 出目テーブル(出目・重み・確率%)。ギフト・入室ルーレットで共用する。 */
+function RouletteSegmentsEditor({
+  segments,
+  onChange,
+}: {
+  segments: ChallengeRouletteSegment[];
+  onChange: (segments: ChallengeRouletteSegment[]) => void;
+}): React.JSX.Element {
+  const patchSeg = (i: number, p: Partial<ChallengeRouletteSegment>): void =>
+    onChange(segments.map((s, j) => (j === i ? { ...s, ...p } : s)));
+  const totalWeight = segments.reduce((s, x) => s + Math.max(0, x.weight), 0);
+
+  return (
+    <>
+      {segments.map((s, i) => (
+        <div className="row" key={i} style={{ gap: 8, alignItems: 'center' }}>
+          <label className="field" style={{ width: 110 }}>
+            {i === 0 ? '出目' : ''}
+            <input type="number" min="1" value={s.amount} onChange={(e) => patchSeg(i, { amount: Number(e.target.value) })} />
+          </label>
+          <label className="field" style={{ width: 110 }}>
+            {i === 0 ? '重み' : ''}
+            <input type="number" min="0" value={s.weight} onChange={(e) => patchSeg(i, { weight: Number(e.target.value) })} />
+          </label>
+          <span className="faint" style={{ fontSize: 11, minWidth: 54, textAlign: 'right' }}>
+            {totalWeight > 0 ? `${((Math.max(0, s.weight) / totalWeight) * 100).toFixed(1)}%` : '—'}
+          </span>
+          <button
+            className="btn small danger"
+            disabled={segments.length <= 1}
+            onClick={() => onChange(segments.filter((_, j) => j !== i))}
+          >
+            削除
+          </button>
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 8 }}>
+        <button
+          className="btn small"
+          disabled={segments.length >= ROULETTE_SEGMENTS_MAX}
+          onClick={() => onChange([...segments, { amount: 5, weight: 10 }])}
+        >
+          出目を追加
+        </button>
+        <button className="btn small" onClick={() => onChange(structuredClone(DEFAULT_ROULETTE.segments))}>
+          出目を既定に戻す
+        </button>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+        確率 = 重み ÷ 重みの合計。既定は +5(30%) +10(25%) +20(20%) +30(15%) +100(9%) +1000(1%)。
+        重み 0 の出目は出ません。
+      </div>
+    </>
+  );
+}
+
 /** ルーレット1件ぶんの設定行。トリガー・出目・確率をここで完結させる。 */
 function RouletteRow({
   rl,
@@ -1884,10 +2126,6 @@ function RouletteRow({
   onTest: OnTest;
   testBusy: boolean;
 }): React.JSX.Element {
-  const patchSeg = (i: number, p: Partial<ChallengeRouletteSegment>): void =>
-    onPatch({ segments: rl.segments.map((s, j) => (j === i ? { ...s, ...p } : s)) });
-  const totalWeight = rl.segments.reduce((s, x) => s + Math.max(0, x.weight), 0);
-
   return (
     <div
       style={{
@@ -1955,105 +2193,17 @@ function RouletteRow({
         モニターには「{rl.label.trim() !== '' ? rl.label.trim() : 'ギフト名'} ○○がルーレット」と出ます
         (○○ = 送信者の名前)。表示名が空のときは TikTok から届く実際のギフト名を使います。
       </div>
-      <div
-        style={{
-          border: '1px solid rgba(255,255,255,.12)',
-          borderRadius: 8,
-          padding: '8px 10px',
-          marginBottom: 8,
-        }}
-      >
-        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-          焦らしパターン
-          <span className="faint" style={{ fontWeight: 400, marginLeft: 8, fontSize: 11 }}>
-            回るたびにチェックした中から均等に抽選。▶ でそのパターンを狙って試し回し。
-          </span>
-        </div>
-        <div className="row" style={{ flexWrap: 'wrap', gap: '6px 14px', alignItems: 'center' }}>
-          {ROULETTE_PATTERNS.map((p) => {
-            const checked = rl.patterns.includes(p);
-            // 全部外すと回れない(保存側は validateRoulette が全許可へ倒すが、
-            // UI では最後の1つを外せなくして「なぜか全部戻った」の混乱を防ぐ)。
-            const last = checked && rl.patterns.length <= 1;
-            const info = ROULETTE_PATTERN_LABELS[p];
-            return (
-              <span key={p} className="row" style={{ gap: 3, alignItems: 'center', whiteSpace: 'nowrap' }}>
-                <label
-                  className="row faint"
-                  style={{ fontSize: 11, cursor: last ? 'not-allowed' : 'pointer', gap: 3, whiteSpace: 'nowrap' }}
-                  title={last ? '最低1つは必要です' : info.hint}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    disabled={last}
-                    onChange={(e) =>
-                      onPatch({
-                        // ROULETTE_PATTERNS の正順へ正規化して持つ — validateRoulette の
-                        // 正規化と揃え、保存後に draft と差分が出る「保存したのに未保存
-                        // マーク」を防ぐ。
-                        patterns: e.target.checked
-                          ? ROULETTE_PATTERNS.filter((q) => q === p || rl.patterns.includes(q))
-                          : rl.patterns.filter((q) => q !== p),
-                      })
-                    }
-                  />
-                  {info.label}
-                </label>
-                <MonitorTestBtn
-                  spec={{ kind: 'roulette', rouletteId: rl.id, pattern: p }}
-                  onTest={onTest}
-                  busy={testBusy}
-                  label="▶"
-                  title={`「${info.label}」を狙ってモニターで試し回しします(チェックの有無に関係なく再生できます)`}
-                />
-              </span>
-            );
-          })}
-        </div>
-        <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
-          「大当たり〜」の3つは、盤面の<b>一番下の出目</b>が入りそうになる超焦らし演出です
-          (どれが当たるかは変わりません)。連打のキュー消化中の短縮スピンには焦らしは入りません。
-        </div>
-      </div>
-      {rl.segments.map((s, i) => (
-        <div className="row" key={i} style={{ gap: 8, alignItems: 'center' }}>
-          <label className="field" style={{ width: 110 }}>
-            {i === 0 ? '出目' : ''}
-            <input type="number" min="1" value={s.amount} onChange={(e) => patchSeg(i, { amount: Number(e.target.value) })} />
-          </label>
-          <label className="field" style={{ width: 110 }}>
-            {i === 0 ? '重み' : ''}
-            <input type="number" min="0" value={s.weight} onChange={(e) => patchSeg(i, { weight: Number(e.target.value) })} />
-          </label>
-          <span className="faint" style={{ fontSize: 11, minWidth: 54, textAlign: 'right' }}>
-            {totalWeight > 0 ? `${((Math.max(0, s.weight) / totalWeight) * 100).toFixed(1)}%` : '—'}
-          </span>
-          <button
-            className="btn small danger"
-            disabled={rl.segments.length <= 1}
-            onClick={() => onPatch({ segments: rl.segments.filter((_, j) => j !== i) })}
-          >
-            削除
-          </button>
-        </div>
-      ))}
-      <div className="row" style={{ marginTop: 8 }}>
-        <button
-          className="btn small"
-          disabled={rl.segments.length >= ROULETTE_SEGMENTS_MAX}
-          onClick={() => onPatch({ segments: [...rl.segments, { amount: 5, weight: 10 }] })}
-        >
-          出目を追加
-        </button>
-        <button className="btn small" onClick={() => onPatch({ segments: structuredClone(DEFAULT_ROULETTE.segments) })}>
-          出目を既定に戻す
-        </button>
-      </div>
-      <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-        確率 = 重み ÷ 重みの合計。既定は +5(30%) +10(25%) +20(20%) +30(15%) +100(9%) +1000(1%)。
-        重み 0 の出目は出ません。
-      </div>
+      <RoulettePatternPicker
+        patterns={rl.patterns}
+        onChange={(patterns) => onPatch({ patterns })}
+        makeSpec={(p) => ({ kind: 'roulette', rouletteId: rl.id, pattern: p })}
+        onTest={onTest}
+        testBusy={testBusy}
+      />
+      <RouletteSegmentsEditor
+        segments={rl.segments}
+        onChange={(segments) => onPatch({ segments })}
+      />
     </div>
   );
 }

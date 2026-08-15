@@ -16,6 +16,7 @@ import type {
   GiftFullCutConfig,
   GiftFullCutRule,
   GiftFxBand,
+  JoinRouletteConfig,
   RoulettePattern,
   RouletteSoundConfig,
   GiftRepeatFxConfig,
@@ -472,6 +473,32 @@ export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
 export const DEFAULT_ROULETTES: readonly ChallengeRouletteConfig[] = [DEFAULT_ROULETTE];
 
 /**
+ * 入室ルーレットの既定。**無効で出荷** — 既存ユーザーの配信を勝手に変えない
+ * (旧 settings.json の joinRoulette キー欠損も validateJoinRoulette がここへ
+ * 倒すので、移行処理は不要)。盤面はギフトルーレットの既定と同じ。
+ * label '初見さん' は rouletteBoardKey の衝突回避も兼ねる(空だと同一盤面の
+ * ギフトルーレットと畳み込まれうる)。
+ */
+export const DEFAULT_JOIN_ROULETTE: JoinRouletteConfig = {
+  enabled: false,
+  target: 'first',
+  label: '初見さん',
+  segments: DEFAULT_ROULETTE.segments.map((s) => ({ ...s })),
+  direction: 'add',
+  patterns: [...ROULETTE_PATTERNS],
+};
+
+/**
+ * 入室ルーレットの連続発火を抑えるクールダウン(ms)。1スピンの演出尺
+ * (ROULETTE_SPIN_MS + ROULETTE_REVEAL_MS ≒ 6.9秒)より長め — レイドや
+ * target:'all' の高頻度入室でモニターのキュー(ROULETTE_QUEUE_MAX)と
+ * リングバッファを初見ルーレットだけで食い潰さないための安全弁。
+ * 窓内の入室は値ごと黙って捨てる(演出起点の機能なので値の完全性は要らない)。
+ * 設定項目にはしない — UI を増やさず定数で持つ。
+ */
+export const JOIN_ROULETTE_MIN_GAP_MS = 10_000;
+
+/**
  * ダイヤ帯域カットインの凍結時間の上限(ms)。durationSec の clamp(30秒)より
  * 短くしてある — 凍結はイベント適用を遅らせるので、演出事故(設定ミス等)でも
  * この長さを超えてカウンタが止まらないようにする安全弁。
@@ -856,6 +883,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   // 既定はギフト=妨害: 1ダイヤにつき +1(設定画面で応援方向へ変更できる)。
   giftDefault: { mode: 'perDiamond', amount: 1 },
   roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[],
+  joinRoulette: structuredClone(DEFAULT_JOIN_ROULETTE),
   rouletteSound: { ...DEFAULT_ROULETTE_SOUND },
   // モニターのリールは確定済みの出目の遅延再生なので、伏せないとログが
   // 常にリールより先に答えを出す。既定でネタバレを止める。
@@ -1589,6 +1617,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     giftRules,
     giftDefault,
     roulettes: validateRoulettes(raw),
+    joinRoulette: validateJoinRoulette(c.joinRoulette),
     rouletteSound: validateRouletteSound(c.rouletteSound),
     // 既定 true なので `!== false`(seEnabled と同じ向き。`=== true` にすると
     // 既定が反転する)。保存済み settings.json にこのキーは無いが、
@@ -1962,6 +1991,32 @@ function sanitizeRoulettePatterns(raw: unknown): RoulettePattern[] {
 }
 
 /**
+ * 盤面(segments)の検証。**抽選不能な盤面は null を返す** — 非配列(欠損キー)、
+ * 有効な出目が 1 件も残らない、全 weight が 0、のいずれも呼び元が自分の既定
+ * segments へ倒す(ギフト・入室で既定が同じでも、フォールバック先の所有は呼び元)。
+ */
+function sanitizeRouletteSegments(raw: unknown): ChallengeRouletteSegment[] | null {
+  if (!Array.isArray(raw)) return null;
+  const segments = raw
+    .filter(
+      (s): s is ChallengeRouletteSegment =>
+        !!s &&
+        typeof s === 'object' &&
+        typeof s.amount === 'number' &&
+        Number.isFinite(s.amount) &&
+        typeof s.weight === 'number' &&
+        Number.isFinite(s.weight)
+    )
+    .slice(0, ROULETTE_SEGMENTS_MAX)
+    .map((s) => ({
+      amount: Math.min(9_999_999, Math.max(1, Math.round(s.amount))),
+      weight: Math.min(999_999, Math.max(0, Math.round(s.weight))),
+    }));
+  const usable = segments.length > 0 && segments.some((s) => s.weight > 0);
+  return usable ? segments : null;
+}
+
+/**
  * ルーレット1件ぶんの検証。既存流儀どおり throw せずサニタイズする。
  * 有効な出目が 1 件も残らない/全 weight が 0 の盤面は抽選不能なので既定 segments に戻す。
  */
@@ -1970,24 +2025,7 @@ function validateRoulette(raw: unknown, fb: { id: string; label: string }): Chal
   const c = raw as Partial<ChallengeRouletteConfig> | null | undefined;
   if (!c || typeof c !== 'object') return { ...structuredClone(d), ...fb };
 
-  const segments: ChallengeRouletteSegment[] = Array.isArray(c.segments)
-    ? c.segments
-        .filter(
-          (s): s is ChallengeRouletteSegment =>
-            !!s &&
-            typeof s === 'object' &&
-            typeof s.amount === 'number' &&
-            Number.isFinite(s.amount) &&
-            typeof s.weight === 'number' &&
-            Number.isFinite(s.weight)
-        )
-        .slice(0, ROULETTE_SEGMENTS_MAX)
-        .map((s) => ({
-          amount: Math.min(9_999_999, Math.max(1, Math.round(s.amount))),
-          weight: Math.min(999_999, Math.max(0, Math.round(s.weight))),
-        }))
-    : structuredClone(d.segments);
-  const usable = segments.length > 0 && segments.some((s) => s.weight > 0);
+  const segments = sanitizeRouletteSegments(c.segments);
 
   return {
     // 欠損・重複 id は呼び元(validateRoulettes)が振り直すので、ここは fb のまま通す。
@@ -2000,7 +2038,31 @@ function validateRoulette(raw: unknown, fb: { id: string; label: string }): Chal
     giftId: typeof c.giftId === 'string' ? c.giftId.trim() : d.giftId,
     giftName: typeof c.giftName === 'string' ? c.giftName.trim().toLowerCase() : d.giftName,
     canonical: typeof c.canonical === 'string' ? c.canonical.trim().toLowerCase() : d.canonical,
-    segments: usable ? segments : structuredClone(d.segments),
+    segments: segments ?? structuredClone(d.segments),
+    direction: c.direction === 'sub' ? 'sub' : 'add',
+    patterns: sanitizeRoulettePatterns(c.patterns),
+  };
+}
+
+/**
+ * 入室ルーレットの検証。既存流儀どおり throw せずサニタイズする。
+ * キー欠損・非オブジェクト(旧 settings.json)は既定(enabled:false)へ倒す —
+ * これが移行の代わり(validateRoulettes の legacy 処理と同じ思想)。
+ * label は空を許さない — rouletteBoardKey('' だと同一盤面のギフトルーレットと
+ * 畳み込まれる)と履歴ログの見出しの両方が壊れるため、空は既定名へ倒す。
+ */
+function validateJoinRoulette(raw: unknown): JoinRouletteConfig {
+  const d = DEFAULT_JOIN_ROULETTE;
+  const c = raw as Partial<JoinRouletteConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+
+  const label = typeof c.label === 'string' ? c.label.trim().slice(0, ROULETTE_LABEL_MAX) : '';
+  return {
+    // enabled の既定は false なので `=== true`(validateRoulette の `!== false` と逆向き)。
+    enabled: c.enabled === true,
+    target: c.target === 'all' ? 'all' : 'first',
+    label: label !== '' ? label : d.label,
+    segments: sanitizeRouletteSegments(c.segments) ?? structuredClone(d.segments),
     direction: c.direction === 'sub' ? 'sub' : 'add',
     patterns: sanitizeRoulettePatterns(c.patterns),
   };

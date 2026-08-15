@@ -513,6 +513,31 @@ export interface ChallengeRouletteConfig {
 }
 
 /**
+ * 入室ルーレット。視聴者の入室(join, action=1)で自動的に1スピン回り、
+ * 出目をカウントへ即時適用する(ギフトルーレット同様、モニターの回転演出は
+ * 確定済みの出目の遅延再生)。トリガーギフトを持たない単一設定なので
+ * ChallengeRouletteConfig とは別型 — giftId/giftName/canonical をダミーで
+ * 持たせると matchRoulette の先勝ち評価や id 振り直しと混線する。
+ * 盤面・方向・焦らしパターンの部品型はギフトルーレットと共有する。
+ */
+export interface JoinRouletteConfig {
+  enabled: boolean;
+  /** 発火対象。'first' = 初見さんのみ(viewer_lifetime 初記録)、'all' = すべての入室。 */
+  target: 'first' | 'all';
+  /**
+   * モニター表示名。「{label} ○○がルーレット」の {label}。空にすると
+   * rouletteBoardKey が同一盤面のギフトルーレットと衝突して畳み込まれうるため、
+   * 検証(validateJoinRoulette)は空を既定 '初見さん' へ倒す。
+   */
+  label: string;
+  segments: ChallengeRouletteSegment[];
+  /** 'add' = カウント増(妨害・既定) / 'sub' = カウント減(応援)。 */
+  direction: 'add' | 'sub';
+  /** 終盤の演出パターン許可リスト。ChallengeRouletteConfig.patterns と同じ規約。 */
+  patterns: RoulettePattern[];
+}
+
+/**
  * ルーレット回転中のサウンド。**全ルーレット(roulettes の全行)共通で1組** —
  * 行ごとに持たない。盤面(segments)と違い音は正しさに関与しないので、
  * effect には載せずモニターが cfg から直接読む(音量を cfg から読む
@@ -836,6 +861,12 @@ export interface ChallengeConfig {
    * 旧 settings.json の単一 `roulette` キーは validateChallengeConfig が1件の配列へ移行する。
    */
   roulettes: ChallengeRouletteConfig[];
+  /**
+   * 入室ルーレット(初見さんのみ / すべての入室)。ギフトルーレットとは独立の
+   * 単一設定。旧 settings.json にキーが無ければ validateJoinRoulette が既定値
+   * (enabled:false)へ倒すので移行は不要。
+   */
+  joinRoulette: JoinRouletteConfig;
   /** ルーレット回転中のBGM・ループ音。全ルーレット共通で1組。 */
   rouletteSound: RouletteSoundConfig;
   /**
@@ -1215,8 +1246,9 @@ export type ChallengeTestEffectSpec =
    * rouletteId は設定UIの行ごとの ▶ ボタン用。未指定なら最初の有効な行を回す。
    * pattern は終盤演出の指定(効果音スロットの試聴で 'kick' を狙い撃ちする)。
    * 未指定なら通常どおり抽選する。
+   * join は入室ルーレット(cfg.joinRoulette)の試写 — rouletteId より優先。
    */
-  | { kind: 'roulette'; rouletteId?: string; pattern?: RoulettePattern }
+  | { kind: 'roulette'; rouletteId?: string; pattern?: RoulettePattern; join?: true }
   | { kind: 'achieved' };
 
 export interface ChallengeStats {
@@ -1233,7 +1265,11 @@ export interface ChallengeStats {
   likeStockUp: number;
   /** 指定コメント(commentRules)による加算量の合計。 */
   commentUp: number;
-  /** ルーレットの回転回数。増減量の合計は giftDown/giftUp に合算する(ギフト起因のため)。 */
+  /** 入室ルーレットによる減算量の合計(正の数で保持)。ギフト由来ではないので giftDown とは別枠。 */
+  joinDown: number;
+  /** 入室ルーレットによる加算量の合計。 */
+  joinUp: number;
+  /** ルーレットの回転回数。ギフト・入室の両ルーレットを合算(増減量は giftUp/Down・joinUp/Down が持つ)。 */
   rouletteSpins: number;
 }
 
