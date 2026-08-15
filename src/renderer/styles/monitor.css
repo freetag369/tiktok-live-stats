@@ -193,7 +193,8 @@ body {
 /*
  * 増(妨害)は数字の色そのものを一瞬グリーンに振る。7セグは常時赤なので、
  * 赤い残光だけでは押し戻されたことが伝わらない。色替えはセグメントの変数を
- * 差し替えるだけなので、残数わずかの lowblink も一緒に緑で明滅する。
+ * 差し替えるだけ。残数わずかの明滅(lowblink-row)は opacity ベースなので
+ * 色替え中もそのまま緑で明滅する。
  */
 .countdown.punch-up {
   animation:
@@ -279,7 +280,11 @@ body {
   }
 }
 
-/* 数字背面の残光。再マウント時に一瞬灯って消える。 */
+/*
+ * 数字背面の残光。punch-* クラスの付け直し(classList リプレイ)で一瞬灯って
+ * 消える。animation は必ず punch-* 側に置く — ::after 本体に置くと、punch と
+ * 無関係な className 変化(low/clear 切替)でも全面グラデーションが発火する。
+ */
 .countdown::after {
   content: '';
   position: absolute;
@@ -287,15 +292,16 @@ body {
   border-radius: 50%;
   opacity: 0;
   pointer-events: none;
-  animation: punchglow 420ms ease-out;
 }
 
 .countdown.punch-down::after {
   background: radial-gradient(ellipse at center, rgba(159, 216, 255, 0.3), transparent 68%);
+  animation: punchglow 420ms ease-out;
 }
 
 .countdown.punch-up::after {
   background: radial-gradient(ellipse at center, rgba(74, 217, 145, 0.34), transparent 68%);
+  animation: punchglow 420ms ease-out;
 }
 
 /*
@@ -305,6 +311,7 @@ body {
  */
 .countdown.punch-strike::after {
   background: radial-gradient(ellipse at center, rgba(255, 79, 160, 0.55), transparent 72%);
+  animation: punchglow 420ms ease-out;
 }
 
 @keyframes punchglow {
@@ -329,11 +336,19 @@ body {
  * 桁は縮められる(flex-shrink)ので、桁数が増えてもステージ幅に必ず収まる。
  * 高さは viewBox の縦横比(100:180)から自動で決まる。
  */
+/*
+ * 発光(drop-shadow)はセグ個別ではなく**桁単位**に集約する。消灯セグは
+ * アルファ0なのでグローに寄与せず、見た目は「点灯セグの合成形状の周囲に発光」で
+ * ほぼ等価。フィルタ描画面が最大42(セグ)→桁数(≤6+α)に減り、
+ * `.countdown{overflow:hidden}` 境界でのフィルタ無効化漏れ(=残像)の発生源も
+ * 桁の SVG 矩形に閉じ込められる。**.seg.on に filter を戻さないこと。**
+ */
 .seg-digit {
   flex: 0 1 126px;
   min-width: 0;
   height: auto;
   max-height: 430px;
+  filter: drop-shadow(0 0 10px var(--seg-glow));
 }
 
 .seg {
@@ -342,12 +357,26 @@ body {
 
 .seg.on {
   fill: var(--seg-on);
-  filter: drop-shadow(0 0 10px var(--seg-glow));
 }
 
-/* 残数わずか: 明滅して緊張感を出す */
-.countdown.low .seg.on {
-  animation: lowblink 1s steps(2, jump-none) infinite;
+/*
+ * 残数わずか: 明滅して緊張感を出す。かつては .seg.on 個別の fill アニメ
+ * (フィルタ付きポリゴン最大42個が毎フレーム再評価)で、残像・負荷の温床
+ * だったので .seg-row 1要素の opacity 明滅に集約した。**.countdown 自体には
+ * 付けないこと** — punch-* と animation プロパティの取り合いになる。
+ */
+.countdown.low .seg-row {
+  animation: lowblink-row 1s steps(2, jump-none) infinite;
+}
+
+@keyframes lowblink-row {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 @keyframes lowblink {
@@ -364,17 +393,23 @@ body {
 
 .countdown.clear .seg.on {
   fill: var(--gold);
-  filter: drop-shadow(0 0 14px rgba(255, 197, 66, 0.8));
   animation: lowblink 0.6s steps(2, jump-none) 8;
 }
 
+.countdown.clear .seg-digit {
+  filter: drop-shadow(0 0 14px rgba(255, 197, 66, 0.8));
+}
+
 /*
- * 着弾で桁が跳ねて白く飛ぶ。.low / .clear の .seg.on ルールと詳細度が同じなので、
+ * 着弾で桁が跳ねて白く飛ぶ。fill は .clear の .seg.on ルールと詳細度が同じなので、
  * ここより前に書くと明滅に負ける — 必ずこの順序を保つこと。
  * 桁数は可変なので nth-child のスタガは使わず全桁同時に動かす。
+ * グロー(filter)は .seg-digit 集約に合わせて segdigitflash 側で撃つ。
  */
 .countdown.punch-strike .seg-digit {
-  animation: segjolt 380ms cubic-bezier(0.2, 1.5, 0.4, 1);
+  animation:
+    segjolt 380ms cubic-bezier(0.2, 1.5, 0.4, 1),
+    segdigitflash 280ms ease-out;
 }
 
 .countdown.punch-strike .seg.on {
@@ -399,14 +434,24 @@ body {
 @keyframes segflash {
   0% {
     fill: #fff;
-    filter: drop-shadow(0 0 26px rgba(255, 255, 255, 0.95));
   }
   45% {
     fill: #ffa8d2;
-    filter: drop-shadow(0 0 18px rgba(255, 79, 160, 0.9));
   }
   100% {
     fill: var(--seg-on);
+  }
+}
+
+/* segflash の白飛びグローの桁単位版(filter は .seg-digit に集約したため)。 */
+@keyframes segdigitflash {
+  0% {
+    filter: drop-shadow(0 0 26px rgba(255, 255, 255, 0.95));
+  }
+  45% {
+    filter: drop-shadow(0 0 18px rgba(255, 79, 160, 0.9));
+  }
+  100% {
     filter: drop-shadow(0 0 10px var(--seg-glow));
   }
 }

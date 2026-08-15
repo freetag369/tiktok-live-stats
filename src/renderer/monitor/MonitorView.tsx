@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type {
   AppSettings,
   ChallengeEffect,
@@ -557,11 +557,29 @@ export function MonitorView(): React.JSX.Element {
   // ※ showResult のタイマー effect は roulette / bandClip / stockCutin の宣言後
   //   (下)にある — 宣言前に deps へ書くと TDZ で落ちる。
 
-  // 数字パンチ: 値が変わるたびに key を進めてアニメーションを再生する。
+  // 数字パンチ: 値が変わるたびに punchKey を進め、classList の付け直しで CSS
+  // アニメーションを再生する(remove → リフロー → add は tickGauge と同じ手口)。
   // 方向(減=進捗/増=妨害)でグローの色と動きを変える。
+  // かつては punchKey を .countdown の key にした再マウントで再生していたが、数字が動くたびに
+  // 7セグ SVG 全体(フィルタ付きポリゴン最大42個)を破棄→再生成するため、
+  // 弱い GPU での残像・GC ジッタの温床だった(配布先の実機報告)。
   const prevValue = useRef<number | null>(null);
   const [punchKey, setPunchKey] = useState(0);
   const [punchDir, setPunchDir] = useState<'down' | 'up' | 'strike'>('down');
+  useLayoutEffect(() => {
+    // paint 前に張り直す(再マウントと同じ見え方)。punchDir は punchKey と同じ
+    // コミットで set される(全 setPunchKey 箇所)ので deps は punchKey だけで足りる。
+    // 注意: React が className を書き戻すのは segCls の値が変わる再レンダー
+    // (low/clear 切替)だけで、そのとき進行中のパンチは途中終了する(低頻度・
+    // 尺 ≤1120ms なので許容)。それ以外の再レンダーでは手動クラスは生き残る —
+    // React は自分の前回 props としか diff しないため。
+    const el = countdownRef.current;
+    if (!el) return;
+    el.classList.remove('punch-down', 'punch-up', 'punch-strike');
+    void el.offsetWidth; // リフローで CSS アニメーションのリスタートを確定させる
+    el.classList.add(`punch-${punchDir}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [punchKey]);
   /**
    * 着弾までの数字の据え置き。null = 据え置きなし(= challenge.value をそのまま出す)。
    * 「複製」ではなく「一時上書き」にしてあるので、解除は常に null を入れるだけで
@@ -1532,8 +1550,8 @@ export function MonitorView(): React.JSX.Element {
    *
    * 数字の実体は .seg-digit。countdownRef(.countdown)も .seg-row も
    * ステージ全幅なので、そちらを測ると「左上」がステージの左上になってしまう
-   * — 必ず先頭桁の要素を測ること。.countdown は punchKey で値が変わるたび
-   * 再マウントするので、ref をキャッシュせずここで毎回引き直す。
+   * — 必ず先頭桁の要素を測ること。桁の要素は桁数の変化で作り直されるので、
+   * ref をキャッシュせずここで毎回引き直す(パンチの再マウント廃止後も同じ)。
    *
    * かつては数字の中心に重ねていたが、7セグと数字が読めなくなるため外へ出した。
    * 桁数が変わると数字の左端は動くので、左端まで寄せきったときは
@@ -3337,9 +3355,11 @@ export function MonitorView(): React.JSX.Element {
   const showAvatars = cfg?.loadAvatars ?? true;
   // 「何時起き」— 有効かつ時刻が入っているときだけ最下段の行を足す。
   const wakeTime = cfg?.challenge.wakeEnabled ? (cfg.challenge.wakeTime ?? null) : null;
+  // punch-* は React の className では持たない — 付け外しは punchKey の
+  // useLayoutEffect(classList リプレイ)が担う。ここに足すと二重管理になり、
+  // 同方向の連続パンチでアニメーションが再スタートしなくなる。
   const segCls = [
     'countdown',
-    `punch-${punchDir}`,
     achieved ? 'clear' : '',
     running && shownValue <= lowThreshold ? 'low' : '',
   ].join(' ');
@@ -3375,7 +3395,7 @@ export function MonitorView(): React.JSX.Element {
     >
       <div className={`title-banner${achieved ? ' clear' : ''}`}>{challenge.title}</div>
 
-      <div className={segCls} key={punchKey} ref={countdownRef}>
+      <div className={segCls} ref={countdownRef}>
         <SevenSeg value={shownValue} digits={digits} />
         {achieved ? <div className="clear-banner">CLEAR!</div> : null}
         {!running && !achieved ? (
