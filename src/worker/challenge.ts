@@ -34,6 +34,7 @@ import {
   matchGiftRule,
   matchRoulette,
   matchTapBoost,
+  tapBoostActivationCount,
   TAP_BOOST_COUNT_MS,
   TAP_BOOST_INTRO_MS,
 } from '@shared/challenge';
@@ -106,6 +107,14 @@ export class ChallengeEngine {
   private achievedMs: number | null = null;
   private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
   private recentEffects: ChallengeEffect[] = [];
+  /**
+   * get() が返す recentEffects のコピーのキャッシュ。press 連打(フィーバー中は
+   * 1タップ = get() 2回: RPC の戻り値 + nudge の delta)のたびに最大32件を
+   * ディープコピーし直すのは無駄が大きい — ring が変わったときだけ作り直す。
+   * 共有しても安全: worker→main は postMessage の structuredClone を通り、
+   * worker 内は push 後の effect を書き換えない(全 effect が焼き込み自己完結)。
+   */
+  private effectsSnapshot: ChallengeEffect[] | null = null;
   /** reset でも巻き戻さない — モニターの冪等再生(既再生 id 比較)が壊れるため。 */
   private nextEffectId = 1;
   /**
@@ -347,6 +356,7 @@ export class ChallengeEngine {
     this.achievedMs = null;
     this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
+    this.effectsSnapshot = null;
     this.seenFollowers.clear();
     this.seenJoiners.clear();
     // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
@@ -416,6 +426,7 @@ export class ChallengeEngine {
     this.achievedMs = null;
     this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
+    this.effectsSnapshot = null;
     this.seenFollowers.clear();
     this.seenJoiners.clear();
     // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
@@ -716,6 +727,7 @@ export class ChallengeEngine {
       ...e,
     });
     while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
+    this.effectsSnapshot = null;
     this.dirty = true;
   }
 
@@ -964,7 +976,21 @@ export class ChallengeEngine {
         // タップブーストと全面カットの両方に登録した設定で「カットインが出ない」
         // と見える唯一の説明なので、必ず記録する。
         this.giftDiag('→ タップブースト一致(全面カットは評価されません)');
-        return this.applyOrQueue(() => this.activateBoost(tb, e));
+        // 連打コンボは normalize.ts が1メッセージに畳むので、**repeatCount 回ぶん
+        // 発動を積む**(ルーレットの rouletteDrawCount と同じ理由 — 見ないと
+        // 「2個贈ったのにフィーバー1回」になる)。1本目が凍結を張るので、2本目
+        // 以降は pendingOps に落ちて清算後に直列発動する。プレーンモードは凍結が
+        // 無く activateBoost が前を即時清算してしまう(最後の1本しか残らない)
+        // ため1回に畳む — どうせ演出も出ない。
+        const times = this.fxAllowed() ? tapBoostActivationCount(e.repeatCount) : 1;
+        if (times < e.repeatCount) {
+          this.giftDiag(`→ ブースト連打 ${e.repeatCount}個 — 発動は${times}回に制限`);
+        }
+        let changed = false;
+        for (let i = 0; i < times; i++) {
+          if (this.applyOrQueue(() => this.activateBoost(tb, e))) changed = true;
+        }
+        return changed;
       }
 
       // ギフトルーレット。複数登録できるが、回るのは上から見て最初に一致した1件だけ
@@ -1233,7 +1259,8 @@ export class ChallengeEngine {
       startedMs: this.startedMs,
       achievedMs: this.achievedMs,
       stats: { ...this.stats },
-      recentEffects: this.recentEffects.map((e) => ({ ...e })),
+      // ring が変わったときだけコピーし直す(effectsSnapshot のコメント参照)。
+      recentEffects: (this.effectsSnapshot ??= this.recentEffects.map((e) => ({ ...e }))),
       // 設定から生で読むので likeEvery/likeStep の変更も次の delta で同期する。
       likeGauge:
         cfg.likeEvery > 0 && cfg.likeStep > 0
@@ -1726,6 +1753,7 @@ export class ChallengeEngine {
     out.sort((a, b) => a.id - b.id);
     for (const e of out) this.recentEffects.unshift(e);
     while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
+    this.effectsSnapshot = null;
   }
 
   /** 達成演出は1回だけ。達成後は press/follow/gift すべて無効(status ガード)。 */
@@ -2050,5 +2078,6 @@ export class ChallengeEngine {
     }
     this.recentEffects.unshift(effect);
     while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
+    this.effectsSnapshot = null;
   }
 }

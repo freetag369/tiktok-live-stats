@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import {
+  CHALLENGE_PRESS_NUDGE_MS,
   DELTA_MS,
   DELTA_MS_HIDDEN,
   FEED_MS,
@@ -83,6 +84,8 @@ export class SessionManager {
    */
   private missionTimer: NodeJS.Timeout | null = null;
   private pruneTimer: NodeJS.Timeout | null = null;
+  /** press 連打の delta 間引きタイマー(nudgeChallengeCoalesced)。 */
+  private challengeNudgeTimer: NodeJS.Timeout | null = null;
   /** missionTimer が計算して置いておく、次の delta に載せる分。 */
   private pendingMissions: MissionProgress[] | null = null;
   private hidden = false;
@@ -254,10 +257,12 @@ export class SessionManager {
     if (this.feedTimer) clearInterval(this.feedTimer);
     if (this.missionTimer) clearInterval(this.missionTimer);
     if (this.pruneTimer) clearInterval(this.pruneTimer);
+    if (this.challengeNudgeTimer) clearTimeout(this.challengeNudgeTimer);
     this.deltaTimer = null;
     this.feedTimer = null;
     this.missionTimer = null;
     this.pruneTimer = null;
+    this.challengeNudgeTimer = null;
   }
 
   // ── adapter callbacks ─────────────────────────────────────────────────────
@@ -437,9 +442,28 @@ export class SessionManager {
     });
   }
 
-  /** チャレンジ操作(押下/開始/停止)の即時反映。タイマー停止中でも1回だけ delta を送る。 */
+  /** チャレンジ操作(開始/停止/リセット等)の即時反映。タイマー停止中でも1回だけ delta を送る。 */
   nudgeChallenge(): void {
     this.pushDelta(false);
+  }
+
+  /**
+   * 押下(challenge.press)専用の間引き nudge。フィーバーのタップウィンドウ中は
+   * 物理ボタン/モニター連打で press が数十Hz になり、即時 nudge だと 1タップ =
+   * フル状態の組み立て + 全ウィンドウへの structuredClone 配信 + 両窓の再レンダー
+   * が毎回走って発動後の体感が重くなる。押した本人の画面は press RPC の戻り値で
+   * 即時更新されるので、ブロードキャストは CHALLENGE_PRESS_NUDGE_MS に1回で足りる
+   * (タップカウンタの他窓表示が最大その分だけ遅れる — 体感差なし)。
+   */
+  nudgeChallengeCoalesced(): void {
+    if (this.challengeNudgeTimer !== null) return;
+    this.challengeNudgeTimer = setTimeout(() => {
+      this.challengeNudgeTimer = null;
+      // 変化が既に別 delta(ギフト即時配信・2Hz tick)で流れていれば
+      // drainIfChanged が null を返し、pushDelta は何も送らない(冪等)。
+      this.pushDelta(false);
+    }, CHALLENGE_PRESS_NUDGE_MS);
+    this.challengeNudgeTimer.unref?.();
   }
 
   private setStatus(s: AdapterStatus): void {

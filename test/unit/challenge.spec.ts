@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteReelCount, rouletteReelPlan, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteReelCount, rouletteReelPlan, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type {
   ChallengeConfig,
   ChallengeEffect,
@@ -4117,6 +4117,22 @@ describe('設定移行 — 全面カットの40行(SETTINGS_VERSION 3)', () => {
   });
 });
 
+describe('ChallengeEngine — get() の recentEffects キャッシュ', () => {
+  it('ring が変わらない限り同じ配列を返し、push で作り直す(press 連打の組み立てコスト対策)', () => {
+    // フィーバー中は 1タップ = get() 2回(RPC の戻り値 + nudge の delta)。
+    // 毎回 map で32件コピーし直すと押下のたびに全ウィンドウ配信と合わせて重い。
+    const e = engine();
+    e.start();
+    e.press();
+    const a = e.get().recentEffects;
+    expect(e.get().recentEffects).toBe(a);
+    e.press();
+    const b = e.get().recentEffects;
+    expect(b).not.toBe(a);
+    expect(e.get().recentEffects).toBe(b);
+  });
+});
+
 describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   const BOOST_GIFT = '9999';
   /** 新形式(rules[])のブースト設定。BOOST_GIFT の1行だけを持つ。 */
@@ -4168,6 +4184,57 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     expect(s.fxFreezeUntilMs).toBe(
       NOW + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
     );
+  });
+
+  it('連打コンボ(repeatCount 2): 1本目の清算後に2本目が直列発動する', () => {
+    // normalize.ts は連打可能ギフト(giftType 1)を repeatEnd で1件に畳んで
+    // repeatCount を載せる。repeatCount を見ないと「2個贈ったのにフィーバー1回」。
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    expect(
+      e.handleEvent(gift({ giftId: BOOST_GIFT, giftName: 'Boost Gift', diamonds: 2, repeatCount: 2 }))
+    ).toBe(true);
+    // 1本目だけが即時発動(2本目は凍結中の pendingOps へ)。
+    let s = e.get();
+    expect(s.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1);
+    expect(s.boost?.endsAtMs).toBe(NOW + PRE + WINDOW);
+    // 凍結明けのドレインで 1本目の清算(boost-end)→ 2本目の発動が起きる。
+    t = s.fxFreezeUntilMs! + 1;
+    s = e.drainIfChanged()!;
+    expect(s.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(2);
+    expect(s.recentEffects.filter((x) => x.kind === 'boost-end')).toHaveLength(1);
+    // 2本目の期限は実行時点起点(凍結明けの遅延発動の規約 — activateBoost の this.now())。
+    expect(s.boost?.endsAtMs).toBe(t + PRE + WINDOW);
+  });
+
+  it('連打コンボの発動は TAP_BOOST_ACTIVATIONS_MAX 回で頭打ち(17連打を17本直列しない)', () => {
+    expect(tapBoostActivationCount(1)).toBe(1);
+    expect(tapBoostActivationCount(2)).toBe(2);
+    expect(tapBoostActivationCount(17)).toBe(TAP_BOOST_ACTIVATIONS_MAX);
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(gift({ giftId: BOOST_GIFT, giftName: 'Boost Gift', diamonds: 17, repeatCount: 17 }));
+    // 凍結明けを繰り返して保留分を全部消化する。
+    for (let i = 0; i < TAP_BOOST_ACTIVATIONS_MAX + 2; i++) {
+      const s = e.get();
+      if (s.fxFreezeUntilMs == null) break;
+      t = s.fxFreezeUntilMs + 1;
+      e.drainIfChanged();
+    }
+    const s = e.get();
+    expect(s.boost).toBeUndefined();
+    expect(s.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(TAP_BOOST_ACTIVATIONS_MAX);
+    expect(s.recentEffects.filter((x) => x.kind === 'boost-end')).toHaveLength(TAP_BOOST_ACTIVATIONS_MAX);
+  });
+
+  it('プレーンモード(モニター閉)の連打コンボは1回に畳む(凍結が無く直列化できない)', () => {
+    const e = engine(boostCfg(), () => NOW);
+    e.setMonitorOpen(false);
+    e.start();
+    e.handleEvent(gift({ giftId: BOOST_GIFT, giftName: 'Boost Gift', diamonds: 2, repeatCount: 2 }));
+    expect(e.get().recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1);
   });
 
   it('resultClip 有効: boost-start/boost-end に尺とクリップが焼き込まれ、凍結がさらに延びる', () => {

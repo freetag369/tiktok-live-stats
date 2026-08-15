@@ -89,7 +89,10 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
     },
     'challenge.press': async () => {
       const s = challenge.press();
-      session.nudgeChallenge();
+      // press だけは間引き nudge — フィーバー中の連打(数十Hz)で全ウィンドウへの
+      // ブロードキャストが毎押下走ると発動後の体感が重くなる。押した本人はこの
+      // 戻り値 s で即時更新される(nudgeChallengeCoalesced のコメント参照)。
+      session.nudgeChallengeCoalesced();
       return s;
     },
     'challenge.toggleRank': async () => {

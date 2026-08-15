@@ -29,6 +29,12 @@ export const MISSIONS_CHECK_MS = 3000;
 /** Aggregate deltas pushed to the renderer. 2 Hz visible, 0.5 Hz when the window is hidden. */
 export const DELTA_MS = 500;
 export const DELTA_MS_HIDDEN = 2000;
+/**
+ * challenge.press の nudge(全ウィンドウへの即時 delta)の間引き間隔。
+ * フィーバー中の連打は数十Hz になりうるので、押した本人への戻り値はそのまま、
+ * ブロードキャストだけこの間隔に畳む(session.nudgeChallengeCoalesced)。
+ */
+export const CHALLENGE_PRESS_NUDGE_MS = 80;
 /** A single delta never carries more than this many viewers; the rest slide to the next tick. */
 export const DELTA_MAX_VIEWERS = 800;
 

@@ -8,8 +8,12 @@
  * finish にインラインで重複しており、安全弁(expire)経路がこの連鎖を持たず
  * キューが宙に浮くバグの温床だった — 方針をここに一本化する。
  *
- * 順序は2種類あり、**どちらも従来挙動の保存**(統一ではない):
- * - 'roulette-first': finishRoulette 用。自キュー(短縮スピンの連鎖)を最優先。
+ * 順序は2種類:
+ * - 'roulette-first': finishRoulette 用。自キュー(スピンの連鎖)を優先するが、
+ *                     **ブーストだけはさらに先** — worker のフィーバーは絶対時刻で
+ *                     走る(worker はルーレットでは凍結しない)ので、スピン連鎖の
+ *                     後ろに並ばせると planBoostStart の期限切れで演出ごと消える。
+ *                     ルーレットの値は適用済みで、表示が後回しになっても失われない。
  * - 'standard':       finishBandFx / finishStockCutin / finishBoostFx / expire 用。
  *                     ブースト(タップのゲーム性を持つので待たせない)→ カットイン
  *                     → スピンの順。
@@ -27,7 +31,7 @@ export type FxDrainOrder = 'roulette-first' | 'standard';
 export interface FxDrainQueues<T> {
   /** CLEAR 演出の持ち越し(1件)。呼び出し側は戻り値の achieved を再生したら null に戻すこと。 */
   achieved: T | null;
-  /** 他演出中に届いたブースト(2件上限は積む側の規約)。 */
+  /** 他演出中に届いたブースト(4件上限は積む側の規約)。 */
   boosts: T[];
   /** 他演出中に届いたカットイン(2件上限は積む側の規約)。 */
   bands: T[];
@@ -57,8 +61,8 @@ export function drainFxQueues<T>(q: FxDrainQueues<T>, order: FxDrainOrder): FxDr
   const seq: Array<['roulette' | 'boost' | 'band', T[]]> =
     order === 'roulette-first'
       ? [
-          ['roulette', q.roulettes],
           ['boost', q.boosts],
+          ['roulette', q.roulettes],
           ['band', q.bands],
         ]
       : [
@@ -110,7 +114,7 @@ export interface FxDrainRun<T> {
  *
  * 停止性: drainFxQueues は next を返す前にキューから shift 済みなので、各周回は
  * 必ず return するか要素を1つ消費する。start は積まない(3つの start* は effect を
- * 読むだけ)ので、上限は boosts(2) + bands(4) + roulettes(24) + 1 = 31 < 64。
+ * 読むだけ)ので、上限は boosts(4) + bands(4) + roulettes(24) + 1 = 33 < 64。
  * maxSteps に達した場合も **drainStrike: true** 側へ倒す — pendingStrike を
  * 宙に浮かせないことを最優先する。
  *

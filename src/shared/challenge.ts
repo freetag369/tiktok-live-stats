@@ -545,6 +545,14 @@ export const CLIP_QUEUE_MAX = 3;
  */
 export const PENDING_BANDS_MAX = 4;
 /**
+ * 他演出中に届いたブースト(boost-start)の持ち越し上限。連打コンボは worker が
+ * 1メッセージあたり最大 TAP_BOOST_ACTIVATIONS_MAX 本を直列発動するので、旧上限の
+ * 2 では3本目が無言で消えていた。死んだ持ち越しは boost-end 受信時に間引かれる
+ * (MonitorView の boost-end ハンドラ)ため、枠が死骸で埋まり続けることはない。
+ * **上げたら FX_DRAIN_MAX_STEPS の見積もりも更新すること。**
+ */
+export const PENDING_BOOSTS_MAX = 4;
+/**
  * クリップの安全弁(ms)。onEnded が来ない素材・遮蔽ウィンドウで再生中フラグが
  * 固着すると、以後クリップが永久に出なくなる(直したいバグより悪い)。
  */
@@ -746,6 +754,27 @@ export const TAP_BOOST_INTRO_MS = 5000;
  * 揃える — 3・2・1 は映像焼き込みなので、ズレるとタップ開始と「1」が合わない。
  */
 export const TAP_BOOST_COUNT_MS = 3000;
+
+/**
+ * トリガーギフト1メッセージ(連打コンボ)あたりの発動回数の上限。
+ *
+ * 連打可能ギフト(giftType 1)は normalize.ts が repeatEnd で1件に畳んで
+ * repeatCount を載せてくるため、repeatCount を見ずに発動すると「2個贈ったのに
+ * フィーバー1回」になる(ルーレットの rouletteDrawCount と同じ問題)。
+ * 一方フィーバー1本は前置き+ウィンドウ+清算で 20〜30 秒あり、17連打を
+ * 素直に17本直列すると10分近く占有する — 演出なので値の正しさとは無関係に
+ * ここで頭打ちにしてよい(切り捨ては giftDiag に必ず記録する)。
+ */
+export const TAP_BOOST_ACTIVATIONS_MAX = 3;
+
+/**
+ * このトリガーギフト1メッセージで何回フィーバーを発動するか。
+ * ルーレットの rouletteDrawCount と対になるが、こちらは**演出の回数**なので
+ * ハード上限で削ってよい(値は動かない — トリガーギフトの規約)。
+ */
+export function tapBoostActivationCount(repeatCount: number): number {
+  return Math.min(TAP_BOOST_ACTIVATIONS_MAX, Math.max(1, Math.round(repeatCount)));
+}
 
 /**
  * ブースト演出クリップのカタログ(段ごとの選択肢)。実ファイルは

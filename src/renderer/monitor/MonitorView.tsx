@@ -17,6 +17,7 @@ import {
   MINI_ABORT_MS,
   MINI_MAX,
   PENDING_BANDS_MAX,
+  PENDING_BOOSTS_MAX,
   ROULETTE_CHAIN_GAP_MS,
   ROULETTE_QUEUE_MAX,
   SHAKE_ABORT_MS,
@@ -657,7 +658,11 @@ export function MonitorView(): React.JSX.Element {
   const boostEffect = useRef<ChallengeEffect | null>(null);
   /** テスト再生(▶)の印。据え置きを張らず、boost-end を待たず自前で締める。 */
   const boostTest = useRef(false);
-  /** 他演出中に届いたブーストの持ち越し(pendingBands と同型・2件上限)。 */
+  /**
+   * 他演出中に届いたブーストの持ち越し(pendingBands と同型)。上限は
+   * PENDING_BOOSTS_MAX — 連打コンボが worker 側で直列発動になった(1メッセージで
+   * 最大 TAP_BOOST_ACTIVATIONS_MAX 本)ぶん、2件では溢れて無言破棄が起きうる。
+   */
   const pendingBoosts = useRef<ChallengeEffect[]>([]);
   /** タップカウンタ(着弾の発射点)。 */
   const boostCounterRef = useRef<HTMLDivElement | null>(null);
@@ -1697,7 +1702,14 @@ export function MonitorView(): React.JSX.Element {
             return false;
           }
           hooks?.onNext?.('roulette');
-          return startRoulette(e, true);
+          // 短縮(焦らし無し)にするのは**後ろにまだスピンが並んでいるとき**だけ。
+          // かつては無条件 fast で、2本目以降が常に 900ms の即決になり「連続で
+          // 贈ると焦らしが飛ぶ」が仕様化していた。drainFxQueues は shift 済み
+          // なので、この時点の rouletteQueue.current.length が残りの並び。
+          // 最後の1本(と、詰まっていない通常の2本目)は通常スピンで焦らしを
+          // 出す。同一ギフトのコンボ内(at > 0)は従来どおり短縮のまま
+          // (startRoulette 側の fast || at > 0)。
+          return startRoulette(e, rouletteQueue.current.length > 0);
         }
         if (kind === 'band') {
           // 断る条件は startBandFx の入口ガードと同じ述語を先に見る — 断る相手の
@@ -3114,7 +3126,7 @@ export function MonitorView(): React.JSX.Element {
         return;
       }
       case 'boost-start': {
-        // 他演出の再生中は持ち越す(pendingBands と同型・2件上限)。テストは
+        // 他演出の再生中は持ち越す(pendingBands と同型・PENDING_BOOSTS_MAX 上限)。テストは
         // 持ち越さずスキップ — ▶ は今すぐ見たいもので、数十秒後に因果不明の
         // 再生が始まるほうが混乱する。
         if (stageBusy()) {
@@ -3122,7 +3134,8 @@ export function MonitorView(): React.JSX.Element {
             fxWarn('tapBoost 実演: 他演出の再生中 — スキップ');
             return;
           }
-          if (pendingBoosts.current.length < 2) pendingBoosts.current.push(e);
+          if (pendingBoosts.current.length < PENDING_BOOSTS_MAX) pendingBoosts.current.push(e);
+          else fxWarn('boost-start: 持ち越しキュー満杯 — 破棄', { queued: pendingBoosts.current.length });
           return;
         }
         // 持ち越さない直行経路でも遅れは起きる — freshChallengeEffects は
@@ -3158,8 +3171,8 @@ export function MonitorView(): React.JSX.Element {
         // **期限(boostEndsAtMs)だけでは落とせない**: モニターを閉じた/動きの
         // 抑制を入れた等の強制清算(worker の applyFxCapsChange)では、期限が
         // まだ未来のままフィーバーが終わっている。
-        // 押し出し効果もある — 積む側の上限は2件なので、死んだ1件が枠を占めると
-        // 直後の**生きた**ブーストが入り口で捨てられる。
+        // 押し出し効果もある — 積む側の上限は PENDING_BOOSTS_MAX 件なので、死んだ
+        // 持ち越しが枠を占めると直後の**生きた**ブーストが入り口で捨てられる。
         if (pendingBoosts.current.length > 0) {
           const alive = pendingBoosts.current.filter((x) => x.id > e.id);
           if (alive.length !== pendingBoosts.current.length) {

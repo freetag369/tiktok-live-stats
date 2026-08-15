@@ -6,7 +6,11 @@ import { drainFxQueues, runFxDrain, type FxDrainOrder, type FxDrainQueues } from
  *
  * この順序は MonitorView の4つの finish(+安全弁の expire)が従う契約で、
  * 過去に「譲ったのに誰も再生しない」系のバグを潰しながら固まったもの。
- * 1ビットも変えないための回帰テスト。
+ * 意図せず変えないための回帰テスト。
+ *
+ * 'roulette-first' でもブーストは最優先 — worker のフィーバーは絶対時刻で走り
+ * (ルーレットでは凍結しない)、スピン連鎖の後ろに並ばせると planBoostStart の
+ * 期限切れで演出ごと消えていた。
  */
 
 function q(over: Partial<FxDrainQueues<string>> = {}): FxDrainQueues<string> {
@@ -32,9 +36,9 @@ describe('drainFxQueues: 順序の固定', () => {
       standard: 'boost:B',
     },
     {
-      name: 'roulette + boost → finishRoulette は自キュー(短縮スピン連鎖)優先',
+      name: 'roulette + boost → どちらの順序でもブースト優先(絶対時刻の期限切れ防止)',
       queues: () => q({ roulettes: ['R'], boosts: ['B'] }),
-      rouletteFirst: 'roulette:R',
+      rouletteFirst: 'boost:B',
       standard: 'boost:B',
     },
     {
@@ -46,7 +50,7 @@ describe('drainFxQueues: 順序の固定', () => {
     {
       name: '全キュー在庫あり',
       queues: () => q({ roulettes: ['R'], boosts: ['B'], bands: ['C'] }),
-      rouletteFirst: 'roulette:R',
+      rouletteFirst: 'boost:B',
       standard: 'boost:B',
     },
   ];
@@ -85,11 +89,10 @@ describe('drainFxQueues: achieved と消費規約', () => {
   });
 
   it('選ばれた演出はキューから消え、他のキューは減らない', () => {
-    const queues = q({ roulettes: ['R1', 'R2'], boosts: ['B1'], bands: ['C1'] });
+    const queues = q({ roulettes: ['R1', 'R2'], boosts: [], bands: ['C1'] });
     const r = drainFxQueues(queues, 'roulette-first');
     expect(r.next).toEqual({ kind: 'roulette', effect: 'R1' });
     expect(queues.roulettes).toEqual(['R2']);
-    expect(queues.boosts).toEqual(['B1']);
     expect(queues.bands).toEqual(['C1']);
   });
 
@@ -171,7 +174,7 @@ describe('runFxDrain: 断られたら次の持ち越しへ落ちる', () => {
       expect(r.skipped.length, order).toBe(3);
       // 捨てた順は drainFxQueues の優先順と一致する。
       expect(r.skipped.map((x) => `${x.kind}:${x.effect}`), order).toEqual(
-        order === 'roulette-first' ? ['roulette:R', 'boost:B', 'band:C'] : ['boost:B', 'band:C', 'roulette:R']
+        order === 'roulette-first' ? ['boost:B', 'roulette:R', 'band:C'] : ['boost:B', 'band:C', 'roulette:R']
       );
       // 断られた要素はキューへ戻らない。
       expect([queues.boosts, queues.bands, queues.roulettes], order).toEqual([[], [], []]);
