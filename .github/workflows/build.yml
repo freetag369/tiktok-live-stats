@@ -136,8 +136,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 配布物のアーティファクトだけを取る。pattern を付けないと同じ run の
+      # 全アーティファクト(E2E 失敗時の playwright-report-* を含む)が落ちてきて、
+      # 下の files: '**/*' がレポートの index.html までリリースに添付してしまう。
       - uses: actions/download-artifact@v4
         with:
+          pattern: '{windows,mac}'
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
