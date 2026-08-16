@@ -23,6 +23,27 @@ test('モニターを開くと7セグに現在値が出て、ダッシュボー�
   expect(state.value).toBe(99);
 });
 
+test('7セグの data-status が状態遷移に追随する(CSS クラスや日本語テキストに頼らない)', async ({
+  app,
+  main,
+}) => {
+  const monitor = await openMonitor(app, main);
+  const countdown = monitor.locator('.countdown');
+
+  // 未開始。
+  await expect(countdown).toHaveAttribute('data-status', 'idle');
+  // 据え置き(凍結)はしていないので data-held は付かない。
+  await expect(countdown).not.toHaveAttribute('data-held', '1');
+
+  await rpc(main, 'challenge.start', undefined);
+  await expect(countdown).toHaveAttribute('data-status', 'running', { timeout: 10_000 });
+
+  // 一時停止は値を残したまま idle へ戻る(status だけでは停止と区別できないので
+  // ダッシュボードは startedMs を見る、という規約の裏返し)。
+  await rpc(main, 'challenge.stop', undefined);
+  await expect(countdown).toHaveAttribute('data-status', 'idle', { timeout: 10_000 });
+});
+
 test('モニターのクリックで残数が減る(配信者が画面を叩く経路)', async ({ app, main }) => {
   await rpc(main, 'challenge.start', undefined);
   const monitor = await openMonitor(app, main);

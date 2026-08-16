@@ -3866,7 +3866,19 @@ export function MonitorView(): React.JSX.Element {
         配信時間: {totals.elapsedMs > 0 ? elapsedText(totals.elapsedMs) : '—'}
       </div>
 
-      <div className={segCls} ref={countdownRef}>
+      {/*
+      data-* は E2E の読み取り口。status は CSS クラス(.clear/.low)と日本語
+      テキストからしか判別できず、据え置き中(heldValue)かどうかは DOM に一切
+      現れなかった — 凍結中は7セグが worker の真値と乖離するので、値が合わない
+      ときの切り分け手段が無い。countdownRef は classList 操作と矩形測定にしか
+      使われないので、属性を足しても既存のパンチ再生には影響しない。
+    */}
+    <div
+      className={segCls}
+      ref={countdownRef}
+      data-status={challenge.status}
+      data-held={heldValue != null ? '1' : undefined}
+    >
         <SevenSeg value={shownValue} digits={digits} />
         {achieved ? <div className="clear-banner">CLEAR!</div> : null}
         {!running && !achieved ? (

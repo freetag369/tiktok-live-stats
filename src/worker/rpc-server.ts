@@ -166,7 +166,7 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
     },
   };
 
-  return async function handle(req: RpcRequest): Promise<RpcResponse> {
+  async function handle(req: RpcRequest): Promise<RpcResponse> {
     const h = (handlers as Record<string, ((p: unknown) => Promise<unknown>) | undefined>)[req.method];
     if (!h) {
       return { id: req.id, ok: false, error: { code: 'VALIDATION', message: `未対応のメソッド: ${req.method}` } };
@@ -178,7 +178,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       const message = (e as Error)?.message ?? String(e);
       return { id: req.id, ok: false, error: { code: 'DB', message } };
     }
-  };
+  }
+
+  // 実際に持っている鍵束を外へ出す。RPC_OWNER('worker' 側)と突き合わせて
+  // 「型では分類したがハンドラを書き忘れた」を test/unit/rpc-routing.spec.ts が拾う。
+  return Object.assign(handle, { methods: Object.keys(handlers) });
 }
 
 /** Only the worker-handled subset. The `cfg.` and `file.` methods live in main. */

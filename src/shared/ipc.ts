@@ -144,30 +144,87 @@ export type RpcResponse<K extends RpcMethod = RpcMethod> =
   | { id: string; ok: true; result: RpcResult<K> }
   | { id: string; ok: false; error: { code: RpcErrorCode; message: string } };
 
-/** Methods main answers itself instead of forwarding. */
-export const MAIN_HANDLED: ReadonlySet<string> = new Set([
-  'cfg.get',
-  'cfg.set',
-  'challengeDefault.save',
-  'challengeDefault.get',
-  'challengeDefault.clear',
-  'file.exportCsv',
-  'file.backup',
-  'file.openDataDir',
-  'file.pickDataDir',
-  'file.openMissions',
-  'file.saveSource',
-  'app.licenses',
-  'monitor.open',
-  'monitor.close',
-  'monitor.restart',
-  'monitor.status',
-  'monitor.displays',
-  'monitor.crashed',
-  'diag.report',
-  'diag.recent',
-  'diag.openLogDir',
-]);
+/**
+ * 各チャネルの処理主体。**RpcMap にキーを足すと、ここを埋めるまで typecheck が
+ * 通らない**(Record<RpcMethod, …> の網羅性)。
+ *
+ * 以前は下の MAIN_HANDLED が手書きの Set で、RpcMap に新チャネルを足しても
+ * 型エラーが出なかった。書き忘れると main が worker へ転送し、worker 側は
+ * 「未対応のメソッド」を返す — **実行時にしか分からない**壊れ方をする。
+ * 逆に、綴りを間違えた死んだエントリも検出できなかった。
+ */
+export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
+  // ── worker(別プロセス。DB とチャレンジエンジンを持つ側) ──────────────
+  'conn.start': 'worker',
+  'conn.stop': 'worker',
+  'conn.status': 'worker',
+  'conn.refreshQuota': 'worker',
+  'conn.startReplay': 'worker',
+  'challenge.get': 'worker',
+  'challenge.start': 'worker',
+  'challenge.stop': 'worker',
+  'challenge.reset': 'worker',
+  'challenge.press': 'worker',
+  'challenge.toggleRank': 'worker',
+  'challenge.testEffect': 'worker',
+  'challenge.fxCaps': 'worker',
+  'q.viewerTable': 'worker',
+  'q.viewer': 'worker',
+  'q.recallCard': 'worker',
+  'q.comments': 'worker',
+  'q.gifts': 'worker',
+  'q.likeSeries': 'worker',
+  'q.sessions': 'worker',
+  'q.sessionDetail': 'worker',
+  'q.sessionTotals': 'worker',
+  'q.timeline': 'worker',
+  'q.leaderboard': 'worker',
+  'q.churn': 'worker',
+  'q.matrix': 'worker',
+  'q.missions': 'worker',
+  'q.diagnostics': 'worker',
+  'm.viewerMeta': 'worker',
+  'm.forgetViewer': 'worker',
+  'm.unblockViewer': 'worker',
+  'm.recomputeScores': 'worker',
+  'm.purge': 'worker',
+  'm.reloadMissions': 'worker',
+  'w.exportCsv': 'worker',
+  'w.backup': 'worker',
+
+  // ── main(設定ファイル・ウィンドウ・ネイティブダイアログを持つ側) ──────
+  'cfg.get': 'main',
+  'cfg.set': 'main',
+  'challengeDefault.save': 'main',
+  'challengeDefault.get': 'main',
+  'challengeDefault.clear': 'main',
+  'file.exportCsv': 'main',
+  'file.backup': 'main',
+  'file.openDataDir': 'main',
+  'file.pickDataDir': 'main',
+  'file.openMissions': 'main',
+  'file.saveSource': 'main',
+  'app.licenses': 'main',
+  'monitor.open': 'main',
+  'monitor.close': 'main',
+  'monitor.restart': 'main',
+  'monitor.status': 'main',
+  'monitor.displays': 'main',
+  'monitor.crashed': 'main',
+  'diag.report': 'main',
+  'diag.recent': 'main',
+  'diag.openLogDir': 'main',
+};
+
+/**
+ * Methods main answers itself instead of forwarding.
+ * RPC_OWNER からの導出値 — 二重管理をしない。
+ */
+export const MAIN_HANDLED: ReadonlySet<string> = new Set(
+  Object.entries(RPC_OWNER)
+    .filter(([, owner]) => owner === 'main')
+    .map(([method]) => method)
+);
 
 // ── Firehose (direct worker → renderer MessagePort) ──────────────────────────
 
