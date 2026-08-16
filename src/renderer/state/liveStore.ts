@@ -2,7 +2,11 @@ import { create } from 'zustand';
 import type { AdapterStatus, QuotaInfo, UserId } from '@shared/events';
 import type { DeltaViewer, FeedItem, JoinAlertCard, LiveMessage, LiveTotals, WorkerState } from '@shared/ipc';
 import type { ChallengeLogEntry, ChallengeState, MissionProgress } from '@shared/dto';
-import { appendChallengeLog } from '@shared/challenge';
+import {
+  appendChallengeLog,
+  challengeSnapshotMaxEffectId,
+  isStaleChallengeSnapshot,
+} from '@shared/challenge';
 import { pruneLiveRows } from '@shared/live-rows';
 
 /**
@@ -50,6 +54,15 @@ interface LiveState {
   quota: QuotaInfo | null;
   sessionId: number | null;
   workerState: WorkerState;
+  /**
+   * worker の世代。`'starting'` への遷移(= WorkerHost.start() が新しい
+   * utilityProcess を起こした)で +1 する。**演出 watermark の唯一のリセット信号** —
+   * worker が再起動すると effect の id が 1 から振り直されるので、購読側は
+   * これが変わったら watermark を null(= 全件再生済みに倒す)へ戻す。
+   * かつては freshChallengeEffects が「id が watermark を下回ったら再起動」と
+   * 推測していたが、古いスナップショットの後着でも成立して演出が重複再生された。
+   */
+  workerEpoch: number;
   droppedFeed: number;
   deferred: number;
 }
@@ -82,6 +95,7 @@ export const useLive = create<LiveState>(() => ({
   quota: null,
   sessionId: null,
   workerState: 'starting',
+  workerEpoch: 0,
   droppedFeed: 0,
   deferred: 0,
 }));
@@ -247,7 +261,23 @@ export function attachLive(opts?: { lite?: boolean }): () => void {
     }
   });
 
-  const offState = window.api.onWorkerState((s) => useLive.setState({ workerState: s }));
+  const offState = window.api.onWorkerState((s) => {
+    const prev = useLive.getState().workerState;
+    // worker 世代の**唯一の合図は 'starting'** — main の WorkerHost.start() が
+    // 冒頭で必ず1回だけ撃つので、utilityProcess 1本につきちょうど1回届く
+    // (クラッシュ復帰は restarting → starting → ready、手動再起動は
+    //  dead → starting → ready。**ready の直前は常に starting** なので
+    //  「restarting|dead → ready」を見ると一度も発火しない)。
+    // 新しい worker では effect の id が 1 から振り直されるため、ここで watermark
+    // (演出再生 / 効果音 / 履歴ログ)を白紙へ戻す。初回起動でも走るが、そのときは
+    // まだ何も取り込んでいないので実質 no-op。
+    const restarted = s === 'starting' && prev !== 'starting';
+    if (restarted) resetChallengeWatermarks();
+    useLive.setState((st) => ({
+      workerState: s,
+      workerEpoch: restarted ? st.workerEpoch + 1 : st.workerEpoch,
+    }));
+  });
   return () => {
     offLive();
     offState();
@@ -265,20 +295,82 @@ export function dismissAlert(userId: UserId): void {
 let logEntries: ChallengeLogEntry[] = [];
 let lastLoggedId: number | null = null;
 let lastStartedMs: number | null | undefined;
+/**
+ * 取り込み済みの effect ストリームの世代印と、その中身。
+ *
+ * **なぜ要るか**: delta は scheduleFlush の rAF(+250ms)コアレスで遅延反映されるが、
+ * RPC(challenge.press / challenge.get)の返り値は setChallenge が即時反映する。
+ * press はモニターの Space 押下と画面タップのたびに飛ぶので、**あとから来た delta を
+ * 適用したあとに、それより古い press の返り値が着弾する**逆転が普通に起きる
+ * (worker のイベントループ停止・ultra 動画再生中の rAF 飢餓で顕著)。
+ * 逆転で recentEffects が古い配列に差し替わると、watermark 方式の演出再生が
+ * 「新しい effect が来た」と誤認して直近5秒ぶんを丸ごと再生し直し、ルーレットも
+ * ギフトカットインも**贈られた個数を超えて**回る/流れる。
+ *
+ * 対策はこの1点だけ: **effect ストリームは後退させない。** 値・boost.tapCount など
+ * press の即時フィードバックに要るフィールドはそのまま通し、recentEffects と
+ * fxQueue(どちらも演出の入力)だけを直前の新しい方で据え置く。
+ */
+let seenMaxEffectId = 0;
+let seenEffects: ChallengeState['recentEffects'] | null = null;
+let seenFxQueue: ChallengeState['fxQueue'];
+/** 後退スナップショットの観測数(診断ログの間引き用)。 */
+let staleSnapshots = 0;
+let staleLoggedAtMs = 0;
+/** 診断ログの間引き窓(ms)。押下ストームで診断リングを溢れさせない。 */
+const STALE_LOG_EVERY_MS = 5000;
+
+/**
+ * worker 再起動で watermark を白紙へ戻す(attachLive の onWorkerState から)。
+ * 履歴ログも含めて捨てる — 新しい worker の id 1 番から取り込み直す。
+ */
+function resetChallengeWatermarks(): void {
+  logEntries = [];
+  lastLoggedId = null;
+  lastStartedMs = undefined;
+  seenMaxEffectId = 0;
+  seenEffects = null;
+  seenFxQueue = undefined;
+}
 
 /**
  * ChallengeState を取り込み、履歴ログを更新して差分パッチを返す。
  * delta 経路と RPC 経路の両方がここを通る(同じ状態を二度受けても冪等)。
  */
-function ingestChallenge(state: ChallengeState): Partial<LiveState> {
+function ingestChallenge(incoming: ChallengeState): Partial<LiveState> {
   // start / reset の検知。worker 側は recentEffects を空にするだけで「消せ」とは
   // 言ってこないので、startedMs の変化(start=新しい時刻 / reset=null)で判断する。
   // status 遷移だけを見ると stop→start の往復を取りこぼす。
-  if (lastStartedMs !== undefined && lastStartedMs !== state.startedMs) {
+  if (lastStartedMs !== undefined && lastStartedMs !== incoming.startedMs) {
     logEntries = [];
     lastLoggedId = null;
+    // ラン境界ではリングが空になるので世代印も戻す(後退判定の材料が無くなる)。
+    seenMaxEffectId = 0;
+    seenEffects = null;
+    seenFxQueue = undefined;
   }
-  lastStartedMs = state.startedMs;
+  lastStartedMs = incoming.startedMs;
+
+  // 後退スナップショットは演出の入力だけ据え置く(上の seenMaxEffectId の解説)。
+  let state = incoming;
+  if (seenEffects !== null && isStaleChallengeSnapshot(seenMaxEffectId, incoming)) {
+    staleSnapshots++;
+    const now = Date.now();
+    if (now - staleLoggedAtMs >= STALE_LOG_EVERY_MS) {
+      staleLoggedAtMs = now;
+      console.warn(
+        '[fx-skip] 古いチャレンジ状態が後着 — 演出の入力(recentEffects)は据え置き',
+        { seenMaxEffectId, incomingMaxEffectId: challengeSnapshotMaxEffectId(incoming), total: staleSnapshots }
+      );
+    }
+    state = { ...incoming, recentEffects: seenEffects };
+    if (seenFxQueue !== undefined) state.fxQueue = seenFxQueue;
+    else delete state.fxQueue;
+  } else {
+    seenMaxEffectId = challengeSnapshotMaxEffectId(incoming);
+    seenEffects = incoming.recentEffects;
+    seenFxQueue = incoming.fxQueue;
+  }
 
   const next = appendChallengeLog(logEntries, state, lastLoggedId);
   lastLoggedId = next.lastId;

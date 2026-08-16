@@ -136,140 +136,6 @@ Seedance 2.5 の出力は**アルファチャンネルを持たない**。その
 
 ---
 
-# ギフト別演出クリップ(`gift/` サブフォルダ)
-
-最上位ギフト16種に、それぞれ専用の演出クリップを割り当てるための素材。
-`tierForDiamonds` は 5000ダイヤ以上を一律 tier 4 に落とすため、
-これらは放っておくと全部が同じ `gift-t4.mp4` を共有してしまう。
-
-| 項目 | 値 |
-|---|---|
-| 生成サービス / モデル | Higgsfield / `seedance_2_5`(mode `t2v`、参照画像なし) |
-| 生成日 | 2026-08-11 |
-| 出力 | 1280×720 (16:9) / 24fps / H.264 / **音声トラック無し** / 各 5.04 秒 |
-
-加工内容: **無し**(返却された mp4 をそのままリネームして格納)。
-
-> ## ⚠️ 著作権について — 必ず読むこと
->
-> これらは **TikTok 本家のギフト演出の再現ではない**。本家の演出は ByteDance の著作物であり、
-> それを模倣・再現した映像は本リポジトリには一切含めていない。
->
-> ここにあるのは各ギフトの**題材(龍・鳳凰・天馬・獅子・宮殿・鯨・銀河など)に合わせて
-> 新規に生成した完全オリジナルの演出**。題材そのものは誰の独占物でもない。
-> 将来クリップを差し替える場合も、本家演出を参照・模倣しないこと。
->
-> 生成物の利用条件は Higgsfield の利用規約(生成時のプラン: Plus)に従う。CC0 ではない。
-> AGPL でのソースzip再配布前に規約上の再配布可否を必ず確認すること。
-
-## 対応表
-
-ファイル名は名寄せ用の canonical と一致させてある。
-
-| ファイル | ギフト | 演出 | 発光色 |
-|---|---|---|---|
-| `universe.mp4` | TikTok Universe | 白の特異点が渦巻銀河へ展開 | 紫 / シアン / 白 |
-| `white_pegasus.mp4` | ホワイトペガサス | 銀白の天馬が翼を広げる | 銀白 / 淡青 |
-| `fire_phoenix.mp4` | ファイアフェニックス | 炎の鳳凰が舞い上がり翼を開く | 赤 / 橙 / 金 |
-| `whale_mirage.mp4` | 鯨と蜃気楼 | 鯨が横切り背後に金の蜃気楼 | 青緑 / 淡金 |
-| `thunder_falcon.mp4` | サンダーファルコン | 稲妻の隼が翼を広げ放電 | 電光青 / 白 |
-| `tiktok_stars.mp4` | TikTok Stars | 星形の光が渦を巻いて飛散 | シアン / マゼンタ |
-| `seal_whale.mp4` | アザラシとクジラ | 2頭が並んで泳ぎ光の渦を曳く | 水色 / 白 |
-| `adams_dream.mp4` | Adam's Dream | 光雲がひらき金の光芒が降りる | 金 / ラベンダー |
-| `universe_plus.mp4` | TikTok Universe+ | 二重螺旋銀河(∞字)が全画面へ | 紫 / 金 / 白 |
-| `lion_charge.mp4` | 獅子奮迅 | 炎の獅子頭が正面へ咆哮 | 金 / 橙 |
-| `leon_lion.mp4` | レオンとライオン | 2頭の獅子が左右から跳んで衝突 | 金 / 琥珀 |
-| `whale_sam.mp4` | クジラのサム | 鯨が跳ねて潮を吹き潜る | シアン / 白 |
-| `lion.mp4` | ライオン | 金の獅子が咆哮、鬣が放射状に光る | 金 |
-| `pegasus.mp4` | ペガサス | 金の天馬が前脚を上げ翼を打つ | 暖金 / 琥珀 |
-| `palace.mp4` | 宮殿 | 光の線で宮殿が組み上がり黄金光を放つ | 金(線画光) |
-| `dragon.mp4` | ドラゴン | 翡翠と金の龍が蛇行し金の火花を吐く | 翡翠緑 / 金 |
-
-## 使い方
-
-上の9本とまったく同じ。**`mix-blend-mode: screen` 必須**。
-
-> ### 配置の制約(踏みやすい罠)
->
-> `mix-blend-mode` は **最も近い祖先のスタッキングコンテキストの中でしか合成されない**。
-> そのため `<video class="fx-clip">` は `.monitor-root` の直下に、**z-index を付けずに**置く。
->
-> - `z-index:50` を持つ `.fx-layer` の内側に入れると、合成が `.fx-layer` 内で閉じて
->   **黒が抜けず UI が黒い矩形で覆われる**(実装時に一度踏んだ)。
-> - `.monitor-root` に `z-index` / `opacity` / `filter` / `isolation` / `transform` を
->   足しても同じ理由で壊れる。`monitor.css` の `.monitor-root` に警告コメントあり。
->
-> 現状は `.stage-scale`(`transform` でコンテキストを作る)が合成の境界になり、
-> クリップはその配下の UI 全体と screen 合成される。
-被写体は全て「自己発光する光で象られた姿」として生成しており、不透明な面や暗部を持たないので、
-screen 合成しても幽霊のように透けず、演出中もカウントダウンの数字が下に見えたままになる。
-
-検証済みの実測値: 各クリップ最終フレームの RGB 輝度は平均 0.0〜2.6 / 255。
-
-### 既知の癖
-
-- `lion_charge` / `whale_mirage` / `lion` / `pegasus` / `white_pegasus` / `universe_plus` /
-  `fire_phoenix` / `seal_whale` は終端に残光がある(最終フレーム最大輝度 27〜249)。
-  末尾で唐突に切れるのが気になる場合は `<video>` に 0.3 秒の CSS フェードアウトを掛ける。
-- `adams_dream` は16本中もっとも拡散的で、中間調の光雲が画面中央下を広く覆う。
-  他が「はっきりした被写体」なのに対しこれだけ雰囲気もの。差し替えるならここ。
-- `seal_whale` の小さい方はアザラシというより仔鯨に見える。
-
-## 名寄せ(組み込み時)
-
-`resources/gift-aliases.default.json` の `nameRules` に canonical を追加する。
-照合は **小文字化 → 完全一致 or 部分一致、先頭ルール勝ち**(`worker/store/apply.ts`)なので、
-**具体的なルールほど先に置く**こと:
-
-- `universe_plus` → `universe`(「TikTok Universe+」は「tiktok universe」を含む)
-- `white_pegasus` → `pegasus`(「ホワイトペガサス」は「ペガサス」を含む)
-- `leon_lion` → `lion`(「レオンとライオン」は「ライオン」を含む)
-- 上記すべて → 既存の汎用 `tiktok` ルール(「TikTok Universe」「TikTok Stars」を飲み込む)
-
-**英語名・他言語名は未確認**。獅子奮迅 / 鯨と蜃気楼 / アザラシとクジラ / クジラのサム の
-他言語名は推測で書かず、実イベントの `gift_catalog` を見てから `match` に足すこと
-(同ファイルの `_note` が「ギフト名は言語設定で変わる」と警告している)。
-
-16種に当たらない高額ギフトは従来どおり `../gift-t4.mp4` がフォールバックとして残る。
-
-## 生成プロンプト(全文)
-
-全16本に共通の末尾ガード。**「不透明な面・暗部・陰影を作らせない」指定が screen 合成の肝**:
-
-```
-Locked-off static camera, no camera movement, centered composition. Everything is made of
-self-luminous light on a pure black (#000000) background — no solid opaque surfaces, no dark or
-mid-tone body, no shading, no rim lighting on a solid form: the shape is drawn entirely by
-glowing particles, embers, filaments and light trails, so the black around and inside it stays
-absolutely black. High contrast, nothing else in frame: no text, no letters, no numbers, no
-logos, no watermark, no people, no real objects, no background scenery. The effect builds near
-the start, peaks, and fully decays — the frame returns to pure black and stays completely black.
-```
-
-以下は各クリップ固有の前半部分(上のガードが後に続く)。
-
-- **universe.mp4** — A vast cosmic event made purely of light. A brilliant white singularity flares at the center of the frame and blooms outward into a sweeping spiral galaxy of violet, cyan and white star-particles, trailing nebula filaments of light and showering thousands of twinkling stars across the frame.
-- **white_pegasus.mp4** — A winged horse formed entirely from silver-white light particles gallops upward through the center of the frame and spreads its enormous glowing wings wide, each feather drawn as a streak of cold white and pale-blue light, scattering silver sparks from its hooves and wingtips.
-- **fire_phoenix.mp4** — A phoenix formed entirely from fire rises through the center of the frame and unfurls vast burning wings, its body and every feather drawn as red, orange and gold flame filaments and flying embers, trailing a storm of glowing sparks that swirl upward.
-- **whale_mirage.mp4** — An enormous whale formed from flowing aqua and teal light glides slowly across the frame from left to right, its silhouette drawn by drifting luminous particles and long ribbon-like light trails, while behind it a shimmering pale-gold mirage of rippling heat-haze light blooms and wavers.
-- **thunder_falcon.mp4** — A falcon formed entirely from crackling electric-blue lightning dives through the center of the frame with its wings swept wide, its outline drawn by branching bolts and white-hot arcs, discharging jagged lightning and blue sparks outward in every direction.
-- **tiktok_stars.mp4** — A dense cascade of cyan, magenta and white five-pointed star-shaped light particles bursts from the center of the frame and swirls outward in a wide spiral, each star twinkling and trailing a bright comet-like streak, filling the frame with sweeping arcs of starlight.
-- **seal_whale.mp4** — A seal and a whale, both formed from soft aqua and white light particles, swim together in a gentle arc across the frame as if through water, trailing streams of luminous bubbles and rippling ribbons of pale blue light.
-- **adams_dream.mp4** — A dreamlike bloom of warm gold and lavender light unfurls at the center of the frame: soft luminous clouds swell outward, a broad shaft of golden light descends through them, and thousands of tiny glowing motes drift slowly upward like a rising dream.
-- **universe_plus.mp4** — The grandest cosmic finale made purely of light. A blinding white flash at the center collapses inward, then explodes into a colossal double-spiral galaxy of violet, gold and white star-particles that fills the entire frame edge to edge, with sweeping nebula light-rays, rings of orbiting stars, and an endless downpour of twinkling starlight.
-- **lion_charge.mp4** — A lion's head formed entirely from roaring golden fire erupts toward the viewer at the center of the frame and roars, its mane drawn as hundreds of whipping flame filaments and flying embers that lash violently outward, radiating shockwaves of gold and orange light. Fierce and explosive.
-- **leon_lion.mp4** — Two lions formed from golden and amber light leap toward each other from the left and right edges of the frame and meet at the center in a burst of light, their manes drawn as swirling luminous filaments and streaming sparks, throwing a wide spray of gold light outward on impact.
-- **whale_sam.mp4** — A large friendly whale formed from bright cyan and white light particles rises gently from the bottom of the frame, arcs across the center and dives back down, trailing a long ribbon of luminous bubbles and blowing a tall spout of glittering white light from its blowhole.
-- **lion.mp4** — A lion formed entirely from golden light strides forward at the center of the frame and roars, its mane drawn as radiating filaments of gold light that flare outward like a sunburst, scattering warm golden sparks in a wide halo around it. Noble and powerful.
-- **pegasus.mp4** — A winged horse formed from warm gold light rears up at the center of the frame and beats its huge glowing wings, each feather a streak of amber and gold light, trailing golden sparks and a swirling cloud of luminous dust from its hooves.
-- **palace.mp4** — A vast palace drawn purely in glowing golden line-light rises up from the bottom of the frame and assembles itself at the center — towers, arches, staircases and domes traced by bright filaments of gold light like a luminous blueprint drawing itself in the air — then flares and radiates a burst of golden rays and sparkles outward.
-- **dragon.mp4** — An enormous eastern dragon formed entirely from jade-green and gold light coils through the frame in a long serpentine arc, its body drawn by flowing luminous filaments and flying embers, its whiskers and mane streaming light behind it, breathing a torrent of golden sparks toward the viewer.
-
-> `palace.mp4` は初回投入時に Higgsfield からプリセット「IN THE DARK」を推薦されて弾かれた。
-> `declined_preset_id` にそのプリセット id を渡して再投入すると通る。
-
----
-
 # ダイヤ帯域カットイン(`band/` サブフォルダ)
 
 ダイヤ数の帯域(1〜50 / 51〜100 / 101〜600 / 601〜1000+)で発火する
@@ -531,6 +397,88 @@ ffmpeg -i raw.mp4 -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v 
 - `+faststart` — moov atom を先頭へ。`app.asar` 内からの `preload="auto"` が全読みせずに始まる。
 - 音声も再エンコード(`-c:a copy` にしない)— 40本の音圧がバラつくと、
   `giftFullCut.volume` 一つで音量を決めるこの経路では耳に付くため。
+
+# ルーレット超激アツ動画(`rl/` サブフォルダ・16本)
+
+ギフトルーレットの超激アツ(ultra)5パターン用。**動画とリールのマス移動が交互に進み、
+動画終端の「一撃」がリールを1マス押す**演出文法で作ってある — 各クリップは
+最後の約1秒にカメラ/画面へ向かう一撃(尾撃ち・火炎・角の突き・飛び掛かり等)で終わる。
+id ⇄ ウィンドウの対応は `src/shared/roulette-fx.ts` の `ROULETTE_PATTERN_TIMING.clips`
+(ファイルは `<pattern>-<n>.mp4`、n はウィンドウ順)。突合は
+`test/unit/roulette-clip-catalog.spec.ts`。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | Dreamina (dreamina.capcut.com) / `Dreamina Seedance 2.0`(t2v・参照なし) |
+| 生成日 | 2026-08-16 |
+| 出力(生成時) | 1280×720 (16:9) / **60fps を名乗る容器に 121 フレーム(実効24fps)** / H.264 / AAC 音声あり |
+| 尺(生成時) | 各 5.06 秒 |
+| 本数 | dragon 3 / unicorn 2 / whale 4 / phoenix 4 / lion 3 = 16 |
+
+**加工内容: ffmpeg でウィンドウ実尺へトリム(尾側を残す)+ 再エンコード + 音声の正規化。**
+一撃が末尾に来るよう頭を切り落とし、各ファイルの実尺を `clips[].at→out` の
+ウィンドウ長にフレーム単位で一致させてある(誤差は最大 ±20ms = 半フレーム未満)。
+アプリ側は loop せず、動画が尽きたら一撃ポーズの最終フレームで静止し、
+そこへ `.rl-clip.out` の溶暗(`RL_CLIP_FADE_MS` 480ms)が被る。
+
+> ## ⚠️ `-ss` を使ってはいけない(初版が踏んだ罠)
+>
+> 素材は `r_frame_rate=60/1` を名乗る容器に 24fps の中身(121フレーム)が入っている。
+> 初版は `-ss <5.06-窓長> -i raw.mp4 -t <窓長>` の**入力シーク**でトリムしたが、
+> この容器ではシークが破綻し、**16本中7本が窓長より 358〜478ms 短くなった**。
+> その結果「最終フレームで静止したまま全不透明で放置 → 消える」という
+> 不自然な間ができていた。**フレーム番号でトリムすること**(`trim=start_frame=`)—
+> シーク・キーフレーム・インデックスに一切依存せず決定的に切れる。
+>
+> あわせて **`fps=24` フィルタも使わない**。素材のPTSは 60fps 容器の 3-2-3-2 tick 刻みで
+> ±1/120 秒揺れており、`fps` は最終スロットを範囲外と判断して**毎回きっちり1フレーム
+> 落とす**(全16本で確認)。代わりに **`settb=1/24,setpts=N`** でタイムベースごと
+> 1/24 に固定し、PTS をフレーム番号から作る — 入力フレームを1枚も落とさずに CFR 24fps。
+> `setpts=N/24/TB` は**不可**(TB が入力の 1/60 のままなので 60fps へ 2.5 倍に
+> 重複展開される。これも実際に踏んだ)。
+
+```
+# id ごとに start_frame S = 121 - N、N = round(窓ms × 24 / 1000)
+ffmpeg -y -i raw.mp4 -filter_complex \
+ "[0:v]trim=start_frame=<S>,settb=1/24,setpts=N[v];\
+  [0:a]atrim=start=<S/24>,asetpts=PTS-STARTPTS,<loudnorm 2パス>,afade=t=out:st=<N/24-0.15>:d=0.15,aresample=48000[a]" \
+ -map "[v]" -map "[a]" -map_metadata -1 \
+ -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v high -fps_mode cfr -r 24 \
+ -c:a aac -b:a 128k -ac 2 -ar 48000 -movflags +faststart out.mp4
+```
+
+| id | 窓ms | N | S | | id | 窓ms | N | S |
+|---|---|---|---|---|---|---|---|---|
+| dragon-1 | 4920 | 118 | 3 | | phoenix-1 | 3960 | 95 | 26 |
+| dragon-2 | 3480 | 84 | 37 | | phoenix-2 | 3000 | 72 | 49 |
+| dragon-3 | 2520 | 60 | 61 | | phoenix-3 | 2400 | 58 | 63 |
+| unicorn-1 | 4992 | 120 | 1 | | phoenix-4 | 2400 | 58 | 63 |
+| unicorn-2 | 4992 | 120 | 1 | | lion-1 | 4800 | 115 | 6 |
+| whale-1 | 4992 | 120 | 1 | | lion-2 | 3480 | 84 | 37 |
+| whale-2 | 3000 | 72 | 49 | | lion-3 | 2496 | 60 | 61 |
+| whale-3 | 2400 | 58 | 63 | | whale-4 | 2160 | 52 | 69 |
+
+- **音声は素材の焼き込みをそのまま使う**(初版は `-an` で捨てていた)。音量は
+  設定の `rouletteSound.clipVolume`(既定70)で、効果音オフなら動画ごと無音。
+  回転ループ音は最初のウィンドウ(`quietAt`)で閉じるので鳴りは被らない。
+- **2パス loudnorm で -16 LUFS に揃える**(`linear=true`)。実測は -10.7〜-30.2 LUFS と
+  19.5 LU もばらついており、音量スライダー1本で決めるこの経路では耳に付くため
+  (全面カット40本で音圧を再エンコードした理由と同じ)。
+- 末尾 150ms だけ `afade` — 音の「プツッ」を防ぐ。一撃の音そのものは削らない長さ。
+- 16本合計 ≒ **13.0MB**(`app.asar` と AGPL ソース zip の両方に載る)。
+- 検証(再トリムのたびに回すこと): 全16本で `nb_read_frames == N` / `r_frame_rate == 24/1` /
+  音声ストリームあり / 実尺と窓長の差が ±21ms(半フレーム)以内 / **末尾フレームが
+  元素材の末尾と一致**(`reverse,trim=end_frame=1` の PSNR — 実測 38〜56dB)。
+  最後の1つは「一撃が切り落とされていない」ことの担保で、これが落ちたら
+  トリムが末尾からずれている。
+- プロンプトは英語・全本共通のスタイル接尾辞
+  「glossy 3D render in the style of a TikTok live gift animation, centered composition,
+  subject inside the middle third, safe for a vertical center crop, …」+
+  終端一撃の指定「in the final second it strikes toward the camera(尾撃ち/火炎/角/
+  羽ばたき/飛び掛かりのテーマ別バリエーション)」。全文は各生成の Dreamina 履歴
+  (アセット)に残っている。
+- ライセンス: Dreamina(CapCut)の利用規約に従う。CC0 ではない。
+  本リポジトリは AGPL で配布されるため、**再配布前に規約上の再配布可否を必ず確認すること**。
 
 | ファイル | ギフト | giftId | giftName | 尺 | サイズ |
 |---|---|---|---|---|---|

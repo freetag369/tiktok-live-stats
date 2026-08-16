@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   ChallengeCommentRule,
   ChallengeConfig,
-  ChallengeGiftClip,
   ChallengeGiftRule,
   ChallengeRouletteConfig,
   RouletteSoundConfig,
@@ -19,6 +18,7 @@ import type {
   GiftRepeatFxConfig,
   JoinRouletteConfig,
   RoulettePattern,
+  RouletteTeaseConfig,
 } from '@shared/dto';
 import { ROULETTE_PATTERNS } from '@shared/dto';
 import {
@@ -35,11 +35,11 @@ import {
   GIFT_FX_REPEAT_MAX,
   GIFT_FX_REPEAT_MAX_MS,
   GIFT_FX_REPEAT_MIN_MS,
-  DEFAULT_GIFT_CLIPS,
   DEFAULT_MINI_FX,
   DEFAULT_JOIN_ROULETTE,
   DEFAULT_ROULETTE,
   DEFAULT_SE_VOLUMES,
+  ROULETTE_JACK_PATTERNS,
   ROULETTE_LABEL_MAX,
   ROULETTE_REELS_MAX,
   ROULETTE_SEGMENTS_MAX,
@@ -58,6 +58,7 @@ import {
   effectiveSeVolume,
 } from '@shared/challenge';
 import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
+import { fullCutRuleMatches } from '@shared/fx-cut';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { useConfirm } from '../components/ConfirmDialog';
 import { setSettings, toast } from '../state/uiStore';
@@ -67,10 +68,9 @@ import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle }
 import { FX_CLIPS, FX_CLIP_GROUPS, isFullCutClip } from '../lib/fx';
 
 /**
- * クリップ選択の <option> 群。**3箇所(ギフトごとの演出クリップ / 全面カット /
- * ダイヤ数帯)で共有**する — 素材が42本増えて全66件になったので、素で並べると
- * 選べない。optgroup で「全面カット / 帯域 / ギフト専用 / 汎用」に束ねる。
- * 区切りと並び順の出所は lib/fx.ts の FX_CLIP_GROUPS。
+ * クリップ選択の <option> 群。**2箇所(全面カット / ダイヤ数帯)で共有**する
+ * — 素で並べると選べない件数なので、optgroup で「全面カット / 帯域 / 汎用」に
+ * 束ねる。区切りと並び順の出所は lib/fx.ts の FX_CLIP_GROUPS。
  */
 function FxClipOptions(): React.JSX.Element {
   return (
@@ -180,29 +180,6 @@ const MINI_LABELS: Record<string, string> = {
   stamp: 'ハンコ(+N がドン)',
   shock: '集中線(最軽量)',
   panic: '絶望カットイン(写真)',
-};
-
-/**
- * 同梱の演出クリップが用意されているギフトの表示名。ここに無い canonical も
- * 自由に追加できる(入力欄に直接書く)ので、あくまで既定行のラベル用。
- */
-const GIFT_CANONICAL_LABELS: Record<string, string> = {
-  universe: 'TikTok Universe',
-  universe_plus: 'TikTok Universe+',
-  tiktok_stars: 'TikTok Stars',
-  white_pegasus: 'ホワイトペガサス',
-  pegasus: 'ペガサス',
-  fire_phoenix: 'ファイアフェニックス',
-  thunder_falcon: 'サンダーファルコン',
-  dragon: 'ドラゴン',
-  lion: 'ライオン',
-  lion_charge: '獅子奮迅',
-  leon_lion: 'レオンとライオン',
-  palace: '宮殿',
-  whale_mirage: '鯨と蜃気楼',
-  whale_sam: 'クジラのサム',
-  seal_whale: 'アザラシとクジラ',
-  adams_dream: "Adam's Dream",
 };
 
 /** テスト再生ハンドラ。null = このスロットは実演再生に非対応。 */
@@ -527,8 +504,8 @@ export function Challenge(): React.JSX.Element {
                 アクセシビリティ → 視覚効果 で「アニメーション効果」をオンにすると表示されます。
               </div>
             ) : null}
+            <FxClipsToggle cfg={draft} onPatch={patch} />
             <MiniFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
-            <GiftClipsSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftFullCutSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <StockCutinSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
             <GiftBandFxSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
@@ -902,8 +879,7 @@ function MiniFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
             </button>
           </div>
           <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
-            ギフトは下の「ギフトごとの演出クリップ」で個別に上書きできます(ハートミーは既定でハンマー)。
-            ここのギフト(小)〜(特大)は、個別指定の無いギフトに効きます。お助け(ファンスタンプ)は
+            ギフトはダイヤ数に応じてギフト(小)〜(特大)のスロットで決まります。お助け(ファンスタンプ)は
             専用スロットなので、ギフト(小)を変えても影響しません(「お助け」タブでも同じ設定を変えられます)。
           </div>
         </>
@@ -913,20 +889,13 @@ function MiniFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
 }
 
 /**
- * ギフトごとの演出クリップ割り当て。上から順に canonical 一致を探し、
- * どれにも当たらないギフトはダイヤ数の tier クリップ(汎用: 小〜特大)になる。
+ * モニター映像演出の全体スイッチ。達成CLEAR・ゲージ満タン・ストック・全面カット・
+ * ダイヤ帯域カットインの動画クリップを一括で止められる — 個別セクションに埋めず
+ * 演出タブの先頭に置く(どのセクションの映像にも効くため)。
  */
-function GiftClipsSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
-  // プレビューはモニターと同じ黒地 + screen 合成で見せる(素材はアルファ無し)。
-  const [preview, setPreview] = useState<{ key: number; url: string } | null>(null);
-
-  const patchClip = (i: number, p: Partial<ChallengeGiftClip>): void => {
-    onPatch({ giftClips: cfg.giftClips.map((c, j) => (j === i ? { ...c, ...p } : c)) });
-  };
-
+function FxClipsToggle({ cfg, onPatch }: Pick<SectionProps, 'cfg' | 'onPatch'>): React.JSX.Element {
   return (
     <>
-      <h3 style={{ marginTop: 14 }}>ギフトごとの演出クリップ</h3>
       <label className="row" style={{ cursor: 'pointer' }}>
         <input
           type="checkbox"
@@ -936,126 +905,17 @@ function GiftClipsSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
         <span>ギフト・達成でモニターに映像を重ねる</span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
-        上から順にギフト名(canonical)の一致を探し、最初に当たった1件のクリップを再生します。
-        どれにも当たらないギフトはダイヤ数に応じた「汎用」クリップになります。
-        ▶ = この場で試写、▶ モニター = モニターで実演再生。
+        達成CLEAR・いいねゲージ満タン・いいねストック・全面カット・ダイヤ帯域カットインの
+        映像すべての全体スイッチです。オフにすると簡易演出と効果音だけになります。
       </div>
-
-      {cfg.fxClipsEnabled ? (
-        <>
-          {cfg.giftClips.map((c, i) => (
-            <div className="challenge-rule" key={c.id}>
-              <label className="field">
-                ギフト名(canonical)
-                <input
-                  type="text"
-                  placeholder="例: dragon"
-                  value={c.canonical}
-                  title={GIFT_CANONICAL_LABELS[c.canonical] ?? ''}
-                  onChange={(e) => patchClip(i, { canonical: e.target.value.trim().toLowerCase() })}
-                />
-              </label>
-              <div className="row" style={{ gap: 6, flex: 1 }}>
-                <label className="field" style={{ flex: 1 }}>
-                  {GIFT_CANONICAL_LABELS[c.canonical] ?? '流す映像'}
-                  <select value={c.clip} onChange={(e) => patchClip(i, { clip: e.target.value })}>
-                    <option value="off">出さない</option>
-                    <FxClipOptions />
-                  </select>
-                </label>
-                <button
-                  className="btn small"
-                  disabled={c.clip === 'off'}
-                  title="このクリップを試写"
-                  style={{ alignSelf: 'flex-end' }}
-                  onClick={() => {
-                    const url = FX_CLIPS.find((f) => f.id === c.clip)?.url;
-                    if (url) setPreview({ key: clipSeq++, url });
-                  }}
-                >
-                  ▶
-                </button>
-                <label className="field" style={{ width: 168 }}>
-                  簡易演出
-                  <select value={c.mini} onChange={(e) => patchClip(i, { mini: e.target.value })}>
-                    <option value="off">出さない</option>
-                    {CHALLENGE_MINI_IDS.map((m) => (
-                      <option key={m} value={m}>
-                        {MINI_LABELS[m] ?? m}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <MonitorTestBtn
-                  spec={c.canonical !== '' ? { kind: 'gift', canonical: c.canonical, diamonds: 100 } : null}
-                  onTest={onTest}
-                  busy={testBusy}
-                  label="▶ モニター"
-                  title={
-                    c.canonical !== ''
-                      ? 'このギフトが届いた体でモニターに実演再生(クリップ+簡易演出+効果音)'
-                      : 'ギフト名(canonical)を入力すると実演再生できます'
-                  }
-                  style={{ alignSelf: 'flex-end' }}
-                />
-              </div>
-              <button
-                className="btn small danger"
-                onClick={() => onPatch({ giftClips: cfg.giftClips.filter((_, j) => j !== i) })}
-              >
-                削除
-              </button>
-            </div>
-          ))}
-          <div className="row" style={{ marginTop: 8 }}>
-            <button
-              className="btn small"
-              onClick={() =>
-                onPatch({
-                  giftClips: [
-                    ...cfg.giftClips,
-                    { id: `clip-${Date.now().toString(36)}-${clipSeq++}`, canonical: '', clip: 'off', mini: 'off' },
-                  ],
-                })
-              }
-            >
-              割り当てを追加
-            </button>
-            <button
-              className="btn small"
-              onClick={() => onPatch({ giftClips: DEFAULT_GIFT_CLIPS.map((c) => ({ ...c })) })}
-            >
-              割り当てを既定に戻す
-            </button>
-          </div>
-
-          {preview ? (
-            <div className="fx-preview">
-              <video
-                key={preview.key}
-                src={preview.url}
-                autoPlay
-                muted
-                playsInline
-                onEnded={() => setPreview(null)}
-                onError={() => setPreview(null)}
-              />
-              <button className="btn small" onClick={() => setPreview(null)}>
-                閉じる
-              </button>
-            </div>
-          ) : null}
-        </>
-      ) : null}
     </>
   );
 }
 
 /**
  * ダイヤ帯域カットイン(バンド演出)。ダイヤ数の帯域で全画面カットインを再生し、
- * 再生中は worker がカウンタを凍結する。一致時は「ギフトごとの演出クリップ」より
- * 優先される。除外(既定: ハートミー 7934)は giftId ベース — ライブ経路では
- * canonical が乗らないため。
+ * 再生中は worker がカウンタを凍結する。除外(既定: ハートミー 7934)は giftId
+ * ベース — ライブ経路では canonical が乗らないため。
  */
 /**
  * 連打ギフト(コンボ)の演出反復。TikTok は同じギフトの連打を1メッセージに畳んで
@@ -1184,6 +1044,17 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
   const fc = cfg.giftFullCut;
   // 試写。全面カットは音声入りなので muted を外す(帯域の試写は無音のまま)。
   const [preview, setPreview] = useState<{ key: number; url: string; sound: boolean } | null>(null);
+  // 絞り込み(画面ローカル)。既定で42行あり、目的の行までスクロールしきれない。
+  // **設定には保存しない** — 保存すると次に開いたとき行が消えたように見える。
+  const [query, setQuery] = useState('');
+  const [onlyEnabled, setOnlyEnabled] = useState(false);
+  const [onlyWithClip, setOnlyWithClip] = useState(false);
+  const filtering = query.trim() !== '' || onlyEnabled || onlyWithClip;
+  const clearFilter = (): void => {
+    setQuery('');
+    setOnlyEnabled(false);
+    setOnlyWithClip(false);
+  };
 
   const patchFc = (p: Partial<GiftFullCutConfig>): void => {
     onPatch({ giftFullCut: { ...fc, ...p } });
@@ -1191,6 +1062,17 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
   const patchRule = (i: number, p: Partial<GiftFullCutRule>): void => {
     patchFc({ rules: fc.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
   };
+
+  // **元配列の index を持ったまま**絞る。一致は上から先勝ちなので、絞り込み後の
+  // index で patchRule/削除をすると、画面に出ていない別の行を壊す。
+  const shown = fc.rules
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => {
+      if (onlyEnabled && !r.enabled) return false;
+      if (onlyWithClip && r.clip === 'off') return false;
+      const clipLabel = FX_CLIPS.find((f) => f.id === r.clip)?.label ?? '';
+      return fullCutRuleMatches(r, clipLabel, query);
+    });
 
   return (
     <>
@@ -1208,9 +1090,59 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
 
       {fc.enabled ? (
         <>
-          {fc.rules.map((r, i) => (
-            <div className="challenge-rule" key={r.id}>
-              <label className="field" style={{ width: 110 }}>
+          <div className="fullcut-toolbar row wrap">
+            <input
+              type="search"
+              value={query}
+              placeholder="絞り込み(表示名・ギフト名・giftId・動画名)"
+              title="スペース区切りで複数語を入れると、すべてを含む行だけが残ります。全角/半角・大文字小文字・ひらがな/カタカナの違いは無視します。"
+              style={{ flex: 1, minWidth: 200 }}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <label
+              className="row"
+              style={{ cursor: 'pointer' }}
+              title="「有効」にチェックが入っている行だけを表示します。"
+            >
+              <input type="checkbox" checked={onlyEnabled} onChange={(e) => setOnlyEnabled(e.target.checked)} />
+              <span className="faint" style={{ fontSize: 11 }}>
+                有効な行のみ
+              </span>
+            </label>
+            <label
+              className="row"
+              style={{ cursor: 'pointer' }}
+              title="カットイン動画が「出さない」以外に設定されている行だけを表示します。"
+            >
+              <input type="checkbox" checked={onlyWithClip} onChange={(e) => setOnlyWithClip(e.target.checked)} />
+              <span className="faint" style={{ fontSize: 11 }}>
+                動画を設定済みのみ
+              </span>
+            </label>
+            <button className="btn small" disabled={!filtering} onClick={clearFilter}>
+              絞り込みを解除
+            </button>
+            <span className="faint num" style={{ fontSize: 11, marginLeft: 'auto' }}>
+              {filtering ? `${fc.rules.length}件中 ${shown.length}件を表示` : `全${fc.rules.length}件`}
+            </span>
+          </div>
+
+          {shown.length === 0 ? (
+            <div className="faint row" style={{ fontSize: 12, padding: '12px 0', gap: 8 }}>
+              <span>一致する行がありません(行が消えたわけではありません)。</span>
+              <button className="btn small" onClick={clearFilter}>
+                絞り込みを解除
+              </button>
+            </div>
+          ) : null}
+
+          {shown.map(({ r, i }) => (
+            <div className="fullcut-rule" key={r.id}>
+              {/* 元の並び順の通し番号。絞り込みで飛び飛びに出ても「上から先勝ち」の順が読める。 */}
+              <span className="faint num fullcut-no" title="上にある行から先に一致判定されます">
+                {i + 1}
+              </span>
+              <label className="field">
                 表示名
                 <input
                   type="text"
@@ -1219,7 +1151,7 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <div style={{ width: 150 }}>
+              <div>
                 <label className="field">
                   ギフト名
                   <input
@@ -1244,7 +1176,7 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                   </span>
                 </label>
               </div>
-              <label className="field" style={{ width: 100 }}>
+              <label className="field">
                 giftId(任意)
                 <input
                   type="text"
@@ -1253,8 +1185,8 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                   onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                 />
               </label>
-              <div className="row" style={{ gap: 6, flex: 1 }}>
-                <label className="field" style={{ flex: 1 }}>
+              <div className="row" style={{ gap: 6 }}>
+                <label className="field" style={{ flex: 1, minWidth: 140 }}>
                   カットイン動画
                   <select value={r.clip} onChange={(e) => patchRule(i, { clip: e.target.value })}>
                     <option value="off">出さない</option>
@@ -1315,10 +1247,13 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
               </div>
             </div>
           ))}
-          <div className="row" style={{ gap: 10, marginTop: 8, alignItems: 'center' }}>
+          <div className="row wrap" style={{ gap: 10, marginTop: 8, alignItems: 'center' }}>
             <button
               className="btn small"
-              onClick={() =>
+              onClick={() => {
+                // 足した行は空なので、絞り込み中だと追加した瞬間に画面から消える。
+                // 先に絞り込みを解除して、末尾に増えた行が見えるようにする。
+                clearFilter();
                 patchFc({
                   rules: [
                     ...fc.rules,
@@ -1335,8 +1270,8 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                       enabled: true,
                     },
                   ],
-                })
-              }
+                });
+              }}
             >
               行を追加
             </button>
@@ -1352,7 +1287,10 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
             </label>
             <button
               className="btn small"
-              onClick={() => onPatch({ giftFullCut: structuredClone(DEFAULT_GIFT_FULL_CUT) })}
+              onClick={() => {
+                clearFilter();
+                onPatch({ giftFullCut: structuredClone(DEFAULT_GIFT_FULL_CUT) });
+              }}
             >
               全面カット設定を既定に戻す
             </button>
@@ -1363,6 +1301,8 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
             そういう行は<b>完全一致</b>にチェックを入れてください(既定では TikTok と GG の2行だけ入っています)。
             giftId を入れるとそちらが優先され、確実に1つのギフトだけに絞れます(ライブのギフト履歴で確認できます)。
             ギフト名・giftId がどちらも空の行はどのギフトにも一致しません。音量は<b>効果音がオフのときは無音</b>になります。
+            行の左の番号は<b>判定される順番</b>です(上の行が先勝ち)。上の絞り込みは<b>表示だけ</b>を変えるもので、
+            順番も設定も変えません。
           </div>
 
           {preview ? (
@@ -1476,7 +1416,7 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
         帯域に一致したギフトで画面全体にカットイン動画を再生し、<b>再生中はカウントを一時停止</b>します
         (その間のギフト・いいね・フォローは捨てられず、演出後に順番に反映されます)。
-        一致した帯域は「ギフトごとの演出クリップ」より優先。ハートミー等の除外は下の giftId 欄で指定します。
+        ハートミー等の除外は下の giftId 欄で指定します。
       </div>
 
       {bf.enabled ? (
@@ -1793,13 +1733,27 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
           />
           <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.spinSeVolume}</span>
         </div>
+        <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6 }}>
+          <span style={{ width: 230, fontSize: 12 }}>超激アツ動画の音量</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={snd.clipVolume}
+            onChange={(e) => patchSnd({ clipVolume: Number(e.target.value) })}
+          />
+          <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.clipVolume}</span>
+        </div>
         <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
           リールが回っている間だけ鳴ります。連続スピン中はBGMを止めません。回転音は終盤の
           「止まりそう」の間で自動的に静かになります。音量は効果音の設定とは独立です。
           各行の「▶ モニターで回す」でも鳴ります。既定はBGM無し・回転音のジングルのみ —
           停止まわりの3音(回転 / 止まりそう / 確定)は「効果音」のセクションで差し替えます。
+          「超激アツ動画の音量」は龍・獅子などの全画面動画に焼き込まれた効果音の音量です
+          (効果音そのものをオフにすると動画も無音になります)。
         </div>
       </div>
+      <RouletteTeaseSection cfg={cfg} onPatch={onPatch} />
       {list.length === 0 ? (
         <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>
           登録されたルーレットはありません(どのギフトでもルーレットは回りません)。
@@ -1854,6 +1808,88 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
 }
 
 /**
+ * 超焦らし(大当たり3種)のカウント方式の設定。全ルーレット共通で1組
+ * (rouletteSound と同じ立ち位置)。有効のとき、超焦らしは毎回の抽選ではなく
+ * 「並びの最後のスピン」を数えて5回か7回に1回だけ必ず発動する — それ以外の回で
+ * 抽選が大当たり系を引いたときは二段フェイク(同じ激アツ尺)に置き換わる。
+ * 入室ルーレットと ▶ 試写は対象外(モニター側 startRoulette のゲート)。
+ */
+function RouletteTeaseSection({
+  cfg,
+  onPatch,
+}: {
+  cfg: ChallengeConfig;
+  onPatch: (p: Partial<ChallengeConfig>) => void;
+}): React.JSX.Element {
+  const tease = cfg.rouletteTease;
+  const patch = (p: Partial<RouletteTeaseConfig>): void =>
+    onPatch({ rouletteTease: { ...tease, ...p } });
+  return (
+    <div
+      style={{
+        border: '1px solid rgba(255,255,255,.12)',
+        borderRadius: 8,
+        padding: '10px 12px',
+        marginBottom: 10,
+      }}
+    >
+      <h4 style={{ margin: '0 0 8px' }}>超焦らしの出し方(全ルーレット共通)</h4>
+      <label className="row" style={{ cursor: 'pointer', gap: 4 }}>
+        <input
+          type="checkbox"
+          checked={tease.enabled}
+          onChange={(e) => patch({ enabled: e.target.checked })}
+        />
+        <span>「大当たり〜」の超焦らしを5回か7回に1回だけ出す(おすすめ)</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
+        並びの最後のスピンを数えて、ランダムに5回か7回に1回、チェックした超焦らしが必ず発動します。
+        それ以外の回に抽選で「大当たり〜」を引いたときは二段フェイク(同じ激アツ・約12秒)に
+        置き換わるので、超焦らしの「入りそう!」は乱発されません。切ると従来どおり毎回の抽選任せに
+        なります。入室ルーレットと ▶ の試し回しはこの仕組みの対象外です。
+      </div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: '6px 14px', alignItems: 'center', marginTop: 8, marginLeft: 22 }}>
+        {ROULETTE_JACK_PATTERNS.map((p) => {
+          const checked = tease.patterns.includes(p);
+          // 全部外すと発動時に引くものが無い(保存側 validateRouletteTease は
+          // 空を3種全部へ倒すが、UI では最後の1つを外せなくして「なぜか全部
+          // 戻った」の混乱を防ぐ — RoulettePatternPicker と同じガード)。
+          const last = checked && tease.patterns.length <= 1;
+          const info = ROULETTE_PATTERN_LABELS[p];
+          return (
+            <label
+              key={p}
+              className="row faint"
+              style={{ fontSize: 11, cursor: last ? 'not-allowed' : 'pointer', gap: 3, whiteSpace: 'nowrap' }}
+              title={last ? '最低1つは必要です' : info.hint}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={last || !tease.enabled}
+                onChange={(e) =>
+                  patch({
+                    // 正順へ正規化して持つ(RoulettePatternPicker と同じ理由 —
+                    // 保存後に draft と差分が出る「保存したのに未保存マーク」を防ぐ)。
+                    patterns: e.target.checked
+                      ? ROULETTE_JACK_PATTERNS.filter((q) => q === p || tease.patterns.includes(q))
+                      : tease.patterns.filter((q) => q !== p),
+                  })
+                }
+              />
+              {info.label}
+            </label>
+          );
+        })}
+        <span className="faint" style={{ fontSize: 11 }}>
+          発動時はこの中から均等に抽選(各ルーレットの焦らしパターン設定より優先されます)。
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
  * 入室ルーレットの設定。ギフトルーレットと違い**単一設定でトリガーギフトを
  * 持たない** — 視聴者の入室(初見さんのみ / すべて)で自動的に1スピン回る。
  * 回転中のサウンドは上の「全ルーレット共通」をそのまま使う。
@@ -1870,8 +1906,10 @@ function JoinRouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
       <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 10 }}>
         視聴者が入室するとモニターでルーレットが回り、出目が数字に加算(または減算)されます。
         対象「初見さんのみ」は、このツールで初めて記録された視聴者だけに回ります。
-        同じ人はチャレンジ1回につき1度だけ。直前の発火から10秒以内の入室は間引かれます
+        同じ人はチャレンジ1回につき1度だけ。直前の発火から30秒以内の入室は間引かれます
         (レイド対策)。ライブ画面のボタンからもオン/オフできます。
+        入室ルーレットのスピンは短縮されず(キューが詰まっていても常にフル尺)、
+        「超焦らしの出し方」のカウントの対象外 — 抽選で引いた焦らしがそのまま出ます。
       </div>
       <div
         style={{
@@ -1955,21 +1993,28 @@ function JoinRouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
 /**
  * 焦らしパターンの表示名と説明(チェックボックスのラベルと title)。
  * 一覧と並び順の出所は shared/dto.ts の ROULETTE_PATTERNS。
+ * 尺の注記は段位(ROULETTE_PATTERN_TIER)由来 — レアな出目ほど重い段位が
+ * 出やすい(信頼度方式)。数値の権威は shared/challenge.ts の ROULETTE_SPIN_*。
  */
 const ROULETTE_PATTERN_LABELS: Record<RoulettePattern, { label: string; hint: string }> = {
-  slow: { label: 'じわじわ減速', hint: '段々遅くなり、あと一歩で粘ってから止まる' },
-  pop: { label: 'ポンポン', hint: '4段飛び移り。間が段々長くなる' },
-  kick: { label: 'フェイク→キック', hint: '1つ手前で止まったと見せて、キックで1個ずれる' },
-  overrun: { label: '行き過ぎ巻き戻し', hint: '当選を通り過ぎて隣に着地→巻き戻して戻ってくる' },
-  crawl: { label: '超低速', hint: '最後の3個を這うように進む。微停止3回' },
-  doublefake: { label: '二段フェイク', hint: 'フェイク停止2回→キック2発' },
-  restart: { label: '失速→再加速', hint: '途中で止まったと見せて、再点火して駆け抜ける' },
-  teeter: { label: '境界シーソー', hint: '当選と隣の境界でシーソー→こてんと倒れる' },
-  stairs: { label: '階段落ち', hint: '5段の階段。段の間が 180ms→510ms と伸びる' },
-  blackout: { label: '暗転', hint: '終盤に真っ暗→明けたらもう止まっている' },
-  jackstop: { label: '大当たり寸止め', hint: '一番下の出目が完全に入って止まる→蹴り出される' },
-  jackslip: { label: '大当たりすり抜け', hint: '一番下の出目が寸前で震えて、スローですり抜ける' },
-  jackback: { label: '大当たり届かず', hint: '一番下の出目が届かず、後ろへ転がり戻る' },
+  slow: { label: 'じわじわ減速', hint: '段々遅くなり、あと一歩で粘ってから止まる(通常・約6秒)' },
+  pop: { label: 'ポンポン', hint: '4段飛び移り。間が段々長くなる(通常・約6秒)' },
+  kick: { label: 'フェイク→キック', hint: '1つ手前で止まったと見せて、キックで1個ずれる(中リーチ・約7.5秒)' },
+  overrun: { label: '行き過ぎ巻き戻し', hint: '当選を通り過ぎて隣に着地→巻き戻して戻ってくる(中リーチ・約7.5秒)' },
+  crawl: { label: '超低速', hint: '最後の3個を這うように進む。微停止3回(通常・約6秒)' },
+  doublefake: { label: '二段フェイク', hint: 'フェイク停止2回→キック2発(激アツ・約12秒)' },
+  restart: { label: '失速→再加速', hint: '途中で止まったと見せて、再点火して駆け抜ける(中リーチ・約7.5秒)' },
+  teeter: { label: '境界シーソー', hint: '当選と隣の境界でシーソー→こてんと倒れる(中リーチ・約7.5秒)' },
+  stairs: { label: '階段落ち', hint: '5段の階段。段の間が 180ms→510ms と伸びる(通常・約6秒)' },
+  blackout: { label: '暗転', hint: '終盤に真っ暗→明けたらもう止まっている(中リーチ・約7.5秒)' },
+  jackstop: { label: '大当たり寸止め', hint: '一番下の出目が完全に入って止まる→蹴り出される(激アツ・約12秒)' },
+  jackslip: { label: '大当たりすり抜け', hint: '一番下の出目が寸前で震えて、スローですり抜ける(激アツ・約12秒)' },
+  jackback: { label: '大当たり届かず', hint: '一番下の出目が届かず、後ろへ転がり戻る(激アツ・約12秒)' },
+  dragon: { label: '黄金龍', hint: '龍の動画とマス移動が交互に進む。火炎の一撃でリールが動く(超激アツ・約24秒・動画演出)' },
+  unicorn: { label: 'ユニコーン', hint: '角の一撃で2マス押し。動画2本のロング焦らし(超激アツ・約24秒・動画演出)' },
+  whale: { label: '大鯨', hint: '尾撃ち×3→ブリーチと同時にスラム。動画4本(超激アツ・約24秒・動画演出)' },
+  phoenix: { label: '不死鳥', hint: '羽ばたきの衝撃波で刻み、再生の爆発で着地。動画4本(超激アツ・約24秒・動画演出)' },
+  lion: { label: '獅子', hint: '飛び掛かりの連続でマスが叩き込まれる。動画3本(超激アツ・約24秒・動画演出)' },
 };
 
 /**
@@ -2050,8 +2095,9 @@ function RoulettePatternPicker({
       </div>
       <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
         「大当たり〜」の3つは、盤面の<b>一番下の出目</b>が入りそうになる超焦らし演出です
-        (どれが当たるかは変わりません)。同じ人の連打(コンボ)の2本目以降と、キューが詰まって
-        いる間の消化スピンは短縮(焦らしなし)になります。並びの最後の1本には焦らしが入ります。
+        (どれが当たるかは変わりません)。出す頻度は上の「超焦らしの出し方」で決まります
+        (有効なら5回か7回に1回だけ)。短縮(焦らしなし)になるのは同じ人の連打(コンボ)の
+        2本目以降だけで、キューが詰まっていても消化スピンは短縮されません。
       </div>
     </div>
   );

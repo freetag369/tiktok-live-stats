@@ -9,9 +9,10 @@ import type { FxEngine } from './fx/engine';
  *
  * データは 2Hz の delta で届き、しかも TikTok はいいねをバッチで送ってくる
  * (LikeEvent.count が 15 など)。素の counter をそのまま出すと 0→15→30 と飛ぶので、
- * idle 中は表示用の分子 drip を cubic ease-out の時間補間で追いつかせる(滴下)—
- * 速く始まってゆっくり止まるスコアカウンターの動き。CSS transition は tick 間を
- * 潰さない程度の追従だけを担当する(monitor.css の data-phase='idle' 参照)。
+ * idle 中は表示用の分子 drip を linear の時間補間で追いつかせる(滴下)。
+ * DRIP_MS > DELTA_MS なので定常流入では補間が途切れず、バーは速度の連続した
+ * 這い上がりになる。CSS transition は tick 間を潰さない程度の追従だけを
+ * 担当する(monitor.css の data-phase='idle' 参照)。
  *
  * 満タン検出は counter の増減ではなく worker が持つ単調カウンタ fills の前回比較で
  * 行う — counter は閾値跨ぎで「増えて見える」し reset でも減るので、増減
@@ -33,16 +34,21 @@ const FILL_MS = 420;
 const HOLD_MS = 300;
 
 /**
- * 1バッチ分のカウントアップ尺。ease-out でこの時間内に必ず追いつく。
- * DELTA_MS(500)より短いので遅れを次のバッチへ繰り越さず、
- * FILL_MS + HOLD_MS(720)より短いので満タン演出中に持ち越しが残ることもない。
+ * 1バッチ分のカウントアップ尺。linear でこの時間内に必ず追いつく。
+ * DELTA_MS(500)より長いことが要 — 定常流入では次バッチが必ず補間の途中に届き、
+ * 司令塔の張り直し(dripFrom=現在値)で速度が途切れない。450(<DELTA_MS)だった
+ * 頃は各サイクル終端に 50ms の完全停止が入り、2Hz の脈打ちに見えた。
+ * +60ms は delta の IPC/タイマージッタの吸収分。定常時の表示遅れは約 0.12 バッチに
+ * 収束する。FILL_MS + HOLD_MS(720)以下は維持 — 満タン演出中の持ち越しは
+ * phase!=idle の adoptDrip が実保証だが、規約としても守る。
  */
-const DRIP_MS = 450;
+const DRIP_MS = 560;
 /**
- * 表示更新の間隔。イージングの評価は時刻ベースなので、tick が遅れても
+ * 表示更新の間隔。補間の評価は時刻ベースなので、tick が遅れても
  * 追いつきの保証(DRIP_MS)は崩れない。28ms(36Hz)から 48ms(≈20Hz)へ —
- * DRIP_MS=450 内に9ステップ入り ease-out の見た目は保たれる。加えて
- * dripCommitNeeded の量子化で「表示が動かない tick」は setState 自体を省く。
+ * DRIP_MS=560 内に約11ステップ入り、tick 間は CSS の idle transition
+ * (0.12s linear)が連続に潰す。加えて dripCommitNeeded の量子化で
+ * 「表示が動かない tick」は setState 自体を省く。
  */
 const DRIP_TICK_MS = 48;
 
@@ -115,7 +121,7 @@ export function LikeGauge({
   fxRef: { current: FxEngine | null };
   /** 親(いいね吸い込みの着弾点)と共有するトラック要素の ref。 */
   trackRef: React.RefObject<HTMLDivElement | null>;
-  /** 親(ストック満杯の弾の発射点)と共有するドット行の ref。 */
+  /** 親(ストック満杯の弾の発射点)と共有するドット列の ref。 */
   stockRowRef: React.RefObject<HTMLDivElement | null>;
   /** cfg.loadAvatars。OFF ならドットは従来の緑丸のまま。 */
   showAvatars: boolean;
@@ -166,18 +172,19 @@ export function LikeGauge({
   }
 
   /**
-   * 滴下1歩 — 時刻ベースの quadratic ease-out 補間。速く始まってゆっくり止まる
-   * (スコアカウンターの動き)ので、等間隔で 1 ずつ刻むより連打が自然に見える。
-   * cubic だと序盤に距離の半分を 90ms で消化してしまい +5 ずつ飛んで見えた
-   * (実測)ので、一段浅い 2 乗にしてある。増分ではなく経過時間から現在値を
-   * 引くため、バックログ量によらず必ず DRIP_MS で追いつき、tick の遅延
-   * (タブ非表示等)でも到達時刻はズレない。
+   * 滴下1歩 — 時刻ベースの linear 補間。かつては quadratic ease-out
+   * (速く始まってゆっくり止まる)だったが、バッチ単独では自然でも 2Hz の
+   * 連続流入では「サージ→減速→停止」の速度鋸歯が脈打ちに見えた —
+   * ease-out はセグメント終端で速度が 0 になり、DRIP_MS(450 当時)< DELTA_MS
+   * が毎サイクル 50ms の停止を保証してしまっていた。linear はセグメント内
+   * 速度一定で、DRIP_MS > DELTA_MS の mid-flight 張り直しと組で速度が繋がる。
+   * 増分ではなく経過時間から現在値を引くため、バックログ量によらず必ず
+   * DRIP_MS で追いつき、tick の遅延(タブ非表示等)でも到達時刻はズレない。
    */
   function dripStep(): void {
     dripTimer.current = 0;
     const t = Math.min(1, (Date.now() - dripStart.current) / DRIP_MS);
-    const e = 1 - (1 - t) ** 2;
-    const v = dripFrom.current + (dripTarget.current - dripFrom.current) * e;
+    const v = dripFrom.current + (dripTarget.current - dripFrom.current) * t;
     dripRef.current = v;
     if (t >= 1) {
       // 到達(v は厳密に target の整数)— 量子化に関わらず必ず commit する。
@@ -241,7 +248,8 @@ export function LikeGauge({
     if (prefersReducedMotion()) return adoptDrip(gauge.counter);
 
     // 現在の表示値から新目標へ張り直す。補間中に次のバッチが来たら、そこまでの
-    // 到達点を新しい起点にする — 連続流入時は 500ms ごとにサージが重なる動きになる。
+    // 到達点を新しい起点にする — DRIP_MS > DELTA_MS なので連続流入時は常に
+    // 補間の途中で張り直され、速度がほぼ一定のまま繋がる(停止しない)。
     dripFrom.current = dripRef.current;
     dripStart.current = Date.now();
     dripTarget.current = gauge.counter;
@@ -402,18 +410,20 @@ export function LikeGauge({
         <span className="lg-reward">満タンで +{num(gauge.step)}</span>
       </div>
       {stock ? (
-        <div className="lg-stock" data-sphase={sphase} ref={stockRowRef}>
-          <span className="lgs-dots">
-            {Array.from({ length: stock.count }, (_, i) => (
-              <StockDot
-                key={i}
-                on={i < litCount}
-                url={slotUrlFor(i)}
-                delay={draining ? `${i * 40}ms` : undefined}
-              />
-            ))}
-          </span>
-          <span className="lgs-label">満杯で +{num(stock.step)}</span>
+        <div className="lg-stock" data-sphase={sphase}>
+          <div className="lgs-col" ref={stockRowRef}>
+            <span className="lgs-dots">
+              {Array.from({ length: stock.count }, (_, i) => (
+                <StockDot
+                  key={i}
+                  on={i < litCount}
+                  url={slotUrlFor(i)}
+                  delay={draining ? `${i * 40}ms` : undefined}
+                />
+              ))}
+            </span>
+            <span className="lgs-label">満杯で +{num(stock.step)}</span>
+          </div>
         </div>
       ) : null}
     </div>

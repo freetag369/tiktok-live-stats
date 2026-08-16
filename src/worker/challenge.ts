@@ -2,6 +2,7 @@ import type { NormalizedEvent, NormViewer, UserId } from '@shared/events';
 import type {
   ChallengeConfig,
   ChallengeEffect,
+  ChallengeFxQueueItem,
   ChallengeRankRow,
   ChallengeResult,
   ChallengeState,
@@ -14,6 +15,7 @@ import type {
 } from '@shared/dto';
 import {
   CHALLENGE_EFFECTS_MAX,
+  CHALLENGE_FX_QUEUE_MAX,
   CHALLENGE_MONITOR_TOP_N,
   CHALLENGE_RESULT_TOP_N,
   GIFT_FX_FREEZE_MARGIN_MS,
@@ -23,6 +25,7 @@ import {
   LIKE_FX_WINDOW_MS,
   ROULETTE_DRAWS_MAX,
   drawRouletteIndex,
+  rouletteRarity,
   giftFxRepeat,
   rouletteBoardKey,
   rouletteDrawCount,
@@ -292,8 +295,13 @@ export class ChallengeEngine {
    * 凍結中も即時に回る — 取りこぼしゼロの肝)。解除時に到着順で実行し、途中で
    * 新たなバンドギフトが出たら再凍結してドレインを中断する(連続ギフトが
    * 1本ずつ順に演出される)。
+   * fx はモニターの演出ストック表示に出す予告(カットイン/ブースト/ルーレット
+   * だけ非 null)。凍結中は effect が recentEffects に載らないため、これが
+   * ChallengeState.fxQueue の唯一のソースになる。
    */
-  private pendingOps: Array<() => void> = [];
+  private pendingOps: Array<{ run: () => void; fx: ChallengeFxQueueItem | null }> = [];
+  /** fxQueue の採番。ドレインを跨いで安定な表示キーのため単調増加。 */
+  private fxQueueSeq = 0;
   /**
    * ドレイン(凍結解除)中の演出の迂回バッファ。非 null の間、pushEffect は
    * ring ではなくここへ積み、finishDrain が同種を1件に畳んでから ring へ移す。
@@ -330,9 +338,10 @@ export class ChallengeEngine {
     /**
      * 演出だけの乱数源。**抽選(rand)とは別に持つ。**
      * 理由は2つ: (1) 抽選の乱数列に演出都合の消費を混ぜると、出目の再現性を
-     * 検査しているテストが演出を変えただけで壊れる。(2) そもそも演出パターンは
-     * 出目と相関してはいけない(相関するとキック=大当たりが学習されて予告になる)
-     * ので、乱数源を分けておくほうが意図に忠実。
+     * 検査しているテストが演出を変えただけで壊れる。(2) パターンと出目の相関は
+     * 信頼度方式(drawRoulettePattern の rarity 引数)による**設計値**であって、
+     * 乱数の共有から生まれる偶発であってはならない — 出目は fxRand から独立のまま、
+     * 演出だけが出目の珍しさを参照する一方向の依存に保つ。
      */
     private readonly fxRand: () => number = Math.random,
     /**
@@ -601,7 +610,7 @@ export class ChallengeEngine {
         break;
       }
       case 'gift': {
-        const m = matchGiftRule(cfg, { canonical: spec.canonical, giftId: 'test', diamonds: spec.diamonds });
+        const m = matchGiftRule(cfg, { giftId: 'test', diamonds: spec.diamonds });
         const band = spec.bandId ? (cfg.giftBandFx.bands.find((b) => b.id === spec.bandId) ?? null) : null;
         const usableBand = band && band.clip !== 'off' ? band : null;
         // 全面カット行の実演。bandId と同じ流儀で「行を名指ししたら一致判定は
@@ -622,8 +631,7 @@ export class ChallengeEngine {
           amount: m?.amount ?? 0,
           ...(m?.flash ? { flash: true } : {}),
           nickname: 'テスト',
-          giftName: spec.canonical ?? 'テストギフト',
-          ...(spec.canonical ? { canonical: spec.canonical } : {}),
+          giftName: 'テストギフト',
           // カットインは effect 1件で自己完結の流儀(handleEvent と同じ)。
           // fxFreezeUntilMs は張らない — テストで実イベントの適用を止めない。
           ...(cutClip ? { fxBandClip: cutClip, fxDurationMs } : {}),
@@ -686,18 +694,24 @@ export class ChallengeEngine {
         // bandId と同じ流儀)。1件も無ければ積む演出が無いのでそのまま抜ける。
         // spec.join は入室ルーレットの試写 — 単一設定なので行解決は不要。enabled は
         // 見ない(既存の試写規約: 「チェックする前に見てみたい」の道具)。
-        const rl = spec.join
-          ? cfg.joinRoulette
+        // ギフト行だけ別変数に割る — rl は JoinRouletteConfig との合併型で .id を
+        // 引けないため(入室ルーレットは id を持たない単一設定)。
+        const gr = spec.join
+          ? null
           : (cfg.roulettes.find((r) => r.id === spec.rouletteId) ??
-            cfg.roulettes.find((r) => r.enabled));
+            cfg.roulettes.find((r) => r.enabled) ??
+            null);
+        const rl = spec.join ? cfg.joinRoulette : gr;
         if (!rl) return;
         const idx = drawRouletteIndex(rl.segments, this.rand);
         const seg = rl.segments[idx]!;
         // 効果音スロットの試聴は 'kick' を狙い撃ちしたいので spec の指定を優先する。
         // spec.pattern は行のチェック(patterns)の**外でも通す** — 設定UIの
         // パターン別 ▶ は「チェックする前に見てみたい」の道具なので、許可リストで
-        // 弾くと試し見ができなくなる。抽選に任せる経路だけ許可リストへ従う。
-        const pat = spec.pattern ?? drawRoulettePattern(this.fxRand, rl.patterns);
+        // 弾くと試し見ができなくなる。抽選に任せる経路だけ許可リストへ従う
+        // (rarity の条件付けもライブ経路と同じ — 実演と本番で分布を変えない)。
+        const pat =
+          spec.pattern ?? drawRoulettePattern(this.fxRand, rl.patterns, rouletteRarity(rl.segments, idx));
         // 実演は常に1スピン。ライブ経路と同じ配列形で積む(モニターの再生経路を
         // 分岐させない — 分岐すると実演では出るのに本番で出ない事故が起きる)。
         e = {
@@ -711,6 +725,13 @@ export class ChallengeEngine {
           rouletteReels: 1,
           ...(rl.direction === 'sub' ? { rouletteDirection: 'sub' as const } : {}),
           ...(rl.label !== '' ? { rouletteLabel: rl.label } : {}),
+          // 本番(handleEvent の join 経路)と effect の形を揃える — 試写でも
+          // モニターの「入室ルーレットは短縮・超焦らしカウントの対象外」が同じに効く。
+          // 行の同一性(行ごとの回転サウンドの引き当て先)も本番と同じ形で載せる。
+          // **spec.rouletteId ではなく実際に回った gr.id** を焼くこと — この経路は
+          // 対象行が消えていたら「最初の有効な行」へ倒すので、spec を鵜呑みにすると
+          // 実演した盤面と鳴る音がズレる。
+          ...(spec.join ? { rouletteJoin: true as const } : gr ? { rouletteId: gr.id } : {}),
           nickname: 'テスト',
         };
         break;
@@ -802,9 +823,10 @@ export class ChallengeEngine {
         else this.stats.joinUp += amount;
         this.stats.rouletteSpins++;
         this.value = Math.max(0, this.value + amount);
-        // 終盤の演出パターンは**出目を引いたあとに、出目とは無関係に引く**
-        // (ギフト経路と同じ — 相関すると演出が結果の予告になる)。
-        const pat = drawRoulettePattern(this.fxRand, jr.patterns);
+        // 終盤の演出パターンは出目を引いたあと、出目の珍しさ(rarity)で段位を
+        // 重み付けして引く(ギフト経路と同じ信頼度方式 — ガセありなので予告に
+        // ならない。詳細は roulette-fx.ts の ROULETTE_TIER_WEIGHTS)。
+        const pat = drawRoulettePattern(this.fxRand, jr.patterns, rouletteRarity(jr.segments, idx));
         this.pushEffect({
           kind: 'roulette',
           amount,
@@ -818,13 +840,16 @@ export class ChallengeEngine {
           // label は validateJoinRoulette が空を許さないので必ず載る —
           // rouletteBoardKey がギフトルーレットと衝突しないのはこの label のおかげ。
           rouletteLabel: jr.label,
+          // モニターはこの印で短縮(キュー消化・マージ由来のコンボ)と超焦らし
+          // カウントを免除する — 初見さんの1本は常にフル尺・抽選パターンのまま。
+          rouletteJoin: true,
           nickname,
           atMs: this.now(),
         });
         // 達成判定は pushEffect の**後**(ギフト経路と同じ id 順契約)。
         this.maybeAchieve(this.now()); // direction:'sub' なら 0 到達しうる
         this.dirty = true;
-      });
+      }, undefined, { kind: 'roulette', nickname });
     }
 
     // 指定コメント = 妨害。キーワード部分一致で規則の量だけ増える(上から先勝ち)。
@@ -987,8 +1012,17 @@ export class ChallengeEngine {
           this.giftDiag(`→ ブースト連打 ${e.repeatCount}個 — 発動は${times}回に制限`);
         }
         let changed = false;
+        const boostNick = e.viewer.nickname ?? e.viewer.displayId;
         for (let i = 0; i < times; i++) {
-          if (this.applyOrQueue(() => this.activateBoost(tb, e))) changed = true;
+          if (
+            this.applyOrQueue(
+              () => this.activateBoost(tb, e),
+              undefined,
+              { kind: 'boost', nickname: boostNick }
+            )
+          ) {
+            changed = true;
+          }
         }
         return changed;
       }
@@ -1031,10 +1065,12 @@ export class ChallengeEngine {
             this.value = Math.max(0, this.value + amount);
             total += amount;
             idxs.push(idx);
-            // 終盤の演出パターンも effect に載せる。**出目を引いたあとに、出目とは
-            // 無関係に引く** — 相関するとキック=大当たりが学習されて予告になる。
-            // 行のチェック(patterns)で許可されたパターンからの一様抽選。
-            pats.push(drawRoulettePattern(this.fxRand, rl.patterns));
+            // 終盤の演出パターンも effect に載せる。出目を引いたあと、出目の
+            // 珍しさ(rarity)で段位を重み付けして引く — パチンコの信頼度方式。
+            // レア出目ほど激アツが出やすいがガセもある(結果の確定予告にはならない。
+            // 詳細は roulette-fx.ts の ROULETTE_TIER_WEIGHTS)。fxRand の消費は
+            // 従来どおり1抽選1回 — 出目(this.rand)の再現性には影響しない。
+            pats.push(drawRoulettePattern(this.fxRand, rl.patterns, rouletteRarity(rl.segments, idx)));
             // 0 到達したら残りは回さない(達成後のイベントは元のタイムラインでも
             // 無視されるため — flushFxFreeze と同じ判断)。direction:'sub' のみ起きる。
             if (this.value === 0) break;
@@ -1056,6 +1092,10 @@ export class ChallengeEngine {
             // 表示名も effect に載せて自己完結させる(モニターの cfg は 120秒
             // ポーリング(CFG_POLL_MS)で古くなりうる — rouletteSegments と同じ理由)。
             ...(rl.label !== '' ? { rouletteLabel: rl.label } : {}),
+            // 行の同一性。**音そのものは載せない** — モニターが resolveRouletteSound で
+            // cfg から引き直す(dto.ts の rouletteId / RouletteSoundConfig 参照)。
+            // こうしておくと、キュー待ちのスピンにも設定変更が即時に効く。
+            rouletteId: rl.id,
             nickname: e.viewer.nickname ?? e.viewer.displayId,
             ...(e.giftName ? { giftName: e.giftName } : {}),
             ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
@@ -1067,6 +1107,11 @@ export class ChallengeEngine {
           // ルーレットより小さくなり、モニターが CLEAR を先に再生してしまう。
           this.maybeAchieve(this.now()); // direction:'sub' なら 0 到達しうる
           this.dirty = true;
+        }, undefined, {
+          kind: 'roulette',
+          nickname: e.viewer.nickname ?? e.viewer.displayId,
+          // 予告の×N = 実際に回る本数(見た目の clamp 込み)。値は draws ぶん動く。
+          count: rouletteReelCount(cfg, draws),
         });
       }
 
@@ -1150,7 +1195,7 @@ export class ChallengeEngine {
           // 連打数。diamonds と同じく normalize.ts の確定値をそのまま載せる。
           ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
           ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
-          // モニターが演出クリップを選ぶのに使う(増減量の判定とは別経路)。
+          // バナー合流のキー(下の coalesce)と履歴に使う(増減量の判定とは別経路)。
           ...(e.canonical ? { canonical: e.canonical } : {}),
           // カットインは effect 1件で自己完結させる(rouletteSegments と同じ流儀)。
           ...(cutClip ? { fxBandClip: cutClip, fxDurationMs } : {}),
@@ -1225,7 +1270,27 @@ export class ChallengeEngine {
         return this.applyOrQueue(() => this.fanStampCoalesceOp(e, m!.amount, m!.flash === true));
       }
       // キュー溢れ時はカットイン(と再凍結)を捨てて値だけ適用する(値の正しさ優先)。
-      return this.applyOrQueue(() => giftOp(true), () => giftOp(false));
+      // 予告(fx)はカットインが実際に付くギフトだけ — バナーだけのギフトは
+      // ストック表示に出さない(モニター側の表示対象と揃える)。
+      // count(×N)は giftOp の rep(:cutClip/fxDurationMs → giftFxRepeat)と同じ式を
+      // 到着時点の cfg で評価する — 予告と実再生の回数を一致させるため。
+      return this.applyOrQueue(
+        () => giftOp(true),
+        () => giftOp(false),
+        fullCut || band
+          ? {
+              kind: 'band',
+              nickname: e.viewer.nickname ?? e.viewer.displayId,
+              count: giftFxRepeat(cfg, e.repeatCount, {
+                banded: true,
+                fxDurationMs: Math.min(
+                  (fullCut ? fullCut.durationSec : (band?.durationSec ?? 0)) * 1000,
+                  GIFT_FX_FREEZE_MAX_MS
+                ),
+              }),
+            }
+          : undefined
+      );
     }
 
     return false;
@@ -1251,6 +1316,13 @@ export class ChallengeEngine {
     // モニター下部のライブランキング。result(TOP5)と違い走行中も載せる —
     // モニターにとって唯一のランキング情報源で、増えるアバターURL も3本だけ。
     const runRank = this.topRankCached('diamonds', CHALLENGE_MONITOR_TOP_N);
+    // 凍結中にワーカーで待っている演出付きイベントの予告(モニターの演出ストック
+    // 表示用)。凍結中は effect が recentEffects に載らないため、これが無いと
+    // 表示がその間だけ盲目になる。
+    const fxQueue = this.pendingOps
+      .filter((p) => p.fx !== null)
+      .slice(0, CHALLENGE_FX_QUEUE_MAX)
+      .map((p) => p.fx!);
     return {
       status: this.status,
       value: this.value,
@@ -1298,6 +1370,8 @@ export class ChallengeEngine {
       // 走行中も毎 delta で組み直すので順位はライブに動く(result は凍結値)。
       ...(this.rankShown ? { rankBoard: this.buildResult(this.now()) } : {}),
       fxFreezeUntilMs: this.fxFreezeUntilMs,
+      // 空ならキーごと省く(runRank と同じ「2Hz の delta を太らせない」規約)。
+      ...(fxQueue.length > 0 ? { fxQueue } : {}),
       // ブースト中だけ載せる(モニターのタップカウンタの唯一のソース)。press RPC は
       // nudge を通るのでタップのたびに即時 delta で届く。▶テスト実演のウィンドウ中も
       // 同じ形で載せる — モニターの表示コードは実発動と実演を区別しなくてよい。
@@ -1441,13 +1515,24 @@ export class ChallengeEngine {
    * 戻り値は「状態が変わったか」(op が false を返したら変わっていない)。
    * キュー溢れ時は overflowOp(無ければ op)を即時実行する — 値の正しさ優先で
    * 演出だけを捨てる(ギフトの場合はカットイン抜きの op が渡ってくる)。
+   * fx はモニターの演出ストック表示に出す予告(カットイン級のイベントだけ渡す)。
    */
-  private applyOrQueue(op: () => boolean | void, overflowOp?: () => boolean | void): boolean {
+  private applyOrQueue(
+    op: () => boolean | void,
+    overflowOp?: () => boolean | void,
+    fx?: Omit<ChallengeFxQueueItem, 'id'>
+  ): boolean {
     if (!this.isFxFrozen()) return op() !== false;
     if (this.pendingOps.length >= GIFT_FX_PENDING_OPS_MAX) {
       return (overflowOp ?? op)() !== false;
     }
-    this.pendingOps.push(() => void op());
+    this.pendingOps.push({
+      run: () => void op(),
+      fx: fx ? { id: ++this.fxQueueSeq, ...fx } : null,
+    });
+    // 予告付きの保留は fxQueue の変化 = モニターに配るべき変化。値は動いていない
+    // (=呼び出し元は false を返す)ので、ここで dirty を立てないと次の delta に乗らない。
+    if (fx) this.dirty = true;
     return false;
   }
 
@@ -1478,7 +1563,7 @@ export class ChallengeEngine {
         // 1件の失敗でドレインを止めない — throw を握らないと残りの保留分が次の
         // 凍結発生まで孤児化し、例外は handleEvent の呼び出し元(onEvent)まで抜ける。
         try {
-          this.pendingOps.shift()!();
+          this.pendingOps.shift()!.run();
         } catch (err) {
           this.diag(`[challenge] pending op failed: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -1513,6 +1598,12 @@ export class ChallengeEngine {
     this.settleBoost(atMs, true);
     const durationMs = tb.durationSec * 1000;
     const cinematic = this.fxAllowed();
+    // プレーンモード化は「起動カットインが飛ばされた」と見た目で区別がつかないので
+    // 必ず記録する — この経路は診断ログに1行も残らず、原因究明が band カットインの
+    // 警告(:1216)からの推測になっていた。
+    if (!cinematic) {
+      this.giftDiag('→ フィーバーはプレーンモードで発動(モニター未表示 / 動きの抑制)— 前置きも映像も無し、倍率だけ');
+    }
     // 前置き演出(咆哮 → 3/2/1)はシネマティックモードだけ。プレーンモードは
     // 映像が無いので即ウィンドウ開始(カウントダウンなしで待たせない)。
     // 段ごとの 'off' 選択はその段をスキップする(尺ごと詰める)。
@@ -1538,11 +1629,22 @@ export class ChallengeEngine {
       // クリップは段ごとの選択を焼き込む(effect 1件で自己完結の流儀)。
       ...(introMs > 0 ? { boostIntroClip: tb.introClip } : {}),
       ...(countMs > 0 ? { boostCountClip: tb.countClip } : {}),
-      ...(tb.loopClip !== 'off' ? { boostLoopClip: tb.loopClip } : {}),
+      // ループ映像も**シネマティックのみ**。プレーンモードは「カットインも溜めも
+      // 無し、倍率のゲーム性だけ残す」契約(boostPlain のコメント参照)なのに、
+      // これを無条件に焼くとモニターは前置き 0ms で startWindow() へ直行し、
+      // タップウィンドウ映像だけを再生していた。
+      ...(cinematic && tb.loopClip !== 'off' ? { boostLoopClip: tb.loopClip } : {}),
       ...(resultMs > 0 ? { boostResultMs: resultMs, boostResultClip: tb.resultClip } : {}),
       // 総尺(前置き+ウィンドウ)。結果カットシーン以降は boost-end 駆動なので含めない —
       // レンダラのウィンドウ段タイマー・boostWillStart の意味を変えないため。
-      fxDurationMs: introMs + countMs + durationMs,
+      //
+      // プレーンモードは 0。boostWillStart(MonitorView)は
+      // `fxDurationMs >= 1000 && !prefersReducedMotion()` だけを見るので、
+      // 実尺を載せると**クリップが無くても暗幕(.boost-screen)+タップカウンタで
+      // 不透明な全画面が durationMs ぶん出てしまう** — 「カットインも溜めも無し」の
+      // 契約に反するうえ、起動カットインが飛ばされたのと同じ見え方になる。
+      // 0 にするとモニターは「×N フィーバー発動!」バナーだけを出す。
+      fxDurationMs: cinematic ? introMs + countMs + durationMs : 0,
       ...(tb.flash ? { flash: true } : {}),
       nickname: e.viewer.nickname ?? e.viewer.displayId,
       ...(e.giftName ? { giftName: e.giftName } : {}),
@@ -1635,7 +1737,7 @@ export class ChallengeEngine {
         // flushFxFreeze と同じ理由 — stop の強制適用が1件の失敗で途切れると、
         // 残りが適用されないまま直後の pendingOps = [] で消える。
         try {
-          this.pendingOps.shift()!();
+          this.pendingOps.shift()!.run();
         } catch (err) {
           this.diag(`[challenge] pending op failed: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -1708,6 +1810,11 @@ export class ChallengeEngine {
         // 見出しは先頭の1件に合わせる(連結後の1本目が誰の分かと揃える)。
         const head = group[0]!;
         if (head.nickname != null) merged.nickname = head.nickname;
+        // 行の同一性(= 回転サウンドの持ち主)も先頭に揃える(mergeRoulette と同じ
+        // 規約 — 連結後に実際に鳴るのは先頭の音)。merged は `{...last}` ベースなので、
+        // 先頭が持たないときは delete でキーごと落とす(undefined 値のキーを残さない)。
+        if (head.rouletteId != null) merged.rouletteId = head.rouletteId;
+        else delete merged.rouletteId;
       }
       out.push(merged);
     };

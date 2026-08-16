@@ -34,31 +34,31 @@ describe('planBoostStart — 持ち越しブーストの再開判定', () => {
       '猶予の 1ms 外 → 前置きの残りでカウントダウンから',
       t(),
       AT + BOOST_START_GRACE_MS + 1,
-      { action: 'resume', phase: 'count', countMs: INTRO + COUNT - 751, remainingMs: TOTAL - 751 },
+      { action: 'resume', phase: 'count', introMs: INTRO + COUNT - 751 - COUNT, countMs: COUNT, remainingMs: TOTAL - 751 },
     ],
     [
       '前置き途中(ストックカットイン 5秒ぶん遅れ)',
       t(),
       AT + 6000,
-      { action: 'resume', phase: 'count', countMs: 2000, remainingMs: 7000 },
+      { action: 'resume', phase: 'count', introMs: 0, countMs: 2000, remainingMs: 7000 },
     ],
     [
       '前置き残りが 600ms 未満 → 段ごと捨てて即ウィンドウ',
       t(),
       AT + 7500,
-      { action: 'resume', phase: 'window', countMs: 0, remainingMs: 5500 },
+      { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: 5500 },
     ],
     [
       'ウィンドウ突入後(スピン1本ぶん遅れ)',
       t(),
       AT + 9000,
-      { action: 'resume', phase: 'window', countMs: 0, remainingMs: 4000 },
+      { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: 4000 },
     ],
     [
       '残り 1500 ちょうど(境界・再生側 — 規則は remaining < MIN で見送り)',
       t(),
       ENDS - BOOST_RESUME_MIN_MS,
-      { action: 'resume', phase: 'window', countMs: 0, remainingMs: BOOST_RESUME_MIN_MS },
+      { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: BOOST_RESUME_MIN_MS },
     ],
     ['残り 1499(境界・見送り側)', t(), ENDS - BOOST_RESUME_MIN_MS + 1, { action: 'skip', reason: 'tail' }],
     ['期限ちょうど', t(), ENDS, { action: 'skip', reason: 'ended' }],
@@ -67,19 +67,19 @@ describe('planBoostStart — 持ち越しブーストの再開判定', () => {
       'カウント段なし(countClip が off)',
       t({ countMs: 0, totalMs: INTRO + WINDOW, endsAtMs: AT + INTRO + WINDOW }),
       AT + 3000,
-      { action: 'resume', phase: 'window', countMs: 0, remainingMs: 7000 },
+      { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: 7000 },
     ],
     [
       'プレーンモード(前置きなし)',
       t({ introMs: 0, countMs: 0, totalMs: WINDOW, endsAtMs: AT + WINDOW }),
       AT + 2000,
-      { action: 'resume', phase: 'window', countMs: 0, remainingMs: 3000 },
+      { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: 3000 },
     ],
     [
       'endsAtMs 欠損(旧 worker)→ atMs + totalMs で代用',
       t({ endsAtMs: undefined }),
       AT + 9000,
-      { action: 'resume', phase: 'window', countMs: 0, remainingMs: 4000 },
+      { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: 4000 },
     ],
     ['endsAtMs 欠損 かつ totalMs 0 → 素通し(fail-open)', t({ endsAtMs: undefined, totalMs: 0 }), AT + 99_999, { action: 'full' }],
     ['未来の effect(時計ずれ・負の elapsed)', t(), AT - 3000, { action: 'full' }],
@@ -87,7 +87,7 @@ describe('planBoostStart — 持ち越しブーストの再開判定', () => {
       '壊れた effect(totalMs < introMs + countMs)ではカウント段を選ばない',
       t({ totalMs: 6000, endsAtMs: AT + 6000 }),
       AT + 3000,
-      { action: 'resume', phase: 'window', countMs: 0, remainingMs: 3000 },
+      { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: 3000 },
     ],
   ];
 
@@ -116,6 +116,24 @@ describe('planBoostStart — 不変条件(掃引)', () => {
     for (const [, p] of sweep(t(), AT - 2000, ENDS + 5000)) {
       if (p.action !== 'resume') continue;
       expect(p.countMs > 0).toBe(p.phase === 'count');
+    }
+  });
+
+  it('カウント段は素材の実尺(3秒)を超えない — 超えると 3・2・1 の後に静止フレームで待つ', () => {
+    // v0.7.2 のバグ: 前置きの残りを丸ごと countMs へ入れていたため、遅れが intro より
+    // 小さいと段が 3 秒を超え、`<video loop>` は window 段でしか立たない(MonitorView の
+    // boost-cutin)ので素材が終わってから静止画で待っていた。
+    for (const [, p] of sweep(t(), AT - 2000, ENDS + 5000)) {
+      if (p.action === 'resume') expect(p.countMs).toBeLessThanOrEqual(COUNT);
+    }
+  });
+
+  it('起動カットイン段は実尺(5秒)を超えず、2段の合計は前置きの残りと一致する', () => {
+    for (const [now, p] of sweep(t(), AT - 2000, ENDS + 5000)) {
+      if (p.action !== 'resume') continue;
+      expect(p.introMs).toBeLessThanOrEqual(INTRO);
+      // 守る契約は「ウィンドウが開く時刻」— 段の分け方に依らず合計は不変。
+      if (p.phase === 'count') expect(p.introMs + p.countMs).toBe(INTRO + COUNT - (now - AT));
     }
   });
 

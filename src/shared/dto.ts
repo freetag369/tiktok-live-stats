@@ -439,8 +439,10 @@ export interface ChallengeGiftRule {
 }
 
 /**
- * ルーレット終盤の演出パターンの全種。**出目とは独立に引く** — 相関した瞬間
- * 「キックが来たら大当たり」が学習されて演出が結果の予告になる。
+ * ルーレット終盤の演出パターンの全種。抽選は**出目の珍しさで条件付ける**(パチンコの
+ * 信頼度方式)— レアな出目ほど激アツ(heavy)パターンが出やすいが、どのパターンも
+ * 全レア度帯で正の重みを持つ(ガセあり)。演出は「期待感」であって結果の確定予告には
+ * ならない。条件付けの実体は roulette-fx.ts の drawRoulettePattern / ROULETTE_TIER_WEIGHTS。
  * 値は CSS のクラス名(rl-p-*)とキーフレーム名(rl-run-*)の接尾辞になる。
  * 各パターンの見せ方の設計は monitor.css のルーレット節の冒頭コメントに、
  * SE のタイミングは roulette-fx.ts の ROULETTE_PATTERN_TIMING にある。
@@ -463,8 +465,50 @@ export const ROULETTE_PATTERNS = [
   'jackstop', //   一番下の出目が完全に入って止まる → 蹴り出される
   'jackslip', //   一番下の出目が寸前で震えて中央をすり抜ける
   'jackback', //   一番下の出目が届かず後ろへ転がり戻る
+  // ── 超激アツ(ultra)— 全画面動画とマス移動が交互に進む。動画の終端の一撃が
+  //    リールを1マス押す(振り付けの規約は roulette-fx.ts の clips コメント)。
+  'dragon', //     黄金龍 — 尾撃ち・火炎でマスを押す。二段キック終い
+  'unicorn', //    ユニコーン — 角の一撃で2マス押し。シーソー終い
+  'whale', //      クジラ — 尾撃ち×3 → ブリーチ(飛沫スラム)終い
+  'phoenix', //    フェニックス — 羽ばたきの衝撃波×3 → 再生の爆発終い
+  'lion', //       ライオン — 全ステップが飛び掛かり(キック)。最後の1つ前で止まらない
 ] as const;
 export type RoulettePattern = (typeof ROULETTE_PATTERNS)[number];
+
+/**
+ * パターンの段位。スピン尺と走行距離は**段位のみの関数**(rouletteSpinMs /
+ * roulette-fx.ts の RUN_BASE)— レア度から尺を直接決めると「長いのに軽い演出」が
+ * 別のバレ経路になるため、レア度は抽選の重み付けにだけ効かせる。
+ */
+export type RouletteTier = 'light' | 'mid' | 'heavy' | 'ultra';
+/**
+ * パターン → 段位。light = 段・微停止だけの通常変動、mid = 強いフェイク/衝撃が
+ * 1発の中リーチ、heavy = ダブルフェイクと大当たり寸止め系(設定UIで「大当たり〜」
+ * と名の付く3種 + doublefake)の激アツ、ultra = 全画面動画×マス移動の超激アツ
+ * (約24秒・ROULETTE_PATTERN_TIMING.clips が動画ウィンドウの権威)。
+ */
+export const ROULETTE_PATTERN_TIER: Record<RoulettePattern, RouletteTier> = {
+  slow: 'light',
+  pop: 'light',
+  crawl: 'light',
+  stairs: 'light',
+  kick: 'mid',
+  overrun: 'mid',
+  restart: 'mid',
+  teeter: 'mid',
+  blackout: 'mid',
+  doublefake: 'heavy',
+  jackstop: 'heavy',
+  jackslip: 'heavy',
+  jackback: 'heavy',
+  dragon: 'ultra',
+  unicorn: 'ultra',
+  whale: 'ultra',
+  phoenix: 'ultra',
+  lion: 'ultra',
+};
+/** スピン尺・走行距離の引数キー。'fast' はコンボ2本目以降の短縮スピン。 */
+export type RouletteSpinKey = RoulettePattern | 'fast';
 
 /** ルーレットの出目1件。amount は表示値(絶対値)、適用方向は direction が決める。 */
 export interface ChallengeRouletteSegment {
@@ -482,7 +526,7 @@ export interface ChallengeRouletteSegment {
 export interface ChallengeRouletteConfig {
   /**
    * 行の識別子。設定UIの key と、行ごとのテスト再生(ChallengeTestEffectSpec の
-   * rouletteId)の対象指定に使う — giftRules/giftClips と同じ流儀。
+   * rouletteId)の対象指定に使う — giftRules と同じ流儀。
    */
   id: string;
   /**
@@ -505,11 +549,20 @@ export interface ChallengeRouletteConfig {
   /** 'add' = カウント増(妨害・既定) / 'sub' = カウント減(応援)。 */
   direction: 'add' | 'sub';
   /**
-   * このルーレットで使う終盤の演出パターン(チェック済みの中から一様に抽選)。
-   * 検証(validateRoulette)が空を許さないので最低1件。許可リストは設定であり
-   * 出目とは無相関 — パターン抽選の独立性(結果の予告にならない)は崩れない。
+   * このルーレットで使う終盤の演出パターン(チェック済みの中から、出目の珍しさで
+   * 段位を重み付けして抽選 — 信頼度方式)。検証(validateRoulette)が空を許さないので
+   * 最低1件。許可リストは設定でしかなく、チェックの組合せがどうであれ全パターンが
+   * 全レア度帯で正の重みを持つ(演出が結果を確定も除外もしない)。
    */
   patterns: RoulettePattern[];
+  /**
+   * この行だけの回転サウンド。**キー欠損 = cfg.rouletteSound(共通)に従う**(既定)。
+   * 上書きするときだけ4項目まとめて1組で持つ(部分継承はしない)。旧 settings.json は
+   * 全行がこのキーを持たないので、**欠損が共通へ倒れること自体が移行の代わり**になる
+   * (SETTINGS_VERSION は上げない)。検証は validateRoulette、実効値の解決は
+   * resolveRouletteSound が唯一の実装。
+   */
+  sound?: RouletteSoundConfig;
 }
 
 /**
@@ -535,13 +588,41 @@ export interface JoinRouletteConfig {
   direction: 'add' | 'sub';
   /** 終盤の演出パターン許可リスト。ChallengeRouletteConfig.patterns と同じ規約。 */
   patterns: RoulettePattern[];
+  /** この入室ルーレットだけの回転サウンド。ChallengeRouletteConfig.sound と同じ規約。 */
+  sound?: RouletteSoundConfig;
 }
 
 /**
- * ルーレット回転中のサウンド。**全ルーレット(roulettes の全行)共通で1組** —
- * 行ごとに持たない。盤面(segments)と違い音は正しさに関与しないので、
- * effect には載せずモニターが cfg から直接読む(音量を cfg から読む
- * giftBandFx.bgmVolume と同じ扱い。設定変更は onSettings の即時プッシュで届く)。
+ * 超焦らし(大当たり寸止め系 jack 3種)のカウント方式。毎回の抽選任せにせず、
+ * 「並びの最後のフル尺スピン」を数えて 5回 or 7回(ROULETTE_TEASE_COUNTS から
+ * ランダム)に1回だけ必ず発動する。発動回以外で worker 抽選が jack を引いたら
+ * doublefake(同じ heavy 段位)へ降格 — 超焦らしの出現をこのカウントに一本化する。
+ * 判定はモニター側(キューの残りを知る唯一の層)、実装は shared/roulette-tease.ts。
+ * 入室ルーレット(rouletteJoin)と試写(test)は対象外で素通し。
+ */
+export interface RouletteTeaseConfig {
+  /** カウント方式の有効/無効。false で従来どおり抽選のまま(降格もしない)。 */
+  enabled: boolean;
+  /**
+   * 発動時に使う jack 系パターン(等重み抽選)。jack 3種のサブセットで最低1件
+   * (検証 validateRouletteTease が空を既定 = 3種全部へ倒す)。行ごとの patterns は
+   * effect に載らずモニターから参照できないため、こちらが発動時の権威。
+   */
+  patterns: RoulettePattern[];
+}
+
+/**
+ * ルーレット回転中のサウンド。**共通の既定1組 + 行ごとの任意上書き**。
+ * cfg.rouletteSound がすべてのルーレットの既定で、sound を持つ行
+ * (ChallengeRouletteConfig / JoinRouletteConfig)だけがそれを**丸ごと**差し替える
+ * — フィールド単位の継承はしない(設定UIを「共通に従う」チェック1個で
+ * 説明しきれる粒度に保つため)。
+ *
+ * 盤面(segments)と違い音は正しさに関与しないので、**effect には音を載せない** —
+ * 載せるのは行の同一性(rouletteId / rouletteJoin)だけで、モニターは
+ * shared の resolveRouletteSound で cfg から引き直す(音量を cfg から読む
+ * giftBandFx.bgmVolume と同じ扱い)。設定変更は onSettings の即時プッシュで届くので、
+ * **キューに積まれたスピンにも新しい音が効く**。
  * enabled ブールは持たない — 各スロットの 'off' が完全にその役を果たし、
  * 「off なのに id が残る」状態を作らないため。
  */
@@ -554,23 +635,13 @@ export interface RouletteSoundConfig {
   spinSe: string;
   /** ループ音の音量 0-100。 */
   spinSeVolume: number;
-}
-
-/**
- * ギフト → 演出クリップの割り当て。上から順に評価し、最初に canonical が
- * 一致した1件を使う。一致が無ければダイヤ数の tier クリップに落ちる。
- */
-export interface ChallengeGiftClip {
-  id: string;
-  /** normalize 済みの canonical('dragon' 等、gift-aliases 由来)。 */
-  canonical: string;
-  /** クリップ id(renderer/lib/fx.ts の FX_CLIPS)または 'off'(この規則では出さない)。 */
-  clip: string;
   /**
-   * 簡易演出 id(shared/challenge.ts の CHALLENGE_MINI_IDS)または 'off'。
-   * 映像クリップとは独立 — 両方出す/片方だけ、を1行で決められる。
+   * 超激アツ(ultra)の全画面動画に焼き込まれた効果音の音量 0-100。
+   * 素材(assets/fx/rl/*.mp4)の音声トラックをそのまま鳴らす — 全面カットの
+   * giftFullCut.volume と同じ流儀で、challenge.seVolume は掛からない絶対値。
+   * seEnabled が false なら動画ごと無音になる。
    */
-  mini: string;
+  clipVolume: number;
 }
 
 /**
@@ -596,8 +667,8 @@ export interface GiftFxBand {
 }
 
 /**
- * ダイヤ帯域カットインの設定。バンド一致時は giftClips(canonical別)より優先して
- * 全画面カットインを再生し、再生中はカウンタを凍結する(worker の fxFreeze)。
+ * ダイヤ帯域カットインの設定。バンド一致時は全画面カットインを再生し、
+ * 再生中はカウンタを凍結する(worker の fxFreeze)。
  */
 export interface GiftBandFxConfig {
   enabled: boolean;
@@ -867,8 +938,13 @@ export interface ChallengeConfig {
    * (enabled:false)へ倒すので移行は不要。
    */
   joinRoulette: JoinRouletteConfig;
-  /** ルーレット回転中のBGM・ループ音。全ルーレット共通で1組。 */
+  /** ルーレット回転中のBGM・ループ音。**すべてのルーレットの既定**(行ごとに sound で上書き可)。 */
   rouletteSound: RouletteSoundConfig;
+  /**
+   * 超焦らし(jack 3種)のカウント方式。全ルーレット共通で1組。旧 settings.json に
+   * キーが無ければ validateRouletteTease が既定(enabled:true・3種全部)へ倒す。
+   */
+  rouletteTease: RouletteTeaseConfig;
   /**
    * ライブ画面の履歴ログでルーレット結果の数値を伏せる(既定 true)。
    *
@@ -908,15 +984,16 @@ export interface ChallengeConfig {
    * seVolume × この値 ÷ 100(さらに素材ごとの gain が掛かる)。既定は全スロット 100。
    */
   seVolumes: Record<ChallengeSeSlot, number>;
-  /** ギフト/達成の演出クリップ(映像)をモニターに重ねる。 */
+  /**
+   * モニターの映像演出の全体スイッチ。達成CLEAR・ゲージ満タン・ストック・
+   * 全面カット・ダイヤ帯域カットインの動画クリップすべてを一括で止められる。
+   */
   fxClipsEnabled: boolean;
-  /** ギフト → クリップの割り当て。空なら全ギフトが tier クリップになる。 */
-  giftClips: ChallengeGiftClip[];
   /** 簡易演出(素材を持たない SVG+CSS の軽量アニメ)をモニターに出す。 */
   miniFxEnabled: boolean;
   /**
    * 演出スロットごとの簡易演出の割り当て。値は CHALLENGE_MINI_IDS の id
-   * または 'off'(出さない)。ギフトは giftClips 側の mini が優先される。
+   * または 'off'(出さない)。
    */
   miniFx: Record<ChallengeSeSlot, string>;
   /**
@@ -924,7 +1001,7 @@ export interface ChallengeConfig {
    * ギフトは帯域カットインを一切再生しない(matchGiftFullCut)。
    */
   giftFullCut: GiftFullCutConfig;
-  /** ダイヤ帯域カットイン。一致時は giftClips より優先(matchGiftBand)。 */
+  /** ダイヤ帯域カットイン(matchGiftBand)。 */
   giftBandFx: GiftBandFxConfig;
   /** 連打ギフトの演出反復。値は動かさず見た目だけ回数ぶん撃つ(rouletteEnabled を除く)。 */
   giftRepeatFx: GiftRepeatFxConfig;
@@ -1091,6 +1168,23 @@ export interface ChallengeEffect {
    */
   rouletteLabel?: string;
   /**
+   * kind='roulette': 発火したギフトルーレット行の id(ChallengeRouletteConfig.id)。
+   * 行ごとの回転サウンドをモニターが cfg から引き直すための「**行の同一性**」だけを
+   * 載せる(音そのものは載せない — RouletteSoundConfig の解説を参照)。
+   * **入室ルーレットには載せない** — あちらは rouletteJoin が行の同一性を兼ねる
+   * (id を持たない単一設定なので、'join' 等を発明するとユーザーの行 id と衝突する)。
+   * 欠損・不明 id(行を削除した/id を変えた)は共通サウンドへ倒れる(音だけの縮退)。
+   * **rouletteBoardKey には入れない** — 理由は同関数の解説にある。
+   */
+  rouletteId?: string;
+  /**
+   * kind='roulette': 入室ルーレット(初見さん/すべての入室)の印。モニターはこの
+   * effect を短縮(キュー消化・マージ由来のコンボ2本目以降)と超焦らしカウント
+   * (rouletteTease)の対象外にする — 常にフル尺で、worker 抽選のパターンを
+   * そのまま再生する。欠損(旧 worker 混在)はギフト扱いへ倒す(演出上の劣化のみ)。
+   */
+  rouletteJoin?: true;
+  /**
    * kind='gift' でダイヤ帯域カットインが一致したときのクリップ id。
    * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニターの設定は
    * 120秒ポーリング(CFG_POLL_MS)で古くなりうるため、演出パラメータは cfg からではなく
@@ -1233,8 +1327,6 @@ export type ChallengeTestEffectSpec =
       kind: 'gift';
       /** tier(小〜特大)判定とフラッシュ判定に使うダイヤ数。 */
       diamonds: number;
-      /** クリップ割り当て行のテスト用。モニターが matchGiftClip で解決する。 */
-      canonical?: string;
       /** 帯演出行のテスト用。指定時はこのバンドのカットインを強制する(帯域一致は評価しない)。 */
       bandId?: string;
       /** 全面カット行のテスト用。指定時はこの行のカットインを強制する(トリガー一致は評価しない)。 */
@@ -1424,6 +1516,26 @@ export interface ChallengeState {
    * タップが実演のカウンタにも映る。
    */
   boost?: { tapCount: number; startsAtMs: Ms; endsAtMs: Ms; multiplier: number; pressStep: number } | null;
+  /**
+   * 凍結中(カットイン/ブースト再生中)にワーカーの保留キュー(pendingOps)で
+   * 待っている「演出付きイベント」の予告。凍結中は effect 自体が recentEffects に
+   * 載らないため、これが無いとモニターの演出ストック表示がその間だけ盲目になる。
+   * 到着順・最大 CHALLENGE_FX_QUEUE_MAX 件。id はワーカー内の採番で、ドレインを
+   * 跨いで安定(表示側の React key / スライドアニメの同一性に使う)。
+   * 空のときはキーごと省く(2Hz の delta を太らせない)。
+   */
+  fxQueue?: ChallengeFxQueueItem[];
+}
+
+/** ワーカー保留キュー1件ぶんの演出予告(ChallengeState.fxQueue の要素)。 */
+export interface ChallengeFxQueueItem {
+  /** ワーカー内の単調採番。ドレインまで不変 — 表示側の同一性キー。 */
+  id: number;
+  kind: 'band' | 'boost' | 'roulette';
+  /** 行為者(viewer.nickname ?? displayId)。 */
+  nickname?: string;
+  /** 連続ぶんの総回数(ルーレットのスピン数/カットインの反復数)。省略 = 1。 */
+  count?: number;
 }
 
 /**

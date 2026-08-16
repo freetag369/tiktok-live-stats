@@ -5,7 +5,7 @@
     "7934": "heart_me"
   },
   "_ordering": "nameRules は上から順に『小文字化して完全一致 or 部分一致』で評価し、最初に当たった規則で確定します（worker/store/apply.ts の resolveCanonical）。したがって具体的な名前ほど上に置くこと。例: 「ホワイトペガサス」は「ペガサス」を含むので white_pegasus を先に、「TikTok Universe」は「tiktok」を含むので汎用 tiktok より先に置く必要があります。",
-  "_topGifts": "最上位ギフト16種は canonical ごとに専用の演出クリップ（src/renderer/assets/fx/gift/<canonical>.mp4）を持ちます。どのギフトでどのクリップを出すかは設定画面『ギフトごとの演出クリップ』で変更できます。英語名・他言語名は実イベントの gift_catalog で確認してから match に足してください（推測で足さないこと）。",
+  "_topGifts": "nameRules の canonical は増減規則（giftRules）・全面カット・ファンスタンプなどの名寄せに使われます。英語名・他言語名は実イベントの gift_catalog で確認してから match に足してください（推測で足さないこと）。",
   "nameRules": [
     { "canonical": "heart_me", "match": ["heart me", "ハートミー", "heartme"] },
 

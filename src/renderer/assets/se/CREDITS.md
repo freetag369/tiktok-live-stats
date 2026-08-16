@@ -113,7 +113,7 @@ ffmpeg -i "<元ファイル>"   -af "areverse,silenceremove=start_periods=1:star
 
 # ルーレット回転サウンド(`roulette/` サブフォルダ)
 
-`spin-reel2.ogg` は**作者提供の素材**(上の「作者提供の専用音」と同じ扱い)、
+`spin-reel2.ogg` と `slot.ogg` は**作者提供の素材**(上の「作者提供の専用音」と同じ扱い)、
 他の2つは **ffmpeg でプロシージャル合成**した自前素材
 (Higgsfield のAI音楽生成が提供範囲から外れたため。2026-08-13 時点で音声合成のみ)。
 band/ と違い外部生成物を含まないので、ライセンスの扱いは上の Kenney 素材(CC0)と
@@ -124,6 +124,7 @@ band/ と違い外部生成物を含まないので、ライセンスの扱い�
 | spin-reel2.ogg | リール回転ループ音(**既定**) | 作者提供の `jingle_26.mp3`。先頭の無音 82ms を落として ogg(q4)化したのみ(音量は未加工) | 2.97 秒 |
 | bgm-roulette1.ogg | 回転中BGM(**既定はオフ**) | サスペンス — スネアロール(16Hz ノイズ減衰)+ A の低音ドローン + 心拍風パルス。8秒シームレスループ(全周期成分が 8s を割り切る) | 8.0 秒 |
 | spin-reel1.ogg | リール回転ループ音 | 同梱 tick.ogg(Kenney CC0)を 75ms 間隔で 40 連結 | 3.0 秒 |
+| slot.ogg | 回転中BGM **と** リール回転ループ音(両方の選択肢) | 作者提供の `IMAGE/bgm/slot.mp3`。ogg(q4)化したのみ(音量は未加工) | 5.22 秒 |
 
 - **ogg なのは意図的**: mp3 はエンコーダ遅延の無音がループ継ぎ目に入る
   (HTMLAudio の loop で数十ms の途切れが聞こえる)。ogg はギャップレス。
@@ -132,6 +133,9 @@ band/ と違い外部生成物を含まないので、ライセンスの扱い�
   その場合はこの表の出典も書き換えること(CC0 ではなくなる)。
 - カタログとループ/フェード再生は `src/renderer/lib/bgm.ts`
   (ROULETTE_BGM / ROULETTE_SPIN_SE)。音圧差はカタログの gain で吸収する。
+- **`slot.ogg` はファイル1本で id 2つ**: BGM枠 `bgm-roulette2` と回転音枠 `spin-slot` が
+  同じ url を指す(`BY_ID` が3カタログをマージするので id は重複させられない)。
+  差し替えるときは1本直せば両方に効く。
 - **既定は BGM オフ + spin-reel2 のみ**(`DEFAULT_ROULETTE_SOUND`)。曲を重ねると
   停止まわりの3音(`roulette` / `roulette-near` / `roulette-hit`)が埋もれるため。
   BGM が欲しい人は設定画面のドロップダウンから選ぶ。
@@ -145,6 +149,9 @@ ffmpeg -i jingle_26.mp3 -af "atrim=start=0.082,asetpts=N/SR/TB,aresample=44100" 
 # spin-reel1.ogg — tick.ogg を 75ms 間隔で 40 連結(3.0s ループ)
 ffmpeg -i tick.ogg -af "apad=whole_dur=0.075" -ar 44100 tick1.wav
 ffmpeg -stream_loop 39 -i tick1.wav -c:a libvorbis -q:a 5 roulette/spin-reel1.ogg
+
+# slot.ogg — 作者提供 slot.mp3 を ogg 化(先頭に無音が無いのでトリム不要)
+ffmpeg -i IMAGE/bgm/slot.mp3 -af "aresample=44100" -c:a libvorbis -q:a 4 roulette/slot.ogg
 
 # bgm-roulette1.ogg — スネアロール + ドローン + 心拍(8.0s ループ)
 ffmpeg  -f lavfi -i "aevalsrc=(random(0)-0.5)*exp(-48*mod(t\,0.0625)):s=44100:d=8"  -f lavfi -i "aevalsrc=0.30*sin(2*PI*55*t)+0.17*sin(2*PI*110*t)+0.10*sin(2*PI*164.81*t):s=44100:d=8"  -f lavfi -i "aevalsrc=sin(2*PI*(75-55*mod(t\,0.5))*mod(t\,0.5))*exp(-14*mod(t\,0.5)):s=44100:d=8"  -filter_complex "[0:a]highpass=f=250,lowpass=f=6500,volume=0.9[roll];[1:a]tremolo=f=0.5:d=0.35,volume=0.85[drone];[2:a]lowpass=f=200,volume=1.6[thump];[roll][drone][thump]amix=inputs=3:normalize=0,alimiter=limit=0.9,aformat=sample_fmts=fltp:channel_layouts=stereo[out]"  -map "[out]" -c:a libvorbis -q:a 5 roulette/bgm-roulette1.ogg

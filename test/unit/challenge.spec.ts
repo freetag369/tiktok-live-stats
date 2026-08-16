@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_CLIPS, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteReelCount, rouletteReelPlan, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteReelCount, rouletteReelPlan, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type {
   ChallengeConfig,
   ChallengeEffect,
@@ -363,10 +363,33 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
   it('rouletteSound の既定: BGM は鳴らさず、回転ループ音だけ鳴る', () => {
     expect(DEFAULT_ROULETTE_SOUND.bgm).toBe('off');
     expect(DEFAULT_ROULETTE_SOUND.spinSe).toBe('spin-reel2');
+    // 超激アツ動画の焼き込み音は既定で鳴る(素材に音が入っているのが前提)。
+    expect(DEFAULT_ROULETTE_SOUND.clipVolume).toBe(70);
     // 停止まわりの3音は既定で全部鳴る(どれかが 'off' だと演出の合図が欠ける)。
     for (const slot of ['roulette', 'roulette-near', 'roulette-hit'] as const) {
       expect(DEFAULT_SE_SOUNDS[slot]).not.toBe('off');
     }
+  });
+
+  it('rouletteSound.clipVolume: 欠損は既定・範囲外は clamp・正常値は保持', () => {
+    // 旧 settings.json にはキーが無い(超激アツ動画より前の世代)。
+    // **欠損が既定へ倒れること自体が移行の代わり**。
+    const legacy = { ...DEFAULT_ROULETTE_SOUND } as Record<string, unknown>;
+    delete legacy.clipVolume;
+    const v = validateChallengeConfig({ ...DEFAULT_CHALLENGE, rouletteSound: legacy });
+    expect(v.rouletteSound.clipVolume).toBe(DEFAULT_ROULETTE_SOUND.clipVolume);
+
+    const clamped = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      rouletteSound: { ...DEFAULT_ROULETTE_SOUND, clipVolume: 999 },
+    });
+    expect(clamped.rouletteSound.clipVolume).toBe(100);
+
+    const kept = validateChallengeConfig({
+      ...DEFAULT_CHALLENGE,
+      rouletteSound: { ...DEFAULT_ROULETTE_SOUND, clipVolume: 0 },
+    });
+    expect(kept.rouletteSound.clipVolume).toBe(0);
   });
 
   it('seVolumes: 欠損は既定(全100)、範囲外は clamp、非数値は既定、正常値は保持', () => {
@@ -463,12 +486,16 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
     expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, fxClipsEnabled: false }).fxClipsEnabled).toBe(false);
   });
 
-  it('giftClips: 欠損は既定割り当て、明示的な空配列は空のまま保持する', () => {
-    const legacy = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
-    delete legacy.giftClips;
-    expect(validateChallengeConfig(legacy).giftClips).toEqual(DEFAULT_GIFT_CLIPS);
-    // 「全部の割り当てを消した」ユーザーの意思を既定で踏み潰さない。
-    expect(validateChallengeConfig({ ...DEFAULT_CHALLENGE, giftClips: [] }).giftClips).toEqual([]);
+  it('giftClips: 廃止済みキーを持つ旧 settings.json は無害に落ちる', () => {
+    // v0.7 系までの settings.json は「ギフトごとの演出クリップ」の割り当てを持つ。
+    // validate は許可キーだけで組み直すので、残っていても結果に現れない。
+    const legacy = {
+      ...DEFAULT_CHALLENGE,
+      giftClips: [{ id: 'a', canonical: 'dragon', clip: 'dragon', mini: 'off' }],
+    } as Record<string, unknown>;
+    const v = validateChallengeConfig(legacy);
+    expect('giftClips' in v).toBe(false);
+    expect(v.fxClipsEnabled).toBe(true);
   });
 
   it('miniFxEnabled / miniFx: 欠損は既定、未知 id は既定に戻す', () => {
@@ -500,32 +527,6 @@ describe('validateChallengeConfig — 壊れた settings.json でも落ちない
     expect(DEFAULT_MINI_FX.follow).toBe('panic');
   });
 
-  it('giftClips: mini 欠損は off(既存 settings.json との後方互換)', () => {
-    const v = validateChallengeConfig({
-      ...DEFAULT_CHALLENGE,
-      giftClips: [{ id: 'a', canonical: 'dragon', clip: 'dragon' }],
-    });
-    expect(v.giftClips[0]).toEqual({ id: 'a', canonical: 'dragon', clip: 'dragon', mini: 'off' });
-  });
-
-  it('giftClips: 未知のクリップ id は off へ、canonical は小文字化、壊れた行は捨てる', () => {
-    const v = validateChallengeConfig({
-      ...DEFAULT_CHALLENGE,
-      giftClips: [
-        { id: 'a', canonical: 'DRAGON', clip: 'dragon', mini: 'off' },
-        { id: 'b', canonical: 'palace', clip: 'no-such-clip', mini: 'off' },
-        { id: 'c', canonical: 'lion', clip: 'off', mini: 'off' },
-        { id: 'd', canonical: '', clip: 'dragon', mini: 'off' }, // canonical 空 → 捨てる
-        { canonical: 'pegasus', clip: 'pegasus' }, // id 無し → 捨てる
-        null,
-      ],
-    });
-    expect(v.giftClips).toEqual([
-      { id: 'a', canonical: 'dragon', clip: 'dragon', mini: 'off' },
-      { id: 'b', canonical: 'palace', clip: 'off', mini: 'off' },
-      { id: 'c', canonical: 'lion', clip: 'off', mini: 'off' },
-    ]);
-  });
 });
 
 describe('matchGiftRule — 先頭一致・diamonds は再計算しない', () => {
@@ -1712,6 +1713,41 @@ describe('drawRouletteIndex — 重み付き抽選', () => {
   });
 });
 
+describe('rouletteRarity — 当選出目の出現確率(信頼度の入力)', () => {
+  const segs = DEFAULT_ROULETTE.segments; // weight 30/25/20/15/9/1(合計100)
+
+  it('既定盤面の各行の確率がそのまま出る', () => {
+    expect(segs.map((_, i) => rouletteRarity(segs, i))).toEqual([0.3, 0.25, 0.2, 0.15, 0.09, 0.01]);
+  });
+
+  it('weight 0 の行は 0(そもそも当選しないが、防御的に)', () => {
+    const s = [
+      { amount: 5, weight: 0 },
+      { amount: 10, weight: 1 },
+    ];
+    expect(rouletteRarity(s, 0)).toBe(0);
+    expect(rouletteRarity(s, 1)).toBe(1);
+  });
+
+  it('全 weight 0 の盤面は 1(drawRouletteIndex の最終行フォールバックを激アツ扱いしない)', () => {
+    const s = [
+      { amount: 5, weight: 0 },
+      { amount: 10, weight: 0 },
+    ];
+    expect(rouletteRarity(s, 1)).toBe(1);
+  });
+
+  it('負の weight は 0 扱い(drawRouletteIndex と同じクランプ)、範囲外 index は 0', () => {
+    const s = [
+      { amount: 5, weight: -3 },
+      { amount: 10, weight: 1 },
+    ];
+    expect(rouletteRarity(s, 0)).toBe(0);
+    expect(rouletteRarity(s, 1)).toBe(1);
+    expect(rouletteRarity(s, 9)).toBe(0);
+  });
+});
+
 describe('rouletteDrawCount / rouletteReelCount — 抽選回数と演出本数の分離', () => {
   const on = cfg({ giftRepeatFx: { ...DEFAULT_GIFT_REPEAT_FX, max: 5, rouletteEnabled: true } });
   const off = cfg({ giftRepeatFx: { ...DEFAULT_GIFT_REPEAT_FX, max: 5, rouletteEnabled: false } });
@@ -2170,11 +2206,12 @@ describe('ChallengeEngine — ギフトルーレット', () => {
   });
 
   it('終盤の演出パターンが effect に載る(モニターは自分で引き直さない)', () => {
-    // fxRand=0.999… → 末尾の 'jackback'。抽選の rand とは別の乱数源から引く。
+    // fxRand=0.999… → canonical 順の末尾 'lion'(超激アツのガセ)。抽選の rand とは
+    // 別の乱数源から引く。
     const e = rlEngine(cfg(), () => 0, () => 0.999999);
     e.start();
     e.handleEvent(heartMe({ diamonds: 1 }));
-    expect(e.get().recentEffects[0]!.roulettePattern).toBe('jackback');
+    expect(e.get().recentEffects[0]!.roulettePattern).toBe('lion');
   });
 
   it('行の patterns(チェック)で許可されたパターンからだけ引く', () => {
@@ -2192,6 +2229,7 @@ describe('ChallengeEngine — ギフトルーレット', () => {
 
   it('演出パターンは出目に影響しない(乱数源が分かれている)', () => {
     // 同じ抽選乱数なら、演出乱数が何であっても出目は同一でなければならない。
+    // 逆方向(出目→演出)は信頼度方式で意図的に相関する — それは次のテストで見る。
     const amounts = [0, 0.5, 0.999999].map((fx) => {
       const e = rlEngine(cfg(), () => 0.995, () => fx);
       e.start();
@@ -2200,6 +2238,25 @@ describe('ChallengeEngine — ギフトルーレット', () => {
     });
     expect(new Set(amounts).size).toBe(1);
     expect(amounts[0]).toBe(1000);
+  });
+
+  it('出目のレア度が演出パターンを条件付ける(信頼度方式 — 同じ fxRand でも帯で変わる)', () => {
+    // rand=0.995 → +1000(p=0.01 = rare 帯)、rand=0 → +5(p=0.30 = common 帯)。
+    // 同じ fxRand=0.05 が、rare では mid の 'kick'、common では light の 'slow' に落ちる
+    // (帯ごとの段位重み 10/30/60 vs 70/25/5 — roulette-fx.ts の ROULETTE_TIER_WEIGHTS)。
+    const rare = rlEngine(cfg(), () => 0.995, () => 0.05);
+    rare.start();
+    rare.handleEvent(heartMe({ diamonds: 1 }));
+    const rareFx = rare.get().recentEffects[0]!;
+    expect(rareFx.amount).toBe(1000);
+    expect(rareFx.roulettePattern).toBe('kick');
+
+    const common = rlEngine(cfg(), () => 0, () => 0.05);
+    common.start();
+    common.handleEvent(heartMe({ diamonds: 1 }));
+    const commonFx = common.get().recentEffects[0]!;
+    expect(commonFx.amount).toBe(5);
+    expect(commonFx.roulettePattern).toBe('slow');
   });
 
   it('label 空の行は rouletteLabel を載せない(モニターは giftName へ落ちる)', () => {
@@ -2625,6 +2682,19 @@ describe('ChallengeEngine — カットイン凍結の許可ゲート(モニタ�
     expect(s.fxFreezeUntilMs).toBeNull();
     expect(s.value).toBe(1040);
     expect(s.stats.follows).toBe(1);
+  });
+
+  it('凍結中の monitorOpen:true 再送は no-op(冪等)— 凍結も保留も乱さない', () => {
+    // main は「モニターを開く」のたびに真実(開いている)を送り直す自己修復を
+    // 行うので、同値の再送が進行中の凍結を壊さないことがその前提条件。
+    const e = engine(bandCfg({ initialValue: 1000, followStep: 10 }), () => NOW);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // band1 凍結
+    e.handleEvent(follow('f1')); // 保留
+    expect(e.setMonitorOpen(true)).toBe(false); // 変化なし → nudge 不要
+    const s = e.get();
+    expect(s.fxFreezeUntilMs).not.toBeNull();
+    expect(s.value).toBe(1030); // 保留はドレインされないまま
   });
 
   it('凍結中に fxCaps が落ちても同様に即時解除される。変化なしの再申告は false', () => {
@@ -4485,6 +4555,12 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const s0 = e.get();
     expect(s0.fxFreezeUntilMs).toBeNull();
     expect(s0.recentEffects[0]).toMatchObject({ kind: 'boost-start', boostIntroMs: 0, boostCountMs: 0 });
+    // ループ映像も載せない。載せるとモニターが前置き 0ms で startWindow() へ直行し、
+    // 「起動カットインが飛ばされた」のと見分けがつかない見え方になる(プレーンモードは
+    // 「カットインも溜めも無し、倍率のゲーム性だけ残す」契約)。
+    expect(s0.recentEffects[0]).not.toHaveProperty('boostLoopClip');
+    // 尺 0 = boostWillStart(モニター)が false → 暗幕すら出ず、バナーだけになる。
+    expect(s0.recentEffects[0]).toMatchObject({ fxDurationMs: 0 });
     expect(s0.boost?.startsAtMs).toBe(NOW); // 前置き演出なしで即ウィンドウ
     t = NOW + 100;
     const s1 = e.press();

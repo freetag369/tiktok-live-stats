@@ -122,3 +122,38 @@ export const FULL_CUT_CLIPS: readonly FullCutClipDef[] = [...FULL_CUT_CLIPS_V1, 
 
 /** 全面カットのクリップ id 一覧。CHALLENGE_FX_CLIP_IDS と BAND_CLIP_IDS の両方が spread する。 */
 export const FULL_CUT_CLIP_IDS: readonly string[] = FULL_CUT_CLIPS.map((c) => c.id);
+
+/**
+ * 検索用の正規化。**設定画面の絞り込み専用** — マッチング本体
+ * (matchGiftTrigger)はここを通さない。あちらは配信イベントの実データと
+ * 突き合わせる規則で、表記ゆれを吸わせると誤爆が増える。
+ *
+ * 3段で正規化する:
+ *   1. NFKC …… 全角英数「ＲＯＳＥ」→「ROSE」、半角カナ「ﾊﾞﾗ」→「バラ」
+ *   2. カタカナ→ひらがな …… 表示名はカタカナ(「バラ」)なので「ばら」でも当てたい
+ *   3. 小文字化 …… giftName は小文字で持っているが、打つ側は大文字のこともある
+ */
+export function normalizeSearchText(s: string): string {
+  return s
+    .normalize('NFKC')
+    .replace(/[\u30a1-\u30f6]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+    .toLowerCase();
+}
+
+/**
+ * 全面カット1行が検索語に一致するか。**空クエリは常に true**(絞り込み無し)。
+ *
+ * 空白区切りの語は AND — 「バラ 5655」のように名前とIDで挟み撃ちできる。
+ * clipLabel は呼び出し側(renderer)が FX_CLIPS から解決して渡す:
+ * shared は素材カタログの URL もラベルも知らない(依存の向きは renderer → shared)。
+ */
+export function fullCutRuleMatches(
+  r: { label: string; giftName: string; giftId: string },
+  clipLabel: string,
+  query: string,
+): boolean {
+  const terms = normalizeSearchText(query).split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const hay = normalizeSearchText([r.label, r.giftName, r.giftId, clipLabel].join('\n'));
+  return terms.every((t) => hay.includes(t));
+}

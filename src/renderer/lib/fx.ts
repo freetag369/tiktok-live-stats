@@ -1,19 +1,3 @@
-import universeUrl from '../assets/fx/gift/universe.mp4';
-import universePlusUrl from '../assets/fx/gift/universe_plus.mp4';
-import whitePegasusUrl from '../assets/fx/gift/white_pegasus.mp4';
-import pegasusUrl from '../assets/fx/gift/pegasus.mp4';
-import firePhoenixUrl from '../assets/fx/gift/fire_phoenix.mp4';
-import thunderFalconUrl from '../assets/fx/gift/thunder_falcon.mp4';
-import dragonUrl from '../assets/fx/gift/dragon.mp4';
-import lionUrl from '../assets/fx/gift/lion.mp4';
-import lionChargeUrl from '../assets/fx/gift/lion_charge.mp4';
-import leonLionUrl from '../assets/fx/gift/leon_lion.mp4';
-import palaceUrl from '../assets/fx/gift/palace.mp4';
-import whaleMirageUrl from '../assets/fx/gift/whale_mirage.mp4';
-import whaleSamUrl from '../assets/fx/gift/whale_sam.mp4';
-import sealWhaleUrl from '../assets/fx/gift/seal_whale.mp4';
-import tiktokStarsUrl from '../assets/fx/gift/tiktok_stars.mp4';
-import adamsDreamUrl from '../assets/fx/gift/adams_dream.mp4';
 import giftT1Url from '../assets/fx/gift-t1.mp4';
 import giftT2Url from '../assets/fx/gift-t2.mp4';
 import giftT3Url from '../assets/fx/gift-t3.mp4';
@@ -40,14 +24,13 @@ import strikeUrl from '../assets/fx/gauge-strike.mp4';
 
 /**
  * ドロップダウンの区切り。素材の性質(合成方法・音の有無)がそのまま group になる。
- * 66 件を1枚のリストで出すと選べないので、設定画面は optgroup で束ねる。
+ * 50 件を1枚のリストで出すと選べないので、設定画面は optgroup で束ねる。
  */
-export type FxClipGroup = 'fullcut' | 'band' | 'gift' | 'generic';
+export type FxClipGroup = 'fullcut' | 'band' | 'generic';
 
 export const FX_CLIP_GROUPS: ReadonlyArray<{ key: FxClipGroup; label: string }> = [
   { key: 'fullcut', label: '全面カット(不透明・音声あり)' },
   { key: 'band', label: 'ダイヤ帯域カットイン(不透明・BGMは別ファイル)' },
-  { key: 'gift', label: 'ギフト専用(screen 合成)' },
   { key: 'generic', label: '汎用(ダイヤ段階)' },
 ];
 
@@ -86,22 +69,6 @@ export const FX_CLIPS: readonly FxClip[] = [
   { id: 'gift-band2', label: 'ハートポーズ(51〜100💎・6秒)', url: giftBand2Url, group: 'band' },
   { id: 'gift-band3', label: 'マネーガン(101〜600💎・8秒)', url: giftBand3Url, group: 'band' },
   { id: 'gift-band4', label: '銀河(601💎〜・10秒)', url: giftBand4Url, group: 'band' },
-  { id: 'universe', label: 'ユニバース(銀河)', url: universeUrl, group: 'gift' },
-  { id: 'universe_plus', label: 'ユニバース+(二重銀河)', url: universePlusUrl, group: 'gift' },
-  { id: 'tiktok_stars', label: 'スターズ(星の渦)', url: tiktokStarsUrl, group: 'gift' },
-  { id: 'white_pegasus', label: 'ホワイトペガサス(銀の天馬)', url: whitePegasusUrl, group: 'gift' },
-  { id: 'pegasus', label: 'ペガサス(金の天馬)', url: pegasusUrl, group: 'gift' },
-  { id: 'fire_phoenix', label: 'ファイアフェニックス(炎の鳳凰)', url: firePhoenixUrl, group: 'gift' },
-  { id: 'thunder_falcon', label: 'サンダーファルコン(雷の隼)', url: thunderFalconUrl, group: 'gift' },
-  { id: 'dragon', label: 'ドラゴン(翡翠の龍)', url: dragonUrl, group: 'gift' },
-  { id: 'lion', label: 'ライオン(金の獅子)', url: lionUrl, group: 'gift' },
-  { id: 'lion_charge', label: '獅子奮迅(炎の獅子頭)', url: lionChargeUrl, group: 'gift' },
-  { id: 'leon_lion', label: 'レオンとライオン(2頭の衝突)', url: leonLionUrl, group: 'gift' },
-  { id: 'palace', label: '宮殿(黄金の建築)', url: palaceUrl, group: 'gift' },
-  { id: 'whale_mirage', label: '鯨と蜃気楼', url: whaleMirageUrl, group: 'gift' },
-  { id: 'whale_sam', label: 'クジラのサム', url: whaleSamUrl, group: 'gift' },
-  { id: 'seal_whale', label: 'アザラシとクジラ', url: sealWhaleUrl, group: 'gift' },
-  { id: 'adams_dream', label: "Adam's Dream(光雲)", url: adamsDreamUrl, group: 'gift' },
   { id: 'gift-t1', label: '小(金の輝き)', url: giftT1Url, group: 'generic' },
   { id: 'gift-t2', label: '中(金のバースト)', url: giftT2Url, group: 'generic' },
   { id: 'gift-t3', label: '大(金の放射光)', url: giftT3Url, group: 'generic' },
@@ -201,6 +168,24 @@ const boostGlob = import.meta.glob('../assets/fx/boost/*.mp4', {
 export function boostClipUrl(id: string | null | undefined): string | null {
   if (!id || id === 'off') return null;
   return boostGlob[`../assets/fx/boost/${id}.mp4`] ?? null;
+}
+
+/**
+ * ルーレット超激アツ(ultra)の動画クリップ(不透明・無音 — SE はルーレットの
+ * cue が担う)。ウィンドウ表(ROULETTE_PATTERN_TIMING.clips)と対になる
+ * assets/fx/rl/<pattern>-<n>.mp4 を引く。無ければ null — RouletteFx は
+ * オーバーレイを出さず純ホールドの焦らしに縮退する(boost と同じ 0 件許容)。
+ * id⇄ファイルの突合は test/unit/roulette-clip-catalog.spec.ts。
+ */
+const rlGlob = import.meta.glob('../assets/fx/rl/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+/** 超激アツクリップ URL。n は 1 始まり。未投入・未知は null。 */
+export function rouletteClipUrl(pattern: string, n: number): string | null {
+  return rlGlob[`../assets/fx/rl/${pattern}-${n}.mp4`] ?? null;
 }
 
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));

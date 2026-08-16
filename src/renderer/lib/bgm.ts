@@ -3,6 +3,9 @@ import bgmBand2Url from '../assets/se/band/bgm-band2.mp3';
 import bgmBand3Url from '../assets/se/band/bgm-band3.mp3';
 import bgmBand4Url from '../assets/se/band/bgm-band4.mp3';
 import bgmRoulette1Url from '../assets/se/roulette/bgm-roulette1.ogg';
+// 回転中BGM枠(bgm-roulette2)とリール回転音枠(spin-slot)の両方で使う同一素材。
+// ファイルは1本・カタログのエントリが2つ(BY_ID の都合で id は分ける)。
+import slotUrl from '../assets/se/roulette/slot.ogg';
 import spinReel1Url from '../assets/se/roulette/spin-reel1.ogg';
 import spinReel2Url from '../assets/se/roulette/spin-reel2.ogg';
 
@@ -44,6 +47,8 @@ export const BAND_BGM: readonly BandBgm[] = [
  */
 export const ROULETTE_BGM: readonly BandBgm[] = [
   { id: 'bgm-roulette1', label: 'サスペンス — ドラムロール', url: bgmRoulette1Url, gain: 0.85 },
+  // gain 0.85: bgm-roulette1(mean -13.0dB)と 0.7dB 差しかないので同値でよい。
+  { id: 'bgm-roulette2', label: 'スロット — リール回転', url: slotUrl, gain: 0.85 },
 ];
 
 /**
@@ -58,6 +63,8 @@ export const ROULETTE_SPIN_SE: readonly BandBgm[] = [
   // 実効 -24.5dB 相当 = 旧構成(BGM + カチカチ)の回転音より 4dB ほど前に出る値。
   { id: 'spin-reel2', label: 'リール回転音(ジングル)', url: spinReel2Url, gain: 0.3 },
   { id: 'spin-reel1', label: 'リール回転音(カチカチ)', url: spinReel1Url, gain: 0.6 },
+  // gain 0.3: 既定の spin-reel2(mean -13.9dB)と 0.2dB 差なので同じ値で釣り合う。
+  { id: 'spin-slot', label: 'リール回転音(スロット)', url: slotUrl, gain: 0.3 },
 ];
 
 // id は 'bgm-band*' / 'bgm-roulette*' / 'spin-*' の接頭辞で衝突しない —

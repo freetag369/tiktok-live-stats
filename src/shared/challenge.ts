@@ -2,7 +2,6 @@ import type {
   ChallengeCommentRule,
   ChallengeConfig,
   ChallengeEffect,
-  ChallengeGiftClip,
   ChallengeGiftRule,
   ChallengeLogEntry,
   ChallengeRouletteConfig,
@@ -19,9 +18,11 @@ import type {
   JoinRouletteConfig,
   RoulettePattern,
   RouletteSoundConfig,
+  RouletteSpinKey,
+  RouletteTeaseConfig,
   GiftRepeatFxConfig,
 } from './dto';
-import { ROULETTE_PATTERNS } from './dto';
+import { ROULETTE_PATTERNS, ROULETTE_PATTERN_TIER } from './dto';
 import { WAKE_TIME_RE } from './time';
 import {
   FULL_CUT_CLIPS,
@@ -72,18 +73,42 @@ export const CHALLENGE_LOG_MAX = 50;
 /**
  * ルーレット演出の尺。monitor.css の @keyframes とモニターの据え置き解除タイマーを
  * ここで同期させる — 片方だけ変えると「数字は動いたのにリールが回っている」が起きる。
- * 6000ms は要望値。終盤の段(ゆっくり/ポンポン/キック)を読める長さが要るため、
- * 旧 4300ms から伸ばした。キーフレームは割合で書いてあるのでここだけで効く。
+ * キーフレームは割合で書いてあるのでここだけで効く。
+ *
+ * 尺はパターンの段位(ROULETTE_PATTERN_TIER)で3段階 — パチンコの信頼度方式で、
+ * レアな出目ほど長い段位のパターンが出やすい(抽選は roulette-fx.ts)。
+ * 6000ms は light(通常変動)の尺 = 従来の全パターン共通値。段位ごとの走行距離
+ * (roulette-fx.ts の RUN_BASE)を尺に比例させているので、序盤のリール速度は
+ * 段位に依らずほぼ一定 — 長い焦らしが「初速の遅いスピン」に見えることはない。
  */
 export const ROULETTE_SPIN_MS = 6000;
+/** mid(中リーチ: kick/overrun/restart/teeter/blackout)の尺。light の 1.25 倍。 */
+export const ROULETTE_SPIN_MID_MS = 7500;
+/**
+ * heavy(激アツ: doublefake/jackstop/jackslip/jackback)の尺。light の 2 倍。
+ * ストレッチで打撃が鈍る分は monitor.css 側で非 cue の打撃キーフレームを詰めて
+ * 補正している。JOIN_ROULETTE_MIN_GAP_MS はこの値 + 確定見せより長いこと。
+ */
+export const ROULETTE_SPIN_HEAVY_MS = 12000;
+/**
+ * ultra(超激アツ: dragon/unicorn/whale/phoenix/lion)の尺。全画面動画(2〜4本)と
+ * マス移動が交互に進む(ウィンドウ表は roulette-fx.ts の ROULETTE_PATTERN_TIMING.clips)。
+ * 動画クリップの実尺の合計 + マス移動の間合いで決まる値であり、他段位のような
+ * 倍率設計ではない。JOIN_ROULETTE_MIN_GAP_MS はこの値 + 確定見せより長いこと。
+ */
+export const ROULETTE_SPIN_ULTRA_MS = 24000;
 /**
  * 当選ブロックの発光(確定見せ)の尺。**確定するまで色を出さない**設計にした結果、
  * 色・符号・発光・確定音の全部がこの窓に入るので 600ms では山場が一瞬で終わる。
  */
 export const ROULETTE_REVEAL_MS = 900;
-/** 短縮スピンの確定見せ。キュー消化中は総尺を詰めたいので通常より短くする。 */
+/** 短縮スピンの確定見せ。コンボ消化中は総尺を詰めたいので通常より短くする。 */
 export const ROULETTE_REVEAL_FAST_MS = 450;
-/** キュー詰まり時の短縮スピン。連続トリガーでも体感が間延びしない長さ。 */
+/**
+ * 同一ギフト(同じ人の連打)のコンボ2本目以降の短縮スピン。連打でも体感が
+ * 間延びしない長さ。キュー消化(別ギフトの並び)は短縮しない — 消化スピンも
+ * フル尺で回す(かつてはキュー詰まり時も短縮していたが廃止)。
+ */
 export const ROULETTE_SPIN_FAST_MS = 900;
 /**
  * **別のギフト**のスピンへ移るときの間合い(ms)。
@@ -111,29 +136,41 @@ export const ROULETTE_QUEUE_MAX = 24;
 export const ROULETTE_DRAWS_MAX = 200;
 /**
  * 1ギフトメッセージあたり実際にリールを回す本数の上限。
- * 20本で 6.9 + 19×1.35 ≒ 32秒。これを超える連打は残りを合算バナー1枚で締める
- * (**値は抽選回数ぶん全部適用済み** — 削るのは見た目だけ)。
+ * 1本目だけが段位の尺で回り、2本目以降は fast(900ms)+ 確定見せ(450ms)。
+ * 最悪(ultra)で 24.9 + 19×1.35 ≒ 50.5秒。これを超える連打は残りを合算バナー
+ * 1枚で締める(**値は抽選回数ぶん全部適用済み** — 削るのは見た目だけ)。
  */
 export const ROULETTE_REELS_MAX = 20;
 /**
  * 据え置きの安全弁。onAnimationEnd が来なくても(タブ非表示等)この時刻で必ず
  * ラッチを解いて worker 値へ収束させる — startStrike の STRIKE_ABORT_MS と同じ役割。
+ * 尺は段位で変わるので、定数としては最長(ultra)の最悪値。実際の解除タイマーは
+ * rouletteAbortMs(パターン別)で張る。
  */
-export const ROULETTE_ABORT_MS = ROULETTE_SPIN_MS + ROULETTE_REVEAL_MS + 1500;
+export const ROULETTE_ABORT_MS = ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS + 1500;
 
 /**
- * スピン1本の実尺と安全弁。fast(キュー消化)と通常で尺が違うので、片方だけ見て
- * 調整すると必ずもう片方が壊れる — 両経路をこの2関数に集約する。
+ * スピン1本の実尺と安全弁。fast(キュー消化)と通常で尺が違い、通常は更に段位で
+ * 4段階 — 片方だけ見て調整すると必ずもう片方が壊れるので、全経路をここに集約する。
  */
-export function rouletteSpinMs(fast: boolean): number {
-  return fast ? ROULETTE_SPIN_FAST_MS : ROULETTE_SPIN_MS;
+export function rouletteSpinMs(key: RouletteSpinKey): number {
+  if (key === 'fast') return ROULETTE_SPIN_FAST_MS;
+  const tier = ROULETTE_PATTERN_TIER[key];
+  return tier === 'ultra'
+    ? ROULETTE_SPIN_ULTRA_MS
+    : tier === 'heavy'
+      ? ROULETTE_SPIN_HEAVY_MS
+      : tier === 'mid'
+        ? ROULETTE_SPIN_MID_MS
+        : ROULETTE_SPIN_MS;
 }
-export function rouletteRevealMs(fast: boolean): number {
-  return fast ? ROULETTE_REVEAL_FAST_MS : ROULETTE_REVEAL_MS;
+/** 確定見せは段位で変えない(尺の緩急は焦らし側で付ける)。fast だけ短縮。 */
+export function rouletteRevealMs(key: RouletteSpinKey): number {
+  return key === 'fast' ? ROULETTE_REVEAL_FAST_MS : ROULETTE_REVEAL_MS;
 }
-/** 据え置きの安全弁(ms)。実尺 + 確定見せ + 余裕。fast でも必ずアニメより後。 */
-export function rouletteAbortMs(fast: boolean): number {
-  return rouletteSpinMs(fast) + rouletteRevealMs(fast) + 1500;
+/** 据え置きの安全弁(ms)。実尺 + 確定見せ + 余裕。どのキーでも必ずアニメより後。 */
+export function rouletteAbortMs(key: RouletteSpinKey): number {
+  return rouletteSpinMs(key) + rouletteRevealMs(key) + 1500;
 }
 
 /**
@@ -144,8 +181,12 @@ export function rouletteAbortMs(fast: boolean): number {
  * - **演出と違い「マウント直後は全件再生済みに倒す」はしない。** ログにストーム
  *   問題は無く、リロード直後に空だと「さっき何が起きたか」が消えてしまう。
  *   同じ理由で「5秒より古い effect はスキップ」もしない。
- * - lastId が最大 id を上回っていたら worker 再起動で id が振り直された合図。
- *   0 に倒して取り込み直す(MonitorView / useChallengeSe と同じ検知)。
+ * - **watermark は絶対に後退しない。** かつては「lastId > maxId なら worker 再起動」
+ *   と見なして 0 へ倒していたが、この判定は**古いスナップショットの後着**でも
+ *   成立してしまう(press RPC の返り値は setChallenge が即時適用、delta は rAF
+ *   コアレスで遅延 — liveStore.ts 参照)。成立した瞬間にリング内の effect が
+ *   丸ごと再取り込みされ、同じギフトの行が二重に積まれていた。
+ *   worker 再起動の追従は呼び出し側が lastId=null を渡して行う(workerEpoch)。
  * - 連続する press は1行に畳む。連打で他の行が全部押し流されるのを防ぐ。
  *
  * 戻り値の log は**新しい順**(index 0 が最新)。
@@ -157,12 +198,12 @@ export function appendChallengeLog(
 ): { log: ChallengeLogEntry[]; lastId: number } {
   const effects = state.recentEffects;
   const maxId = effects.reduce((m, e) => Math.max(m, e.id), 0);
-  // worker 再起動で id が 1 に戻ると、watermark が天井に残って以後すべて
-  // 「取り込み済み」扱いになりログが凍る。巻き戻りを検知したら追従させる。
-  const from = lastId === null || lastId > maxId ? 0 : lastId;
+  // null(初回・worker 再起動の明示リセット)だけが 0 から取り込み直す。
+  const from = lastId ?? 0;
   // test(演出テスト再生)はログに積まない — 値に影響しない偽の行が履歴を汚す。
   // maxId は全件で計算済みなので watermark はテスト分も通過する。
   const fresh = effects.filter((e) => e.id > from && e.test !== true).sort((a, b) => a.id - b.id);
+  // 古いスナップショットが後着しても watermark は下げない(max で受ける)。
   if (fresh.length === 0) return { log: log as ChallengeLogEntry[], lastId: Math.max(from, maxId) };
 
   const out = log.slice();
@@ -280,26 +321,10 @@ export const CHALLENGE_SE_SOUND_IDS: readonly string[] = [
  * validate はこのリストで割り当てを検証する — 未知の id は 'off' に倒す。
  * 'off' は「この規則ではクリップを出さない」。
  *
- * gift-t1〜t4 は「ダイヤ数の段階で出る汎用クリップ」で、どの canonical にも
- * 一致しなかったギフトのフォールバックにもなる(下の tierClipId)。
+ * gift-t1〜t4 は「ダイヤ数の段階」の汎用クリップ。全面カット・帯域の
+ * ドロップダウンから選べる(スロット名 gift-t1〜t4 の由来でもある)。
  */
 export const CHALLENGE_FX_CLIP_IDS: readonly string[] = [
-  'universe',
-  'universe_plus',
-  'white_pegasus',
-  'pegasus',
-  'fire_phoenix',
-  'thunder_falcon',
-  'dragon',
-  'lion',
-  'lion_charge',
-  'leon_lion',
-  'palace',
-  'whale_mirage',
-  'whale_sam',
-  'seal_whale',
-  'tiktok_stars',
-  'adams_dream',
   'gift-t1',
   'gift-t2',
   'gift-t3',
@@ -356,33 +381,6 @@ export const DEFAULT_MINI_FX: Record<ChallengeSeSlot, string> = {
   'boost-end': 'off',
   achieved: 'off',
 };
-
-/**
- * 既定のギフト→クリップ割り当て。canonical は resources/gift-aliases.default.json
- * の nameRules と一致させること — ここに無い canonical のギフトは tier クリップになる。
- * 設定画面から自由に差し替え・追加・削除できる。
- */
-export const DEFAULT_GIFT_CLIPS: readonly ChallengeGiftClip[] = [
-  // ハートミーは1ダイヤの高頻度ギフト。映像は tier1 の汎用のまま、叩かれて増える
-  // 手触りを簡易演出のハンマーで足す(映像だけ切りたければ clip を 'off' に)。
-  { id: 'clip-heart_me', canonical: 'heart_me', clip: 'gift-t1', mini: 'hammer' },
-  { id: 'clip-universe_plus', canonical: 'universe_plus', clip: 'universe_plus', mini: 'off' },
-  { id: 'clip-universe', canonical: 'universe', clip: 'universe', mini: 'off' },
-  { id: 'clip-tiktok_stars', canonical: 'tiktok_stars', clip: 'tiktok_stars', mini: 'off' },
-  { id: 'clip-white_pegasus', canonical: 'white_pegasus', clip: 'white_pegasus', mini: 'off' },
-  { id: 'clip-pegasus', canonical: 'pegasus', clip: 'pegasus', mini: 'off' },
-  { id: 'clip-fire_phoenix', canonical: 'fire_phoenix', clip: 'fire_phoenix', mini: 'off' },
-  { id: 'clip-thunder_falcon', canonical: 'thunder_falcon', clip: 'thunder_falcon', mini: 'off' },
-  { id: 'clip-dragon', canonical: 'dragon', clip: 'dragon', mini: 'off' },
-  { id: 'clip-lion_charge', canonical: 'lion_charge', clip: 'lion_charge', mini: 'off' },
-  { id: 'clip-leon_lion', canonical: 'leon_lion', clip: 'leon_lion', mini: 'off' },
-  { id: 'clip-lion', canonical: 'lion', clip: 'lion', mini: 'off' },
-  { id: 'clip-palace', canonical: 'palace', clip: 'palace', mini: 'off' },
-  { id: 'clip-whale_mirage', canonical: 'whale_mirage', clip: 'whale_mirage', mini: 'off' },
-  { id: 'clip-whale_sam', canonical: 'whale_sam', clip: 'whale_sam', mini: 'off' },
-  { id: 'clip-seal_whale', canonical: 'seal_whale', clip: 'seal_whale', mini: 'off' },
-  { id: 'clip-adams_dream', canonical: 'adams_dream', clip: 'adams_dream', mini: 'off' },
-];
 
 export const DEFAULT_SE_SOUNDS: Record<ChallengeSeSlot, string> = {
   press: 'click-soft',
@@ -489,14 +487,41 @@ export const DEFAULT_JOIN_ROULETTE: JoinRouletteConfig = {
 };
 
 /**
- * 入室ルーレットの連続発火を抑えるクールダウン(ms)。1スピンの演出尺
- * (ROULETTE_SPIN_MS + ROULETTE_REVEAL_MS ≒ 6.9秒)より長め — レイドや
+ * 入室ルーレットの連続発火を抑えるクールダウン(ms)。最長の1スピンの演出尺
+ * (ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS ≒ 24.9秒)より長め — レイドや
  * target:'all' の高頻度入室でモニターのキュー(ROULETTE_QUEUE_MAX)と
  * リングバッファを初見ルーレットだけで食い潰さないための安全弁。
+ * (heavy 12秒化で 10→15秒、ultra 24秒化で 15→30秒。test/unit が不等式を固定。)
  * 窓内の入室は値ごと黙って捨てる(演出起点の機能なので値の完全性は要らない)。
  * 設定項目にはしない — UI を増やさず定数で持つ。
  */
-export const JOIN_ROULETTE_MIN_GAP_MS = 10_000;
+export const JOIN_ROULETTE_MIN_GAP_MS = 30_000;
+
+/**
+ * 超焦らし(大当たり寸止め系)の3種。ROULETTE_PATTERNS から段位ではなく名前で
+ * 引く — heavy には doublefake も居るので TIER フィルタでは取れない
+ * (ROULETTE_ULTRA_PATTERNS と同じ「一覧から filter」の流儀)。
+ */
+export const ROULETTE_JACK_PATTERNS: readonly RoulettePattern[] = ROULETTE_PATTERNS.filter(
+  (p) => p === 'jackstop' || p === 'jackslip' || p === 'jackback'
+);
+
+/**
+ * 超焦らしのカウント方式の発動間隔の候補。発動のたびに等確率で引き直し、
+ * その回数目の「並びの最後のフル尺スピン」で必ず発動する(5回に1回 or 7回に1回)。
+ * 設定項目にはしない — UI を増やさず定数で持つ(JOIN_ROULETTE_MIN_GAP_MS と同じ判断)。
+ */
+export const ROULETTE_TEASE_COUNTS = [5, 7] as const;
+
+/**
+ * 超焦らしカウント方式の既定。**有効で出荷** — 「超焦らしは5〜7回に1回だけ」が
+ * 新しい標準挙動(旧 settings.json の rouletteTease キー欠損も validateRouletteTease
+ * がここへ倒すので、移行処理は不要)。patterns は jack 3種全部。
+ */
+export const DEFAULT_ROULETTE_TEASE: RouletteTeaseConfig = {
+  enabled: true,
+  patterns: [...ROULETTE_JACK_PATTERNS],
+};
 
 /**
  * ダイヤ帯域カットインの凍結時間の上限(ms)。durationSec の clamp(30秒)より
@@ -517,6 +542,12 @@ export const GIFT_FX_FREEZE_MARGIN_MS = 500;
  * その間に届くイベントを飲めるだけの深さを持たせてある。
  */
 export const GIFT_FX_PENDING_OPS_MAX = 256;
+/**
+ * delta に載せる演出予告(ChallengeState.fxQueue)の上限件数。保留キュー自体は
+ * GIFT_FX_PENDING_OPS_MAX まで積めるが、モニターの表示は5行+溢れ表記なので
+ * 予告はこの件数で切って 2Hz の delta を太らせない。
+ */
+export const CHALLENGE_FX_QUEUE_MAX = 8;
 
 // ── 連打ギフトの演出反復(giftRepeatFx) ──────────────────────────────────────
 
@@ -621,11 +652,16 @@ export const CHALLENGE_BAND_BGM_IDS: readonly string[] = [
  */
 export const CHALLENGE_ROULETTE_BGM_IDS: readonly string[] = [
   'bgm-roulette1',
+  'bgm-roulette2',
   ...CHALLENGE_BAND_BGM_IDS,
 ];
 
 /** リール回転ループ音の id 一覧。実ファイルは renderer/lib/bgm.ts の ROULETTE_SPIN_SE。 */
-export const CHALLENGE_ROULETTE_SPIN_SE_IDS: readonly string[] = ['spin-reel2', 'spin-reel1'];
+export const CHALLENGE_ROULETTE_SPIN_SE_IDS: readonly string[] = [
+  'spin-reel2',
+  'spin-reel1',
+  'spin-slot',
+];
 
 /**
  * ルーレット回転サウンドの既定。回転ループ音は**有効(鳴る)で出荷**、
@@ -639,6 +675,7 @@ export const DEFAULT_ROULETTE_SOUND: RouletteSoundConfig = {
   bgmVolume: 70,
   spinSe: 'spin-reel2',
   spinSeVolume: 70,
+  clipVolume: 70,
 };
 
 /**
@@ -914,6 +951,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[],
   joinRoulette: structuredClone(DEFAULT_JOIN_ROULETTE),
   rouletteSound: { ...DEFAULT_ROULETTE_SOUND },
+  rouletteTease: structuredClone(DEFAULT_ROULETTE_TEASE),
   // モニターのリールは確定済みの出目の遅延再生なので、伏せないとログが
   // 常にリールより先に答えを出す。既定でネタバレを止める。
   hideRouletteResultInLog: true,
@@ -930,7 +968,6 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   seSounds: { ...DEFAULT_SE_SOUNDS },
   seVolumes: { ...DEFAULT_SE_VOLUMES },
   fxClipsEnabled: true,
-  giftClips: DEFAULT_GIFT_CLIPS.map((c) => ({ ...c })),
   miniFxEnabled: true,
   miniFx: { ...DEFAULT_MINI_FX },
   giftFullCut: structuredClone(DEFAULT_GIFT_FULL_CUT),
@@ -959,48 +996,12 @@ export function tierForDiamonds(diamonds: number): 1 | 2 | 3 | 4 {
   return 1;
 }
 
-/** tier に対応する汎用クリップ id。canonical の割り当てが無いギフトのフォールバック。 */
-export function tierClipId(tier: 1 | 2 | 3 | 4): string {
-  return `gift-t${tier}`;
-}
-
 /**
- * ギフト → 演出クリップ id の写像。canonical 一致を上から探し、無ければ tier
- * クリップへ落ちる。戻り null は「クリップを出さない」('off' 指定 or 無効時)。
- *
- * matchGiftRule と違い canonical しか見ない — 増減量の規則(giftRules)と
- * 見た目の規則(giftClips)は別物として設定できるようにするため。
+ * ギフト → 簡易演出 id の写像。ダイヤ数の tier スロット(gift-t1〜t4)で解決する
+ * — スロット側を変えればその段階のギフト全体に効く。戻り null は「出さない」。
  */
-export function matchGiftClip(
-  cfg: ChallengeConfig,
-  g: { canonical?: string; diamonds: number }
-): string | null {
-  if (!cfg.fxClipsEnabled) return null;
-  if (g.canonical) {
-    for (const c of cfg.giftClips) {
-      if (c.canonical !== g.canonical) continue;
-      return c.clip === 'off' ? null : c.clip;
-    }
-  }
-  return tierClipId(tierForDiamonds(g.diamonds));
-}
-
-/**
- * ギフト → 簡易演出 id の写像。matchGiftClip と対だが、フォールバック先が固定 id では
- * なく miniFx の tier スロット — スロット側を変えれば未割り当てのギフト全体に効く。
- * 戻り null は「簡易演出を出さない」。
- */
-export function matchGiftMini(
-  cfg: ChallengeConfig,
-  g: { canonical?: string; diamonds: number }
-): string | null {
+export function matchGiftMini(cfg: ChallengeConfig, g: { diamonds: number }): string | null {
   if (!cfg.miniFxEnabled) return null;
-  if (g.canonical) {
-    for (const c of cfg.giftClips) {
-      if (c.canonical !== g.canonical) continue;
-      return c.mini === 'off' ? null : c.mini;
-    }
-  }
   return miniForSlot(cfg, `gift-t${tierForDiamonds(g.diamonds)}` as ChallengeSeSlot);
 }
 
@@ -1030,7 +1031,7 @@ export function matchGiftFullCut(
 
 /**
  * ギフト → ダイヤ帯域カットインの写像。一致した帯域を返す(クリップ 'off' や
- * 除外・無効は null)。giftClips(canonical別クリップ)より優先して評価する。
+ * 除外・無効は null)。
  *
  * 除外は giftId が本線 — ライブ経路では NormalizedEvent.canonical が未代入
  * (matchRouletteTrigger と同じ制約)。canonical 'heart_me' は保険で常に除外。
@@ -1160,6 +1161,14 @@ export function rouletteDraws(
  * 出目 index は盤面に対する位置なので、**盤面が違う effect の出目は連結できない**
  * (ハートミーの 3 番目とバラの 3 番目は別の額)。worker の凍結ドレイン畳み込みと
  * モニターのキュー連結が同じ規約を使うための唯一の実装。
+ *
+ * **rouletteId(行の同一性)は入れない。** ここは「出目 index の意味が同じか」=
+ * 正しさの判定で、行ごとの回転サウンドのような演出の都合を混ぜるとキーの意味が
+ * 二重になる。入れると、表示名・出目・向きが全一致するだけの別行が畳めなくなり、
+ * モニターのキュー満杯時に「盤面違いで連結できない → バナーのみでリールが出ない」
+ * 経路(playFx の分岐が明示的に忌避している最悪の見え方)へ落ちる頻度が上がる。
+ * 畳まれた 1 本をどの行の音で鳴らすかは mergeRoulette / finishDrain が
+ * **先頭 a に固定**して決着させる(nickname と同じ規約)。
  */
 export function rouletteBoardKey(e: ChallengeEffect): string {
   return `${e.rouletteLabel ?? ''}|${e.rouletteDirection ?? 'add'}|${(e.rouletteSegments ?? []).join(',')}`;
@@ -1176,11 +1185,21 @@ export function sameRouletteBoard(a: ChallengeEffect, b: ChallengeEffect): boole
  * 呼ぶ前に sameRouletteBoard で確かめること。値・統計は既に worker が両方ぶん
  * 適用済みなので、ここで畳むのは**見た目と1行の履歴**だけ(finishDrain の規約と同じ)。
  * 見出し(nickname)は先頭 a のものを残す — 連結後の1本目が誰の分かと揃える。
+ *
+ * `cfg` は連結後のリール本数を引き直すための設定。**worker の finishDrain が
+ * `rouletteReelCount(this.getConfig(), idxs.length)` を使うのと同じ規約に揃える** —
+ * 渡さないと `giftRepeatFx.rouletteEnabled = false`(「連打でもリールは1本」)で
+ * worker が 1 本に絞った effect が、モニターのキュー満杯連結で最大
+ * ROULETTE_REELS_MAX 本に化ける。未指定は従来動作(上限 clamp のみ)。
  */
-export function mergeRoulette(a: ChallengeEffect, b: ChallengeEffect): ChallengeEffect {
+export function mergeRoulette(
+  a: ChallengeEffect,
+  b: ChallengeEffect,
+  cfg?: ChallengeConfig | null
+): ChallengeEffect {
   const idxs = [...(a.rouletteIndexes ?? []), ...(b.rouletteIndexes ?? [])].slice(0, ROULETTE_DRAWS_MAX);
   const pats = [...(a.roulettePatterns ?? []), ...(b.roulettePatterns ?? [])].slice(0, ROULETTE_DRAWS_MAX);
-  return {
+  const merged: ChallengeEffect = {
     ...b,
     id: Math.max(a.id, b.id),
     nickname: a.nickname,
@@ -1195,8 +1214,53 @@ export function mergeRoulette(a: ChallengeEffect, b: ChallengeEffect): Challenge
     rouletteIndex: idxs[0] ?? a.rouletteIndex,
     roulettePattern: pats[0] ?? a.roulettePattern,
     // 連結後の本数で引き直す(元の rouletteReels は合計にならない)。
-    rouletteReels: Math.min(ROULETTE_REELS_MAX, idxs.length),
+    rouletteReels: cfg ? rouletteReelCount(cfg, idxs.length) : Math.min(ROULETTE_REELS_MAX, idxs.length),
   };
+  // 行の同一性(= 回転サウンドの持ち主)は先頭 a に合わせる。nickname と同じ規約で、
+  // 連結後に実際に鳴るのは 1 本目の音だから — `{...b}` 任せにすると「a の音で
+  // 鳴っているのに effect には b の行が載っている」がキューの畳み込みで生まれる。
+  // undefined 値のキーを残さず delete するのは、effect は「載せないフィールドは
+  // キーごと出さない」流儀で作られているため(JSON 比較を素直に保つ)。
+  if (a.rouletteId != null) merged.rouletteId = a.rouletteId;
+  else delete merged.rouletteId;
+  return merged;
+}
+
+/**
+ * effect 1件 → **実際に鳴らす回転サウンド**。モニターとテストが共有する唯一の実装
+ * (rouletteDraws / rouletteBoardKey と同じ「判断を shared の純関数に閉じる」流儀 —
+ * レンダラのテスト環境が無いので、音の決定ロジックはここに置いてテストする)。
+ *
+ * 解決順:
+ *   1. e.rouletteId が cfg.roulettes に**居れば** → その行の sound ?? 共通
+ *   2. e.rouletteJoin → cfg.joinRoulette.sound ?? 共通
+ *   3. それ以外(id 欠損 / 行を削除した / id を変えた)→ 共通
+ *
+ * rouletteId を先に見るのは、畳み込み(mergeRoulette / finishDrain)が音の持ち主を
+ * 先頭 a に固定するのと足並みを揃えるため。実効の effect ではギフト行(rouletteId)と
+ * 入室(rouletteJoin)は排他なので、通常はどちらを先に見ても同値。
+ *
+ * 行が見つからないとき**既定(DEFAULT_ROULETTE_SOUND)へ倒さない**のが要点 —
+ * 共通こそがこの機能以前の全ルーレットの音で、行が消えただけで無音や別の音に
+ * なるのは劣化。enabled は見ない(設定UIの ▶ 試写が enabled を見ないのと同じ)。
+ *
+ * **cfg 未取得(null/undefined)は null = 無音**を返す。既定を返してはいけない —
+ * cfg.get が返る前のスピンで回転音だけ先に鳴り始める(現行の
+ * `cfg?.challenge.rouletteSound` → undefined → playBandBgm(undefined) → null で
+ * 無音、という縮退と 1:1 に保つ)。
+ */
+export function resolveRouletteSound(
+  cfg: ChallengeConfig | null | undefined,
+  e: ChallengeEffect
+): RouletteSoundConfig | null {
+  if (!cfg) return null;
+  const common = cfg.rouletteSound;
+  if (e.rouletteId != null && e.rouletteId !== '') {
+    const rl = cfg.roulettes.find((r) => r.id === e.rouletteId);
+    if (rl) return rl.sound ?? common;
+  }
+  if (e.rouletteJoin) return cfg.joinRoulette.sound ?? common;
+  return common;
 }
 
 /**
@@ -1274,7 +1338,16 @@ export function isChallengeEffectFresh(e: ChallengeEffect, nowMs: number): boole
  *   マウントが実演の push より遅れると、最初のスナップショットに含まれた実演が
  *   無言で「再生済み」扱いになり consumed される(「▶ を押しても何も起きない、
  *   2回目は出る」の原因)。
- * - lastPlayed > maxId は worker 再起動で id が振り直された合図。0 に倒して追従する。
+ * - **watermark は絶対に後退しない(next >= lastPlayed)。** かつては
+ *   「lastPlayed > maxId なら worker 再起動で id が振り直された」と見なして 0 へ
+ *   倒していたが、この判定は**古いスナップショットの後着**でも成立する:
+ *   press RPC の返り値は setChallenge が即時適用、delta は rAF コアレスで遅延反映
+ *   なので(liveStore.ts)、押下のたびに逆転が起きうる。成立するとリング内の
+ *   鮮度ゲート内 effect が丸ごと再生され直し、さらに watermark 自体が後退して
+ *   次の delta でもう一度再生される — 「ルーレット/ギフトが贈られた個数を超えて
+ *   何回も再生される」の原因はこれだった。
+ *   worker 再起動の追従は**呼び出し側が lastPlayed=null を渡して**行う
+ *   (liveStore の workerEpoch が 'restarting|dead → ready' で合図する)。
  * - 鮮度ゲートを過ぎた演出は無言でスキップ(watermark は進める)。
  *
  * 戻り値: next = 新しい watermark、play = 再生すべき演出(id 昇順)。
@@ -1293,11 +1366,34 @@ export function freshChallengeEffects(
       : [];
     return { next: maxId, play };
   }
-  const from = lastPlayed > maxId ? 0 : lastPlayed;
   const play = effects
-    .filter((e) => e.id > from && freshEnough(e))
+    .filter((e) => e.id > lastPlayed && freshEnough(e))
     .sort((a, b) => a.id - b.id);
-  return { next: Math.max(from, maxId), play };
+  return { next: Math.max(lastPlayed, maxId), play };
+}
+
+/**
+ * 取り込もうとしているスナップショットが**古い**(effect ストリームが後退して
+ * いる)か。true なら recentEffects / fxQueue を差し替えてはいけない。
+ *
+ * delta は rAF コアレスで遅延反映、RPC(challenge.press / challenge.get)の返り値は
+ * 即時適用され、`ChallengeState` に seq も version も無いので順序を比較する材料が
+ * これしか無い。`nextEffectId` は worker の生存中は厳密に単調(start/stop/reset で
+ * リセットされない)なので、max(recentEffects.id) がそのまま世代印になる。
+ *
+ * ラン境界(start/reset は recentEffects を空にする)と worker 再起動は**呼び出し側**
+ * が seen を 0 へ戻して吸収する(前者は startedMs の変化、後者は workerEpoch)。
+ * 戻したあとは seen=0 なのでどんなスナップショットも「古くない」になり、空リングの
+ * 取り込みも素通りする。逆に**戻していないのに空リングが来たら後退扱いでよい** —
+ * 採用すると演出の入力(recentEffects)が消えるだけだから。
+ */
+export function isStaleChallengeSnapshot(seenMaxEffectId: number, state: ChallengeState): boolean {
+  return challengeSnapshotMaxEffectId(state) < seenMaxEffectId;
+}
+
+/** スナップショットの effect 世代印(max(recentEffects.id)、空なら 0)。 */
+export function challengeSnapshotMaxEffectId(state: ChallengeState): number {
+  return state.recentEffects.reduce((m, e) => Math.max(m, e.id), 0);
 }
 
 /**
@@ -1648,6 +1744,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     roulettes: validateRoulettes(raw),
     joinRoulette: validateJoinRoulette(c.joinRoulette),
     rouletteSound: validateRouletteSound(c.rouletteSound),
+    rouletteTease: validateRouletteTease(c.rouletteTease),
     // 既定 true なので `!== false`(seEnabled と同じ向き。`=== true` にすると
     // 既定が反転する)。保存済み settings.json にこのキーは無いが、
     // **欠損が true へ倒れること自体が移行の代わり**になる
@@ -1671,7 +1768,6 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     seSounds: validateSeSounds(c.seSounds),
     seVolumes: validateSeVolumes(c.seVolumes),
     fxClipsEnabled: c.fxClipsEnabled !== false,
-    giftClips: validateGiftClips(c.giftClips),
     miniFxEnabled: c.miniFxEnabled !== false,
     miniFx: validateMiniFx(c.miniFx),
     giftFullCut: validateGiftFullCut(c.giftFullCut),
@@ -1728,6 +1824,48 @@ function validateRouletteSound(raw: unknown): RouletteSoundConfig {
     bgmVolume: vol(c.bgmVolume, d.bgmVolume),
     spinSe: id(c.spinSe, CHALLENGE_ROULETTE_SPIN_SE_IDS, d.spinSe),
     spinSeVolume: vol(c.spinSeVolume, d.spinSeVolume),
+    // 旧 settings.json にはキーが無い(超激アツ動画より前の世代)— 欠損が
+    // 既定へ倒れること自体が移行の代わり(rouletteTease と同じ手口)。
+    clipVolume: vol(c.clipVolume, d.clipVolume),
+  };
+}
+
+/**
+ * 行ごとの回転サウンド上書きの検証。**継承(キー無し)を潰さない**のが上の
+ * validateRouletteSound との唯一の違い — あちらは非オブジェクトを既定へ倒すので、
+ * そのまま呼ぶと「共通に従う」が「既定値で明示的に上書き」に化け、共通側の変更が
+ * 行に届かなくなる(この機能で一番踏みやすい罠)。中身のサニタイズは共通と同一の
+ * 関数へ委譲する — id 許可リストと音量 clamp を 2 実装に分裂させない。
+ *
+ * 配列を明示的に弾くのが要点。`typeof [] === 'object'` なので、これが無いと
+ * 手編集の `sound: []` が「全項目が既定の上書き」に化ける(validateRouletteSound は
+ * [] を既定オブジェクトへ倒す仕様で、共通側のテストがそれを固定している)。
+ */
+function validateRouletteSoundOverride(raw: unknown): RouletteSoundConfig | undefined {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  return validateRouletteSound(raw);
+}
+
+/**
+ * 超焦らしカウント方式の検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(rouletteTease キー無し)は既定(有効・jack 3種)へ倒す —
+ * **欠損が既定へ倒れること自体が移行の代わり**(stockCutinVolume と同じ手口)。
+ * patterns は jack 3種との積集合、空・欠損は既定(3種全部)へ — 発動回に
+ * 引くものが無い状態を作らない(validateRoulette が patterns の空を許さないのと
+ * 同じ理由)。
+ */
+function validateRouletteTease(raw: unknown): RouletteTeaseConfig {
+  const d = DEFAULT_ROULETTE_TEASE;
+  const c = raw as Partial<RouletteTeaseConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  const patterns = Array.isArray(c.patterns)
+    ? ROULETTE_JACK_PATTERNS.filter((p) => (c.patterns as RoulettePattern[]).includes(p))
+    : [];
+  return {
+    // 既定 true なので `!== false`(hideRouletteResultInLog と同じ向き —
+    // `=== true` にすると既定が反転する。この関数群で一番踏みやすい罠)。
+    enabled: c.enabled !== false,
+    patterns: patterns.length > 0 ? patterns : [...d.patterns],
   };
 }
 
@@ -1979,7 +2117,7 @@ export const ROULETTE_LABEL_MAX = 24;
  * `roulette` があればそれを1件の配列へ包んで引き継ぐ — ユーザーが調整した盤面を
  * 「既定に戻す」で踏み潰さないため。どちらも無ければ既定(ハートミー1件)。
  *
- * 明示的な空配列は空のまま通す(validateGiftClips と同じ判断)— 全部消した
+ * 明示的な空配列は空のまま通す — 全部消した
  * ユーザーの意思を尊重する。ルーレット0件は「どのギフトでも回らない」で破綻しない。
  */
 function validateRoulettes(raw: unknown): ChallengeRouletteConfig[] {
@@ -2055,6 +2193,7 @@ function validateRoulette(raw: unknown, fb: { id: string; label: string }): Chal
   if (!c || typeof c !== 'object') return { ...structuredClone(d), ...fb };
 
   const segments = sanitizeRouletteSegments(c.segments);
+  const sound = validateRouletteSoundOverride(c.sound);
 
   return {
     // 欠損・重複 id は呼び元(validateRoulettes)が振り直すので、ここは fb のまま通す。
@@ -2070,6 +2209,10 @@ function validateRoulette(raw: unknown, fb: { id: string; label: string }): Chal
     segments: segments ?? structuredClone(d.segments),
     direction: c.direction === 'sub' ? 'sub' : 'add',
     patterns: sanitizeRoulettePatterns(c.patterns),
+    // 上書きが無いときは**キーごと出さない**(direction:'sub' と同じ条件付き
+    // スプレッドの流儀)。常に sound を出すと DEFAULT_ROULETTE(キー無し)と形が
+    // ずれ、保存済み settings.json の全行に無意味な既定値が生える。
+    ...(sound ? { sound } : {}),
   };
 }
 
@@ -2086,6 +2229,7 @@ function validateJoinRoulette(raw: unknown): JoinRouletteConfig {
   if (!c || typeof c !== 'object') return structuredClone(d);
 
   const label = typeof c.label === 'string' ? c.label.trim().slice(0, ROULETTE_LABEL_MAX) : '';
+  const sound = validateRouletteSoundOverride(c.sound);
   return {
     // enabled の既定は false なので `=== true`(validateRoulette の `!== false` と逆向き)。
     enabled: c.enabled === true,
@@ -2094,27 +2238,9 @@ function validateJoinRoulette(raw: unknown): JoinRouletteConfig {
     segments: sanitizeRouletteSegments(c.segments) ?? structuredClone(d.segments),
     direction: c.direction === 'sub' ? 'sub' : 'add',
     patterns: sanitizeRoulettePatterns(c.patterns),
+    // 上書きが無ければキーごと出さない(validateRoulette と同じ規約)。
+    ...(sound ? { sound } : {}),
   };
-}
-
-/**
- * ギフト→クリップ割り当ての検証。giftRules と同じく throw せずサニタイズする。
- * 未設定(undefined)は既定を配る一方、明示的な空配列は空のまま通す — 全部の
- * 割り当てを消したユーザーの意思を「既定に戻す」で踏み潰さないため。
- */
-function validateGiftClips(raw: unknown): ChallengeGiftClip[] {
-  if (raw === undefined || raw === null) return DEFAULT_GIFT_CLIPS.map((c) => ({ ...c }));
-  if (!Array.isArray(raw)) return DEFAULT_GIFT_CLIPS.map((c) => ({ ...c }));
-  const out: ChallengeGiftClip[] = [];
-  for (const r of raw as Array<Partial<ChallengeGiftClip>>) {
-    if (!r || typeof r !== 'object') continue;
-    if (typeof r.id !== 'string' || typeof r.canonical !== 'string' || r.canonical === '') continue;
-    const clip = typeof r.clip === 'string' && CHALLENGE_FX_CLIP_IDS.includes(r.clip) ? r.clip : 'off';
-    // mini は後から足したフィールド。既存 settings.json には無いので欠損は 'off'。
-    const mini = typeof r.mini === 'string' && CHALLENGE_MINI_IDS.includes(r.mini) ? r.mini : 'off';
-    out.push({ id: r.id, canonical: r.canonical.toLowerCase(), clip, mini });
-  }
-  return out;
 }
 
 /** 登録できる指定コメント規則の上限件数。設定UIと settings.json の現実的な上限。 */
@@ -2282,7 +2408,7 @@ export function matchGiftTrigger(
 
 /**
  * ギフト → ルーレット行の写像。**上から順に評価し、最初に一致した1件だけ**を返す
- * (giftRules / giftClips と同じ先勝ち)。enabled でない行は飛ばす。
+ * (giftRules と同じ先勝ち)。enabled でない行は飛ばす。
  * 戻り null は「このギフトではルーレットを回さない」= 通常のギフト規則へ落ちる。
  */
 export function matchRoulette(
@@ -2375,4 +2501,16 @@ export function drawRouletteIndex(segments: readonly ChallengeRouletteSegment[],
   // 浮動小数の端(r がちょうど 0 まで減り切らない)は weight > 0 の最後の行へ。
   for (let i = segments.length - 1; i >= 0; i--) if (segments[i]!.weight > 0) return i;
   return segments.length - 1;
+}
+
+/**
+ * 当選 index の出現確率(0..1)。drawRouletteIndex と同じクランプ(負の weight は 0)。
+ * パターン抽選の信頼度条件付け(roulette-fx.ts の drawRoulettePattern)に渡す。
+ * 盤面が全滅(Σ<=0)なら 1 を返す — drawRouletteIndex の最終行フォールバックに
+ * 偽の激アツ(rare 帯)を付けない。
+ */
+export function rouletteRarity(segments: readonly ChallengeRouletteSegment[], index: number): number {
+  const total = segments.reduce((s, x) => s + Math.max(0, x.weight), 0);
+  if (total <= 0) return 1;
+  return Math.max(0, segments[index]?.weight ?? 0) / total;
 }

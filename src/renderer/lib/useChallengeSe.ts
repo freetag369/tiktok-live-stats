@@ -75,8 +75,8 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
 /**
  * recentEffects を watermark 方式で監視し、新規演出の効果音を鳴らす。
  * MonitorView の視覚再生(playEffect)と同じ規約の独立した watermark を持つ:
- * マウント直後は全件再生済みに倒す / id 巻き戻り(worker 再起動)を検知したら
- * 追従 / 5秒より古い演出は無音でスキップ。
+ * マウント直後は全件再生済みに倒す / worker 再起動(opts.epoch の変化)で白紙に
+ * 戻す / 5秒より古い演出は無音でスキップ。
  *
  * active=false でも watermark は進め続ける — モニター閉→ダッシュボード切替の
  * 瞬間に過去演出が一斉に鳴る事故を防ぐ(二重再生防止の要)。
@@ -104,6 +104,13 @@ export function useChallengeSe(
      * 直後に直前の実演ジングルが鳴り直る事故を避ける)。
      */
     mountPlaysTest?: boolean;
+    /**
+     * worker の世代(liveStore の workerEpoch)。変化したら watermark を白紙へ
+     * 戻す — 再起動で effect の id が 1 から振り直されるため。**視覚側
+     * (MonitorView)と同じ信号で戻すこと**、片方だけ残ると音と映像がずれる。
+     * 未指定なら戻さない(ダッシュボード等、再起動追従が要らない呼び出し向け)。
+     */
+    epoch?: number;
   }
 ): void {
   const lastPlayed = useRef<number | null>(null);
@@ -159,6 +166,12 @@ export function useChallengeSe(
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [challenge?.recentEffects]);
+
+  // worker 再起動(epoch の変化)で watermark を白紙へ戻す。視覚側の同名の
+  // effect(MonitorView)と対。初回マウントでは lastPlayed が既に null なので no-op。
+  useEffect(() => {
+    lastPlayed.current = null;
+  }, [opts.epoch]);
 
   // active が飛行中に反転(モニターの開閉)したら予約済みの反復を捨てる。
   // 残すと、鳴らす担当が入れ替わった瞬間に両ウィンドウが同じコンボを鳴らす。

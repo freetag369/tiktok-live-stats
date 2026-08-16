@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ROULETTE_PATTERN_TIMING, ROULETTE_PATTERNS } from '@shared/roulette-fx';
+import { RL_CLIP_FADE_MS, ROULETTE_PATTERN_TIMING, ROULETTE_PATTERNS } from '@shared/roulette-fx';
 
 /**
  * ルーレット演出の CSS ⇄ TS 結合検査。se-catalog.spec.ts と同じく実ファイルを
@@ -31,6 +31,14 @@ function keyframesBody(name: string): string {
     i++;
   }
   return css.slice(start, i - 1);
+}
+
+/** 通常のルール(`<selector> { ... }`)の本文を取り出す。 */
+function ruleBody(selector: string): string {
+  const re = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`);
+  const m = re.exec(css);
+  expect(m, `${selector} が monitor.css に無い`).not.toBeNull();
+  return m![1]!;
 }
 
 /** ブロック本文からセレクタ行の cue マーカーを {kind → [X/100]} で集める。 */
@@ -95,6 +103,12 @@ describe('monitor.css — cue マーカーと ROULETTE_PATTERN_TIMING の機械�
       const steps = (got.get('step') ?? []).sort((a, b) => a - b);
       expect(steps, `${p}: cue:step`).toHaveLength(t.stepAts.length);
       t.stepAts.forEach((at, i) => expect(steps[i]!, `${p}: stepAts[${i}]`).toBeCloseTo(at, 3));
+      // 超激アツの動画ウィンドウ開始(cue:clip)も同じ規約で機械照合する —
+      // 動画とリールの同期は割合の一致だけが頼りなので、ズレの検出をここに寄せる。
+      const clips = (got.get('clip') ?? []).sort((a, b) => a - b);
+      const wantClips = (t.clips ?? []).map((c) => c.at);
+      expect(clips, `${p}: cue:clip`).toHaveLength(wantClips.length);
+      wantClips.forEach((at, i) => expect(clips[i]!, `${p}: clips[${i}].at`).toBeCloseTo(at, 3));
     });
   }
 
@@ -117,5 +131,38 @@ describe('monitor.css — 暗転とゴーストの部材', () => {
     }
     // 消灯の完了は veil-out(答え合わせ)より前 = 100% で opacity 0 のキーフレーム。
     expect(keyframesBody('rl-jack-fade')).toMatch(/100%\s*\{\s*opacity:\s*0;/);
+  });
+});
+
+/**
+ * 超激アツ動画(.rl-clip)の消え際。**この describe は再発防止が主目的**。
+ *
+ * 初版は `transition: opacity` と `animation: rl-clip-in ... both` を同じ
+ * プロパティに併用していた。CSS Transitions は「その property が CSS Animation の
+ * 効果下にあるとき transition の値をカスケードに足さない」と定めているため、
+ * fill し続ける animation がいる限りフェードは一度も画面に出ない。さらに
+ * rl-clip-in が `from` しか持たず暗黙の 100% が「カスケードの計算値」に解決される
+ * ので、.out を付けた瞬間に塗り値ごと 0 へ飛ぶ = 1フレームでプツッと消えていた。
+ * 下の3本は、その3条件(transition 併用 / 暗黙キーフレーム / 尺のズレ)を封じる。
+ */
+describe('monitor.css — 超激アツ動画の溶暗(.rl-clip)', () => {
+  it('退場の尺が RL_CLIP_FADE_MS と一致する', () => {
+    const m = /\.rl-clip\.out\s*\{[^}]*animation:\s*rl-clip-out\s+([\d.]+)(m?s)/.exec(css);
+    expect(m, '.rl-clip.out の animation: rl-clip-out が見つからない').not.toBeNull();
+    const msVal = m![2] === 's' ? Math.round(Number(m![1]) * 1000) : Number(m![1]);
+    expect(msVal).toBe(RL_CLIP_FADE_MS);
+  });
+
+  it('入りも消えも animation のみ — transition を混ぜない(フェードが死ぬ)', () => {
+    expect(ruleBody('.roulette-screen .rl-clip')).not.toMatch(/transition\s*:/);
+    expect(ruleBody('.roulette-screen .rl-clip.out')).not.toMatch(/transition\s*:/);
+  });
+
+  it('rl-clip-in / rl-clip-out は 0% と 100% を明示する(暗黙キーフレーム禁止)', () => {
+    for (const name of ['rl-clip-in', 'rl-clip-out']) {
+      const body = keyframesBody(name);
+      expect(body, `${name} の 0%`).toMatch(/0%\s*\{[^}]*opacity:/);
+      expect(body, `${name} の 100%`).toMatch(/100%\s*\{[^}]*opacity:/);
+    }
   });
 });

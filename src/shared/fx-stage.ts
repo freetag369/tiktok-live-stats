@@ -57,6 +57,14 @@ export const BANNER_QUEUE_MAX = 64;
  * 飢餓弁。舞台が空いたとき既定ではカットイン(持ち越しキュー)を優先するが、
  * 45 秒級の全面カットが連続すると順番待ちのバナーが延々と後回しになる。
  * 最古がこれ以上待っていたら、その1枚だけ先に出す。
+ *
+ * 「その1枚だけ」は `lastStarveServeMs`(前回発火の時刻ラッチ)で担保する。
+ * ≤v0.7.2 は無状態の年齢判定だけだったため、バナー流入が排出速度
+ * (約 0.51 件/秒)を超えると先頭が常に 8 秒超えになり **毎回 'banner' に
+ * ラッチして drain が全死**した — 満タン/ストック着弾(pendingStrike)は
+ * drain の最下位フォールスルーでしか消化されないので、渋滞中の配信では
+ * 「ゲージは溜まるのに演出が一切出ない」となる(diag.log の
+ * 「バナーの順番待ちが渋滞」がその足跡)。発火はこの窓につき1回まで。
  */
 export const BANNER_STARVE_MS = 8000;
 
@@ -115,6 +123,16 @@ export function clampBannerEndAt(curEndAt: number, nowMs: number): number {
   return Math.min(curEndAt, nowMs + BANNER_LATCH_MAX_AHEAD_MS);
 }
 
+/**
+ * 飢餓弁の発火時刻の後方ステップ対策(clampBannerEndAt と同型・短縮方向のみ —
+ * 時計が単調な限りは恒等関数)。発火時刻は「now を書く」だけなので正当な値は
+ * 常に過去 — 未来に居るのは時計の後方ステップだけで、放置すると弁がステップ幅
+ * ぶん閉じ続ける(= 渋滞中のバナーがその間1枚も流れない)。
+ */
+export function clampStarveServedAt(curMs: number, nowMs: number): number {
+  return Math.min(curMs, nowMs);
+}
+
 /** pickStageNext の入力。 */
 export interface StagePick {
   /** 持ち越しキュー(達成 / ブースト / 帯域 / ルーレット / 着弾)に中身があるか。 */
@@ -124,18 +142,31 @@ export interface StagePick {
   /** 順番待ちの最古が積まれた時刻。空なら null。 */
   oldestQueuedAtMs: number | null;
   nowMs: number;
+  /**
+   * 飢餓弁が最後にバナーを通した時刻。0 = 未発火(遥か過去)。呼び出し側は
+   * 実際にバナーを供給した瞬間だけ now を書き、後方ステップは
+   * clampStarveServedAt で引き戻すこと。
+   */
+  lastStarveServeMs: number;
 }
 
 /**
  * 舞台が空いた瞬間に何を出すか。**既定はカットイン優先** — 持ち越しキューは
  * 浅く(PENDING_BANDS_MAX=4 / pendingBoosts 2)、溢れると「値だけ動いて演出が
  * 出ない」最悪の見え方になるので、待たせる実害が大きいのはこちら。
- * バナー側は飢餓弁でしか割り込ませない。
+ * バナー側は飢餓弁でしか割り込ませず、発火は BANNER_STARVE_MS の窓につき
+ * 1回まで(前回発火からの経過も同じ定数で判定)— 渋滞が続いても drain と
+ * バナーが交互に番を得る。
  */
 export function pickStageNext(s: StagePick): StageNext {
   const queued = s.queuedCount > 0;
   if (!s.hasDrain) return queued ? 'banner' : 'idle';
-  if (queued && s.oldestQueuedAtMs != null && s.nowMs - s.oldestQueuedAtMs >= BANNER_STARVE_MS) {
+  if (
+    s.nowMs - s.lastStarveServeMs >= BANNER_STARVE_MS && // 弁の再発火窓(1発/窓)
+    queued &&
+    s.oldestQueuedAtMs != null &&
+    s.nowMs - s.oldestQueuedAtMs >= BANNER_STARVE_MS
+  ) {
     return 'banner';
   }
   return 'drain';

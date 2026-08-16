@@ -89,13 +89,29 @@ describe('appendChallengeLog — watermark', () => {
     expect(b.log.map((e) => e.id)).toEqual([3, 2, 1]);
   });
 
-  it('worker 再起動で id が 1 に戻っても凍らない(巻き戻り検知)', () => {
+  it('worker 再起動で id が 1 に戻っても凍らない(呼び出し側が lastId=null で再開する)', () => {
     const a = appendChallengeLog([], state([fx({ id: 40 })]), null);
     expect(a.lastId).toBe(40);
-    // worker が作り直され id が振り直された
-    const b = appendChallengeLog(a.log, state([fx({ id: 2, kind: 'follow', amount: 10 })]), a.lastId);
+    // worker が作り直され id が振り直された。追従は liveStore の workerEpoch が
+    // watermark を白紙(null)に戻すことで行う — 関数側で id の大小から推測しない。
+    const b = appendChallengeLog([], state([fx({ id: 2, kind: 'follow', amount: 10 })]), null);
     expect(b.log[0]).toMatchObject({ id: 2, kind: 'follow' });
     expect(b.lastId).toBe(2);
+  });
+
+  it('古いスナップショットが後着しても行を重複させず watermark も下げない', () => {
+    // delta は rAF コアレスで遅延反映、press RPC の返り値は即時反映なので逆転する。
+    // かつては「lastId > maxId = worker 再起動」と誤検知して 0 に倒し、同じギフトの
+    // 行が二度積まれていた(演出の二重再生と同じ根)。
+    const a = appendChallengeLog(
+      [],
+      state([fx({ id: 12, kind: 'gift', amount: 5 }), fx({ id: 11, kind: 'follow', amount: 10 })]),
+      null
+    );
+    expect(a.log.map((e) => e.id)).toEqual([12, 11]);
+    const stale = appendChallengeLog(a.log, state([fx({ id: 11, kind: 'follow', amount: 10 })]), a.lastId);
+    expect(stale.log).toBe(a.log); // 参照ごと据え置き = 1行も足さない
+    expect(stale.lastId).toBe(12);
   });
 
   it(`${CHALLENGE_LOG_MAX} 件を超えたら古い行から捨てる`, () => {

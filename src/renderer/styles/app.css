@@ -1213,6 +1213,51 @@ pre.doc {
   padding: 6px 0;
   border-bottom: 1px solid var(--line-soft);
 }
+/**
+ * 全面カットの絞り込みツールバー。既定42行あるセクションの頭に貼り付いて、
+ * どこまでスクロールしても検索し直せるようにする。
+ *
+ * スクロールの親は .screen(overflow:auto)なので top:0 でその上端に止まる。
+ * 左右の負マージンは .card の padding(14px)を食い潰す分 — これが無いと
+ * 下を流れる行の端がツールバーの脇から覗く。background は必ず不透明トークン
+ * (.card の地と同じ --bg-1)にすること。透過だと行が透けて読めなくなる。
+ */
+.fullcut-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  gap: 10px;
+  margin: 0 -14px 4px;
+  padding: 8px 14px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+}
+/**
+ * 全面カットの1行。.challenge-rule(3列)を流用していたが、この行だけ子が5つ
+ * あって最後の操作群が勝手に次段へ回り込んでいた。列を明示して1行1段に戻す。
+ *
+ * align-items:start …… ギフト名セルだけ下に「完全一致」が付いて2段になる。
+ * center のままだと他の列がその分沈んでラベルの高さが揃わない。
+ */
+.fullcut-rule {
+  display: grid;
+  grid-template-columns: 22px 110px 150px 100px minmax(0, 1fr);
+  gap: 6px;
+  align-items: start;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+/* 操作群(動画・秒数・モニター・有効・削除)。幅が足りないときだけ折り返す。 */
+.fullcut-rule > .row {
+  flex-wrap: wrap;
+}
+/* 判定順の通し番号。ラベル行の高さ分だけ下げて入力欄の頭と目線を合わせる。 */
+.fullcut-no {
+  font-size: 11px;
+  text-align: right;
+  padding-top: 22px;
+}
+
 /* いいね進捗のミニバー(モニターの LikeGauge の縮小版・演出なし) */
 .challenge-like-mini {
   position: relative;

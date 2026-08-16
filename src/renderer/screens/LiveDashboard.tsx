@@ -573,6 +573,8 @@ function ChallengeCard(): React.JSX.Element | null {
   // idle に戻っても delta は来ない — 取り直さないと「running 表示のまま押しても
   // 無反応」「idle のまま PUSH が灰色固着」の両方が起きる。
   const workerState = useLive((s) => s.workerState);
+  /** worker の世代。再起動で effect の id が振り直されるので SE の watermark を戻す。 */
+  const workerEpoch = useLive((s) => s.workerEpoch);
   useEffect(() => {
     if (!enabled) return;
     const refetch = (): void => {
@@ -601,6 +603,9 @@ function ChallengeCard(): React.JSX.Element | null {
     volume: settings?.challenge.seVolume ?? 70,
     sounds: settings?.challenge.seSounds,
     volumes: settings?.challenge.seVolumes,
+    // worker 再起動で id が振り直されたら watermark を白紙へ。**渡さないと
+    // 再起動後に無音のまま固着する**(watermark が天井に残るため)。
+    epoch: workerEpoch,
   });
 
   // ホットキー(F9)・物理USBボタン・モニター窓の Space から押されたときも
@@ -673,8 +678,11 @@ function ChallengeCard(): React.JSX.Element | null {
   const running = st === 'running';
   const achieved = st === 'achieved';
   useNowTick(running);
+  // press 行は表示しない(連打でログが埋まり、いいね到達などの節目が流れてしまう)。
+  // データとしては積んだまま、描画時にだけ除く — hideRouletteResultInLog と同じ流儀。
+  const visibleLog = log.filter((e) => e.kind !== 'press');
   // 新着ログは上に積まれる。ユーザーが遡っている間は追従しない。
-  const logRef = useStickyTop(log[0]?.id);
+  const logRef = useStickyTop(visibleLog[0]?.id);
 
   if (!enabled || !settings) return null;
 
@@ -751,12 +759,12 @@ function ChallengeCard(): React.JSX.Element | null {
 
       {/* 履歴。worker のリングバッファは12件で消えるので、renderer 側に積み直した
           challengeLog(最大50件)を出す。ここだけが「後から辿れる」唯一の場所。 */}
-      {log.length > 0 ? (
+      {visibleLog.length > 0 ? (
         <div className="ch-log" ref={logRef}>
           {/* マスクは描画時に読む(ログ行へ焼き込まない)— like 行の likeEvery とは
               逆の判断。伏せるかどうかはイベントの性質ではなく表示の好みで、
               企画のあとにスイッチを切って答え合わせできるほうが目的に合う。 */}
-          {log.map((e) => (
+          {visibleLog.map((e) => (
             <ChallengeLogRow key={e.id} e={e} maskRoulette={settings.challenge.hideRouletteResultInLog} />
           ))}
         </div>

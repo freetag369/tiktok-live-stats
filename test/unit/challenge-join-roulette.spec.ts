@@ -150,6 +150,8 @@ describe('ChallengeEngine — 入室ルーレット', () => {
     expect(fx.rouletteReels).toBe(1);
     expect(fx.rouletteSegments).toEqual(DEFAULT_JOIN_ROULETTE.segments.map((x) => x.amount));
     expect(fx.rouletteLabel).toBe(DEFAULT_JOIN_ROULETTE.label);
+    // モニターはこの印で短縮と超焦らしカウントを免除する(常にフル尺の契約)。
+    expect(fx.rouletteJoin).toBe(true);
     expect(fx.nickname).toBe('viewer-j1');
     expect(fx.valueAfter).toBe(s.value);
     // ギフトではないので gift 系フィールドは載せない(モニターは 🎰 プレースホルダ)。
@@ -302,6 +304,20 @@ describe('ChallengeEngine — 入室ルーレット', () => {
     expect(fx.rouletteLabel).toBe('初見さん');
     expect(fx.roulettePattern).toBe('kick');
     expect(fx.rouletteSegments).toEqual(DEFAULT_JOIN_ROULETTE.segments.map((x) => x.amount));
+    // 本番(join 経路)と effect の形を揃える — 試写でも入室ルーレットは
+    // 短縮・超焦らしカウントの対象外として再生される。
+    expect(fx.rouletteJoin).toBe(true);
+  });
+
+  it('testEffect(行指定)の試写には rouletteJoin が載らない(ギフト扱い)', () => {
+    const base = structuredClone(DEFAULT_CHALLENGE);
+    const c = { ...base, enabled: true };
+    const e = jrEngine(c);
+    e.start();
+    e.testEffect({ kind: 'roulette', pattern: 'kick' });
+    const fx = e.get().recentEffects[0]!;
+    expect(fx.kind).toBe('roulette');
+    expect(fx.rouletteJoin).toBeUndefined();
   });
 
   it('ギフトルーレットとは独立に数える(両方有効でも spins は経路ごとに増える)', () => {

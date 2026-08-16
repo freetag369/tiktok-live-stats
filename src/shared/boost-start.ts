@@ -60,10 +60,21 @@ export type BoostStartPlan =
   | { action: 'skip'; reason: 'ended' | 'tail' }
   | { action: 'full' }
   | {
-      /** 途中参加。起動カットインは必ず捨てる(一番長く、かつ「これから始まる」の予告なので)。 */
+      /** 途中参加。前置きの残りだけを段の実尺どおりに組み直す。 */
       action: 'resume';
       phase: 'count' | 'window';
-      /** カウントダウン段の残り尺。phase==='window' なら 0。 */
+      /**
+       * 起動カットイン段の残り尺。前置きの残りが**カウント段の実尺を超えた**ぶんが
+       * ここに入る(= まだ咆哮の途中)。phase==='window' なら 0。
+       *
+       * これを持たずに前置きの残りを丸ごと countMs へ入れていたのが v0.7.2 の
+       * バグ — カウント素材は 3.0 秒固定で `<video loop>` は window 段でしか
+       * 立たないため、段が 3 秒を超えると **3・2・1 が終わってから静止フレームで
+       * 数秒待つ**ことになり、「1 がタップ開始と同期する」契約
+       * (challenge.ts の TAP_BOOST_COUNT_MS)が壊れていた。
+       */
+      introMs: number;
+      /** カウントダウン段の残り尺。**段の実尺(countMs)を超えない**。phase==='window' なら 0。 */
       countMs: number;
       /** 開始時点から数えた残り総尺(= endsAt - nowMs)。startBoostFx の totalMs に渡す。 */
       remainingMs: number;
@@ -101,9 +112,19 @@ export function planBoostStart(t: QueuedBoostTiming, nowMs: number): BoostStartP
     preRemaining >= BOOST_RESUME_COUNT_MIN_MS &&
     remaining - preRemaining >= BOOST_RESUME_MIN_MS
   ) {
-    return { action: 'resume', phase: 'count', countMs: preRemaining, remainingMs: remaining };
+    // 前置きの残りは**後ろの段から埋める** — カウント段は実尺を超えず、
+    // 余った先頭ぶんが起動カットインの残りになる。守るのは「ウィンドウが開く時刻」
+    // (= preRemaining の合計)で、そこは分け方に依らず不変。
+    const countMs = Math.min(count, preRemaining);
+    return {
+      action: 'resume',
+      phase: 'count',
+      introMs: preRemaining - countMs,
+      countMs,
+      remainingMs: remaining,
+    };
   }
-  return { action: 'resume', phase: 'window', countMs: 0, remainingMs: remaining };
+  return { action: 'resume', phase: 'window', introMs: 0, countMs: 0, remainingMs: remaining };
 }
 
 /** ChallengeEffect → QueuedBoostTiming。フィールド対応の唯一の権威。 */

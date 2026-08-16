@@ -54,11 +54,24 @@ describe('freshChallengeEffects — 演出 watermark の共有規約', () => {
     expect(r.play.map((e) => e.id)).toEqual([2]);
   });
 
-  it('id の巻き戻り(worker 再起動)を検知したら 0 に倒して追従する', () => {
+  it('watermark は後退しない — 古いスナップショットが後着しても再生し直さない', () => {
+    // press RPC の返り値(setChallenge が即時反映)が、あとから来た delta より後に
+    // 着弾する逆転。かつてはこれを「worker 再起動で id が振り直された」と誤検知して
+    // 0 に倒し、リング内の鮮度ゲート内 effect を丸ごと再生し直していた
+    // (= ルーレット/ギフトが贈られた個数を超えて再生される主因)。
     const effects = [fx(2), fx(1)];
     const r = freshChallengeEffects(effects, 100, NOW);
-    expect(r.next).toBe(2);
-    expect(r.play.map((e) => e.id)).toEqual([1, 2]);
+    expect(r.play).toEqual([]);
+    expect(r.next).toBe(100); // 下げない
+  });
+
+  it('worker 再起動の追従は呼び出し側の lastPlayed=null で行う(workerEpoch)', () => {
+    // 再起動直後は「全件再生済みに倒す」— そのあとの新しい id が普通に再生される。
+    const first = freshChallengeEffects([fx(2), fx(1)], null, NOW);
+    expect(first.next).toBe(2);
+    expect(first.play).toEqual([]);
+    const second = freshChallengeEffects([fx(3), fx(2), fx(1)], first.next, NOW);
+    expect(second.play.map((e) => e.id)).toEqual([3]);
   });
 
   it('リング溢れ(1 delta に上限+1件以上)は古い方から欠番になるが、watermark は前進し新しい分は再生される', () => {
@@ -75,11 +88,13 @@ describe('freshChallengeEffects — 演出 watermark の共有規約', () => {
     expect(r.play.map((e) => e.id)).toEqual(Array.from({ length: n }, (_, i) => i + 2));
   });
 
-  it('空配列でも壊れない(reset 後は巻き戻り扱いで 0 に倒す — 従来実装と同じ)', () => {
+  it('空配列でも壊れない — reset 直後でも watermark は下げない', () => {
     expect(freshChallengeEffects([], null, NOW)).toEqual({ next: 0, play: [] });
-    // reset で recentEffects は消えるが id カウンタは続くので、0 に倒しても
-    // 次の effect(id は続き番号)は必ず watermark を越えて再生される。
-    expect(freshChallengeEffects([], 5, NOW)).toEqual({ next: 0, play: [] });
+    // reset で recentEffects は消えるが worker の id カウンタは続く(nextEffectId は
+    // start/stop/reset でリセットされない)。据え置きで正しく、次の effect は必ず
+    // watermark を越えて再生される。0 に倒すと、直後に古いスナップショットが後着した
+    // ときにリング内が丸ごと再生され直す。
+    expect(freshChallengeEffects([], 5, NOW)).toEqual({ next: 5, play: [] });
   });
 });
 

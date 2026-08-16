@@ -98,6 +98,11 @@ function openMonitor(): void {
   if (existing) {
     existing.focus();
     notifyMonitorState();
+    // 開いているのに worker 側の monitorOpen が false に食い違っていると、
+    // fxAllowed() が立たずカットインが「モニター未表示」で抑止され続ける。
+    // setMonitorOpen は冪等(同値なら no-op)なので、真実(=窓は開いている)を
+    // 毎回送り直して自己修復させる。
+    host?.send({ t: 'monitorOpen', open: true });
     return;
   }
   const mon = openMonitorWindow(
@@ -457,9 +462,13 @@ async function boot(): Promise<void> {
   host = new WorkerHost({
     onState: (s, detail) => {
       win?.webContents.send(CH_WORKER_STATE, s);
+      // モニター窓にも配る — MonitorView は ready への遷移で fxCaps を即時再申告する
+      // (再送がモニターの 120 秒ポーリング頼みだった頃は、worker の起動レース/
+      // 再起動から最大2分、カットインが全部「モニター未表示/動きの抑制」で
+      // 拒否されていた — dev 起動直後の実配信ログで実測した穴)。
+      getMonitorWindow()?.webContents.send(CH_WORKER_STATE, s);
       // worker 再起動で凍結許可(monitorOpen/fxCaps)は既定 false に戻る —
-      // 窓の開閉状態だけ main から再送する(fxCaps はモニターの 2 分ポーリングが
-      // そのうち再送するまで fail-open で、凍結が張られないだけ)。
+      // 窓の開閉状態は main から再送する(fxCaps は上記のモニター側 effect が再送)。
       if (s === 'ready') host?.send({ t: 'monitorOpen', open: getMonitorWindow() != null });
       if (s === 'dead') toast('error', `記録エンジンが停止しました。アプリを再起動してください。${detail ? `（${detail}）` : ''}`);
     },
