@@ -275,17 +275,20 @@ describe('凍結ドレイン中の例外耐性', () => {
   it('保留 op が throw しても残りの op は適用され、例外は呼び出し元へ抜けない', () => {
     let t = NOW;
     let boom = false;
-    const c = bandCfg({ initialValue: 1000, pressStep: 1 });
+    // 押下はもう保留キューを使わない(凍結を素通しして即時に効く)ので、保留 op は
+    // 視聴者由来のイベントで作る。ルーレットは**適用時に**乱数を引くので、そこを
+    // throw させれば「ドレイン中の1件だけが死ぬ」状況を素直に作れる。
+    const c = bandCfg({ initialValue: 1000 });
     const e = new ChallengeEngine(
+      () => c,
+      () => t,
       () => {
         if (boom) {
           boom = false;
           throw new Error('boom');
         }
-        return c;
+        return 0; // 出目は常に先頭(+5)
       },
-      () => t,
-      Math.random,
       Math.random,
       () => undefined
     );
@@ -293,16 +296,17 @@ describe('凍結ドレイン中の例外耐性', () => {
     e.setFxCaps(true);
     e.start();
     e.handleEvent(gift({ diamonds: 30 })); // band1: 6秒凍結
-    e.press(); // 保留 op 1(適用時に getConfig() を読む)
-    e.press(); // 保留 op 2
-    expect(e.get().value).toBe(1030); // トリガー自身は即時適用、press は凍結中で保留
+    const heartMe = (): GiftEvent => gift({ giftId: '7934', giftName: 'Heart Me', diamonds: 1 });
+    e.handleEvent(heartMe()); // 保留 op 1(適用時に rand を引く)
+    e.handleEvent(heartMe()); // 保留 op 2
+    expect(e.get().value).toBe(1030); // トリガー自身は即時適用、ルーレットは保留
     t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS;
-    boom = true; // 次の getConfig() = op1 の適用時に throw
+    boom = true; // 次の rand = op1 の適用時に throw
     const drained = e.drainIfChanged();
     expect(drained).not.toBeNull();
     // op1 は死んだが op2 は適用された(従来は例外が伝播し op2 も孤児化していた)
-    expect(drained!.stats.presses).toBe(1);
-    expect(drained!.value).toBe(1029);
+    expect(drained!.stats.rouletteSpins).toBe(1);
+    expect(drained!.value).toBe(1035);
     expect(drained!.fxFreezeUntilMs).toBeNull();
   });
 });

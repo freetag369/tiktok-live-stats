@@ -1235,7 +1235,20 @@ export interface ChallengeEffect {
   boostMultiplier?: number;
   /** kind='boost-end': 演出中に溜めたタップ回数。amount = -(tapCount × pressStep × multiplier)。 */
   boostTapCount?: number;
-  /** kind='boost-start': タップウィンドウの期限(ms)。前置き演出の後に閉じる。 */
+  /**
+   * kind='boost-start': タップウィンドウの期限(ms)。
+   *
+   * **これは「アーム期限切れで強制発動した場合」のフォールバックのタイムライン**
+   * (atMs + BOOST_ARM_MAX_MS + 前置き + ウィンドウ)であって、実際の期限ではない。
+   * 実際の期限はモニターが challenge.boostCue を撃った時刻から決まる(ChallengeState.boost)。
+   *
+   * この焼き方が **planBoostStart を1行も変えずにアームを成立させている**:
+   * 判定の原点は endsAt - fxDurationMs = atMs + BOOST_ARM_MAX_MS なので、
+   * アーム中は elapsed が負 → 常に full(= 起動カットインから満尺)。期限を過ぎると
+   * elapsed が正になり従来どおり full → resume → skip へ連続的に劣化し、
+   * その時点では worker も同じ時刻で自走しているので**この値がそのまま真になる**。
+   * 一見の不整合に見えるが**直してはいけない** — 詳細は shared/boost-start.ts の冒頭。
+   */
   boostEndsAtMs?: Ms;
   /**
    * kind='boost-start': 起動カットイン(咆哮)の尺(ms)。0 = この段なし
@@ -1349,6 +1362,34 @@ export type ChallengeTestEffectSpec =
    */
   | { kind: 'roulette'; rouletteId?: string; pattern?: RoulettePattern; join?: true }
   | { kind: 'achieved' };
+
+/**
+ * challenge.boostCue のパラメータ。フィーバー(タップブースト)は worker が
+ * ギフト着弾で**予約(arm)するだけ**で、タップ窓はモニターが起動カットインを
+ * 実際に再生し始めた瞬間に開く — この型がその合図。
+ *
+ * なぜ必要か: worker の絶対時刻とモニターの実再生開始は最大 BOOST_ARM_MAX_MS
+ * ずれる(舞台が他演出で塞がっている間 pendingBoosts に積まれるため)。
+ * 従来はその差を「起動カットインを削る」ことで吸収していた(planBoostStart の
+ * resume)。合図で窓の原点をモニター側に移すと、5 秒の咆哮が構造的に必ず満尺で出る。
+ */
+export type ChallengeBoostCue =
+  | {
+      /** 起動カットインの再生を開始した = タップ窓を開いてよい。 */
+      action: 'start';
+      /** 対象の boost-start effect の id。アーム中のものと一致しなければ無視される。 */
+      effectId: number;
+      /** モニターが再生を開始した時刻(Date.now())。worker 側で now を超えない範囲に丸める。 */
+      startedAtMs: Ms;
+      /** 実際に再生する前置きの尺(起動カットイン + カウントダウン)。 */
+      preMs: number;
+    }
+  | {
+      /** この予約は再生されない(キュー溢れ・開始不可・モニター再読み込み)。 */
+      action: 'drop';
+      /** 対象の boost-start effect の id。**0 = アーム中のものを種類を問わず解放**。 */
+      effectId: number;
+    };
 
 export interface ChallengeStats {
   presses: number;
@@ -1511,6 +1552,19 @@ export interface ChallengeState {
    * ダッシュボードの表示・テスト用 — モニターは自前でクリップ再生中を知っている。
    */
   fxFreezeUntilMs?: number | null;
+  /**
+   * 押下で**1タップずつ即時に減らした**累計。ラン中は単調増加、start/reset で 0。
+   * 0 のときはキーごと省く(未定義 = 0)。
+   *
+   * モニターが「カットイン据え置き中でもタップぶんだけ数字を下げる」ために読む
+   * (shared/fx-hold.ts)。押下は凍結を素通しして値へ即時に効くが、据え置き
+   * (heldValue)は演出の開始時点で固定されるため、この累計の増分ぶんだけ
+   * 据え置きも下げないと「押しても数字が動かない」に戻る。
+   *
+   * **ブースト清算(settleBoost)ぶんは含めない** — あちらはロールアップ発表で
+   * 見せる契約なので、追従させると発表前に答えが漏れる。
+   */
+  pressDownTotal?: number;
   /**
    * タップブースト中だけ載る。press RPC は session.nudgeChallenge を通るので、
    * タップのたびに即時 delta で配られる(2Hz を待たない)— モニターのタップ

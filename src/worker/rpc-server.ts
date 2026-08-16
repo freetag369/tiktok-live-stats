@@ -23,6 +23,18 @@ export interface RpcDeps {
 }
 
 /**
+ * 遅い RPC の警告しきい値(ms)と、同じ method を連続で吐かないスロットル。
+ *
+ * worker は単一スレッド + 同期 sqlite なので、1本の RPC が長引くとその間
+ * `challenge.press` は**配送すらされない** = そのままボタンが効かない時間になる。
+ * loop-lag は「何 ms 止まったか」しか出さず**どの RPC が犯人か**が分からなかったので、
+ * ここで method 名と実測を1行だけ残す(閾値+スロットルの流儀は batcher の
+ * FLUSH_WARN_MS と同じ)。犯人が分かってから初めて分割・キャッシュを考えること。
+ */
+const RPC_SLOW_MS = 250;
+const RPC_SLOW_EVERY_MS = 10_000;
+
+/**
  * Mission config: a user-editable JSON file, because TikTok revises reward
  * thresholds and a hardcoded 25 would quietly become wrong. A broken file falls
  * back to the bundled default and reports why, rather than taking the app down.
@@ -114,6 +126,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       // caps が落ちて凍結を即時解除した場合だけ状態が変わる(nudge で配る)。
       if (challenge.setFxCaps(p.bandFx)) session.nudgeChallenge();
     },
+    'challenge.boostCue': async (p) => {
+      // **合体(nudgeChallengeCoalesced)は使えない** — タップ窓が開くより先に
+      // ChallengeState.boost がモニターとダッシュボードへ届いている必要がある。
+      if (challenge.boostCue(p)) session.nudgeChallenge();
+    },
 
     'q.viewerTable': async (p) => store.getSessionViewerTable(p.sessionId, p),
     'q.viewer': async (p) => store.getViewer(p.userId, p.sessionId),
@@ -166,17 +183,31 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
     },
   };
 
+  /** method ごとの直近警告時刻。1本の重いクエリで診断ログを埋めないためのスロットル。 */
+  const slowWarnedAt = new Map<string, number>();
+
   async function handle(req: RpcRequest): Promise<RpcResponse> {
     const h = (handlers as Record<string, ((p: unknown) => Promise<unknown>) | undefined>)[req.method];
     if (!h) {
       return { id: req.id, ok: false, error: { code: 'VALIDATION', message: `未対応のメソッド: ${req.method}` } };
     }
+    const startedMs = Date.now();
     try {
       const result = await h(req.params);
       return { id: req.id, ok: true, result } as RpcResponse;
     } catch (e) {
       const message = (e as Error)?.message ?? String(e);
       return { id: req.id, ok: false, error: { code: 'DB', message } };
+    } finally {
+      // 成否を問わず測る — 落ちたクエリでもスレッドは同じだけ止まっている。
+      const dt = Date.now() - startedMs;
+      if (dt >= RPC_SLOW_MS) {
+        const last = slowWarnedAt.get(req.method) ?? 0;
+        if (startedMs + dt - last >= RPC_SLOW_EVERY_MS) {
+          slowWarnedAt.set(req.method, startedMs + dt);
+          console.warn(`[worker] RPC ${req.method} に ${dt}ms かかりました(この間ボタンの操作は届きません)`);
+        }
+      }
     }
   }
 
@@ -200,6 +231,7 @@ type HandlerMap = {
   'challenge.toggleRank': () => Promise<D.ChallengeState>;
   'challenge.testEffect': (p: D.ChallengeTestEffectSpec) => Promise<void>;
   'challenge.fxCaps': (p: { bandFx: boolean }) => Promise<void>;
+  'challenge.boostCue': (p: D.ChallengeBoostCue) => Promise<void>;
   'q.viewerTable': (p: { sessionId: number | null } & D.ViewerTableQuery) => Promise<unknown>;
   'q.viewer': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;
   'q.recallCard': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;

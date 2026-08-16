@@ -1,5 +1,6 @@
 import type { NormalizedEvent, NormViewer, UserId } from '@shared/events';
 import type {
+  ChallengeBoostCue,
   ChallengeConfig,
   ChallengeEffect,
   ChallengeFxQueueItem,
@@ -18,6 +19,8 @@ import {
   CHALLENGE_FX_QUEUE_MAX,
   CHALLENGE_MONITOR_TOP_N,
   CHALLENGE_RESULT_TOP_N,
+  BOOST_ARM_MAX_MS,
+  BOOST_COMMIT_MAX_LAG_MS,
   GIFT_FX_FREEZE_MARGIN_MS,
   GIFT_FX_FREEZE_MAX_MS,
   GIFT_FX_PENDING_OPS_MAX,
@@ -223,6 +226,24 @@ export class ChallengeEngine {
   private likeFxPending = 0;
   private likeFxLastMs = 0;
   /**
+   * 凍結中に即時適用した押下の、effect 未表示ぶんの合算。
+   *
+   * 押下は凍結を素通しして値へ即時に効く(press のコメント参照)が、effect まで
+   * 1タップ1件で積むと、連打がリングバッファ(CHALLENGE_EFFECTS_MAX)を押し流して
+   * 待っているカットイン/ルーレットが配られる前に落ちる。さらに押下 SE と簡易演出が
+   * カットインの音と絵に重なる。よって値だけ先に動かし、演出はここへ畳んで
+   * 解除後に1件だけ出す(likeFxPending / fanStampFx と同じ流儀)。
+   */
+  private pendingPressFx: { amount: number; count: number } | null = null;
+  /**
+   * 押下で**1タップずつ即時に減らした**累計。ラン中は単調増加で start/reset のみ 0。
+   *
+   * モニターが「カットイン据え置き中でもタップぶんだけ数字を下げる」ために読む
+   * (shared/fx-hold.ts)。ブースト清算(settleBoost)ぶんは**含めない** — あちらは
+   * ロールアップ発表で見せるので、追従させると発表前に答えが漏れる。
+   */
+  private pressDownTotal = 0;
+  /**
    * お助け(ファンスタンプ)の合算窓の期限。null = 窓なし(次の1件は「先頭」)。
    *
    * LIKE_FX_WINDOW_MS(固定長)と違い**期限を絶対時刻で直接持つ**のは、窓長が
@@ -276,6 +297,37 @@ export class ChallengeEngine {
    * カウントが止まる事故を作らず、5倍のゲーム性だけ残す。
    */
   private boostPlain = false;
+  /**
+   * 発動予約(アーム)。ギフト着弾で組み、**モニターが起動カットインを再生し始めた
+   * 合図(boostCue)でコミット**してタップ窓を開く。こうすると映像とタップ計数が
+   * 必ず揃い、planBoostStart の resume(起動カットイン破棄)が正常系から消える。
+   *
+   * 不変条件(テストで固定):
+   *  - armedBoost !== null ⟹ boostUntilMs === null(窓はまだ開いていない)
+   *  - armedBoost !== null ⟹ fxFreezeUntilMs !== null(暫定凍結を必ず張る)
+   * 後者は**連打コンボの直列化が依存している** — activateBoost が同期的に凍結を
+   * 張るおかげで、1メッセージ内の2本目以降が applyOrQueue で pendingOps へ落ちる。
+   * ここで凍結を張らないと全部が即時発動して互いを強制清算し合う。
+   *
+   * プレーンモード(fxAllowed()=false)はアームしない — 映像が無いので待つ理由がなく、
+   * 「カットインも溜めも無し、倍率だけ」の契約どおり即発動する。
+   */
+  private armedBoost: {
+    /** 対応する boost-start effect の id(合図の照合キー)。 */
+    id: number;
+    /** ギフト着弾時刻(診断とフォールバックの原点)。 */
+    atMs: number;
+    /** atMs + BOOST_ARM_MAX_MS。ここを過ぎたら worker が自走する。 */
+    deadlineMs: number;
+    /** 到着時点で確定した焼き込み(activateBoost と同じ規約)。 */
+    introMs: number;
+    countMs: number;
+    durationMs: number;
+    resultMs: number;
+    resultClip: string;
+    multiplier: number;
+    pressStep: number;
+  } | null = null;
   /**
    * ▶テスト実演(testEffect 'tapBoost')のタップウィンドウ。null = 実演なし。
    * testEffect は値・統計・凍結に触れない契約だが、タップカウンタの実源が
@@ -383,6 +435,8 @@ export class ChallengeEngine {
     this.resetFanStampFx();
     // 前ラン由来の保留分を新ランへ持ち込まない(値は initialValue で始める規約)。
     this.pendingOps = [];
+    this.pendingPressFx = null;
+    this.pressDownTotal = 0;
     this.fxFreezeUntilMs = null;
     // ブーストも清算せず破棄(pendingOps と同じ判断 — 新ランは素の状態で始める)。
     this.clearBoost();
@@ -406,6 +460,10 @@ export class ChallengeEngine {
     // status 遷移で break しなくなり、取りこぼしが消える)。
     this.stopping = true;
     try {
+      // まだ映像が始まっていない予約は無言で捨てる。タップも値も1つも動いて
+      // いないので清算するものが無く、停止後にフィーバーを始める意味も無い
+      // (settleBoost は boostUntilMs null で早期 return するのでここが唯一の出口)。
+      this.armedBoost = null;
       // 溜めたタップを闇に落とさない — stop は「値を残す」規約なので、保留 op の
       // 強制適用より先にブーストを清算する(boost-end が保留分より先に並ぶ)。
       this.settleBoost(this.now(), true);
@@ -416,6 +474,9 @@ export class ChallengeEngine {
     this.status = 'idle';
     // 停止後に合算待ちの演出が漏れないように捨てる(値には適用済み)。
     this.likeFxPending = 0;
+    // 押下も同じ — 値は適用済みなので、停止したあとに押下音だけ鳴らさない
+    // (pressDownTotal は「ランの累計」なので stop では残す)。
+    this.pendingPressFx = null;
     this.resetFanStampFx();
     this.clearTestBoost();
     this.dirty = true;
@@ -425,6 +486,8 @@ export class ChallengeEngine {
   reset(): ChallengeState {
     // 直後に initialValue で上書きするので保留分は適用せず捨てる。
     this.pendingOps = [];
+    this.pendingPressFx = null;
+    this.pressDownTotal = 0;
     this.fxFreezeUntilMs = null;
     this.clearBoost();
     this.clearTestBoost();
@@ -511,31 +574,73 @@ export class ChallengeEngine {
     this.flushFxFreeze(nowMs);
     // タップウィンドウ中のタップは applyOrQueue に入れない — シネマティック
     // モードでは「数えるだけ」(値・統計・effect は settleBoost が一括で確定する。
-    // effect を積まないので ring 12件も食い潰さない)、プレーンモードでは即時
-    // ×倍率。起動カットイン中(boostStartMs 前)はここを通らず、通常の凍結
-    // キューへ落ちる(3/2/1 の前のタップは倍にならない)。
+    // effect を積まないので ring を食い潰さない)、プレーンモードでは即時×倍率。
+    // 起動カットイン中(boostStartMs 前)はここを通らず、下の専用ブロックで
+    // 凍結キューへ落ちる(3/2/1 の前のタップは倍にも即時にもならない)。
     if (this.boostUntilMs !== null && nowMs >= this.boostStartMs && nowMs < this.boostUntilMs) {
       if (this.boostPlain) {
         const step = this.boostPressStep * this.boostMultiplier;
+        // 1タップずつ即時に減る経路なので pressDownTotal に載せる(清算方式の
+        // シネマティックとは逆 — あちらは settleBoost の発表で見せるので載せない)。
+        this.pressDownTotal += Math.min(step, this.value);
         this.value = Math.max(0, this.value - step);
         this.stats.presses++;
         this.pushEffect({ kind: 'press', amount: -step, boostMultiplier: this.boostMultiplier, atMs: nowMs });
-        this.maybeAchieve(nowMs);
+        // 凍結中(モニターが途中で開いてカットインが走った等)は達成を見送る —
+        // 押下経路の達成は必ず演出明け(flushFxFreeze の末尾)に出す。
+        if (!this.isFxFrozen()) this.maybeAchieve(nowMs);
       } else {
         this.boostTapCount++;
       }
       this.dirty = true;
       return this.get();
     }
-    // 凍結中はキューへ(カウンタ一時停止の一貫性 — 数字は演出後に動く)。
-    this.applyOrQueue(() => {
-      const step = this.getConfig().pressStep;
-      this.value = Math.max(0, this.value - step);
+    // フィーバーの起動カットイン(咆哮 → 3・2・1)中だけは**従来どおり凍結キューへ**。
+    // 倍率が乗らないのは元からだが、ここは即時にもしない — 3・2・1 は「まだ押す
+    // 時間ではない」合図で、フライングで数字が動くと溜めの意味が消える。溜めたぶんは
+    // boost-end の後にドレインで通常適用される(取りこぼしはゼロ)。
+    if (this.boostUntilMs !== null && nowMs < this.boostStartMs) {
+      this.applyOrQueue(() => {
+        const introStep = this.getConfig().pressStep;
+        const introApplied = Math.min(introStep, this.value);
+        this.value -= introApplied;
+        this.stats.presses++;
+        this.pressDownTotal += introApplied;
+        this.pushEffect({ kind: 'press', amount: -introStep, atMs: this.now() });
+        this.maybeAchieve(this.now());
+        this.dirty = true;
+      });
+      return this.get();
+    }
+    // 押下は**凍結を素通しして即時に効く**(applyOrQueue に入れない)。保留キューへ
+    // 落としていた頃は、カットイン1本で最長 15 秒・連鎖で最大 45 秒ぶん数字が1も
+    // 動かず、配信者からはボタンが死んで見えた。走行中のタップは必ず届くのが約束。
+    // 演出(押下 SE・簡易演出)だけは凍結中まとめて pendingPressFx へ畳み、解除後に
+    // 1件だけ出す — カットインの音と絵に重ねない・リングを連打で押し流さないため。
+    const step = this.getConfig().pressStep;
+    // クランプ後の実減少量。pressDownTotal はモニターの据え置き追従が読むので、
+    // 「画面上で実際に減った量」と一致していなければならない。
+    const applied = Math.min(step, this.value);
+    if (this.isFxFrozen()) {
+      // 0 到達後は値も統計も動かさない。達成は凍結明け(flushFxFreeze の末尾)まで
+      // 待つ規約なので、その間の連打で presses だけが膨らむのを防ぐ
+      // (達成後の press が無視されるのと同じ扱い)。
+      if (this.value === 0) return this.get();
+      this.value -= applied;
       this.stats.presses++;
-      this.pushEffect({ kind: 'press', amount: -step, atMs: this.now() });
-      this.maybeAchieve(this.now());
+      this.pressDownTotal += applied;
+      const fx = (this.pendingPressFx ??= { amount: 0, count: 0 });
+      fx.amount += applied;
+      fx.count++;
       this.dirty = true;
-    });
+      return this.get();
+    }
+    this.value -= applied;
+    this.stats.presses++;
+    this.pressDownTotal += applied;
+    this.pushEffect({ kind: 'press', amount: -step, atMs: nowMs });
+    this.maybeAchieve(nowMs);
+    this.dirty = true;
     return this.get();
   }
 
@@ -1388,6 +1493,8 @@ export class ChallengeEngine {
       // 走行中も毎 delta で組み直すので順位はライブに動く(result は凍結値)。
       ...(this.rankShown ? { rankBoard: this.buildResult(this.now()) } : {}),
       fxFreezeUntilMs: this.fxFreezeUntilMs,
+      // 0 のときはキーごと省く(runRank と同じ「2Hz の delta を太らせない」規約)。
+      ...(this.pressDownTotal > 0 ? { pressDownTotal: this.pressDownTotal } : {}),
       // 空ならキーごと省く(runRank と同じ「2Hz の delta を太らせない」規約)。
       ...(fxQueue.length > 0 ? { fxQueue } : {}),
       // ブースト中だけ載せる(モニターのタップカウンタの唯一のソース)。press RPC は
@@ -1449,9 +1556,13 @@ export class ChallengeEngine {
       clearTimeout(this.freezeTimer);
       this.freezeTimer = null;
     }
-    if (this.fxFreezeUntilMs === null) return;
+    // アームの期限も**このタイマーが唯一の出口**。配信終了後は 2Hz tick も
+    // イベント入口も無いので、ここで見ないと予約が永久に解決しない。
+    if (this.fxFreezeUntilMs === null && this.armedBoost === null) return;
     // +25ms: flushFxFreeze の「期限ちょうど」比較を確実に越えてから発火する。
-    const delay = Math.max(0, this.fxFreezeUntilMs - this.now()) + 25;
+    // 早い方で起こす — 凍結の暫定期限はアーム期限より必ず後(前置き+ウィンドウぶん)。
+    const at = Math.min(this.fxFreezeUntilMs ?? Infinity, this.armedBoost?.deadlineMs ?? Infinity);
+    const delay = Math.max(0, at - this.now()) + 25;
     const t = setTimeout(() => {
       this.freezeTimer = null;
       this.flushFxFreeze(this.now());
@@ -1463,7 +1574,12 @@ export class ChallengeEngine {
       // ドレインまで到達した経路は末尾で既に張り直しているので、null ガードで
       // 二重張り(= onFreezeExpired が2回飛ぶ)を防ぐ。
       // 張り直しの delay は「残りのズレ + 25ms」なので、時計が追いつけば収束する。
-      if (this.fxFreezeUntilMs !== null && this.freezeTimer === null) this.armFreezeTimer();
+      if (
+        (this.fxFreezeUntilMs !== null || this.armedBoost !== null) &&
+        this.freezeTimer === null
+      ) {
+        this.armFreezeTimer();
+      }
       if (this.dirty) this.onFreezeExpired?.();
     }, delay);
     // worker の shutdown をこのタイマーが引き留めない(テストの後始末も同様)。
@@ -1508,6 +1624,12 @@ export class ChallengeEngine {
     // する — 見えない演出のためにタップを溜め続けない。凍結の即時解除より先に
     // 呼ぶこと(settle が保留 op のドレインより先に並ぶ)。
     this.settleBoost(this.now(), true);
+    // まだ映像が始まっていない予約は**プレーンモードで即発動**する(破棄しない)。
+    // ガードを通過できるのはアーム中も凍結を張っているから(armedBoost の doc 参照)。
+    // **強制清算より後に置くこと** — 前に置くと、いま開いたばかりの窓を
+    // 直後の settleBoost(force) が即座に閉じてしまう(実行中とアームは排他なので
+    // 順序を入れ替えても取りこぼしは起きない)。
+    this.plainCommitArmedBoost(this.now(), 'モニター閉 / 動きの抑制');
     this.fxFreezeUntilMs = this.now();
     this.flushFxFreeze(this.now());
     this.armFreezeTimer();
@@ -1519,6 +1641,38 @@ export class ChallengeEngine {
     if (this.monitorOpen === open) return false;
     this.monitorOpen = open;
     return this.applyFxCapsChange();
+  }
+
+  /**
+   * モニターの RPC(challenge.boostCue)から: アーム済みフィーバーの合図。
+   * 戻り値 = 状態が変わった(呼び出し側は nudge して delta を配ること — setFxCaps と同じ規約)。
+   *
+   * 'start' はモニターが起動カットインを**実際に再生し始めた**合図で、ここで
+   * タップ窓が開く。'drop' は「この予約は再生されない」の申告で、プレーンモードへ倒す。
+   * アームが無い/id が違う合図は黙って無視する(二重コミット・期限切れ後の
+   * 遅れた合図・別のフィーバーの合図はすべてここで冪等になる)。
+   */
+  boostCue(p: ChallengeBoostCue): boolean {
+    const a = this.armedBoost;
+    if (a === null) return false;
+    const nowMs = this.now();
+    if (p.action === 'drop') {
+      // effectId 0 = 「アーム中のものを種類を問わず解放」(モニターの再マウント時)。
+      if (p.effectId !== 0 && p.effectId !== a.id) return false;
+      this.plainCommitArmedBoost(nowMs, 'モニターが再生を見送った');
+      this.flushFxFreeze(nowMs);
+      return true;
+    }
+    if (p.effectId !== a.id) return false;
+    // startedAtMs はモニターの Date.now()。同一マシンの同じ時計だが RPC は
+    // renderer → main → worker の postMessage を挟むので少し過去になる。
+    // **now を超えさせないのが要** — 未来だとタップ窓が映像より後ろへずれて
+    // 開幕の押下を飲む。古すぎる側は時計の異常として切り上げる。
+    const startMs = Math.min(Math.max(p.startedAtMs, nowMs - BOOST_COMMIT_MAX_LAG_MS), nowMs);
+    // 前置きはモニターが実際に流す尺に従う(焼き込みを超えないようにだけ守る)。
+    const preMs = Math.min(Math.max(0, p.preMs), a.introMs + a.countMs);
+    this.commitBoost(a, startMs, preMs, true);
+    return true;
   }
 
   /** モニターの RPC(challenge.fxCaps)から: カットインを再生できるか。 */
@@ -1566,10 +1720,19 @@ export class ChallengeEngine {
     // GIFT_FX_FREEZE_MARGIN_MS 早く切れるので、凍結解除の時点では常に settle 済み
     // になり、boost-end effect の id < 保留イベントの id が保証される
     // (boostUntilMs null ガードで冪等)。
+    // アームの期限切れは**清算より先**に見る — ここで強制発動すると boostUntilMs が
+    // 入るので、直後の settleBoost がそのまま同じ時間軸で処理できる。press /
+    // handleEvent / drainIfChanged / applyFxCapsChange / 凍結タイマーの全経路が
+    // ここを通るので、時計の入口はこの1箇所で足りる。
+    this.commitArmedBoostIfExpired(nowMs);
     this.settleBoost(nowMs);
     if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) return;
     this.fxFreezeUntilMs = null;
     this.dirty = true;
+    // 凍結中に即時適用した押下の演出(合算1件)。**ドレインより先**に出す —
+    // ドレイン中のギフトが 0 到達で achieved を積むと、後回しにした押下音が
+    // CLEAR の上に乗ってしまう(fanStampCoalesceOp の force flush と同じ理由)。
+    this.flushPressFx();
     // ドレイン中の演出は迂回バッファへ(finishDrain が同種を畳んで ring へ移す)。
     this.drainFx = [];
     try {
@@ -1596,6 +1759,33 @@ export class ChallengeEngine {
     // pushEffect は ring へ直行し、id はドレインした演出より後になる)。
     // 再凍結で中断していれば isFxFrozen() が真なのでガードで止まり次の解除へ持ち越す。
     this.flushFanStampFx();
+    // 凍結中の押下で 0 に達していた場合の達成はここが唯一の出口 — press() は
+    // 凍結中 maybeAchieve を見送るので、達成演出は必ずカットインの後に出る。
+    // 再凍結(ドレイン中断)なら次の解除へ持ち越す。2Hz tick と armFreezeTimer の
+    // 両方がここを通るので、イベントが途絶えても最大 500ms で到達する。
+    if (!this.isFxFrozen()) this.maybeAchieve(nowMs);
+  }
+
+  /**
+   * 凍結中に溜めた押下の演出を **effect 1件** にまとめて出す(押下 SE・簡易演出が
+   * それぞれ1回ずつになる)。値・統計は press() が適用済みなので、ここで動かすのは
+   * 見た目だけ。amount は合算、coalesced に実タップ数を載せる(finishDrain の
+   * press 畳み込みと同じ形)。
+   *
+   * 凍結中は出さない — 呼ぶのは flushFxFreeze の解除経路だけで、再凍結中に
+   * 誤って呼ばれても持ち越すようガードしておく(flushFanStampFx と同型)。
+   */
+  private flushPressFx(): void {
+    const p = this.pendingPressFx;
+    if (p === null || this.isFxFrozen()) return;
+    this.pendingPressFx = null;
+    this.pushEffect({
+      kind: 'press',
+      amount: -p.amount,
+      ...(p.count > 1 ? { coalesced: p.count } : {}),
+      atMs: this.now(),
+    });
+    this.dirty = true;
   }
 
   // ── タップブースト(フィーバー) ─────────────────────────────────────────
@@ -1611,6 +1801,12 @@ export class ChallengeEngine {
     // 実発動が優先 — 実演のタップウィンドウが残っていたら破棄する(press が
     // テスト計数に吸われて実カウンタが動かない事故を防ぐ)。
     this.clearTestBoost();
+    // まだ映像が始まっていない予約が残っていたら、ここでプレーンとして発動させる。
+    // 直後の settleBoost が boost-end(タップ 0)を積むので、モニター側は
+    // 「x.id > boost-end.id」の間引きで**古い持ち越しを確実に捨てられる** —
+    // これを撃たないと、後から不透明シネマだけ再生されてタップが1回も数えられない。
+    // (到達経路は pendingOps 溢れだけだが、失敗の形が最悪なので塞いでおく。)
+    this.plainCommitArmedBoost(atMs, '同じトリガーの再発動');
     // プレーンモード中の再トリガーは即実行で届く(凍結が無いので直列化されない)。
     // 前のブーストを清算してから始める — 溜め直しではなく「延長戦」を2本に分ける。
     this.settleBoost(atMs, true);
@@ -1629,19 +1825,46 @@ export class ChallengeEngine {
     const countMs = cinematic && tb.countClip !== 'off' ? TAP_BOOST_COUNT_MS : 0;
     // 結果カットシーン(ウィンドウ終了 → 減算発表の前置き)もシネマティックのみ。
     const resultMs = cinematic && tb.resultClip !== 'off' ? TAP_BOOST_RESULT_MS : 0;
-    this.boostStartMs = atMs + introMs + countMs;
-    this.boostUntilMs = this.boostStartMs + durationMs;
-    this.boostTapCount = 0;
-    this.boostMultiplier = tb.multiplier;
-    this.boostPressStep = this.getConfig().pressStep;
-    this.boostResultMs = resultMs;
-    this.boostResultClip = resultMs > 0 ? tb.resultClip : '';
-    this.boostPlain = !cinematic;
-    this.pushEffect({
+    const pressStep = this.getConfig().pressStep;
+    // アームの期限。シネマティックではこの時刻が effect に焼く boostEndsAtMs の
+    // 原点になり(下)、モニターの planBoostStart はここまで必ず full を返す。
+    const deadlineMs = atMs + BOOST_ARM_MAX_MS;
+    if (cinematic) {
+      // **タップ窓はまだ開かない**(boostUntilMs は null のまま = アーム)。
+      // 開くのはモニターが起動カットインを再生し始めた合図(boostCue)を受けた時。
+      this.armedBoost = {
+        id: 0, // pushEffect の戻り値で埋める(下)
+        atMs,
+        deadlineMs,
+        introMs,
+        countMs,
+        durationMs,
+        resultMs,
+        resultClip: resultMs > 0 ? tb.resultClip : '',
+        multiplier: tb.multiplier,
+        pressStep,
+      };
+    } else {
+      // プレーンモードは待つ理由がない(映像が無い)ので従来どおり即発動。
+      this.boostStartMs = atMs;
+      this.boostUntilMs = atMs + durationMs;
+      this.boostTapCount = 0;
+      this.boostMultiplier = tb.multiplier;
+      this.boostPressStep = pressStep;
+      this.boostResultMs = 0;
+      this.boostResultClip = '';
+      this.boostPlain = true;
+    }
+    const effectId = this.pushEffect({
       kind: 'boost-start',
       amount: 0,
       boostMultiplier: tb.multiplier,
-      boostEndsAtMs: this.boostUntilMs,
+      // **フォールバックのタイムライン**(実際の期限ではない)。アーム期限まで
+      // コミットが来なかったとき worker が deadlineMs 起点で自走するので、
+      // その時のタップ窓の終端がこれ。判定の原点 endsAt - fxDurationMs が
+      // deadlineMs になることで、アーム中の planBoostStart は常に full を返す
+      // (= 起動カットインが必ず満尺で出る)。dto.ts の boostEndsAtMs の doc 参照。
+      boostEndsAtMs: (cinematic ? deadlineMs + introMs + countMs : atMs) + durationMs,
       boostIntroMs: introMs,
       boostCountMs: countMs,
       // クリップは段ごとの選択を焼き込む(effect 1件で自己完結の流儀)。
@@ -1677,11 +1900,93 @@ export class ChallengeEngine {
     // settle 済みで、発表シーケンス中に保留イベントの演出が割り込まない。
     // タップ 0 で発表するものが無いときは settleBoost が凍結を引き戻す。
     if (cinematic) {
+      this.armedBoost!.id = effectId;
+      // **暫定**の凍結期限 — 現行の式の boostUntilMs をフォールバック値に置き換えただけ。
+      // コミットは必ず**短縮方向**に張り直す(settleBoost の Math.min 引き戻しと同じ流儀)。
+      // アーム中も凍結を張るのが要: 連打コンボの直列化(applyOrQueue → pendingOps)は
+      // isFxFrozen() に依存していて、外すと1メッセージ内の全発動が即時に走って
+      // 互いを強制清算し合う。
       this.fxFreezeUntilMs =
-        this.boostUntilMs + resultMs + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS;
+        deadlineMs +
+        introMs +
+        countMs +
+        durationMs +
+        resultMs +
+        BOOST_SETTLE_BUDGET_MS +
+        GIFT_FX_FREEZE_MARGIN_MS;
       this.armFreezeTimer();
     }
     this.dirty = true;
+  }
+
+  /**
+   * アーム済みフィーバーの発動(**唯一の commit 経路**)。ここでタップ窓が開く。
+   * cinematic=false ならプレーンモード(前置きなし・映像なし・凍結なし)で発動する。
+   *
+   * startMs はモニターが起動カットインを再生し始めた時刻。窓の原点をそこに移すのが
+   * この設計の全部 — worker の絶対時刻とモニターの実再生開始のズレが消えるので、
+   * planBoostStart が起動カットインを削る理由が構造的に無くなる。
+   */
+  private commitBoost(
+    a: NonNullable<ChallengeEngine['armedBoost']>,
+    startMs: number,
+    preMs: number,
+    cinematic: boolean
+  ): void {
+    this.armedBoost = null;
+    this.boostStartMs = startMs + (cinematic ? preMs : 0);
+    this.boostUntilMs = this.boostStartMs + a.durationMs;
+    this.boostTapCount = 0;
+    this.boostMultiplier = a.multiplier;
+    this.boostPressStep = a.pressStep;
+    this.boostResultMs = cinematic ? a.resultMs : 0;
+    this.boostResultClip = cinematic ? a.resultClip : '';
+    this.boostPlain = !cinematic;
+    if (cinematic) {
+      // 暫定期限(deadlineMs 起点)から**実際の再生に合わせて張り直す** = 必ず短縮。
+      this.fxFreezeUntilMs =
+        this.boostUntilMs + this.boostResultMs + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS;
+      this.armFreezeTimer();
+    }
+    this.dirty = true;
+  }
+
+  /**
+   * アーム期限切れ = モニターが最後まで再生しなかった。**破棄ではなく強制発動**する
+   * (ユーザー決定 — 課金ギフトをもらったのにフィーバーが起きない形を作らない)。
+   *
+   * 起点は now ではなく **deadlineMs** — こうすると effect に焼いた boostEndsAtMs が
+   * そのまま真になり、期限直後に再生を始めたモニターの planBoostStart が整合して
+   * 最悪でも従来挙動(resume/skip)へ連続的に着地する。now を使うと期限が前置きぶん
+   * 嘘になり、「既に閉じた窓へ向けて 13 秒のシネマを流す」最悪形が生まれる。
+   */
+  private commitArmedBoostIfExpired(nowMs: number): void {
+    const a = this.armedBoost;
+    if (a === null || nowMs < a.deadlineMs) return;
+    this.giftDiag(
+      `→ フィーバーのアーム期限切れ(${Math.round(BOOST_ARM_MAX_MS / 1000)}秒)— モニターの再生を待たず強制発動`
+    );
+    this.commitBoost(a, a.deadlineMs, a.introMs + a.countMs, true);
+  }
+
+  /**
+   * アーム中のフィーバーをプレーンモードで即発動する。モニターが閉じた/動きの抑制が
+   * 入った/モニターが「再生しない」と言ってきた経路で使う。
+   *
+   * 破棄しないのは設計意図に従うため: activateBoost はモニターが見えないときも
+   * プレーンモードで発動する(「カットインも溜めも無し、倍率のゲーム性だけ残す」)。
+   * アームは**その状況が時間的にずれただけ**で、タップも値もまだ1つも動いていない。
+   * ここで捨てると「課金ギフトが何も生まない」ケースを新設することになる。
+   */
+  private plainCommitArmedBoost(nowMs: number, why: string): void {
+    const a = this.armedBoost;
+    if (a === null) return;
+    this.giftDiag(`→ アーム中のフィーバーをプレーンモードで即発動(${why})— 映像なし、倍率だけ`);
+    this.commitBoost(a, nowMs, 0, false);
+    // プレーンは凍結しない契約(activateBoost の if (cinematic) と対)。
+    // ドレインは呼び出し側に任せる — ここで flushFxFreeze を呼ぶと再入する。
+    this.fxFreezeUntilMs = nowMs;
+    this.armFreezeTimer();
   }
 
   /**
@@ -1730,6 +2035,9 @@ export class ChallengeEngine {
 
   /** ブースト状態の破棄(start/reset — 清算せず捨てる。pendingOps 破棄と同じ判断)。 */
   private clearBoost(): void {
+    // アームもここで落とす — start()/reset() と settle の共通出口なので、
+    // 「窓は閉じたのに予約だけ生き残る」を構造的に作らない。
+    this.armedBoost = null;
     this.boostUntilMs = null;
     this.boostStartMs = 0;
     this.boostTapCount = 0;
@@ -2193,16 +2501,19 @@ export class ChallengeEngine {
    * (flushLikeFx だけは演出が遅れて出るが、値はその時点で適用済みなので
    * 「いま何になっているか」として正しい)。
    */
-  private pushEffect(e: Omit<ChallengeEffect, 'id' | 'valueAfter'>): void {
+  private pushEffect(e: Omit<ChallengeEffect, 'id' | 'valueAfter'>): number {
     const effect: ChallengeEffect = { id: this.nextEffectId++, valueAfter: this.value, ...e };
     // ドレイン中は迂回バッファへ(id 採番と valueAfter は通常どおり済ませてから —
     // id の単調性は watermark 冪等再生の生命線)。finishDrain が ring へ移す。
     if (this.drainFx !== null) {
       this.drainFx.push(effect);
-      return;
+      return effect.id;
     }
     this.recentEffects.unshift(effect);
     while (this.recentEffects.length > CHALLENGE_EFFECTS_MAX) this.recentEffects.pop();
     this.effectsSnapshot = null;
+    // 戻り値はアーム(armedBoost.id)の照合キー。**採番規則をここ以外へ写さない** —
+    // 呼び出し前に nextEffectId を覗く方式にすると規則が二重化して静かに壊れる。
+    return effect.id;
   }
 }

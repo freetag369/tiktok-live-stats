@@ -40,6 +40,13 @@ export type RpcMap = {
    * 開閉(main 発の monitorOpen)の AND が立つときだけカットイン凍結を張る。
    */
   'challenge.fxCaps': { p: { bandFx: boolean }; r: void };
+  /**
+   * アーム済みフィーバーの合図。worker はギフト着弾で発動を**予約するだけ**で、
+   * タップ窓はモニターが起動カットインを実際に再生し始めた瞬間に開く。
+   * これがないと worker の絶対時刻とモニターの実再生開始が最大 BOOST_ARM_MAX_MS
+   * ずれ、その差を「起動カットインを削る」ことで吸収するしかなくなる。
+   */
+  'challenge.boostCue': { p: D.ChallengeBoostCue; r: void };
 
   // queries
   'q.viewerTable': { p: { sessionId: number | null } & D.ViewerTableQuery; r: D.Page<D.ViewerTableRow> };
@@ -168,6 +175,7 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'challenge.toggleRank': 'worker',
   'challenge.testEffect': 'worker',
   'challenge.fxCaps': 'worker',
+  'challenge.boostCue': 'worker',
   'q.viewerTable': 'worker',
   'q.viewer': 'worker',
   'q.recallCard': 'worker',

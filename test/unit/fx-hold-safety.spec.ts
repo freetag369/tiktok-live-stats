@@ -87,6 +87,34 @@ describe('ホールド番犬(時間ベースの最後の脱出口)', () => {
   });
 });
 
+describe('フィーバーのアーム→コミット(起動カットインを削らせない)', () => {
+  // レンダラの DOM テスト環境がこのリポジトリに無いので、合図が消えて/移動して
+  // いないことはソース文字列でしか担保できない。合図が落ちると worker は
+  // アーム期限(BOOST_ARM_MAX_MS)まで待ってから自走し、症状が静かに再発する。
+  it('startBoostFx は e.test 以外で必ず challenge.boostCue を撃つ', () => {
+    const fn = fnBody('startBoostFx');
+    expect(fn).toContain("'challenge.boostCue'");
+    expect(fn).toContain('!e.test');
+  });
+
+  it('合図は前置き(preMs)が確定してから — 段の尺を送るので順序が意味を持つ', () => {
+    const fn = fnBody('startBoostFx');
+    expect(fn.indexOf('const preMs')).toBeGreaterThanOrEqual(0);
+    expect(fn.indexOf('const preMs')).toBeLessThan(fn.indexOf("'challenge.boostCue'"));
+  });
+
+  it('再生を見送る経路は drop を撃つ(撃たないと worker が期限まで待つ)', () => {
+    // 入口の満杯・直行/ドレインの skip・開始不可・マウント時の総解放。
+    expect([...SRC.matchAll(/dropBoostCue\(/g)].length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('worker 再起動では持ち越しを捨てる(誰も清算しない不透明シネマを防ぐ)', () => {
+    const m = SRC.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[workerEpoch\]\)/);
+    expect(m, 'workerEpoch の effect が見つからない').toBeTruthy();
+    expect(m![0]).toContain('pendingBoosts.current = []');
+  });
+});
+
 describe('演出優先順位一元化 v0.8.0(§6b 連鎖の譲り合い・据え置き会計)', () => {
   it('finishRoulette: 確定バナー(pushFloat)は譲り判定・コンボ直呼びより前', () => {
     // 譲るときも「止まったリールの額」は先に見せる — バナーが譲り分岐の後ろに
@@ -133,5 +161,99 @@ describe('演出優先順位一元化 v0.8.0(§6b 連鎖の譲り合い・据え
   it('pendingStageAmount はルーレットを rouletteRemainingAmount(resumeAt 起点)で数える', () => {
     // 全リール直和のままだと §6b の連鎖再開で消化済みリールぶん数字が巻き戻る。
     expect(fnBody('pendingStageAmount')).toContain('rouletteRemainingAmount(');
+  });
+});
+
+describe('着弾の常時実行(2026-08-16 ユーザー決定 — shared/fx-strike-route.ts)', () => {
+  it('strikeBeatNow は据え置きを所有しない(holdValue 禁止・setHeldValue は関数型 updater のみ)', () => {
+    // ビートはカットイン中(持ち主が別に居る)に走る。数値を渡す setHeldValue や
+    // holdValue を書くと持ち主が二重になり、数字の巻き戻り・出目の先漏れが復活する。
+    const fn = fnBody('strikeBeatNow');
+    expect(fn).not.toContain('holdValue(');
+    const all = [...fn.matchAll(/setHeldValue\(/g)].length;
+    const functional = [...fn.matchAll(/setHeldValue\(\(h\)/g)].length;
+    expect(all).toBeGreaterThan(0);
+    expect(functional).toBe(all);
+  });
+
+  it('stockImpactVisuals は据え置きに一切触らない(revealStock との分割の要)', () => {
+    // ここに setHeldValue / activeStrike が入ると、ビート経路(カットイン中)から
+    // 呼んだ瞬間に持ち主の据え置きを壊す。解除は revealStock 側の2行だけ。
+    const fn = fnBody('stockImpactVisuals');
+    expect(fn).not.toContain('setHeldValue');
+    expect(fn).not.toContain('activeStrike');
+  });
+
+  it('queueStrike の呼び出しは3箇所だけ(coalesce / flushStrike 安全弁 / runDrain の戻し)', () => {
+    // 増えたら「舞台待ちのキュー」が復活していないか疑うこと — 着弾は常時実行が規約。
+    // 4 = 定義1 + 呼び出し3。
+    expect([...SRC.matchAll(/queueStrike\(/g)].length).toBe(4);
+  });
+
+  it('値変化 effect は routeStrike(shared の真理値表)で分岐する — stageBusy を着弾に使わない', () => {
+    expect(SRC).toContain('const route = routeStrike({');
+    // routeStrike の入力に stageBusy 系を足したら fx-strike-route.spec の構造凍結も
+    // 同時に落ちる設計だが、レンダラ側の配線もここで見張る。
+    const call = SRC.slice(SRC.indexOf('const route = routeStrike({'), SRC.indexOf('});', SRC.indexOf('const route = routeStrike({')));
+    expect(call).not.toContain('stageBusy');
+  });
+
+  it('flushStrike の handoff(横取り)はビートで撃ち切る — 後送りの queueStrike に戻さない', () => {
+    const fn = fnBody('flushStrike');
+    const handoffBranch = fn.slice(fn.indexOf('if (handoff)'), fn.indexOf('} else if'));
+    expect(handoffBranch).toContain('strikeBeatNow(');
+    expect(handoffBranch).not.toContain('queueStrike(');
+  });
+
+  it('finishStockCutin はチェーン終端として continueStrikeChain で直結する(舞台へ落とさない)', () => {
+    // scheduleDrain 直呼びに戻すと、カットイン中に合算された満タンがバナーの
+    // ドレイン待ちへ落ち、「着弾が出ない」が再発する。
+    const fn = fnBody('finishStockCutin');
+    expect(fn).toContain('continueStrikeChain()');
+    expect(fn).not.toContain('scheduleDrain()');
+  });
+});
+
+describe('確定バナー保護 — バナーは単枠置換なのでビートは触らない(2026-08-16)', () => {
+  // showBannerNow は setFloats([1枚]) の置換。immediate flush は「表示中バナーを
+  // 上書きで消す権利」でもあり、ビート化でルーレットの確定 ±N が1フレームで
+  // 消える実害が出た。ここで固定するのは (1) ビートのバナー非接触、(2) 保留 flush の
+  // ラッチ判定、(3) ルーレット確定バナー側の immediate 温存、の3点。
+  it('strikeBeatNow はバナーに一切触らない(flush 系・pushFloat 不在)', () => {
+    const fn = fnBody('strikeBeatNow');
+    expect(fn).not.toContain('flushDeferredFloats(');
+    expect(fn).not.toContain('flushPendingFloat(');
+    expect(fn).not.toContain('pushFloat(');
+    // visuals は flushFloats=false で呼ぶ — 無引数に戻すと確定バナー上書きが再発。
+    expect(fn).toContain('impactStrikeVisuals(false)');
+    expect(fn).toContain('stockImpactVisuals(stockDelta, false)');
+  });
+
+  it.each([
+    ['impactStrikeVisuals', 'flushPendingFloat('],
+    ['stockImpactVisuals', 'flushDeferredFloats('],
+  ])('%s は flushFloats=true 既定+ガード付き flush を保つ', (name, flushCall) => {
+    // 既定 true = チェーン着弾(impactStrike / impactStrikePartial / revealStock /
+    // startStrikeFromPending 縮退)は従来どおり通知を出す。ガードを外すとビート
+    // 経路の非接触が破れ、ガードごと消すと通知が永久に保留される。
+    const fn = fnBody(name);
+    expect(fn).toContain('flushFloats = true');
+    expect(fn).toContain(`if (flushFloats) ${flushCall}`);
+  });
+
+  it('flushPendingFloat の immediate はラッチ判定付き(無条件 true に戻さない)', () => {
+    // 無条件 immediate は表示中のルーレット確定バナーを置換で消す(実害の本体)。
+    // 読み取りはクランプ規律(stageBusy と同型)。
+    const fn = fnBody('flushPendingFloat');
+    expect(fn).toContain('clampBannerEndAt(');
+    expect(fn).toContain('stageWaitMs(');
+    expect(fn).not.toContain('immediate: true');
+  });
+
+  it('finishRoulette の確定バナーは immediate を維持する(逆方向の退行防止)', () => {
+    // 確定バナーはリールのビートに同期する唯一のバナー。ラッチ判定に落とすと
+    // コンボ中(rouletteHold 中はキューが開かない)に1枚も出なくなる。
+    const fn = fnBody('finishRoulette');
+    expect(fn).toContain('immediate: true');
   });
 });

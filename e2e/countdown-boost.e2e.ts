@@ -114,6 +114,35 @@ test.describe('シネマティック(モニター表示・reduced-motion なし)
     const state = await challengeGet(main);
     expect(state.value).toBe(before - 10);
   });
+
+  test('演出が渋滞していても起動カットインは頭から満尺で再生される', async ({ app, main }) => {
+    // 実配信での症状そのもの: ±N バナーが詰まっている最中にトリガーギフトが来ると、
+    // worker の絶対時刻とモニターの実再生開始がズレて起動カットイン(咆哮 5 秒)が
+    // 削られていた。worker が発動を**予約**し、モニターが再生を始めた合図
+    // (challenge.boostCue)でタップ窓を開くようにしたので、待たされても頭から出る。
+    //
+    // 旧実装ならここは count-321(途中参加)か loop-panther(ウィンドウ直行)に
+    // なるので、このテストは修正の有無を直接判別する。
+    await rpc(main, 'challenge.start', undefined);
+    const monitor = await openMonitor(app, main);
+
+    // 舞台を塞ぐ。バナーが出ている間 stageBusy() が真で boost-start は持ち越される。
+    for (let i = 0; i < 4; i += 1) {
+      await rpc(main, 'challenge.testEffect', { kind: 'follow' });
+    }
+    await expect(monitor.locator('.floats > .float').first()).toBeVisible({ timeout: 10_000 });
+
+    await rpc(main, 'conn.startReplay', { file: FIXTURE, speed: 0 });
+
+    const clip = monitor.locator('video.fx-clip-opaque');
+    // ★ 渋滞を抜けた後、**起動カットインから**始まること。
+    await expect(clip).toHaveAttribute('src', /intro-panther/, { timeout: 30_000 });
+    await expect(clip).toHaveAttribute('src', /count-321/, { timeout: 30_000 });
+    // 3・2・1 の間はまだ押せない(映像焼き込みの「1」とタップ開始の同期契約)。
+    await expect(monitor.locator('.boost-overlay')).toHaveCount(0);
+    await expect(monitor.locator('.boost-overlay')).toHaveCount(1, { timeout: 30_000 });
+    await expect(clip).toHaveAttribute('src', /loop-panther/);
+  });
 });
 
 test.describe('プレーンモード(モニターを開かない)', () => {

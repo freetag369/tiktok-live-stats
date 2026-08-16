@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { BOOST_ARM_MAX_MS, CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type {
   ChallengeConfig,
   ChallengeEffect,
@@ -2527,22 +2527,30 @@ describe('ChallengeEngine — カットイン凍結(fxFreeze)', () => {
     expect(e.get().recentEffects[0]!.fxDurationMs).toBe(GIFT_FX_FREEZE_MAX_MS);
   });
 
-  it('凍結中の follow / press は値に効かず、期限後に順序どおり適用される', () => {
+  it('凍結中の follow は保留・press は素通しで即時に効く(演出だけ凍結明けへ)', () => {
+    // 押下だけは凍結キューに入れない — 走行中のタップは必ず数字へ届くのが約束で、
+    // 保留にしていた頃はカットイン1本で最長 15 秒ボタンが死んで見えた。
+    // 視聴者由来のイベント(follow/gift/like)は従来どおり保留する。
     let t = NOW;
     const e = engine(bandCfg({ initialValue: 1000, followStep: 10, pressStep: 1 }), () => t);
     e.start();
     e.handleEvent(gift({ diamonds: 30 })); // band1: 6 秒凍結
     t += 1000;
     expect(e.handleEvent(follow('f1'))).toBe(false); // 保留
-    e.press(); // 保留
-    expect(e.get().value).toBe(1030); // 凍結中は不変
-    expect(e.get().stats.follows).toBe(0);
+    e.press();
+    expect(e.get().value).toBe(1029); // 押下は即時
+    expect(e.get().stats.presses).toBe(1);
+    expect(e.get().pressDownTotal).toBe(1);
+    expect(e.get().stats.follows).toBe(0); // follow は凍結中は不変
+    // 演出(押下 SE・簡易演出)だけは凍結明けまで出さない。
+    expect(e.get().recentEffects.some((x) => x.kind === 'press')).toBe(false);
     t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS; // 期限到達
     const drained = e.drainIfChanged(); // 2Hz tick が安全弁として解除
     expect(drained).not.toBeNull();
     expect(drained!.value).toBe(1030 + 10 - 1);
     expect(drained!.stats.follows).toBe(1);
     expect(drained!.stats.presses).toBe(1);
+    expect(drained!.recentEffects.filter((x) => x.kind === 'press')).toHaveLength(1);
     expect(drained!.fxFreezeUntilMs).toBeNull();
   });
 
@@ -2751,13 +2759,15 @@ describe('ChallengeEngine — カットイン凍結の許可ゲート(モニタ�
 });
 
 describe('ChallengeEngine — 凍結ドレインの演出合算(coalesce)', () => {
-  it('凍結中の press×20 は1件に畳まれ、履歴が押し流されない', () => {
+  it('凍結中の press×20 は値だけ即時に効き、演出は1件に畳まれて履歴が押し流されない', () => {
     let t = NOW;
     const e = engine(bandCfg({ initialValue: 1000, pressStep: 1 }), () => t);
     e.start();
     e.handleEvent(gift({ diamonds: 30 })); // band1 凍結
-    for (let i = 0; i < 20; i++) e.press(); // 全部保留
-    expect(e.get().value).toBe(1030);
+    for (let i = 0; i < 20; i++) e.press(); // 値は即時・演出だけ合算
+    expect(e.get().value).toBe(1030 - 20);
+    expect(e.get().pressDownTotal).toBe(20);
+    expect(e.get().recentEffects.some((x) => x.kind === 'press')).toBe(false);
     t = NOW + 30_000;
     e.drainIfChanged();
     const s = e.get();
@@ -2887,7 +2897,7 @@ describe('ChallengeEngine — 凍結ドレインの演出合算(coalesce)', () =
     expect(f).not.toHaveProperty('coalesced');
   });
 
-  it('ドレインが再凍結で中断しても、そこまでの分は畳まれて出る', () => {
+  it('押下演出は凍結の窓ごとに1件 — 再凍結を跨いだ分は次の解除で別の1件になる', () => {
     let t = NOW;
     const e = engine(bandCfg({ initialValue: 1000, pressStep: 1 }), () => t);
     e.start();
@@ -2896,15 +2906,23 @@ describe('ChallengeEngine — 凍結ドレインの演出合算(coalesce)', () =
     e.press();
     e.press();
     e.handleEvent(gift({ giftId: '8888', diamonds: 80 })); // band2 — ドレイン中断役
-    e.press();
-    e.press();
+    // 値はどれも即時に効いている(band2 の +80 だけがドレイン待ち)。
+    expect(e.get().value).toBe(1030 - 3);
     t = NOW + 6000 + GIFT_FX_FREEZE_MARGIN_MS;
     e.drainIfChanged();
     let s = e.get();
+    // band1 の窓で溜まった3件が1件に畳まれて出る。**ドレインより先**に出すので、
+    // 再凍結役の band2 カットインより id は小さい(押下音が CLEAR や次の
+    // カットインの上に乗らない)。
     const press1 = s.recentEffects.find((x) => x.kind === 'press')!;
     expect(press1).toMatchObject({ amount: -3, coalesced: 3 });
     expect(s.recentEffects[0]).toMatchObject({ kind: 'gift', fxBandClip: 'gift-band2' });
-    expect(s.fxFreezeUntilMs).not.toBeNull(); // 再凍結中
+    expect(press1.id).toBeLessThan(s.recentEffects[0]!.id);
+    expect(s.fxFreezeUntilMs).not.toBeNull(); // band2 で再凍結中
+    // band2 の窓で押した分は、その窓の解除でもう1件として出る。
+    e.press();
+    e.press();
+    expect(e.get().value).toBe(1030 + 80 - 5); // 押下もギフトも適用済み
     t += 30_000;
     e.drainIfChanged();
     s = e.get();
@@ -4261,20 +4279,28 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   const COUNT = TAP_BOOST_COUNT_MS; // 3000
   const PRE = INTRO + COUNT; // 前置き演出(咆哮+カウントダウン)の総尺
   const WINDOW = DEFAULT_TAP_BOOST_RULE.durationSec * 1000; // 5000
+  /** アーム期限まで待ってもコミットが来なかったときの強制発動の時刻。 */
+  const DEADLINE = NOW + BOOST_ARM_MAX_MS;
 
-  it('シネマティック発動: 値は動かず boost-start が焼き込まれ、総尺+清算予算+margin で凍結する', () => {
+  /**
+   * モニターが起動カットインを**再生し始めた**合図。実機では MonitorView の
+   * startBoostFx が challenge.boostCue を撃つ。シネマティックのフィーバーは
+   * アーム(予約)止まりなので、これを撃つまでタップ窓は開かない。
+   */
+  function cue(e: ChallengeEngine, at: number, pre = PRE): boolean {
+    const id = e.get().recentEffects.find((x) => x.kind === 'boost-start')!.id;
+    return e.boostCue({ action: 'start', effectId: id, startedAtMs: at, preMs: pre });
+  }
+
+  it('シネマティック発動はアーム(予約)止まり: タップ窓はまだ開かず、期限はフォールバック値', () => {
     const e = engine(boostCfg(), () => NOW);
     e.start();
     expect(e.handleEvent(boostGift())).toBe(true);
     const s = e.get();
     expect(s.value).toBe(1000);
-    expect(s.boost).toEqual({
-      tapCount: 0,
-      startsAtMs: NOW + PRE,
-      endsAtMs: NOW + PRE + WINDOW,
-      multiplier: 5,
-      pressStep: 1,
-    });
+    // **窓はまだ開いていない** — モニターが起動カットインを再生し始めるまで待つ。
+    // これが「渋滞で 5 秒の咆哮が削られる」を構造的に消している核心。
+    expect(s.boost).toBeUndefined();
     expect(s.recentEffects[0]).toMatchObject({
       kind: 'boost-start',
       amount: 0,
@@ -4284,7 +4310,10 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       boostIntroClip: 'intro-panther',
       boostCountClip: 'count-321',
       boostLoopClip: 'loop-panther',
-      boostEndsAtMs: NOW + PRE + WINDOW,
+      // **フォールバックのタイムライン**(アーム期限で強制発動した場合の終端)。
+      // 実尺(fxDurationMs)は変えないので、判定の原点 endsAt - fxDurationMs が
+      // ちょうどアーム期限になり、モニターの planBoostStart はそこまで必ず full を返す。
+      boostEndsAtMs: DEADLINE + PRE + WINDOW,
       fxDurationMs: PRE + WINDOW,
       valueAfter: 1000,
     });
@@ -4293,9 +4322,149 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     expect(s.recentEffects[0]).not.toHaveProperty('boostResultClip');
     // 凍結は清算発表(ロールアップ→着弾)の予算ぶん先まで(resultClip 'off' でも
     // '-N' の発表自体は出るので BOOST_SETTLE_BUDGET_MS は常に乗る)。
+    // 暫定の凍結期限もアーム期限起点。コミットで**短縮**される(下のテスト)。
+    // アーム中も凍結を張るのは連打コンボの直列化がこれに依存しているため。
     expect(s.fxFreezeUntilMs).toBe(
-      NOW + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
+      DEADLINE + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
     );
+  });
+
+  it('コミット: モニターが再生を始めた時刻からタップ窓が開き、凍結もそこへ張り直す', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(boostGift());
+    // 舞台が塞がっていて 12 秒待たされた、の再現。
+    t = NOW + 12_000;
+    expect(cue(e, t)).toBe(true);
+    const s = e.get();
+    expect(s.boost).toEqual({
+      tapCount: 0,
+      startsAtMs: t + PRE, // ← 起動カットイン 5 秒 + 3・2・1 が**満尺で**先に流れる
+      endsAtMs: t + PRE + WINDOW,
+      multiplier: 5,
+      pressStep: 1,
+    });
+    // 凍結は実再生に合わせて張り直す(暫定期限より必ず手前 = 短縮方向)。
+    expect(s.fxFreezeUntilMs).toBe(
+      t + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
+    );
+  });
+
+  it('何秒待たされても起動カットインは満尺で始まる(この修正の本体)', () => {
+    for (const waited of [0, 5_000, 15_000, 30_000, BOOST_ARM_MAX_MS - 1]) {
+      let t = NOW;
+      const e = engine(boostCfg(), () => t);
+      e.start();
+      e.handleEvent(boostGift());
+      t = NOW + waited;
+      expect(cue(e, t), `waited=${waited}`).toBe(true);
+      // 前置きが1msも削られない = モニターは intro → count → window を通しで流せる。
+      expect(e.get().boost?.startsAtMs, `waited=${waited}`).toBe(t + PRE);
+    }
+  });
+
+  it('アーム期限で強制発動する — 起点は now ではなく期限(焼いた boostEndsAtMs が真になる)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(boostGift());
+    const baked = e.get().recentEffects[0]!.boostEndsAtMs;
+    // コミットが来ないまま期限を過ぎる(モニターが落ちた等)。破棄せず自走する —
+    // 「課金ギフトをもらったのにフィーバーが起きない」を作らないため。
+    t = DEADLINE + 1;
+    const s = e.drainIfChanged()!;
+    expect(s.boost?.startsAtMs).toBe(DEADLINE + PRE);
+    // 焼き込んだフォールバックのタイムラインとぴったり一致する = 遅れて再生を
+    // 始めたモニターの planBoostStart が整合し、最悪でも従来挙動へ着地する。
+    expect(s.boost?.endsAtMs).toBe(baked);
+  });
+
+  it('期限切れ後・二重・別 id の合図は no-op(冪等)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(boostGift());
+    const id = e.get().recentEffects[0]!.id;
+    // 別 id は無視。
+    expect(e.boostCue({ action: 'start', effectId: id + 99, startedAtMs: t, preMs: PRE })).toBe(
+      false
+    );
+    expect(e.get().boost).toBeUndefined();
+    t = NOW + 3_000;
+    expect(cue(e, t)).toBe(true);
+    const opened = e.get().boost?.endsAtMs;
+    // 二重コミットは効かない(アームはもう無い)。
+    expect(cue(e, t + 1_000)).toBe(false);
+    expect(e.get().boost?.endsAtMs).toBe(opened);
+  });
+
+  it('合図の startedAtMs は now を超えない・古すぎる値は切り上げる(クランプ)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(boostGift());
+    t = NOW + 10_000;
+    // 未来時刻。丸めないとタップ窓が映像より後ろへずれて開幕の押下を飲む。
+    const id = e.get().recentEffects[0]!.id;
+    e.boostCue({ action: 'start', effectId: id, startedAtMs: t + 5_000, preMs: PRE });
+    expect(e.get().boost?.startsAtMs).toBe(t + PRE);
+
+    // 古すぎる値(時計の異常)は now - BOOST_COMMIT_MAX_LAG_MS まで。
+    let t2 = NOW;
+    const e2 = engine(boostCfg(), () => t2);
+    e2.start();
+    e2.handleEvent(boostGift());
+    t2 = NOW + 10_000;
+    const id2 = e2.get().recentEffects[0]!.id;
+    e2.boostCue({ action: 'start', effectId: id2, startedAtMs: NOW - 60_000, preMs: PRE });
+    expect(e2.get().boost?.startsAtMs).toBe(t2 - 2_000 + PRE);
+  });
+
+  it('アーム中にモニターが閉じたらプレーンモードで即発動する(倍率だけ残す)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(boostGift());
+    t = NOW + 4_000;
+    expect(e.setMonitorOpen(false)).toBe(true);
+    const s = e.get();
+    // 破棄しない — activateBoost がモニター未表示のとき取る挙動(プレーンモード)と
+    // 同じ形に倒すだけ。ここで捨てると課金ギフトが何も生まないケースを新設する。
+    expect(s.boost?.startsAtMs).toBe(t); // 前置きなしで即ウィンドウ
+    expect(s.fxFreezeUntilMs).toBeNull();
+    expect(s.recentEffects.some((x) => x.kind === 'boost-end')).toBe(false);
+    // プレーンなので押下は即時 ×倍率。
+    t = NOW + 4_100;
+    expect(e.press().value).toBe(995);
+  });
+
+  it('モニターの drop 合図もプレーンで即発動 / effectId 0 は総解放', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(boostGift());
+    const id = e.get().recentEffects[0]!.id;
+    // 別 id の drop は無視。
+    expect(e.boostCue({ action: 'drop', effectId: id + 99 })).toBe(false);
+    expect(e.get().boost).toBeUndefined();
+    t = NOW + 2_000;
+    expect(e.boostCue({ action: 'drop', effectId: 0 })).toBe(true);
+    expect(e.get().boost?.startsAtMs).toBe(t);
+    expect(e.get().fxFreezeUntilMs).toBeNull();
+  });
+
+  it('アーム中の押下は倍率なしで即時に効く(まだフィーバーは始まっていない)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(boostGift());
+    t = NOW + 2_000;
+    const s = e.press();
+    // 凍結中でも押下は素通しで効く既存契約のまま。倍率が乗らないのは正しい
+    // (フィーバーはまだ始まっていない)— 3・2・1 の保留はコミット後の前置き中だけ。
+    expect(s.value).toBe(999);
+    expect(s.boost).toBeUndefined();
   });
 
   it('連打コンボ(repeatCount 2): 1本目の清算後に2本目が直列発動する', () => {
@@ -4307,17 +4476,20 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     expect(
       e.handleEvent(gift({ giftId: BOOST_GIFT, giftName: 'Boost Gift', diamonds: 2, repeatCount: 2 }))
     ).toBe(true);
-    // 1本目だけが即時発動(2本目は凍結中の pendingOps へ)。
+    // 1本目だけがアームされる(2本目は凍結中の pendingOps へ)。**アーム中も凍結を
+    // 張っているからこの直列化が保たれる** — 外すと2本が同時に走って潰し合う。
     let s = e.get();
     expect(s.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1);
-    expect(s.boost?.endsAtMs).toBe(NOW + PRE + WINDOW);
-    // 凍結明けのドレインで 1本目の清算(boost-end)→ 2本目の発動が起きる。
-    t = s.fxFreezeUntilMs! + 1;
+    expect(cue(e, NOW)).toBe(true);
+    expect(e.get().boost?.endsAtMs).toBe(NOW + PRE + WINDOW);
+    // 凍結明けのドレインで 1本目の清算(boost-end)→ 2本目のアームが起きる。
+    t = e.get().fxFreezeUntilMs! + 1;
     s = e.drainIfChanged()!;
     expect(s.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(2);
     expect(s.recentEffects.filter((x) => x.kind === 'boost-end')).toHaveLength(1);
-    // 2本目の期限は実行時点起点(凍結明けの遅延発動の規約 — activateBoost の this.now())。
-    expect(s.boost?.endsAtMs).toBe(t + PRE + WINDOW);
+    // 2本目もモニターの合図で開く(期限は合図の時点起点)。
+    expect(cue(e, t)).toBe(true);
+    expect(e.get().boost?.endsAtMs).toBe(t + PRE + WINDOW);
   });
 
   it('連打コンボの発動は TAP_BOOST_ACTIVATIONS_MAX 回で頭打ち(17連打を17本直列しない)', () => {
@@ -4365,7 +4537,8 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       boostResultMs: TAP_BOOST_RESULT_MS,
       boostResultClip: 'result-panther',
     });
-    expect(s0.fxFreezeUntilMs).toBe(
+    cue(e, NOW);
+    expect(e.get().fxFreezeUntilMs).toBe(
       NOW + PRE + WINDOW + TAP_BOOST_RESULT_MS + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
     );
     // タップして清算 → boost-end 側にも同じ焼き込み(発表シーケンスの本線)。
@@ -4448,6 +4621,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     e.press();
     expect(e.get().boost?.tapCount).toBe(1);
     e.handleEvent(boostGift()); // 実発動 → 実演の計数は破棄
+    cue(e, t);
     const s = e.get();
     expect(s.boost?.tapCount).toBe(0);
     expect(s.boost?.startsAtMs).toBe(NOW + PRE + 1000 + PRE); // 実発動の前置き明け
@@ -4463,6 +4637,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     );
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     // 発表するものが無い(タップ 0)— settle が凍結を引き戻し、保留イベントを
     // 発表予算(結果4秒+予算4秒)ぶん待たせない。
     t = NOW + PRE + WINDOW + 1;
@@ -4483,6 +4658,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     );
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW, 0); // 段が無いのでモニターの前置きも 0
     const s = e.get();
     expect(s.boost?.startsAtMs).toBe(NOW); // 前置きゼロ
     expect(s.recentEffects[0]).toMatchObject({
@@ -4500,6 +4676,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg(), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + 1000; // 3・2・1 の前
     e.press();
     expect(e.get().boost?.tapCount).toBe(0);
@@ -4520,6 +4697,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg(), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + PRE + 1000;
     e.press();
     e.press();
@@ -4535,17 +4713,21 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg({ pressStep: 2 }), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + PRE + 1000;
     for (let i = 0; i < 3; i++) e.press();
     t = NOW + PRE + WINDOW + 1; // ウィンドウ明け(凍結はまだ margin 分残る)
-    const s = e.press(); // settleBoost が先に走り、この press 自体は凍結キューへ
-    expect(s.value).toBe(1000 - 3 * 2 * 5);
+    // settleBoost が先に走って清算し、この press 自体はウィンドウ外なので
+    // 通常の押下として**即時に**効く(値は清算 -30 に続けて -2)。
+    const s = e.press();
+    expect(s.value).toBe(1000 - 3 * 2 * 5 - 2);
     expect(s.boost).toBeUndefined();
-    expect(s.stats.presses).toBe(3);
+    expect(s.stats.presses).toBe(4);
     const be = s.recentEffects.find((x) => x.kind === 'boost-end')!;
+    // boost-end の valueAfter は清算時点の値 — その後の押下では動かない。
     expect(be).toMatchObject({ amount: -30, boostTapCount: 3, boostMultiplier: 5, valueAfter: 970 });
-    // 凍結明けに保留の press(通常 -2)が適用される(タップ>0 なので凍結は
-    // 清算発表の予算ぶん先まで残る — 発表中に保留演出が割り込まない)。
+    // 押下の演出だけは清算発表の凍結が明けてから出る(タップ>0 なので凍結は
+    // 発表の予算ぶん先まで残る — 発表中に保留演出が割り込まない)。
     t = NOW + PRE + WINDOW + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS + 1;
     const s2 = e.drainIfChanged()!;
     expect(s2.value).toBe(968);
@@ -4557,6 +4739,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg({ initialValue: 10 }), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + PRE + 1000;
     for (let i = 0; i < 3; i++) e.press(); // 3×1×5 = 15 ≥ 10
     t = NOW + PRE + WINDOW + GIFT_FX_FREEZE_MARGIN_MS + 1;
@@ -4582,6 +4765,9 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(c, () => NOW);
     e.start();
     e.handleEvent(gift({ giftId: '7934', giftName: 'Heart Me', diamonds: 1 }));
+    // ブーストはアーム止まりなので、勝った証拠は boost-start が積まれたこと。
+    expect(e.get().recentEffects.some((x) => x.kind === 'boost-start')).toBe(true);
+    cue(e, NOW);
     const s = e.get();
     expect(s.boost).not.toBeUndefined();
     expect(s.stats.rouletteSpins).toBe(0);
@@ -4621,6 +4807,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg(), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + PRE + 1000;
     e.press();
     e.press();
@@ -4639,6 +4826,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg(), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + PRE + 1000;
     e.press();
     const s = e.reset();
@@ -4656,6 +4844,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg(), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + PRE + 1000;
     e.press();
     e.press();
@@ -4671,6 +4860,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
     const e = engine(boostCfg({ followStep: 10 }), () => t);
     e.start();
     e.handleEvent(boostGift());
+    cue(e, NOW);
     t = NOW + PRE + 1000;
     e.press(); // タップ(数えるだけ)
     e.handleEvent(follow('f1')); // 保留

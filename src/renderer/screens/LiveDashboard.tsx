@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChallengeLogEntry, ViewerFilter, ViewerTableRow } from '@shared/dto';
 import type { FeedItem } from '@shared/ipc';
-import { CFG_POLL_MS, VIEWER_PAGE_SIZE } from '@shared/constants';
+import { CFG_POLL_MS, CHALLENGE_PRESS_ERROR_TOAST_MS, VIEWER_PAGE_SIZE } from '@shared/constants';
 import { DEFAULT_DASH_LAYOUT, dashTemplate, moveDashPane, normalizeDashLayout, type DashPaneKey } from '@shared/dash-layout';
 import { compact, diamondsToJpy, num } from '@shared/format';
 import { formatDurationJa, relativeDayJa } from '@shared/time';
@@ -614,6 +614,8 @@ function ChallengeCard(): React.JSX.Element | null {
   // 経路を問わず必ず増えるうえ、リングバッファから押し出されても取りこぼさない。
   const prevPresses = useRef<number | null>(null);
   const [hit, setHit] = useState(0);
+  /** 押下エラーのトーストを最後に出した時刻(間引きの状態 — call() を参照)。 */
+  const pressErrorAtMs = useRef(0);
 
   // 企画が飛ぶ操作(リセット/開始し直し)と配信中の一時停止は一度確認する。
   const [confirmNode, confirm] = useConfirm();
@@ -696,12 +698,28 @@ function ChallengeCard(): React.JSX.Element | null {
   const done = view.done;
   const elapsedMs = view.elapsedMs;
   // PUSH/開始/停止が無言で失敗すると配信事故になる — 必ずトーストへ落とす。
+  // ただし押下だけは間引く: worker のイベントループが止まると press が
+  // RPC_TIMEOUT_MS(15秒)で次々に落ち、連打したぶんだけトーストが積み上がって
+  // 画面が読めなくなる。**押した分は失われない**(RPC はポートに積まれ、ループが
+  // 空けば全部処理される)ので、状況を1本伝えれば足りる。
   const call = (
     m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press' | 'challenge.toggleRank'
   ) =>
     void rpc(m, undefined)
       .then(setChallenge)
-      .catch((e: Error) => toast({ level: 'error', msgJa: `チャレンジ操作に失敗しました: ${e.message}` }));
+      .catch((e: Error) => {
+        if (m === 'challenge.press') {
+          const nowMs = Date.now();
+          if (nowMs - pressErrorAtMs.current < CHALLENGE_PRESS_ERROR_TOAST_MS) return;
+          pressErrorAtMs.current = nowMs;
+          toast({
+            level: 'warn',
+            msgJa: 'PUSH の反応が遅れています(アプリが重い可能性があります)。押した分は失われず、あとでまとめて反映されます。',
+          });
+          return;
+        }
+        toast({ level: 'error', msgJa: `チャレンジ操作に失敗しました: ${e.message}` });
+      });
   // 押し間違いは配信中だと取り返しがつかない(値も統計もログも戻せない)。
   const callConfirmed = (m: 'challenge.start' | 'challenge.stop' | 'challenge.reset', o: ConfirmOptions) =>
     void confirm(o).then((ok) => {

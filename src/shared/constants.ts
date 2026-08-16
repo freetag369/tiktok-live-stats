@@ -35,6 +35,13 @@ export const DELTA_MS_HIDDEN = 2000;
  * ブロードキャストだけこの間隔に畳む(session.nudgeChallengeCoalesced)。
  */
 export const CHALLENGE_PRESS_NUDGE_MS = 80;
+/**
+ * 押下エラーのトースト間引き(ms)。worker のイベントループが止まると
+ * challenge.press が RPC_TIMEOUT_MS(15秒)で次々に落ち、連打したぶんだけトーストが
+ * 積み上がって画面が読めなくなる。**タップ自体は失われない** — RPC メッセージは
+ * ポートに積まれ、ループが空けば全部処理される(遅れるだけ)。だから1本出せば十分。
+ */
+export const CHALLENGE_PRESS_ERROR_TOAST_MS = 10_000;
 /** A single delta never carries more than this many viewers; the rest slide to the next tick. */
 export const DELTA_MAX_VIEWERS = 800;
 

@@ -60,40 +60,62 @@ function gift(over: Partial<NormalizedEvent> & { diamonds?: number } = {}): Norm
   } as NormalizedEvent;
 }
 
+function follow(userId: string): NormalizedEvent {
+  seq += 1;
+  return {
+    kind: 'social',
+    sub: 'follow',
+    msgId: `f${seq}`,
+    tsMs: NOW,
+    tsSource: 'server',
+    seq,
+    viewer: { userId, nickname: userId },
+  } as NormalizedEvent;
+}
+
 /** 帯域カットインに一致する高額ギフトで凍結を張る。 */
 function freeze(e: ChallengeEngine): void {
   e.handleEvent(gift({ diamonds: 30 }));
   expect(e.get().fxFreezeUntilMs).not.toBeNull();
 }
 
+/**
+ * 保留キューを上限ちょうどまで埋める。**押下は使えない** — press は凍結を
+ * 素通しして即時に効くようになったので1件もキューに積まれない(この差自体は
+ * 下の「押下は保留キューを使わない」で固定している)。視聴者由来で最も軽い
+ * follow(値だけ・演出予告なし)で埋める。
+ */
+function fillQueue(e: ChallengeEngine, n = GIFT_FX_PENDING_OPS_MAX): void {
+  for (let i = 0; i < n; i += 1) e.handleEvent(follow(`fill${seq}-${i}`));
+}
+
 describe('保留キューの溢れ弁 — 値の正しさを演出より優先する', () => {
-  it('押下: 上限まで積んだ後の press は即時適用される(闇に消えない)', () => {
+  it('押下: 保留キューを一切使わない — 上限まで詰まっていても即時に効く', () => {
     const c = cfg({
       initialValue: 10_000,
       pressStep: 1,
+      followStep: 1,
       giftBandFx: { ...structuredClone(DEFAULT_GIFT_BAND_FX), enabled: true },
     });
     const e = engine(c);
     e.start();
     freeze(e);
-    const afterGift = e.get().value;
+    fillQueue(e); // 視聴者由来のイベントでキューを上限まで埋める
+    const before = e.get().value;
 
-    // 上限ちょうどまでは全部キューへ(値は動かない)。
-    for (let i = 0; i < GIFT_FX_PENDING_OPS_MAX; i += 1) e.press();
-    expect(e.get().value).toBe(afterGift);
-
-    // 溢れた分は即時実行される。
+    // 溢れていようがいまいが押下は素通し — 走行中のタップは必ず数字へ届く。
     e.press();
-    expect(e.get().value).toBe(afterGift - 1);
+    expect(e.get().value).toBe(before - 1);
     e.press();
-    expect(e.get().value).toBe(afterGift - 2);
+    expect(e.get().value).toBe(before - 2);
+    expect(e.get().stats.presses).toBe(2);
   });
 
-  it('押下: 凍結が明けると溜めていた上限ぶんが全部適用される(取りこぼしゼロ)', () => {
+  it('フォロー: 凍結が明けると溜めていた上限ぶんが全部適用される(取りこぼしゼロ)', () => {
     let t = NOW;
     const c = cfg({
       initialValue: 10_000,
-      pressStep: 1,
+      followStep: 1,
       giftBandFx: { ...structuredClone(DEFAULT_GIFT_BAND_FX), enabled: true },
     });
     const e = engine(c, () => t);
@@ -101,15 +123,15 @@ describe('保留キューの溢れ弁 — 値の正しさを演出より優先�
     freeze(e);
     const afterGift = e.get().value;
 
-    for (let i = 0; i < GIFT_FX_PENDING_OPS_MAX; i += 1) e.press();
-    e.press(); // 溢れた1回は即時
-    expect(e.get().value).toBe(afterGift - 1);
+    fillQueue(e);
+    e.handleEvent(follow('overflow')); // 溢れた1件は即時
+    expect(e.get().value).toBe(afterGift + 1);
 
     // 凍結明け。保留分が全部流れる。
     t = NOW + 600_000;
     e.drainIfChanged();
-    expect(e.get().value).toBe(afterGift - GIFT_FX_PENDING_OPS_MAX - 1);
-    expect(e.get().stats.presses).toBe(GIFT_FX_PENDING_OPS_MAX + 1);
+    expect(e.get().value).toBe(afterGift + GIFT_FX_PENDING_OPS_MAX + 1);
+    expect(e.get().stats.follows).toBe(GIFT_FX_PENDING_OPS_MAX + 1);
   });
 
   it('ギフト: 溢れたら値だけ適用し、カットイン(再凍結)は捨てる', () => {
@@ -123,7 +145,7 @@ describe('保留キューの溢れ弁 — 値の正しさを演出より優先�
     freeze(e);
     const frozenUntil = e.get().fxFreezeUntilMs;
 
-    for (let i = 0; i < GIFT_FX_PENDING_OPS_MAX; i += 1) e.press();
+    fillQueue(e);
 
     const before = e.get().value;
     // 帯域に一致する(=本来カットインが付く)ギフトを溢れた状態で受ける。
@@ -143,7 +165,7 @@ describe('保留キューの溢れ弁 — 値の正しさを演出より優先�
     const e = engine(c);
     e.start();
     freeze(e);
-    for (let i = 0; i < GIFT_FX_PENDING_OPS_MAX; i += 1) e.press();
+    fillQueue(e);
 
     const dup = gift({ diamonds: 30 });
     const before = e.get().value;

@@ -8,7 +8,13 @@ import {
   type BoostStartPlan,
   type QueuedBoostTiming,
 } from '@shared/boost-start';
-import { TAP_BOOST_COUNT_MS, TAP_BOOST_DURATION_MIN_SEC, TAP_BOOST_INTRO_MS } from '@shared/challenge';
+import {
+  BOOST_ARM_MAX_MS,
+  GIFT_FX_FREEZE_MAX_TOTAL_MS,
+  TAP_BOOST_COUNT_MS,
+  TAP_BOOST_DURATION_MIN_SEC,
+  TAP_BOOST_INTRO_MS,
+} from '@shared/challenge';
 import type { ChallengeEffect } from '@shared/dto';
 
 /*
@@ -24,6 +30,17 @@ const ENDS = AT + TOTAL;
 
 function t(over: Partial<QueuedBoostTiming> = {}): QueuedBoostTiming {
   return { atMs: AT, endsAtMs: ENDS, introMs: INTRO, countMs: COUNT, totalMs: TOTAL, ...over };
+}
+
+/**
+ * 判定の原点。planBoostStart は endsAt - totalMs を起点に elapsed を測るので、
+ * ここが「タイムラインが始まったことになっている時刻」。通常形では atMs だが、
+ * **アーム形では atMs + BOOST_ARM_MAX_MS(= アーム期限)**になる — それが
+ * 「アーム中は必ず full = 起動カットインが満尺で出る」を追加コードなしで
+ * 成立させている仕掛け(shared/boost-start.ts の冒頭)。
+ */
+function origin(timing: QueuedBoostTiming): number {
+  return (timing.endsAtMs ?? timing.atMs + timing.totalMs) - timing.totalMs;
 }
 
 describe('planBoostStart — 持ち越しブーストの再開判定', () => {
@@ -133,7 +150,8 @@ describe('planBoostStart — 不変条件(掃引)', () => {
       if (p.action !== 'resume') continue;
       expect(p.introMs).toBeLessThanOrEqual(INTRO);
       // 守る契約は「ウィンドウが開く時刻」— 段の分け方に依らず合計は不変。
-      if (p.phase === 'count') expect(p.introMs + p.countMs).toBe(INTRO + COUNT - (now - AT));
+      if (p.phase === 'count')
+        expect(p.introMs + p.countMs).toBe(INTRO + COUNT - (now - origin(t())));
     }
   });
 
@@ -171,6 +189,59 @@ describe('planBoostStart — 定数の整合', () => {
 
   it('カウント段の最小残りは段の実尺より短い(そうでないと resume/count に入れない)', () => {
     expect(BOOST_RESUME_COUNT_MIN_MS).toBeLessThan(TAP_BOOST_COUNT_MS);
+  });
+});
+
+describe('planBoostStart — アーム形(worker がフォールバックの期限を焼いた場合)', () => {
+  // worker はギフト着弾で発動を**予約するだけ**にし、boostEndsAtMs には
+  // 「アーム期限で強制発動した場合」のタイムラインを焼く。実尺(totalMs)は
+  // 変えないので、判定の原点はちょうどアーム期限になる。
+  const DEADLINE = AT + BOOST_ARM_MAX_MS;
+  const armed = (): QueuedBoostTiming => t({ endsAtMs: DEADLINE + TOTAL });
+
+  it('アーム期限までは何秒待っても full — 「起動カットインが必ず満尺で出る」の根拠', () => {
+    expect(origin(armed())).toBe(DEADLINE);
+    for (const now of [AT, AT + 5_000, AT + 30_000, DEADLINE - 1, DEADLINE]) {
+      expect(planBoostStart(armed(), now), `now-AT=${now - AT}`).toEqual({ action: 'full' });
+    }
+  });
+
+  it('猶予(750ms)までは期限を過ぎても full', () => {
+    expect(planBoostStart(armed(), DEADLINE + BOOST_START_GRACE_MS)).toEqual({ action: 'full' });
+  });
+
+  it('期限を過ぎたら従来どおり resume → skip へ連続的に劣化する', () => {
+    expect(planBoostStart(armed(), DEADLINE + 6000)).toMatchObject({ action: 'resume', phase: 'count' });
+    expect(planBoostStart(armed(), DEADLINE + TOTAL)).toEqual({ action: 'skip', reason: 'ended' });
+  });
+
+  it('掃引の不変条件は通常形とまったく同じ(原点が動くだけ)', () => {
+    const o = origin(armed());
+    const seen: BoostStartPlan['action'][] = [];
+    for (let n = DEADLINE - 2000; n <= DEADLINE + TOTAL + 5000; n += 50) {
+      const p = planBoostStart(armed(), n);
+      seen.push(p.action);
+      if (p.action !== 'resume') continue;
+      expect(p.remainingMs).toBeGreaterThan(1000);
+      expect(p.countMs).toBeLessThanOrEqual(COUNT);
+      expect(p.introMs).toBeLessThanOrEqual(INTRO);
+      expect(p.countMs > 0).toBe(p.phase === 'count');
+      expect(p.remainingMs - p.countMs).toBeGreaterThanOrEqual(BOOST_RESUME_MIN_MS);
+      if (p.phase === 'count') expect(p.introMs + p.countMs).toBe(INTRO + COUNT - (n - o));
+    }
+    const rank = { full: 0, resume: 1, skip: 2 } as const;
+    for (let i = 1; i < seen.length; i += 1) {
+      expect(rank[seen[i]!], `index ${i}`).toBeGreaterThanOrEqual(rank[seen[i - 1]!]);
+    }
+    expect(new Set(seen)).toEqual(new Set(['full', 'resume', 'skip']));
+  });
+
+  it('アーム期限は猶予より長く、舞台を塞ぐ最悪ケース(帯カットイン反復)を飲む', () => {
+    expect(BOOST_ARM_MAX_MS).toBeGreaterThan(BOOST_START_GRACE_MS);
+    // giftFxRepeat が GIFT_FX_FREEZE_MAX_TOTAL_MS で反復回数を削るので、1本の
+    // カットインが舞台を占める最長がこの値。ここを下回ると、正当な長尺カットイン
+    // の最中に期限が切れて「起動カットインが飛ばされる」が再発する。
+    expect(BOOST_ARM_MAX_MS).toBeGreaterThan(GIFT_FX_FREEZE_MAX_TOTAL_MS);
   });
 });
 

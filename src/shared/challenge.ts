@@ -592,6 +592,40 @@ export const PENDING_BANDS_MAX = 4;
  */
 export const PENDING_BOOSTS_MAX = 4;
 /**
+ * フィーバーの「アーム」(発動予約)を保持する上限(ms)。worker はギフト着弾で
+ * 予約するだけで、**モニターが起動カットインを再生し始めた瞬間**(challenge.boostCue)に
+ * タップ窓を開く。ここはその合図が来なかったときの安全網。
+ *
+ * 60 秒の根拠 — 舞台を塞ぐ最悪ケースの合計:
+ *  - 反復帯カットインは構造上の最長 **45 秒**(giftFxRepeat が
+ *    GIFT_FX_FREEZE_MAX_TOTAL_MS で回数を削るので atMs + fxDurationMs * rep の上限)。
+ *    ブーストは fx-priority で④だが「再生中の演出は中断しない」規約なので待つ。
+ *  - バナー飢餓弁 DRAIN_STARVE_MS(10 秒)+ delta/ドレインの遅延。
+ *  - 別のフィーバーは塞げない(アームが凍結を張るので連打コンボは直列化される)。
+ *  - ルーレット連鎖は既に譲る(collectWaitingClasses が 'boost' を積む)。
+ * **短くしてはいけない** — 20〜45 秒だと正当な長尺カットインの最中に期限が切れ、
+ * 「起動カットインが飛ばされる」症状がそのまま再発する。
+ *
+ * 期限切れは破棄ではなく**シネマティックで強制発動**(deadlineMs 起点)。こうすると
+ * effect に焼いた boostEndsAtMs がそのまま真になり、遅れて再生を始めたモニターの
+ * planBoostStart が整合して最悪でも従来挙動(resume/skip)に着地する。
+ *
+ * 注意: アーム中の暫定凍結はこの値ぶん伸びるので、総凍結は
+ * GIFT_FX_FREEZE_MAX_TOTAL_MS(45 秒)を超えうる。あちらは**帯カットインの反復回数**
+ * 専用の天井(giftFxRepeat が唯一の消費者)で、ブーストの凍結は現行でも 31.5 秒あり
+ * 元から管轄外 — TAP_BOOST_DURATION_MAX_SEC の doc と同じ判断。
+ * 実際にこの値まで凍結が伸びるのは「コミットが永久に来ない」病的ケースだけで、
+ * 通常はコミットで commitTime + 前置き + ウィンドウ + 清算まで**短縮**される。
+ */
+export const BOOST_ARM_MAX_MS = 60_000;
+/**
+ * コミット合図(startedAtMs)に許す最大の遡り(ms)。モニターと worker は同一マシンの
+ * 同じ Date.now() を見るが、RPC は renderer → main → worker の postMessage を挟むので
+ * 遅延ぶんだけ過去になる。これを超えて古い値は「時計がおかしい」として今に丸める。
+ * 未来側は 0 に丸める(now を超えるとタップ窓が映像より後ろへずれ、開幕の押下を飲む)。
+ */
+export const BOOST_COMMIT_MAX_LAG_MS = 2_000;
+/**
  * クリップの安全弁(ms)。onEnded が来ない素材・遮蔽ウィンドウで再生中フラグが
  * 固着すると、以後クリップが永久に出なくなる(直したいバグより悪い)。
  */

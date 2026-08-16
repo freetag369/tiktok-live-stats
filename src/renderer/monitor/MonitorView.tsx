@@ -40,6 +40,8 @@ import {
 import { num } from '@shared/format';
 import { CFG_POLL_MS } from '@shared/constants';
 import { bestDrainRank, peekNextDrainKind, runFxDrain, type FxDrainQueues } from '@shared/fx-drain';
+import { pressDropSinceHold } from '@shared/fx-hold';
+import { routeStrike } from '@shared/fx-strike-route';
 import {
   BANNER_PRIORITY,
   bannerRank,
@@ -639,6 +641,15 @@ export function MonitorView(): React.JSX.Element {
    * worker の権威ある値へ必ず収束する。
    */
   const [heldValue, setHeldValue] = useState<number | null>(null);
+  /**
+   * 押下追従(shared/fx-hold.ts)の3点セット。据え置きは演出の開始時点で固定される
+   * ので、そのままだと「凍結を素通しして即時に効く押下」が数字に出ない。
+   * base = 据え置きを張った時点の worker の pressDownTotal、applied = そこから
+   * すでに据え置きへ反映した累計、ref = 最新の pressDownTotal(delta ごとに前進)。
+   */
+  const pressDownTotalRef = useRef(0);
+  const holdPressBase = useRef(0);
+  const holdPressApplied = useRef(0);
   const prevFills = useRef<number | null>(null);
   /** ストック満杯累計の前回値。likeGauge.fills と同じ単調増加規約で比較する。 */
   const prevStockFills = useRef<number | null>(null);
@@ -912,6 +923,16 @@ export function MonitorView(): React.JSX.Element {
     void rpc('challenge.fxCaps', { bandFx: !prefersReducedMotion() }).catch(() => undefined);
   }
 
+  /**
+   * 「このフィーバーの予約は再生されない」の申告。worker はアームをプレーンモードへ
+   * 倒す(倍率だけ適用) — 破棄しないのは「課金ギフトをもらったのにフィーバーが
+   * 起きない」を作らないため。**effectId 0 = アーム中のものを種類を問わず解放**。
+   * 撃たないと worker はアーム期限(BOOST_ARM_MAX_MS)まで待ってしまう。
+   */
+  function dropBoostCue(effectId: number): void {
+    void rpc('challenge.boostCue', { action: 'drop', effectId }).catch(() => undefined);
+  }
+
   // ワーカー再起動・起動レースで凍結許可(fxCaps)は既定 false に戻る/失われる。
   // 従来は 120 秒ポーリングが唯一の再送で、その間ワーカーは全カットインを
   // 「モニター未表示/動きの抑制」として拒否していた(dev 起動直後の実配信で
@@ -919,6 +940,15 @@ export function MonitorView(): React.JSX.Element {
   useEffect(() => {
     if (workerState === 'ready') sendCaps();
   }, [workerState]);
+
+  // モニターの再読み込み・再マウントでは watermark が null(= 全件再生済みに倒す)
+  // から始まるので、**マウント前に積まれた boost-start は二度と再生されない**
+  // (freshChallengeEffects の lastPlayed===null 分岐)。worker 側にアームが
+  // 残っていると期限まで無駄に待つので、ここで解放してプレーンへ倒す。
+  // アームが無ければ worker 側で no-op。
+  useEffect(() => {
+    dropBoostCue(0);
+  }, []);
 
   // worker 再起動で effect の id が振り直されたら watermark を白紙へ戻す。
   // かつては freshChallengeEffects が「id が watermark を下回ったら再起動」と
@@ -928,6 +958,20 @@ export function MonitorView(): React.JSX.Element {
   // (初回マウントでは既に null で完全な no-op)。
   useEffect(() => {
     lastPlayed.current = null;
+    // worker が作り直されるとフィーバーの状態ごと消える。持ち越しを残すと
+    // **誰も清算しない不透明シネマ**をタップカウンタ 0 のまま再生し、boost-end も
+    // 永久に来ない。boostEndsAtMs がアーム期限ぶん先(フォールバックのタイムライン)
+    // なので planBoostStart では落とせない — ここで捨てるのが唯一の出口。
+    if (pendingBoosts.current.length > 0) {
+      fxWarn('worker 再起動 — 再生できないフィーバーの持ち越しを破棄', {
+        dropped: pendingBoosts.current.length,
+      });
+      pendingBoosts.current = [];
+      refreshFxStock();
+    }
+    // 依存は workerEpoch だけ — refreshFxStock は毎レンダー同一性が変わるので
+    // 入れると worker の世代が変わっていないのに毎回走る(この行の流儀は同ファイル内の他 effect と同じ)。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workerEpoch]);
 
   useEffect(() => {
@@ -1018,6 +1062,10 @@ export function MonitorView(): React.JSX.Element {
     prevFills.current = fills;
     prevStockFills.current = sFills;
     prevValue.current = challenge.value;
+    // prevValue と**必ず同じ場所で**前進させる — heldValueFor は prevValue を原点に
+    // 使うので、押下追従の基準がそれより古い delta のものだと、据え置きに既に
+    // 反映済みの押下をもう一度引いて数字が二重に飛ぶ。
+    pressDownTotalRef.current = challenge.pressDownTotal ?? 0;
 
     if (prevV === null) return; // マウント直後はアダプト(過去の変化で光らせない)
 
@@ -1052,85 +1100,90 @@ export function MonitorView(): React.JSX.Element {
       });
     }
 
-    // ルーレット演出中は据え置きを守る — 着弾ラッチや通常パンチで上書きすると
-    // リールが止まる前に数字がネタバレする。反映は finishRoulette が行い、
-    // 解除は常に null 代入なので worker 値へ必ず収束する。
-    // カットイン(バンド演出)中も同じ理由で守る — 反映は finishBandFx が行う。
-    // ストック着弾カットイン中も同様(再満杯は reveal 時に worker 値へ一括収束)。
+    // ルーレット/カットイン演出中は据え置き(数字)を守る — 上書きするとリールが
+    // 止まる前に数字がネタバレする。反映は各 finish* が行い、解除は常に null 代入
+    // なので worker 値へ必ず収束する。ただし**着弾の演出そのものは待たせない** —
+    // 持ち主が別に居る間は beat(visuals-only)で即時に出す(routeStrike が権威)。
     //
-    // 同一デルタの場合: この effect は演出再生(playEffect)より先に走るので、
-    // これから再生される未再生ルーレット/カットインがあればラッチを譲る(直後に
-    // startRoulette / startBandFx が張る)。5秒超の取りこぼしは演出側もスキップ
-    // するので、そのときは譲らず通常どおり着弾/パンチへ進む。
-    // 未再生 effect に譲るのは「本当にリール/カットインが始まる」ものだけ —
-    // 盤面欠損・未知クリップ id・動きの抑制で始まらない effect に譲ると、
-    // 譲った先が何も出さず、着弾もパンチも丸ごと消える(誰も再生しない)。
-    // 同一デルタに相乗りした未再生 effect は「再生中」扱い(この直後に必ず
-    // start* が走る)— 据え置き(heldValue)の持ち主は常に1人の規約なので、
-    // ここで着弾チェーンを張ってしまうと持ち主が二重になる。
-    const yieldToCutin =
-      anyCutinHold() ||
-      // watermark 未確立(lastPlayed=null)では譲らない — 直後の watermark 初期化が
-      // 全件を「再生済み」に倒すので、譲った先は誰も再生しない。鮮度は playEffect と
-      // 同じ isChallengeEffectFresh(test 演出は 15 秒)— 生の 5000 を置くと、
-      // 5〜15 秒経った test ルーレットで「譲らないのに再生はする」ズレが生まれ、
-      // startRoulette の flushStrike が飛行中の着弾チェーンを打ち切る。
-      (lastPlayed.current !== null &&
-        challenge.recentEffects.some(
-          (e) =>
-            e.id > lastPlayed.current! &&
-            isChallengeEffectFresh(e, Date.now()) &&
-            (e.kind === 'roulette'
-              ? rouletteWillSpin(e)
-              : e.kind === 'boost-start'
-                ? boostWillStart(e)
-                : e.kind === 'gift' && e.fxBandClip != null && bandWillStart(e))
-        ));
+    // cutinImminent = 同一デルタに相乗りした未再生ルーレット/ブースト/バンド。
+    // この effect は演出再生(playEffect)より先に走るので、これらは「再生中」扱い
+    // (この直後に必ず start* が据え置きを張る)— ここでフルチェーンを張ると
+    // 据え置きの持ち主が二重になる。数えるのは「本当にリール/カットインが始まる」
+    // ものだけ — 盤面欠損・未知クリップ id・動きの抑制で始まらない effect を
+    // 数えると、beat に落とした数字の据え置きを誰も引き取らない。
+    // watermark 未確立(lastPlayed=null)では「これから始まる」と見なさない — 直後の
+    // watermark 初期化が全件を「再生済み」に倒すので、始まる者は誰も居ない。
+    // 鮮度は playEffect と同じ isChallengeEffectFresh(test 演出は 15 秒)— 生の
+    // 5000 を置くと、5〜15 秒経った test ルーレットで「始まらないのに再生はする」
+    // ズレが生まれ、startRoulette の flushStrike が飛行中の着弾チェーンを打ち切る。
+    const cutinImminent =
+      lastPlayed.current !== null &&
+      challenge.recentEffects.some(
+        (e) =>
+          e.id > lastPlayed.current! &&
+          isChallengeEffectFresh(e, Date.now()) &&
+          (e.kind === 'roulette'
+            ? rouletteWillSpin(e)
+            : e.kind === 'boost-start'
+              ? boostWillStart(e)
+              : e.kind === 'gift' && e.fxBandClip != null && bandWillStart(e))
+      );
 
-    if (yieldToCutin) {
-      // 譲るのは「数字の据え置き」だけ。着弾した事実まで捨てると、ゲージが 0 に
-      // 戻ったのに音も光もバナーも出ない(演出が丸ごと消える最大の経路だった)。
-      // ストック満杯分も必ず持ち越す — 落とすと緑弾・カットイン・SE が永久に消える。
-      // 実際の再生は解除の瞬間に startStrikeFromPending がフルチェーン1本で行う。
-      if ((likeDelta > 0 || stockDelta > 0) && challenge.status === 'running') {
-        queueStrike(likeDelta, stockDelta);
-      }
+    // 着弾の経路決定は shared/fx-strike-route.ts が権威(真理値表はテストで凍結)。
+    // 入力に stageBusy が**無い** = バナーは着弾を止めない — かつてはバナー表示中の
+    // 着弾を pendingStrike へ退避 → 舞台ドレインで follow バナーに負け続け、実配信
+    // では「ゲージは溜まるのに着弾が出ない」ように見えた(2026-08-16 ユーザー決定
+    // 「キューに入れず常時実行」で廃止)。
+    const route = routeStrike({
+      hasFill: likeDelta > 0 || stockDelta > 0,
+      running: challenge.status === 'running',
+      chainFlying: strikeTimers.current.length > 0,
+      cutinActive: anyCutinHold(),
+      cutinImminent,
+    });
+
+    if (route === 'coalesce') {
+      // チェーン飛行中は再スタートも flushStrike もしない — startStrike 冒頭の
+      // clearStrikeTimers が前チェーンの着弾を無再生で潰すため。合算して持ち越し、
+      // 現行チェーン終端の continueStrikeChain が**間合いなし直結**で1本にして
+      // 出す(舞台の順番待ちはしない — 最大遅延は現行チェーン1本ぶんで有界)。
+      queueStrike(likeDelta, stockDelta);
+      // 着弾チェーンの据え置き中も押下は見せる(beat 経路と同じ理由)。
+      followHoldWithPresses();
       return;
     }
 
-    // チェーン飛行中は再スタートも flushStrike もしない — startStrike 冒頭の
-    // clearStrikeTimers や下の flushStrike が前チェーンの着弾を無再生で潰すため、
-    // 連続満タン時に着弾演出(パンチ/粒子/クリップ/SE)が一度も出なくなる
-    // (実配信でいいねが流れ続けると常時この経路に入る)。合算して持ち越し、
-    // 現行チェーンの着弾後に1本のチェーンとして出す。値のみの変化(押下/ギフト)
-    // もここで止める — 数字の反映は着弾時の null 収束が引き受ける。
-    if (strikeTimers.current.length > 0) {
-      if ((likeDelta > 0 || stockDelta > 0) && challenge.status === 'running') {
-        queueStrike(likeDelta, stockDelta);
-      }
+    if (route === 'beat') {
+      // カットイン中/直前 — 据え置きの持ち主は常に1人の規約なのでフルチェーンは
+      // 張れないが、着弾を待たせもしない: visuals-only のビートを即時に撃つ。
+      // かつてはここで pendingStrike へ退避 → 演出明けの再生待ちで、連鎖リール/
+      // バンド中は最長 45 秒着弾が出なかった。
+      strikeBeatNow(likeDelta, stockDelta);
+      // カットインの下でも押下ぶんだけ数字を動かす(worker は凍結中も押下を
+      // 即時適用している — 据え置きを追従させないと「押しても動かない」に戻る)。
+      followHoldWithPresses();
       return;
     }
 
-    /*
-     * ±N 浮上バナーが出ている(または消え際の間合い中)なら、いいねゲージ/ストックの
-     * 着弾チェーンは始めない — 「バナーが消えてから演出」の対象。ここに来た時点で
-     * カットインもチェーンも居ない(上の2つで return 済み)ので、塞いでいるのは
-     * バナーだけ。
-     *
-     * **数字は「まだ見せていないぶん」を引いた値で据え置く。** 素通しすると、いったん
-     * worker 値まで進んでから、演出の開始時にその増減ぶんだけ**巻き戻って**見える
-     * (実機ハーネスで実測: 1050 → 1030 → 1050)。ルーレットではさらに悪く、リールが
-     * 回る前に数字が答えを出す(出目の先漏れ)。
-     * 据え置きは delta のたびに張り直すので、待っている間の押下(値の変化)は
-     * そのまま反映され、パンチも出る。持ち主は「舞台待ちの持ち越し」— 解除は
-     * 各 start* の張り直しか flushStrike(null 代入)で、舞台が空けば次の delta が
-     * 必ず flushStrike を通るので、従来どおり必ず worker 値へ収束する。
-     */
-    if (stageBusy()) {
-      if ((likeDelta > 0 || stockDelta > 0) && challenge.status === 'running') {
-        queueStrike(likeDelta, stockDelta);
+    if (route === 'none') {
+      // 値のみの変化(押下/ギフト)か停止中。数字の持ち主(カットイン/チェーン)が
+      // 別に居るなら押下追従だけ見せて帰る — 下の flushStrike へ落とすと持ち主の
+      // 据え置きを null で落とし、リールの出目が先漏れする。
+      if (anyCutinHold() || cutinImminent || strikeTimers.current.length > 0) {
+        followHoldWithPresses();
+        return;
       }
-      if (applyStageHold()) {
+      /*
+       * ±N 浮上バナーが出ている(または消え際の間合い中)間、**値のみの変化**は
+       * 従来どおり「まだ見せていないぶん」を引いた値で据え置く。素通しすると、
+       * いったん worker 値まで進んでから、演出の開始時にその増減ぶんだけ
+       * **巻き戻って**見える(実機ハーネスで実測: 1050 → 1030 → 1050)。
+       * 据え置きは delta のたびに張り直すので、待っている間の押下(値の変化)は
+       * そのまま反映され、パンチも出る。解除は各 start* の張り直しか flushStrike
+       * (null 代入)で、必ず worker 値へ収束する。
+       * ※着弾(chain ルート)はこのブロックを通らない — バナーで着弾は止めない。
+       */
+      if (stageBusy() && applyStageHold()) {
         if (prevV !== challenge.value) {
           setPunchDir(challenge.value < prevV ? 'down' : 'up');
           setPunchKey((k) => k + 1);
@@ -1156,11 +1209,24 @@ export function MonitorView(): React.JSX.Element {
     }
 
     if (canStrike) {
-      startStrike(held, prevV, likeDelta, stockDelta);
+      // 据え置きは会計の唯一の式(heldValueFor)でクランプする — バナー待ちで
+      // 溜まったルーレット/バンドの未表示ぶんを差し引かないと、チェーン中に結果が
+      // 先漏れし、直後の start* の再据え置きで巻き戻って見える。舞台待ちの
+      // 持ち越しが無ければ held と同値(挙動不変)。減算ギフト(負の持ち越し)は
+      // min で従来どおり held 側に倒す — 旧経路(素の startStrike)と同じ縮退。
+      startStrike(Math.min(held, heldValueFor(likeDelta + stockDelta)), prevV, likeDelta, stockDelta);
       return;
     }
 
     flushStrike(); // 保留があれば畳んでから通常のパンチへ
+    if ((likeDelta > 0 || stockDelta > 0) && challenge.status === 'running' && !prefersReducedMotion()) {
+      // 据え置けない縮退(v=0 等で held >= value、または stock のみの差分)。
+      // かつては無言で落ちて「満タンなのに音も光も出ない」だった — フルチェーンの
+      // 代わりに visuals-only のビートで必ず着弾を見せる(startStrikeFromPending の
+      // held >= v 縮退と同型)。パンチはビートが 'strike' で出すのでここで返る。
+      strikeBeatNow(likeDelta, stockDelta);
+      return;
+    }
     // 相殺デルタ(値不変・着弾だけ不成立)ではパンチしない — 方向が決められない。
     if (prevV !== challenge.value) {
       setPunchDir(challenge.value < prevV ? 'down' : 'up');
@@ -1384,6 +1450,35 @@ export function MonitorView(): React.JSX.Element {
   }
 
   /**
+   * 据え置きを張る唯一の入口。**setHeldValue に数値を渡すのはここだけ**にすること —
+   * 押下追従の基準(pressDownTotal)をここで採り直しているので、素で setHeldValue を
+   * 呼ぶと、その据え置きの間だけ押下が数字に出なくなる(解除は null 代入のままでよい)。
+   */
+  function holdValue(v: number): void {
+    holdPressBase.current = pressDownTotalRef.current;
+    holdPressApplied.current = 0;
+    setHeldValue(v);
+  }
+
+  /**
+   * 据え置き中に効いた押下ぶんだけ数字を下げる。**減る方向にしか動かない**
+   * (判定は shared/fx-hold の pressDropSinceHold)ので、出目やカットインの
+   * 未表示ぶんは据え置いたまま = 結果の先漏れも巻き戻りも起こさない。
+   * 呼ぶのは「据え置きの持ち主が居るまま早期 return する」経路(カットインへ譲る /
+   * 着弾チェーン飛行中)だけ。舞台待ち(applyStageHold)は毎 delta 張り直すので不要。
+   */
+  function followHoldWithPresses(): void {
+    const drop = pressDropSinceHold(holdPressBase.current, pressDownTotalRef.current, holdPressApplied.current);
+    if (drop <= 0) return;
+    holdPressApplied.current += drop;
+    setHeldValue((h) => (h === null ? h : Math.max(0, h - drop)));
+    // 数字が動いた手応え。押下 SE と簡易演出は worker が凍結明けに1件だけ出す
+    // (カットインの音と絵に重ねないため)ので、演出中はパンチだけ。
+    setPunchDir('down');
+    setPunchKey((k) => k + 1);
+  }
+
+  /**
    * 舞台待ちの持ち越しぶんを差し引いて数字を据え置く。**2箇所から呼ぶ必要がある** —
    * 持ち越しを積むのは playEffect だが、値を反映する値変化 effect はそれより先に
    * 走るので、値変化 effect だけでは同じ delta の中で結果が1フレーム漏れる。
@@ -1396,7 +1491,7 @@ export function MonitorView(): React.JSX.Element {
     const withheld = pendingStageAmount();
     const v = prevValue.current;
     if (withheld === 0 || v === null) return false;
-    setHeldValue(Math.max(0, v - withheld));
+    holdValue(Math.max(0, v - withheld));
     return true;
   }
 
@@ -1547,11 +1642,14 @@ export function MonitorView(): React.JSX.Element {
    * 呼び出し側13箇所は原則そのまま — 下の2つだけ immediate を渡す。
    *
    * @param opts.immediate 順番待ちを飛ばして即座に出す。**演出そのもののビートに
-   *   同期していなければならないバナー専用**:
-   *   (a) ルーレットの確定バナー。コンボ中は rouletteHold が張られたままなので、
+   *   同期していなければならないバナー専用**。表示は単枠置換(showBannerNow)なので、
+   *   これは「表示中バナーを上書きで消す権利」でもある — 渡してよいのは:
+   *   (a) ルーレットの確定バナー(無条件)。コンボ中は rouletteHold が張られたままなので、
    *       積むとチェーンが全部終わるまで1枚も出ず、額とリールの対応が読めなくなる。
-   *   (b) 着弾チェーンの通知(flushPendingFloat)。飛行中に積むとパンチ・粒子・SE から
-   *       切り離され、「アニメーション → 通知」の規約(fx-floats.ts)が逆向きに壊れる。
+   *   (b) 着弾チェーンの通知(flushPendingFloat — **ラッチが空いているときだけ**)。
+   *       飛行中に積むとパンチ・粒子・SE から切り離され「アニメーション → 通知」の規約
+   *       (fx-floats.ts)が逆向きに壊れる一方、無条件にすると表示中のルーレット確定
+   *       バナーを上書きで消す(実害あり)— だからラッチ判定付き。
    * @param opts.se 表示と同時に鳴らす効果音スロット。
    * @param kind 優先クラスの引き当てキー(fx-priority の登録簿2)。順番待ちの
    *   取り出し順(takeNextBanner)と溢れの破棄順(enqueueBanner の rankOf)、
@@ -1890,6 +1988,13 @@ export function MonitorView(): React.JSX.Element {
    * 着弾待ちの保留を1枚にまとめて出す(保留なしなら no-op)。node は畳んだ合計 +N で
    * ここで組む。ref を先に null にしてから push するので、どの出口から二重に
    * 呼ばれてもバナーは1枚しか出ない。
+   *
+   * immediate は**ラッチが空いているときだけ** — 着弾の瞬間に出す(「アニメーション →
+   * 通知」)のが仕様だが、バナーは単枠置換(showBannerNow)なので、無条件 immediate は
+   * 表示中の他人のバナー(ルーレットの確定 ±N 等)を上書きで消す破壊権になっていた。
+   * 表示中(ラッチ生存)ならキューへ落とし、直後の順番で出す(pushFloat の非 immediate
+   * 経路は enqueue 直後に必ず pumpStage を叩くので取り残しは無い)。ラッチが空いて
+   * いればチェーン飛行中でも従来どおり即時 = 着弾同期は維持。
    */
   function flushPendingFloat(
     ref: { current: PendingFloat | null },
@@ -1899,9 +2004,10 @@ export function MonitorView(): React.JSX.Element {
     const p = ref.current;
     if (p === null) return;
     ref.current = null;
-    // 着弾の瞬間に出すのが仕様(「アニメーション → 通知」)。順番待ちへ積むと
-    // パンチ・粒子・SE から切り離されて規約が逆向きに壊れる。
-    pushFloat(render(p.amount), 'bad like-float', kind, { immediate: true });
+    // 読み取り側もクランプを通す(stageBusy と同じ規律 — 書き込みは pumpStage だけ)。
+    const now = Date.now();
+    const bannerFree = stageWaitMs(clampBannerEndAt(bannerEndAt.current, now), now, 'banner') === 0;
+    pushFloat(render(p.amount), 'bad like-float', kind, { immediate: bannerFree });
   }
 
   /**
@@ -1933,12 +2039,51 @@ export function MonitorView(): React.JSX.Element {
     if (shouldFlushDeferredFloats(floatHoldState())) flushDeferredFloats();
   }
 
-  /** 持ち越しキューへの合算。チェーン飛行中・カットイン中の満タン/満杯を積む。 */
+  /**
+   * 持ち越しへの合算。**チェーン飛行中(routeStrike の coalesce)専用**の
+   * 直列化バッファ — 消化はチェーン終端の continueStrikeChain の直結で、舞台の
+   * 順番待ちはしない。カットイン中・バナー中の着弾はここへ積まず strikeBeatNow /
+   * フルチェーンで即時に出す(2026-08-16 ユーザー決定「着弾は常時実行」)。
+   * runDrain の strike 経路は安全弁・番犬・レース時の最後の網として残っている。
+   */
   function queueStrike(like: number, stock: number): void {
     const q = pendingStrike.current ?? { like: 0, stock: 0 };
     q.like += like;
     q.stock += stock;
     pendingStrike.current = q;
+  }
+
+  /**
+   * カットイン中の visuals-only 着弾ビート(routeStrike の beat)。
+   *
+   * 据え置き(heldValue)の持ち主が別に居る間はフルチェーンを張れない(持ち主は
+   * 常に1人の規約)が、着弾の**見え・音**は据え置きと独立に出せる — 光・パンチ・
+   * SE・粒子をその場で即時再生し、数字は着弾分だけ関数型 updater で
+   * 増加追従させる(fx-hold の押下追従=減少方向とちょうど対称。worker は値を
+   * 適用済みなので、カットイン自身の増減は据え置いたまま = 出目の先漏れなし)。
+   *
+   * **バナー(±N 浮上)には一切触らない。** バナーは単枠置換(showBannerNow)なので、
+   * ここで flush するとカットイン自身の確定バナー(ルーレットの ±N 等)を上書きで
+   * 消してしまう(実配信で「ルーレットの浮上Nが出ない」として観測された実害)。
+   * 保留(pendingLikeFloats/pendingStockFloats)は合算されたまま残り、出口は
+   * fxHoldBusy のウォッチドッグ(全カットイン終了時)/本物のチェーン着弾/
+   * runDrain idle が必ず引き受ける。
+   *
+   * タイマーは張らない(chainActive を汚さない)。hold への数値代入もしない —
+   * 「数値を渡す setHeldValue は holdValue() だけ」の規約に適合(fx-hold-safety)。
+   * hold 未取得の「これから始まる」枝では h===null で追従は no-op — 直後の
+   * start* が heldValueFor で張る値は着弾分込み(pendingStrike 非計上)で整合する。
+   */
+  function strikeBeatNow(likeDelta: number, stockDelta: number): void {
+    if (likeDelta <= 0 && stockDelta <= 0) return;
+    if (prefersReducedMotion()) {
+      // 保留バナーはここでも出さない(出口はウォッチドッグ/着弾/drain idle)。
+      fxWarn('reduced-motion: カットイン中の着弾ビートをスキップ(数字は収束時に反映)');
+      return;
+    }
+    setHeldValue((h) => (h === null ? h : h + likeDelta + stockDelta));
+    if (likeDelta > 0) impactStrikeVisuals(false);
+    if (stockDelta > 0) stockImpactVisuals(stockDelta, false);
   }
 
   /**
@@ -2003,24 +2148,39 @@ export function MonitorView(): React.JSX.Element {
    * 保留中の据え置きを即座に畳む。数字は常に worker の値へ収束する。
    *
    * @param handoff true = 直後に別演出が始まる(startRoulette / startBandFx /
-   *   startBoostFx の冒頭)。このとき保留バナーは**出さずに持ち越す** — ここで
-   *   出すと、演出明けに startStrikeFromPending が本番の着弾を再生してもキューが
-   *   空でバナーが二度と出ない(「ストック満杯バナーが出ないことがある」の本体)。
-   *   持ち越したバナーは着弾(impactStrike / revealStock)か、全カットイン終了時の
-   *   ウォッチドッグ(fxHoldBusy の effect)が必ず出す。
-   *   これらの start* は hold フラグを立てる**前**に呼ぶので、floatHoldState の
-   *   cutinActive では「これから始まる」が見えない — だから引数で渡す。
+   *   startBoostFx の冒頭)。未着弾ぶん+持ち越しの残は後送りにせず、その場で
+   *   visuals-only のビート(strikeBeatNow)として撃ち切る。保留バナーはビートが
+   *   触らないので持ち越されたまま — これから始まる演出の終了時にウォッチドッグが
+   *   出す(単枠バナーを直前に消費すると動画裏で誰にも見えず死ぬだけ)。
+   *   これらの start* は hold フラグを立てる**前**に呼ぶので、ビートの増加追従は
+   *   no-op で、直後の holdValueFor と数字が揃う — だから引数で渡す。
+   *   false(安全弁・リセット経路)では従来どおり持ち越しへ戻し、バナーは
+   *   出す先が居なければここで回収する。
    */
   function flushStrike(handoff = false) {
     clearStrikeTimers();
-    // 飛行中チェーンの未着弾ぶんは捨てずに持ち越しへ戻す — startRoulette /
-    // startBandFx の横取りで畳まれた着弾(ストックカットイン含む)は、演出明けの
-    // startStrikeFromPending が再生する。pendingStrike 自体はここでは消費しない。
-    // 消費するのは runDrain / continueStrikeChain の「先に取る」と、停止・リセット
-    // (下の status effect)だけ。
     const a = activeStrike.current;
     activeStrike.current = null;
-    if (a && (a.like > 0 || a.stock > 0)) queueStrike(a.like, a.stock);
+    if (handoff) {
+      // 横取り(startRoulette / startBandFx / startBoostFx)— 飛行中チェーンの
+      // 未着弾ぶんと持ち越しの残を、後送りにせず**今ここで visuals-only の
+      // ビートとして撃ち切る**(2026-08-16「着弾は常時実行」)。かつては
+      // pendingStrike へ戻して演出明けの startStrikeFromPending 待ちだった。
+      // この時点で呼び出し元はまだ hold を立てていない(flushStrike(true) は
+      // hold 設定の前)ので、ビートの増加追従は no-op — 直後の holdValueFor は
+      // pendingStrike 消費済み+worker 適用済みの値で計算され、ビートと数字が
+      // 同じ瞬間に揃う。
+      const p = pendingStrike.current;
+      pendingStrike.current = null; // 「先に取る」規律(continueStrikeChain と同型)
+      const like = (a?.like ?? 0) + (p?.like ?? 0);
+      const stock = (a?.stock ?? 0) + (p?.stock ?? 0);
+      strikeBeatNow(like, stock);
+    } else if (a && (a.like > 0 || a.stock > 0)) {
+      // 安全弁・リセット経路 — 未着弾ぶんは捨てずに持ち越しへ戻す。消費は
+      // runDrain / continueStrikeChain の「先に取る」と、停止・リセット
+      // (下の status effect)だけ。
+      queueStrike(a.like, a.stock);
+    }
     // カットイン中の安全弁経路でもここに来る。stockCutin が null なら両行とも
     // no-op なので、ストックなしの従来 strike 経路の挙動は変わらない。
     stockCutinHold.current = false;
@@ -2052,16 +2212,18 @@ export function MonitorView(): React.JSX.Element {
    * 演出終了時の持ち越しドレイン。どのキューをどの順で見るかは
    * shared/fx-drain.ts の drainFxQueues が権威(FX_PRIORITY_ORDER 由来・テストで固定)。
    * achieved(CLEAR)は「再生」— 開始スロットを消費せず次演出と並走する。
-   * strike(保留着弾)は序列②③の一級市民としてここで消化する — 消費は
-   * drainFxQueues の take に一本化(呼び出し前に queues.strike へ移し、take され
-   * なかった場合は必ず戻す)。hooks はルーレット BGM の後始末(finishRoulette 系)。
+   * strike は 2026-08-16 の「着弾は常時実行」で通常は舞台を経なくなった
+   * (coalesce はチェーン終端の直結、カットイン中はビート)— ここの strike 経路は
+   * 安全弁・番犬・レースで pendingStrike に残った分を拾う**最後の網**として温存する。
+   * 消費は drainFxQueues の take に一本化(呼び出し前に queues.strike へ移し、
+   * take されなかった場合は必ず戻す)。hooks はルーレット BGM の後始末(finishRoulette 系)。
    */
   function runDrain(hooks?: DrainHooks): boolean {
     const queues = drainQueuesView();
     pendingAchieved.current = null;
-    // 保留着弾は queues.strike へ移した(take と分離すると宙に浮く)。runFxDrain 中の
-    // 横取り(start* の flushStrike(true))が pendingStrike を積み直すことがあるので、
-    // ここでの null 代入と後段の戻しは queueStrike のマージで整合させる。
+    // 保留着弾は queues.strike へ移した(take と分離すると宙に浮く)。runFxDrain 中に
+    // 走る start* の flushStrike(true) は今は pendingStrike をビートで撃ち切る側だが、
+    // ここでの null 代入と後段の戻しは従来どおり queueStrike のマージで整合させる。
     pendingStrike.current = null;
     const r = runFxDrain(queues, {
       playAchieved: (e) => playEffect(e),
@@ -2107,10 +2269,12 @@ export function MonitorView(): React.JSX.Element {
           hooks?.onNext?.('band');
           return startBandFx(e);
         }
-        // ブーストだけは「期限切れ」がある。worker のフィーバーは絶対時刻で走り、
-        // ルーレット連鎖(最長 ~39秒 — heavy 12.9 + 19×1.35)では worker は凍結しないので、キューから
-        // 出す時点で終わっているフィーバーがありうる。そのまま再生すると
-        // 0 のままのタップカウンタを不透明動画で最大 26 秒見せることになる。
+        // ブーストだけは「期限切れ」がある。ただし worker はギフト着弾で**予約する
+        // だけ**(アーム)になったので、焼き込まれた boostEndsAtMs は
+        // 「アーム期限 BOOST_ARM_MAX_MS で強制発動した場合」のフォールバックの
+        // タイムライン。したがって skip = **アーム期限を過ぎても舞台が空かなかった**
+        // という異常系だけ。そのまま再生すると 0 のままのタップカウンタを
+        // 不透明動画で見せることになるので出さない。
         const e = next.effect;
         const plan = planBoostStart(boostStartTiming(e), Date.now());
         if (plan.action === 'skip') {
@@ -2121,6 +2285,7 @@ export function MonitorView(): React.JSX.Element {
             nowMs: Date.now(),
             waitedMs: Date.now() - e.atMs,
           });
+          if (!e.test) dropBoostCue(e.id);
           return false;
         }
         if (!boostWillStart(e)) {
@@ -2128,6 +2293,7 @@ export function MonitorView(): React.JSX.Element {
             durationMs: e.fxDurationMs,
             reducedMotion: prefersReducedMotion(),
           });
+          if (!e.test) dropBoostCue(e.id);
           return false;
         }
         hooks?.onNext?.('boost');
@@ -2209,7 +2375,7 @@ export function MonitorView(): React.JSX.Element {
     // rouletteRemainingAmount、会計の式は heldValueFor(4開始点で共有)— 解除後は
     // 必ず worker の権威ある値に収束する。原点が e.valueAfter でなく prevValue
     // なのは、バナー待ちや持ち越しで遅れて始まると valueAfter が古いため。
-    setHeldValue(heldValueFor(rouletteRemainingAmount(e, at)));
+    holdValue(heldValueFor(rouletteRemainingAmount(e, at)));
     // 短縮するのはコンボ2本目以降(at > 0)のみ。入室ルーレット(rouletteJoin)は
     // マージで畳まれた2本目以降でも短縮しない — 初見さんの1本は常にフル尺。
     const short = !e.rouletteJoin && (fast || at > 0);
@@ -2551,7 +2717,7 @@ export function MonitorView(): React.JSX.Element {
     // この effect は呼び出し前にキューから抜き済み(pendingStageAmount に二重計上
     // されない)。原点が e.valueAfter でないのは、pendingBands / バナー待ちで
     // 遅れて始まると valueAfter が古く、カットイン開始で数字が過去へ飛ぶため。
-    setHeldValue(heldValueFor(e.amount));
+    holdValue(heldValueFor(e.amount));
     setBandClip({ key: ++fxKey, url, durationMs, out: false, fullCut: e.fxFullCut === true });
     // ストック先頭行の ×N(連続ギフトの残ショット数)。ショット毎のタイマーが減らす。
     playingFx.current = { kind: 'band', id: e.id, nickname: e.nickname, remaining: bandRep };
@@ -2662,6 +2828,7 @@ export function MonitorView(): React.JSX.Element {
         durationMs: e.fxDurationMs,
         reducedMotion: prefersReducedMotion(),
       });
+      if (!e.test) dropBoostCue(e.id);
       return false;
     }
     // 途中参加(resume)は前置きの残りを段ごとに組み直す。3・2・1 は映像に
@@ -2674,6 +2841,33 @@ export function MonitorView(): React.JSX.Element {
     const countMs = plan.action === 'full' ? (e.boostCountMs ?? 0) : plan.countMs;
     const preMs = introMs + countMs;
     const totalMs = plan.action === 'full' ? (e.fxDurationMs ?? 0) : plan.remainingMs;
+    if (plan.action === 'resume') {
+      // アーム後は正常系で resume に落ちない(planBoostStart はアーム期限まで必ず
+      // full を返す)。ここに来た = **アーム期限 BOOST_ARM_MAX_MS が切れた**という
+      // 異常なので必ず記録する。この経路が完全に無言だったことが
+      // 「起動カットインが飛ばされる」の原因究明を遅らせた。
+      fxWarn('フィーバーの起動カットインを短縮 — アーム期限切れ', {
+        phase: plan.phase,
+        introMs,
+        countMs,
+        atMs: e.atMs,
+        waitedMs: Date.now() - e.atMs,
+      });
+    }
+    // ★アーム済みフィーバーの発動合図。**ここが唯一の合流点** — 直行経路
+    // (playEffect の boost-start)とドレイン経路(runDrain)の両方が必ず通る。
+    // worker はこの時刻を起点にタップウィンドウを開くので、映像と計数窓が構造的に
+    // 揃い、起動カットイン(5秒)が渋滞で削られることが無くなる。
+    // ▶実演(e.test)は別状態(worker の testBoost*)なので撃たない — 撃つと
+    // 試写の時刻で**実フィーバー**をコミットしてしまう。
+    if (!e.test) {
+      void rpc('challenge.boostCue', {
+        action: 'start',
+        effectId: e.id,
+        startedAtMs: Date.now(),
+        preMs,
+      }).catch(() => undefined);
+    }
     // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。handoff=true —
     // 直後にこの演出が始まるので、保留バナーは出さずに持ち越す(演出明けの着弾で出る)。
     flushStrike(true);
@@ -2688,7 +2882,7 @@ export function MonitorView(): React.JSX.Element {
     // テスト再生は据え置かない(testEffect は値を変えない契約 — 実タップで値が
     // 動いたときに表示が固まって見えるのを避ける)。会計の式は heldValueFor に
     // 一本化(この effect は呼び出し前にキューから抜き済み)。
-    if (!e.test) setHeldValue(heldValueFor(e.amount));
+    if (!e.test) holdValue(heldValueFor(e.amount));
     if (e.flash) pushFlash('gift-t3');
     const push = (ms: number, fn: () => void) => {
       boostTimers.current.push(window.setTimeout(fn, ms));
@@ -3023,7 +3217,7 @@ export function MonitorView(): React.JSX.Element {
     // 飛行中の未着弾ぶんを記録 — ルーレット/カットインの横取り(flushStrike)で
     // 畳まれたとき、この記録が pendingStrike へ戻って演出明けに再生される。
     activeStrike.current = { like: likeDelta, stock: stockDelta };
-    setHeldValue(held);
+    holdValue(held);
     // 同デルタに押下/ギフトが混ざっていた分は据え置かず、その場で見せる。
     if (held !== prevV) {
       setPunchDir(held < prevV ? 'down' : 'up');
@@ -3093,15 +3287,19 @@ export function MonitorView(): React.JSX.Element {
    * clearStrikeTimers は呼ばない(後続ビートと安全弁が生きている)。
    */
   function impactStrikePartial(shown: number) {
-    setHeldValue(shown);
+    holdValue(shown);
     impactStrikeVisuals();
   }
 
-  /** ゲージ満タン着弾の共通演出(パンチ/シェイク/粒子/クリップ/SE)。 */
-  function impactStrikeVisuals() {
+  /**
+   * ゲージ満タン着弾の共通演出(パンチ/シェイク/粒子/クリップ/SE)。
+   * flushFloats=false はカットイン中のビート(strikeBeatNow)専用 — バナーは単枠
+   * 置換なので、カットイン自身の確定バナーを上書きしないよう通知は保留のまま残す。
+   */
+  function impactStrikeVisuals(flushFloats = true) {
     // 着弾の瞬間に「+N いいね妨害!」を出す — アニメーション → 通知の順序。
     // 2段着弾の1段目(impactStrikePartial)もここを通るので、いいね分はそこで出る。
-    flushPendingFloat(pendingLikeFloats, likeFloatNode, 'like-float');
+    if (flushFloats) flushPendingFloat(pendingLikeFloats, likeFloatNode, 'like-float');
     setPunchDir('strike');
     setPunchKey((k) => k + 1);
     pushShake('shake');
@@ -3203,19 +3401,33 @@ export function MonitorView(): React.JSX.Element {
     const delta = stockCutinDelta.current;
     setStockCutin(null); // unmount = 焼き込み音声も止まる
     revealStock(delta);
-    // カットイン中に届いた演出の持ち越しをドレインする(finishBandFx と同順)。
-    scheduleDrain();
+    // カットイン中に合算された満タン/満杯(coalesce)は舞台を経ずに間合いなし
+    // 直結で続けて出す(「着弾は常時実行」— バナーのドレイン待ちに落とさない)。
+    // 持ち越しが無ければ continueStrikeChain が従来どおり scheduleDrain へ倒す。
+    continueStrikeChain();
   }
 
   /** ストック分の reveal — 据え置き全解除+着弾演出(パンチ/シェイク/粒子/SE)。 */
   function revealStock(stockDelta: number) {
     activeStrike.current = null; // ストック段まで着弾完了
     setHeldValue(null);
+    stockImpactVisuals(stockDelta);
+  }
+
+  /**
+   * ストック着弾の共通演出(パンチ/シェイク/粒子/クリップ/SE/バナー)。
+   * 据え置きには一切触らない — revealStock(解除あり)と strikeBeatNow
+   * (カットイン中の visuals-only ビート)の両方から呼ばれる。ビート経路で
+   * revealStock を直接呼ぶと他人の据え置きを null で落とし、リールの出目が
+   * 先漏れする — この分割が安全の要。
+   */
+  function stockImpactVisuals(stockDelta: number, flushFloats = true) {
     // 2発目(緑)の着弾(カットイン有りなら終端)と同時に「いいねストック満杯!」を出す。
     // いいね側のバナーもここで必ず出す — ストック着弾カットイン(最長7秒)の間は
     // strikeTimers が生きているため playEffect が保留しており、この経路で流さないと
     // 次の着弾が起きるまでバナーが闇に消える。
-    flushDeferredFloats();
+    // flushFloats=false はカットイン中のビート専用(impactStrikeVisuals と同じ理由)。
+    if (flushFloats) flushDeferredFloats();
     setPunchDir('strike');
     setPunchKey((k) => k + 1);
     pushShake('shake-strong');
@@ -3587,7 +3799,7 @@ export function MonitorView(): React.JSX.Element {
           !stockCutinHold.current &&
           !boostHold.current
         ) {
-          setHeldValue(Math.max(0, e.valueAfter - e.amount));
+          holdValue(Math.max(0, e.valueAfter - e.amount));
           startStockCutin(e.amount);
         } else if (e.test) {
           // カットインを出せない実演でも無反応にはしない — gauge-full の実演と
@@ -3708,7 +3920,10 @@ export function MonitorView(): React.JSX.Element {
             return;
           }
           if (pendingBoosts.current.length < PENDING_BOOSTS_MAX) pendingBoosts.current.push(e);
-          else fxWarn('boost-start: 持ち越しキュー満杯 — 破棄', { queued: pendingBoosts.current.length });
+          else {
+            fxWarn('boost-start: 持ち越しキュー満杯 — 破棄', { queued: pendingBoosts.current.length });
+            dropBoostCue(e.id);
+          }
           return;
         }
         // 持ち越さない直行経路でも遅れは起きる — freshChallengeEffects は
@@ -3723,6 +3938,7 @@ export function MonitorView(): React.JSX.Element {
             atMs: e.atMs,
             endsAtMs: e.boostEndsAtMs,
           });
+          if (!e.test) dropBoostCue(e.id);
           return;
         }
         if (!startBoostFx(e, directPlan)) {
