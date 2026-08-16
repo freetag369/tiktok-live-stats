@@ -270,4 +270,19 @@ describe('fx-priority 序列との整合(v0.8.0)', () => {
     );
     expect(v.items[0]).toMatchObject({ kind: 'join-roulette', playing: true, key: 'join-roulette:9' });
   });
+
+  it('follow の予告は workerQueue 行として末尾セクションに出る(count 無し = 1)', () => {
+    const v = buildFxStock(
+      snap({
+        bands: [{ id: 1, nickname: 'ば', rep: 1 }],
+        workerQueue: [{ id: 4, kind: 'follow', nickname: 'ふ' }],
+      })
+    );
+    expect(v.items.map((it) => it.key)).toEqual(['band:1', 'wq:4']);
+    expect(v.items[1]).toEqual({ key: 'wq:4', kind: 'follow', name: 'ふ', count: 1, playing: false });
+  });
+
+  it('STOCK_SECTION_ORDER に follow は混ざらない(ref キューが無い種別 — 混ぜると roulettes が二重出力)', () => {
+    expect(STOCK_SECTION_ORDER).not.toContain('follow');
+  });
 });

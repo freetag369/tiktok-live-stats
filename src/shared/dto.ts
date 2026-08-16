@@ -1297,6 +1297,16 @@ export interface ChallengeEffect {
    */
   fanStampPeople?: number;
   /**
+   * kind='follow' かつ coalesced≥2(凍結ドレインの合算)のとき: バナーに並べる
+   * 表示名(到着順)。follow は seenFollowers で userId 重複排除済みなので
+   * 1 effect = 1人 が保証され、人数は coalesced が兼ねる(fanStampPeople 相当の
+   * 別フィールドは持たない)。上限・文字数予算は fan-stamp と共有
+   * (FAN_STAMP_NAMES_MAX / FAN_STAMP_NAMES_BUDGET、唯一の実装は
+   * shared/fan-stamp.ts の followBannerParts)。**1件のときは載せない** —
+   * 従来どおり nickname 経路に倒して既存の文言を1ドットも変えないため。
+   */
+  followNames?: string[];
+  /**
    * テスト再生(challenge.testEffect)由来。値・統計には影響しない演出だけの
    * effect — ダッシュボードの履歴ログはこれを積まない(演出とSEは再生する)。
    */
@@ -1588,11 +1598,15 @@ export interface ChallengeState {
   fxQueue?: ChallengeFxQueueItem[];
 }
 
-/** ワーカー保留キュー1件ぶんの演出予告(ChallengeState.fxQueue の要素)。 */
+/**
+ * ワーカー保留キュー1件ぶんの演出予告(ChallengeState.fxQueue の要素)。
+ * follow は「カットイン級」ではないが予告に載せる — 凍結中のフォローが
+ * 予告ゼロだと配信者から「フォローされたのに無反応」に見えるため。
+ */
 export interface ChallengeFxQueueItem {
   /** ワーカー内の単調採番。ドレインまで不変 — 表示側の同一性キー。 */
   id: number;
-  kind: 'band' | 'boost' | 'roulette';
+  kind: 'band' | 'boost' | 'roulette' | 'follow';
   /** 行為者(viewer.nickname ?? displayId)。 */
   nickname?: string;
   /** 連続ぶんの総回数(ルーレットのスピン数/カットインの反復数)。省略 = 1。 */

@@ -88,6 +88,24 @@ function clipName(name: string, max: number = FAN_STAMP_NAME_CHARS): string {
 }
 
 /**
+ * 名前リストを人数と文字数の**両方**で詰める(fanStamp / follow 共用)。
+ * 予算で0人になっても必ず1人は残す。
+ */
+function packNames(src: readonly string[]): string[] {
+  const names: string[] = [];
+  let used = 0;
+  for (const raw of src.slice(0, FAN_STAMP_NAMES_MAX)) {
+    const n = clipName(raw);
+    // 2人目以降は区切りの「・」も1文字として数える。
+    const cost = Array.from(n).length + (names.length === 0 ? 0 : 1);
+    if (names.length > 0 && used + cost > FAN_STAMP_NAMES_BUDGET) break;
+    names.push(n);
+    used += cost;
+  }
+  return names;
+}
+
+/**
  * お助けバナーの文言を決める唯一の実装。
  *
  * **1人ぶん(= 従来と同じ状況)では従来と完全に同じ結果を返す**のが最優先の契約 —
@@ -112,17 +130,7 @@ export function fanStampBannerParts(e: FanStampBannerInput): FanStampBannerParts
     };
   }
 
-  // 人数と文字数の**両方**で切る。予算で0人になっても必ず1人は残す。
-  const names: string[] = [];
-  let used = 0;
-  for (const raw of src.slice(0, FAN_STAMP_NAMES_MAX)) {
-    const n = clipName(raw);
-    // 2人目以降は区切りの「・」も1文字として数える。
-    const cost = Array.from(n).length + (names.length === 0 ? 0 : 1);
-    if (names.length > 0 && used + cost > FAN_STAMP_NAMES_BUDGET) break;
-    names.push(n);
-    used += cost;
-  }
+  const names = packNames(src);
   return {
     amount,
     names,
@@ -131,4 +139,40 @@ export function fanStampBannerParts(e: FanStampBannerInput): FanStampBannerParts
     giftCount,
     multi: true,
   };
+}
+
+/** フォロー合算バナーの入力(ChallengeEffect の部分型)。 */
+export interface FollowBannerInput {
+  amount: number;
+  nickname?: string;
+  coalesced?: number;
+  followNames?: string[];
+}
+
+export interface FollowBannerParts {
+  /** 並べる名前(省略記号適用済み)。**必ず1件以上**(名無しなら '' 1件)。 */
+  names: string[];
+  /** 「ほかN人」相当の N(people - 並べた件数)。0 なら出さない。 */
+  othersCount: number;
+  /** 人数。follow は seenFollowers 済みで 1 effect = 1人 なので coalesced が兼ねる。 */
+  people: number;
+  /** 2人以上ぶんを畳んだバナーか(CSS のレイアウト切り替えに使う)。 */
+  multi: boolean;
+}
+
+/**
+ * フォロー妨害バナーの文言を決める唯一の実装。
+ *
+ * fanStampBannerParts と同じ最優先の契約 — **1人ぶん(= 従来と同じ状況)では
+ * 従来と完全に同じ結果を返す**。followNames 欠損(旧 worker の effect や
+ * 即時経路)で coalesced≥2 でも nickname 1件へフォールバックして落ちない。
+ */
+export function followBannerParts(e: FollowBannerInput): FollowBannerParts {
+  const people = Math.max(1, e.coalesced ?? 1);
+  const src = e.followNames ?? (e.nickname != null && e.nickname !== '' ? [e.nickname] : []);
+  if (people <= 1 || src.length <= 1) {
+    return { names: [src[0] ?? e.nickname ?? ''], othersCount: 0, people: 1, multi: false };
+  }
+  const names = packNames(src);
+  return { names, othersCount: Math.max(0, people - names.length), people, multi: true };
 }

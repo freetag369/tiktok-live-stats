@@ -130,6 +130,16 @@ export class ChallengeEngine {
    */
   private seenFollowers = new BoundedSet<UserId>(50_000);
   /**
+   * フォロー診断の要約カウンタ(60秒に1行へ畳む)。適用は1行/件で出すが、
+   * 重複スキップと followStep<=0 は実配信で洪水になる(実測 455件/h 級)ので
+   * 件数だけ数えて次の到達時にまとめて出す。start/reset で seenFollowers と
+   * 一緒にクリアする。
+   */
+  private followDupCount = 0;
+  private followDupLogMs: number | null = null;
+  private followStep0Count = 0;
+  private followStep0LogMs: number | null = null;
+  /**
    * 入室ルーレットはチャレンジ1回につきユーザー1度だけ(再入室・再接続バック
    * ログの再配信対策)。target が first/all のどちらでも適用する。容量は
    * seenFollowers と同じ判断(溢れの副作用も同じ — 最初期の入室者がもう一度効くだけ)。
@@ -355,6 +365,12 @@ export class ChallengeEngine {
   /** fxQueue の採番。ドレインを跨いで安定な表示キーのため単調増加。 */
   private fxQueueSeq = 0;
   /**
+   * 現在の凍結エピソード中に溢れ弁(overflowOp)へ落ちた件数。ドレインで 0 に
+   * 戻し、サマリを1行残す(flushOverflowDiag)。溢れは連発しうるので、ログは
+   * エピソード先頭の1行+サマリ1行の最大2行に抑える。
+   */
+  private pendingOverflowCount = 0;
+  /**
    * ドレイン(凍結解除)中の演出の迂回バッファ。非 null の間、pushEffect は
    * ring ではなくここへ積み、finishDrain が同種を1件に畳んでから ring へ移す。
    * 迂回しないと最大 GIFT_FX_PENDING_OPS_MAX 件の演出が一気に ring(12件)へ
@@ -419,6 +435,7 @@ export class ChallengeEngine {
     this.recentEffects = [];
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
+    this.resetFollowDiagCounters();
     this.seenJoiners.clear();
     // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
     // チャレンジで、開始直後の入室が黙って捨てられるのを防ぐ。
@@ -500,6 +517,7 @@ export class ChallengeEngine {
     this.recentEffects = [];
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
+    this.resetFollowDiagCounters();
     this.seenJoiners.clear();
     // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
     // チャレンジで、開始直後の入室が黙って捨てられるのを防ぐ。
@@ -892,23 +910,51 @@ export class ChallengeEngine {
     // (libType 'follow' は実配信では来ない — WebcastSocialMessage 経由)。
     // dedup(seenFollowers)は凍結中も即時に回し、値適用+演出だけを保留する。
     if (e.kind === 'social' && e.sub === 'follow') {
-      if (this.seenFollowers.has(e.viewer.userId)) return false;
+      const nowMs = this.now();
+      if (this.seenFollowers.has(e.viewer.userId)) {
+        this.followDupCount++;
+        if (this.followDupLogMs === null || nowMs - this.followDupLogMs >= 60_000) {
+          this.socialDiag(`重複スキップ ×${this.followDupCount}(直近60秒・再接続バックログ含む)`);
+          this.followDupCount = 0;
+          this.followDupLogMs = nowMs;
+        }
+        return false;
+      }
       this.seenFollowers.add(e.viewer.userId);
-      if (cfg.followStep <= 0) return false;
-      return this.applyOrQueue(() => {
-        this.value += cfg.followStep;
-        this.stats.follows++;
-        // atMs は e.tsMs(TikTokサーバ時刻)ではなくローカル時計。モニターの
-        // 「5秒より古い演出はスキップ」判定と同じ時計で比較させるため。
-        // 凍結明けの実行でも this.now() を読むので、このゲートで死なない。
-        this.pushEffect({
-          kind: 'follow',
-          amount: cfg.followStep,
-          nickname: e.viewer.nickname ?? e.viewer.displayId,
-          atMs: this.now(),
-        });
-        this.dirty = true;
-      });
+      if (cfg.followStep <= 0) {
+        // 「フォロー妨害が発生しない」の最有力原因は設定 0 — 必ず痕跡を残す。
+        this.followStep0Count++;
+        if (this.followStep0LogMs === null || nowMs - this.followStep0LogMs >= 60_000) {
+          this.socialDiag(`followStep=0 のため無効 ×${this.followStep0Count}(直近60秒)`);
+          this.followStep0Count = 0;
+          this.followStep0LogMs = nowMs;
+        }
+        return false;
+      }
+      const nick = e.viewer.nickname ?? e.viewer.displayId;
+      if (this.isFxFrozen() && this.pendingOps.length < GIFT_FX_PENDING_OPS_MAX) {
+        this.socialDiag(`受信 userId=${e.viewer.userId} → 凍結中 → 保留 +${cfg.followStep}`);
+      }
+      return this.applyOrQueue(
+        () => {
+          this.value += cfg.followStep;
+          this.stats.follows++;
+          this.socialDiag(`適用 +${cfg.followStep} nick=${JSON.stringify(nick ?? null)}(値 ${this.value})`);
+          // atMs は e.tsMs(TikTokサーバ時刻)ではなくローカル時計。モニターの
+          // 「5秒より古い演出はスキップ」判定と同じ時計で比較させるため。
+          // 凍結明けの実行でも this.now() を読むので、このゲートで死なない。
+          this.pushEffect({
+            kind: 'follow',
+            amount: cfg.followStep,
+            nickname: nick,
+            atMs: this.now(),
+          });
+          this.dirty = true;
+        },
+        undefined,
+        // 凍結中の予告(演出ストック表示)。follow は 1 effect = 1人 なので count 無し。
+        { kind: 'follow', ...(nick !== undefined ? { nickname: nick } : {}) }
+      );
     }
 
     // 入室ルーレット。入室(action=1)で自動的に1スピン回り、出目をカウントへ
@@ -1615,6 +1661,16 @@ export class ChallengeEngine {
   }
 
   /**
+   * フォロー妨害の診断ログ。giftDiag と同じ出口(constructor の diag)・同じ
+   * 生存条件(handleEvent 冒頭の status ガードの後段でしか呼ばれない)。
+   * follow は従来ログが 0 行で、「発生しない」を実データ(DB)でしか裏取り
+   * できなかった — gift(2,600行/実配信)との非対称を埋めるのが目的。
+   */
+  private socialDiag(message: string): void {
+    this.diag(`[challenge/social] ${message}`);
+  }
+
+  /**
    * 能力が失われた瞬間に凍結中なら即時解除する共通処理。
    * 戻り値 = 状態が変わった(呼び出し側は nudge して delta を配ること)。
    */
@@ -1696,6 +1752,13 @@ export class ChallengeEngine {
   ): boolean {
     if (!this.isFxFrozen()) return op() !== false;
     if (this.pendingOps.length >= GIFT_FX_PENDING_OPS_MAX) {
+      // 値は正しく入るが演出(カットイン/再凍結)は捨てる。連発しうるので
+      // ログはエピソード先頭の1行だけ — 残件数はドレイン時のサマリが持つ。
+      if (this.pendingOverflowCount++ === 0) {
+        this.diag(
+          `[challenge] 保留キュー上限(${GIFT_FX_PENDING_OPS_MAX}件)— 以降は演出を捨て値のみ即時適用`
+        );
+      }
       return (overflowOp ?? op)() !== false;
     }
     this.pendingOps.push({
@@ -1706,6 +1769,21 @@ export class ChallengeEngine {
     // (=呼び出し元は false を返す)ので、ここで dirty を立てないと次の delta に乗らない。
     if (fx) this.dirty = true;
     return false;
+  }
+
+  /** 溢れ弁エピソードのサマリを1行残してカウンタを戻す(両ドレイン出口から)。 */
+  private flushOverflowDiag(): void {
+    if (this.pendingOverflowCount === 0) return;
+    this.diag(`[challenge] 保留キュー溢れ: この凍結中に計${this.pendingOverflowCount}件の演出を破棄`);
+    this.pendingOverflowCount = 0;
+  }
+
+  /** フォロー診断の要約カウンタを初期化(start/reset の seenFollowers.clear() と対)。 */
+  private resetFollowDiagCounters(): void {
+    this.followDupCount = 0;
+    this.followDupLogMs = null;
+    this.followStep0Count = 0;
+    this.followStep0LogMs = null;
   }
 
   /**
@@ -1753,6 +1831,9 @@ export class ChallengeEngine {
     } finally {
       this.finishDrain();
     }
+    // 溢れ弁エピソードのサマリ(あれば)。再凍結で中断しても「ここまでの分」を出す —
+    // 続きの溢れは新しいエピソードとして数え直す。
+    this.flushOverflowDiag();
     // 再凍結(ドレイン中断)なら次の期限で張り直し、解除完了なら外す。
     this.armFreezeTimer();
     // ドレイン明けの合算バナーは tick を待たず即出す(finishDrain 済みなので
@@ -2073,6 +2154,7 @@ export class ChallengeEngine {
     } finally {
       this.finishDrain();
     }
+    this.flushOverflowDiag();
     this.armFreezeTimer();
   }
 
@@ -2141,6 +2223,19 @@ export class ChallengeEngine {
         // 先頭が持たないときは delete でキーごと落とす(undefined 値のキーを残さない)。
         if (head.rouletteId != null) merged.rouletteId = head.rouletteId;
         else delete merged.rouletteId;
+      }
+      if (last.kind === 'follow') {
+        // 合算バナーに並べる名前(到着順・同名は畳む。表示上限は fan-stamp と共有)。
+        // follow は seenFollowers で userId 重複排除済み = 1 effect = 1人 なので、
+        // 人数は coalesced が兼ねる(fanStampPeople 相当は持たない)。
+        const names: string[] = [];
+        for (const g of group) mergeFanStampName(names, g.nickname ?? '');
+        if (names.length >= 1) merged.followNames = names;
+        // 見出し(followNames 欠損時のフォールバック)は先頭に揃える(roulette と同じ規約)。
+        const head = group[0]!;
+        if (head.nickname != null) merged.nickname = head.nickname;
+        else delete merged.nickname;
+        this.socialDiag(`凍結明け合算 follow ×${group.length}(+${merged.amount})names=${names.join('・')}`);
       }
       out.push(merged);
     };

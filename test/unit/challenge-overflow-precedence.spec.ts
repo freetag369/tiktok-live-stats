@@ -293,3 +293,77 @@ describe('ギフトの増減写像 — 先勝ち4段の表', () => {
     expect(e.get().boost ?? null).toBeNull();
   });
 });
+
+/**
+ * 溢れ弁の診断(エピソード方式)。溢れは worker 側に痕跡が一切残らなかった
+ * (網羅監査 2026-08-16 で検出)。連発しうるのでログは「エピソード先頭の1行 +
+ * ドレイン時のサマリ1行」の最大2行に畳む、が契約。
+ */
+describe('保留キュー溢れの診断 — エピソード先頭1行+サマリ1行', () => {
+  function engineWithDiag(
+    c: ChallengeConfig,
+    now: () => number
+  ): { e: ChallengeEngine; overflow: () => string[] } {
+    const lines: string[] = [];
+    const e = new ChallengeEngine(() => c, now, () => 0, () => 0, (m) => lines.push(m));
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
+    return { e, overflow: () => lines.filter((l) => l.includes('保留キュー')) };
+  }
+
+  function bandCfg(): ChallengeConfig {
+    return cfg({
+      initialValue: 10_000,
+      followStep: 1,
+      giftBandFx: { ...structuredClone(DEFAULT_GIFT_BAND_FX), enabled: true },
+    });
+  }
+
+  it('溢れの1件目だけ即時1行、ドレインでサマリ1行 — 次のエピソードでまた1行目', () => {
+    let t = NOW;
+    const { e, overflow } = engineWithDiag(bandCfg(), () => t);
+    e.start();
+    freeze(e);
+    fillQueue(e);
+    for (let i = 0; i < 5; i += 1) e.handleEvent(follow(`ovf-a${i}`));
+    // エピソード先頭の1行だけ(2〜5件目は無言でカウント)。
+    expect(overflow().filter((l) => l.includes('上限'))).toHaveLength(1);
+
+    // 凍結明けドレイン → サマリ1行(計5件)+ カウンタが 0 に戻る。
+    t = NOW + 600_000;
+    e.drainIfChanged();
+    const summaries = overflow().filter((l) => l.includes('溢れ'));
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toContain('計5件');
+
+    // 再凍結 → 再溢れで、また「1行目」が出る(エピソードのリセット確認)。
+    freeze(e);
+    fillQueue(e);
+    e.handleEvent(follow('ovf-b'));
+    expect(overflow().filter((l) => l.includes('上限'))).toHaveLength(2);
+  });
+
+  it('stop(forceApplyPendingOps)経路でもサマリが出る', () => {
+    const { e, overflow } = engineWithDiag(bandCfg(), () => NOW);
+    e.start();
+    freeze(e);
+    fillQueue(e);
+    e.handleEvent(follow('ovf-1'));
+    e.handleEvent(follow('ovf-2'));
+    e.stop();
+    const summaries = overflow().filter((l) => l.includes('溢れ'));
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toContain('計2件');
+  });
+
+  it('溢れが無ければ1行も出ない', () => {
+    let t = NOW;
+    const { e, overflow } = engineWithDiag(bandCfg(), () => t);
+    e.start();
+    freeze(e);
+    e.handleEvent(follow('few'));
+    t = NOW + 600_000;
+    e.drainIfChanged();
+    expect(overflow()).toHaveLength(0);
+  });
+});

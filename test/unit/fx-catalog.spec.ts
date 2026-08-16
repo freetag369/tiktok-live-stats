@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -141,5 +141,56 @@ describe('全面カットの既定行(DEFAULT_GIFT_FULL_CUT)', () => {
     }
     // 本体の「TikTok」だけは当たる
     expect(matchGiftFullCut(cfg, { giftId: 'x', giftName: 'TikTok' })?.clip).toBe('cut-tiktok');
+  });
+});
+
+/**
+ * screen 合成クリップ(assets/fx 直下)の実在検査。renderer/lib/fx.ts の静的
+ * import(REQUIRED)は欠けるとビルドごと落ちるが、それをビルドまで気づけない
+ * のは遅い — cut/ と同じくここで突き合わせる(網羅監査 2026-08-16 で追加)。
+ */
+describe('screen 合成クリップ(assets/fx 直下)', () => {
+  const FX_DIR = join(__dirname, '../../src/renderer/assets/fx');
+  /** renderer/lib/fx.ts の静的 import(無いとビルド自体が落ちる)。 */
+  const REQUIRED = ['gift-t1', 'gift-t2', 'gift-t3', 'gift-t4', 'achieved', 'gauge-full', 'gauge-strike'];
+  /** 0件許容 glob(fx.ts)— 在っても無くてもよい。 */
+  const OPTIONAL = ['stock-full', 'stock-cutin'];
+  /**
+   * カタログ未登録の残置素材(giftClips 全廃 e06b57a の残骸)。一度もコードから
+   * 参照されたことがなく配布ビルドにも入らないが、**将来使う可能性に備えて
+   * 残す**(ユーザー決定 2026-08-16)。使い始めるときはここから外して
+   * REQUIRED / OPTIONAL のどちらかへ移すこと。
+   */
+  const KNOWN_ORPHANS = ['press', 'follow', 'like'];
+
+  const files = readdirSync(FX_DIR)
+    .filter((f) => f.endsWith('.mp4'))
+    .map((f) => f.replace(/\.mp4$/, ''))
+    .sort();
+
+  it('必須素材(静的 import)がすべて実在する', () => {
+    for (const id of REQUIRED) {
+      expect(files.includes(id), `${id}.mp4 が無い — ビルドが落ちる`).toBe(true);
+    }
+  });
+
+  it('直下の mp4 に未知の孤児が無い(REQUIRED ∪ OPTIONAL ∪ KNOWN_ORPHANS)', () => {
+    const known = new Set([...REQUIRED, ...OPTIONAL, ...KNOWN_ORPHANS]);
+    for (const f of files) expect(known.has(f), `未知の孤児ファイル: ${f}.mp4`).toBe(true);
+  });
+
+  it('KNOWN_ORPHANS の素材が消えたらリストから外す(鮮度の検査)', () => {
+    for (const id of KNOWN_ORPHANS) {
+      expect(existsSync(join(FX_DIR, `${id}.mp4`)), `${id}.mp4 が無い — リストを整理`).toBe(true);
+    }
+  });
+
+  it('帯域カットイン(band/)は 4 本と一対一', () => {
+    // 期待リストの出典: renderer/lib/fx.ts の FX_CLIPS(band 4 id は直書き)。
+    const band = readdirSync(join(FX_DIR, 'band'))
+      .filter((f) => f.endsWith('.mp4'))
+      .map((f) => f.replace(/\.mp4$/, ''))
+      .sort();
+    expect(band).toEqual(['gift-band1', 'gift-band2', 'gift-band3', 'gift-band4']);
   });
 });

@@ -26,6 +26,8 @@ const LABELS: Record<FxStockKind, string> = {
   band: 'ギフト',
   'join-roulette': '初見ルーレット',
   roulette: 'ルーレット',
+  // 凍結中の予告(workerQueue)のみ — フォローはレンダラー側キューを持たない。
+  follow: 'フォロー',
 };
 
 function Row({ item }: { item: FxStockItem }): React.JSX.Element {

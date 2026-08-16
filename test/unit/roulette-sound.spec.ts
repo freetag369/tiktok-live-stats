@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHALLENGE,
@@ -322,5 +324,28 @@ describe('ChallengeEngine — 行の同一性の焼き込み', () => {
     const fx = e.get().recentEffects[0]!;
     expect(fx.rouletteJoin).toBe(true);
     expect('rouletteId' in fx).toBe(false);
+  });
+});
+
+/**
+ * モニター配線のソース不変条件(float-abort.spec.ts と同じ流儀 — レンダラの
+ * テスト環境が無いのでソーステキストで守る)。
+ *
+ * resolveRouletteSound は関数・検証・worker の焼き込み・本ファイルのテストまで
+ * 全部揃っていたのに、**消費側(MonitorView)が一度も呼んでおらず**行別サウンド
+ * 設定が恒久無効だった(網羅監査 2026-08-16 で検出)。直読みの復活 = 配線の
+ * 剥がれをここで検出する。
+ */
+describe('resolveRouletteSound のモニター配線(ソース不変条件)', () => {
+  // vitest の実行 cwd はリポジトリルート(他のソース検査 spec と同じ前提)。
+  const src = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
+
+  it('回転サウンドと ultra クリップ音量の両方が resolveRouletteSound を呼ぶ', () => {
+    const calls = src.match(/resolveRouletteSound\(/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('共通 rouletteSound の直読みは残っていない(配線剥がれの検出)', () => {
+    expect(src.includes('cfg?.challenge.rouletteSound')).toBe(false);
   });
 });

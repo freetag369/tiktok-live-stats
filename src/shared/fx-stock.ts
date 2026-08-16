@@ -16,6 +16,7 @@
  * workerQueue(ChallengeState.fxQueue — カットイン/ブースト再生中に届き、凍結明けまで
  * recentEffects に載らないイベントの予告)は後段。凍結明けに effect 化されて
  * レンダラーのキューへ移ると key が wq: から effect.id ベースへ変わる(行は入れ替わる)。
+ * follow の予告も workerQueue 行として出る(凍結明けはバナーなのでキュー行は消えるだけ)。
  * 保留着弾(pendingStrike — いいね満杯/ストック満杯)は**表示しない**(ユーザー指定)。
  *
  * shared に置くのは fx-drain.ts / fx-stage.ts と同じ理由 — 決定ロジックを
@@ -33,7 +34,8 @@ export type FxStockKind =
   | 'boost' // フィーバー(pendingBoosts)
   | 'band' // ギフトカットイン(pendingBands — 帯/フルカットとも。表示ラベルは「ギフト」)
   | 'join-roulette' // 初見(入室)ルーレット(joinRouletteQueue)
-  | 'roulette'; // ギフトルーレット(rouletteQueue)
+  | 'roulette' // ギフトルーレット(rouletteQueue)
+  | 'follow'; // フォロー妨害の凍結中予告(workerQueue のみ — レンダラー側キューは持たない)
 
 /**
  * 登録簿4(fx-priority.ts の規約): ストック表示種別 → 優先クラス。
@@ -45,12 +47,19 @@ export const STOCK_KIND_PRIORITY = {
   band: 'band',
   'join-roulette': 'join-roulette',
   roulette: 'other',
+  follow: 'follow',
 } as const satisfies Record<Exclude<FxStockKind, 'clear'>, FxPriorityClass>;
 
-/** キューセクションの表示順(fx-priority の序列から導出)。 */
-export const STOCK_SECTION_ORDER: readonly Exclude<FxStockKind, 'clear'>[] = (
+/**
+ * キューセクションの表示順(fx-priority の序列から導出)。
+ * follow は除外する — レンダラー側に対応する ref キューが無く(予告は workerQueue
+ * 行だけ)、混ぜるとセクションループの else 分岐が roulettes を二重に流す。
+ */
+export const STOCK_SECTION_ORDER: readonly Exclude<FxStockKind, 'clear' | 'follow'>[] = (
   Object.keys(STOCK_KIND_PRIORITY) as Exclude<FxStockKind, 'clear'>[]
-).sort((a, b) => fxRank(STOCK_KIND_PRIORITY[a]) - fxRank(STOCK_KIND_PRIORITY[b]));
+)
+  .filter((k): k is Exclude<FxStockKind, 'clear' | 'follow'> => k !== 'follow')
+  .sort((a, b) => fxRank(STOCK_KIND_PRIORITY[a]) - fxRank(STOCK_KIND_PRIORITY[b]));
 
 /** キュー1件ぶんの識別スナップショット(effect.id + 行為者)。 */
 export interface FxStockQueuedRef {

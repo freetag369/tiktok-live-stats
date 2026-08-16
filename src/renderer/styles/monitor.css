@@ -1001,6 +1001,10 @@ body {
 .fxs-roulette {
   color: var(--mon-pink);
 }
+/* フォローの凍結中予告。バナー(.float.banner-follow)のランプ色と揃える。 */
+.fxs-follow {
+  color: #ff7a7a;
+}
 
 /* 連続ぶんの残数(×N)。消費のたび同じ行の上で減っていく。 */
 .fxs-mult {
@@ -2145,6 +2149,21 @@ body {
 }
 
 .float.banner-helper.multi .f-txt {
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+/*
+ * 複数人ぶんを 1 枚に畳んだフォローバナー(凍結明けドレインの合算 1 件)。
+ * 「たろう・はなこ ×3人がフォロー!」— 事情はお助けの .multi と同じで、
+ * 名前列のぶん 2 行クランプだと「がフォロー!」ごと消えるため 3 行へ緩める。
+ * 予算の権威も同じく shared/fan-stamp.ts(followBannerParts)。
+ */
+.float.banner-follow.multi {
+  --float-text: 20px;
+}
+
+.float.banner-follow.multi .f-txt {
   -webkit-line-clamp: 3;
   line-clamp: 3;
 }

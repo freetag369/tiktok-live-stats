@@ -31,6 +31,7 @@ import {
   matchGiftMini,
   mergeRoulette,
   miniForSlot,
+  resolveRouletteSound,
   rouletteHeadline,
   rouletteReelPlan,
   rouletteRemainingAmount,
@@ -79,7 +80,7 @@ import {
   type FloatHoldState,
   type PendingFloat,
 } from '@shared/fx-floats';
-import { fanStampBannerParts } from '@shared/fan-stamp';
+import { fanStampBannerParts, followBannerParts } from '@shared/fan-stamp';
 import {
   STRIKE_TRAVEL_MAX_MS,
   STRIKE_TRAVEL_MIN_MS,
@@ -2356,12 +2357,14 @@ export function MonitorView(): React.JSX.Element {
     // 直後にこの演出が始まるので、保留バナーは出さずに持ち越す(演出明けの着弾で出る)。
     flushStrike(true);
     rouletteHold.current = true;
-    // 回転サウンド。id・音量とも cfg 参照 — 全ルーレット共通なので effect に載せる
-    // 情報が無い(盤面と違い、古い cfg で鳴っても正しさは壊れない)。テスト再生
-    // (challenge.testEffect)もこの関数を通るので同じ音が鳴る。
-    // BGM はキュー消化の連鎖中は止めない(null のときだけ開始)。ループ音は
-    // onSpinQuiet で毎回止まるので、スピンごとに頭から撃ち直す。
-    const snd = cfg?.challenge.rouletteSound;
+    // 回転サウンド。行別上書き(roulettes[].sound / joinRoulette.sound)の解決は
+    // resolveRouletteSound が唯一の実装 — worker が effect に rouletteId /
+    // rouletteJoin を焼き込むのはこのため(cfg 未取得は null = 無音)。テスト再生
+    // (challenge.testEffect)も行 id を焼くので同じ音が鳴る。
+    // BGM はキュー消化の連鎖中は止めない(null のときだけ開始)— 連鎖が別の行へ
+    // 跨いだ場合は先頭行の BGM を維持する(既知の妥協)。ループ音は
+    // onSpinQuiet で毎回止まるので、スピンごとに頭から撃ち直す = 行別が正しく効く。
+    const snd = resolveRouletteSound(cfg?.challenge, e);
     if (rouletteBgm.current === null) rouletteBgm.current = playBandBgm(snd?.bgm, snd?.bgmVolume ?? 0);
     if (rouletteSpinSe.current === null) {
       rouletteSpinSe.current = playBandBgm(snd?.spinSe, snd?.spinSeVolume ?? 0);
@@ -2635,6 +2638,8 @@ export function MonitorView(): React.JSX.Element {
     rouletteQueue.current = [];
     joinRouletteQueue.current = [];
     drainWaitingSinceMs.current = null; // reset/stop 文脈 — 残キューは呼び出し側が続けて捨てる
+    // pendingAchieved の破棄はリセット/停止の意図(唯一の呼び出し元は status==='idle'
+    // の後片付け)。異常系の番犬経路は expireRoulette が**保全**する — 取り違えない。
     pendingAchieved.current = null;
     playingFx.current = null; // ストック先頭行(表示は idle エフェクトの refresh が写す)
     if (!rouletteHold.current) return;
@@ -3518,6 +3523,17 @@ export function MonitorView(): React.JSX.Element {
         if (pendingBands.current.length < PENDING_BANDS_MAX) {
           pendingBands.current.push(e);
           banded = true;
+        } else {
+          // 溢れ = このカットインは出さない(mini+カード+粒子へ縮退 — banded は
+          // 立てない)。worker は fxAllowed 判定で凍結を既に張って(消化して)いる
+          // ため、無言で落とすと「カウンタは止まったのに映像が出ない」だけが残る。
+          // 他のキュー溢れ(banner / roulette / boost)と同じく必ず痕跡を残す。
+          fxWarn(`カットイン持ち越しが上限(${PENDING_BANDS_MAX}件)— 通常演出へ縮退`, {
+            id: e.id,
+            clip: e.fxBandClip,
+            durationMs: e.fxDurationMs,
+            rep: giftFxShots(e).rep,
+          });
         }
       } else {
         banded = startBandFx(e);
@@ -3682,12 +3698,18 @@ export function MonitorView(): React.JSX.Element {
         // フラッシュ・シェイク・粒子・簡易演出・効果音は**バナーと同時**に出す。
         // 連続フォローではバナーが順番待ちに回るので、ここで撃つと光と揺れだけが
         // 先走って再生中の演出に重なる(要望そのもの)。
+        // 凍結明けの合算(coalesced≥2)は followNames の名前列 + ×N人 で1枚 —
+        // 文言の決定は shared の followBannerParts が唯一の実装(fanStamp と同じ流儀)。
+        const p = followBannerParts(e);
         pushFloat(
           <>
             <span className="f-amt">+{num(e.amount)}</span>
-            {nameLines({ who: e.nickname ?? '', act: 'がフォロー!' })}
+            {nameLines({
+              who: p.names.join('・'),
+              act: p.multi ? `×${num(p.people)}人がフォロー!` : 'がフォロー!',
+            })}
           </>,
-          'bad banner-follow',
+          `bad banner-follow${p.multi ? ' multi' : ''}`,
           'follow',
           {
             se: 'follow',
@@ -4463,10 +4485,10 @@ export function MonitorView(): React.JSX.Element {
               // 同じ effect の全リールが同じ走行ジッタで走らないよう at を混ぜる
               // (出目とは無関係の見た目パラメータ — 相関させない規約は変えない)。
               seed={roulette.effect.id * 31 + roulette.at}
-              // 超激アツ動画に焼き込まれた効果音。id・音量が cfg 参照なのは回転音と
-              // 同じ理由(盤面と違い、古い cfg で鳴っても正しさは壊れない)。
-              // cfg 未取得は 0 = 無音へ倒す — 設定が届く前に音だけ先に出さない。
-              clipVolume={cfg?.challenge.rouletteSound?.clipVolume ?? 0}
+              // 超激アツ動画に焼き込まれた効果音。行別上書きの解決は回転音と同じ
+              // resolveRouletteSound(worker が rouletteId / rouletteJoin を焼き込み済み)。
+              // cfg 未取得は null → 0 = 無音へ倒す — 設定が届く前に音だけ先に出さない。
+              clipVolume={resolveRouletteSound(cfg?.challenge, roulette.effect)?.clipVolume ?? 0}
               seEnabled={cfg?.challenge.seEnabled ?? true}
               onNearStop={nearStopRoulette}
               onKick={kickRoulette}

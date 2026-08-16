@@ -10,8 +10,13 @@ import { ChallengeEngine } from '@worker/challenge';
  *
  * 凍結中は effect が recentEffects に載らないため、モニターの演出ストック表示は
  * これが無いとカットイン連発の間だけ盲目になる(「ストックが出てない」の正体)。
- * 契約: カットイン級(band / boost / roulette)だけが載る・値しか動かさない保留
- * (press / follow / like)は載らない・ドレインで消える・予告だけでも delta が出る。
+ * 契約: カットイン級(band / boost / roulette)と **follow** が載る・値しか
+ * 動かさない他の保留(press / like)は載らない・ドレインで消える・予告だけでも
+ * delta が出る。
+ *
+ * 【仕様変更 2026-08-16】follow は以前「値だけ = 予告なし」だったが、凍結中の
+ * フォローが配信者から完全に無反応に見える(「フォロー妨害が発生しない」誤認の
+ * 一因)ため予告に載せる方針へ反転した。
  */
 
 const NOW = Date.UTC(2026, 7, 1, 12, 0, 0);
@@ -64,7 +69,7 @@ function engine(c: ChallengeConfig, now: () => number): ChallengeEngine {
 }
 
 describe('ChallengeState.fxQueue — 凍結中の演出予告', () => {
-  it('凍結中のバンドギフト/ルーレットは予告に載り、follow(値だけ)は載らない', () => {
+  it('凍結中のバンドギフト/ルーレットに加えて follow も予告に載る(仕様変更)', () => {
     let t = NOW;
     const e = engine(cfg({ initialValue: 1000, followStep: 10 }), () => t);
     e.start();
@@ -73,7 +78,7 @@ describe('ChallengeState.fxQueue — 凍結中の演出予告', () => {
     e.handleEvent(gift({ diamonds: 30 })); // band1 一致 → 6 秒凍結
     t += 1000;
     e.handleEvent(gift({ giftId: '8888', diamonds: 80 })); // 保留(band2 予告)
-    e.handleEvent(follow('f1')); // 保留(値だけ — 予告なし)
+    e.handleEvent(follow('f1')); // 保留(follow 予告 — 1 effect = 1人なので count 無し)
     e.handleEvent(
       gift({
         giftId: '7934',
@@ -84,12 +89,14 @@ describe('ChallengeState.fxQueue — 凍結中の演出予告', () => {
     ); // 保留(ルーレット予告・5連 = ×5)
 
     const q = e.get().fxQueue;
-    expect(q).toHaveLength(2);
+    expect(q).toHaveLength(3);
     expect(q![0]).toMatchObject({ kind: 'band', nickname: 'gifter' });
+    expect(q![1]).toMatchObject({ kind: 'follow', nickname: 'viewer-f1' });
+    expect(q![1]!.count).toBeUndefined();
     // count はモニターの ×N(実際に回る本数 = rouletteReelCount)。
-    expect(q![1]).toMatchObject({ kind: 'roulette', nickname: 'まわす人', count: 5 });
+    expect(q![2]).toMatchObject({ kind: 'roulette', nickname: 'まわす人', count: 5 });
     // id は採番済みで相異なる(モニターの行キー = スライドアニメの同一性)。
-    expect(q![0]!.id).not.toBe(q![1]!.id);
+    expect(new Set(q!.map((w) => w.id)).size).toBe(3);
   });
 
   it('予告だけの変化でも delta が出る(dirty が立つ)', () => {
