@@ -46,6 +46,25 @@ function defaultHotkey(): string {
   return process.platform === 'darwin' ? 'Control+Alt+9' : 'F9';
 }
 
+/**
+ * 既定ファイル(同梱デフォ・デフォ保存)にプラットフォーム差を当てる。
+ *
+ * どちらも**全プラットフォーム共通の1ファイル**で、Windows で書かれたものが
+ * そのまま mac へ配布・コピーされる。ファイル側では mac を表現できないので、
+ * 差は読み込んだ後にコードで当てるしかない — これが無いと同梱デフォの 'F9' が
+ * 必ず勝ち、defaultHotkey() は一度も到達しないまま mac の既定が死んだキーになる。
+ *
+ * 触るのは**組み込み既定(F9)のままの値だけ**。ファイルに別の値が入っていれば
+ * それは意図して選ばれた割り当てなので尊重する。逆に「mac で意図して F9 を選んだ」
+ * 場合と F9 のままの既定は区別できないが、当たるのは settings.json がまだ無い時の
+ * 初期値と「既定に戻す」の戻り先だけで、UI から選び直せばその値が保存され以後優先される。
+ */
+function withPlatformHotkey(cfg: ChallengeConfig): ChallengeConfig {
+  if (cfg.hotkey !== DEFAULT_CHALLENGE.hotkey) return cfg;
+  const hotkey = defaultHotkey();
+  return hotkey === cfg.hotkey ? cfg : { ...cfg, hotkey };
+}
+
 function file(dataDir: string): string {
   return join(configDirIn(dataDir), 'settings.json');
 }
@@ -129,7 +148,8 @@ export function loadChallengeDefault(dataDir: string): ChallengeConfig | null {
       const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<ChallengeConfig> & { settingsVersion?: number };
       // 世代印は settings.json と同じ扱い — 古いアプリで作られたファイルにも新既定の移行を配る。
       const from = typeof raw.settingsVersion === 'number' ? raw.settingsVersion : 0;
-      return migrateChallengeConfig(validateChallengeConfig(raw as ChallengeConfig), from);
+      // ホットキーだけは読み込み後にプラットフォーム差を当てる(withPlatformHotkey 参照)。
+      return withPlatformHotkey(migrateChallengeConfig(validateChallengeConfig(raw as ChallengeConfig), from));
     } catch {
       // 壊れたファイルで起動不能にしない — 次の候補へフォールバック。
     }

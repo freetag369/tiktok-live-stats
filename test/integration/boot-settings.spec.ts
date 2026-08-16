@@ -39,6 +39,23 @@ function settingsPath(): string {
   return join(dir, 'config', 'settings.json');
 }
 
+/**
+ * process.platform を差し替えて fn を実行する。
+ *
+ * vi.stubGlobal は globalThis のプロパティにしか効かず、process.platform は
+ * process 自身の読み取り専用プロパティなので届かない。defineProperty で直接
+ * 置き換え、finally で元の記述子ごと戻す(他のテストへ漏らさない)。
+ */
+function withPlatform<T>(platform: string, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...original, value: platform });
+  try {
+    return fn();
+  } finally {
+    Object.defineProperty(process, 'platform', original);
+  }
+}
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'tls-cfg-'));
 });
@@ -54,24 +71,38 @@ describe('loadSettings — 読めないときに落ちない', () => {
     expect(s.dbPath).toBe(join(dir, 'db', 'analytics.db'));
   });
 
-  it('既定のチャレンジ設定は同梱デフォ由来 — boot-settings の defaultHotkey() は到達しない', () => {
-    // defaultSettings は `loadChallengeDefault(dataDir) ?? {…, hotkey: defaultHotkey()}`。
-    // 同梱の resources/challenge-default.json は**常に存在する**ので左辺が必ず勝ち、
-    // プラットフォーム別の defaultHotkey()(mac だけ Control+Alt+9)には到達しない。
-    //
-    // ⚠️ その結果 mac でも既定ホットキーが F9 になる。boot-settings.ts のコメントが
-    // 言うとおり mac の F9 はメディアキーで、globalShortcut.register は成功するのに
-    // 一度も発火しない — 一番わかりにくい壊れ方をする。ここは**現状を記録する**
-    // テストで、直すかどうかは製品側の判断(同梱デフォは全プラットフォーム共通の
-    // 1ファイルなので、mac だけ差し替えるには読み込み後の後処理が要る)。
+  it('既定のホットキーは mac だけ F キー行を避けた値になる(同梱デフォの F9 に上書きされない)', () => {
+    // defaultSettings は `loadChallengeDefault(dataDir) ?? {…, hotkey: defaultHotkey()}` で、
+    // 同梱の resources/challenge-default.json は**常に存在する**ため左辺が必ず勝つ。
+    // 同梱ファイルは全プラットフォーム共通の1ファイルなので mac 用の値を持てず、
+    // 差は loadChallengeDefault が読み込んだ後に当てている(withPlatformHotkey)。
+    // これが無いと mac の既定が F9(メディアキー)になり、globalShortcut.register は
+    // 成功するのに一度も発火しない — 一番わかりにくい壊れ方をする。
     const bundled = JSON.parse(
       readFileSync(join(resolve('resources'), 'challenge-default.json'), 'utf8')
     ) as { hotkey?: string };
-    const s = loadSettings(dir);
-    expect(s.challenge.hotkey).toBe(bundled.hotkey);
-    // プラットフォームに関係なく同じ値になることを明示する(Windows で偶然通って
-    // mac で落ちる、という今回の取りこぼしの再発防止)。
-    expect(s.challenge.hotkey).toBe('F9');
+    // 差し替えの前提: 同梱ファイルは組み込み既定のまま。ここが別値に編集されたら
+    // 「意図した割り当て」とみなして触らない仕様なので、その時はこのテストが気づく。
+    expect(bundled.hotkey).toBe(DEFAULT_CHALLENGE.hotkey);
+
+    // 両プラットフォームの分岐を1台のCIで検査する(mac ジョブはタグ push でしか走らない)。
+    expect(withPlatform('darwin', () => loadSettings(dir).challenge.hotkey)).toBe('Control+Alt+9');
+    expect(withPlatform('win32', () => loadSettings(dir).challenge.hotkey)).toBe('F9');
+  });
+
+  it('既定ファイルに明示された別のホットキーは mac でも尊重する', () => {
+    // 差し替えるのは「組み込み既定のまま」の値だけ。デフォ保存(config/)は
+    // 同梱より優先される経路なので、そこに書かれた明示値が生き残ることを見る。
+    saveChallengeDefault(dir, { ...structuredClone(DEFAULT_CHALLENGE), hotkey: 'Control+Shift+P' });
+    expect(withPlatform('darwin', () => loadSettings(dir).challenge.hotkey)).toBe('Control+Shift+P');
+  });
+
+  it('保存済みの settings.json は mac でも書き換えない(ユーザーの選択が優先)', () => {
+    // 差し替えが効くのは「まだユーザーの選択が無い」初期値だけ。保存値まで
+    // 触ると、mac で意図して F9 を選んだ人の設定が起動のたびに巻き戻る。
+    const challenge = { ...structuredClone(DEFAULT_CHALLENGE), hotkey: 'F9' };
+    writeRaw(JSON.stringify({ settingsVersion: SETTINGS_VERSION, challenge }));
+    expect(withPlatform('darwin', () => loadSettings(dir).challenge.hotkey)).toBe('F9');
   });
 
   it('壊れた JSON は既定へ倒れ、ディスク上のファイルは書き換えない', () => {
