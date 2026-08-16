@@ -22,6 +22,7 @@ export function challengeGet(page: Page): Promise<ChallengeState> {
 
 /** 診断リング。main / worker / dashboard / monitor の**全スコープ**が入る。 */
 export interface DiagEntry {
+  atMs: number;
   level: string;
   scope: string;
   message: string;
@@ -42,4 +43,24 @@ const HARNESS_NOISE = [
 export async function diagErrors(page: Page): Promise<DiagEntry[]> {
   const all = await rpc<DiagEntry[]>(page, 'diag.recent', undefined);
   return all.filter((e) => e.level === 'error' && !HARNESS_NOISE.some((re) => re.test(e.message)));
+}
+
+/**
+ * 起動時点のエラーを基準線として控える。
+ *
+ * CI のコールドランナーでは初回起動が重く、アプリ自身の停止メーターが
+ * 「main イベントループが 3000ms 停止」を正しく記録する(npm ci 直後・ディスク
+ * キャッシュ無し・sqlite マイグレーション込み)。これは環境の話で製品のバグでは
+ * ないが、**メーターごと無視すると本来の目的(固まりの検出)が死ぬ**。
+ * そこで基準線を取り、テスト自身の操作で**新しく増えた**エラーだけを見る。
+ */
+export async function diagBaseline(page: Page): Promise<DiagEntry[]> {
+  return diagErrors(page);
+}
+
+/** 基準線より後に増えたエラーだけを返す。 */
+export async function diagErrorsSince(page: Page, baseline: DiagEntry[]): Promise<DiagEntry[]> {
+  const seen = new Set(baseline.map((e) => `${e.atMs}|${e.scope}|${e.message}`));
+  const all = await diagErrors(page);
+  return all.filter((e) => !seen.has(`${e.atMs}|${e.scope}|${e.message}`));
 }

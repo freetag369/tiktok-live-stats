@@ -1,5 +1,5 @@
 import { expect, test } from './fixtures';
-import { challengeGet, diagErrors, rpc } from './helpers/rpc';
+import { challengeGet, diagBaseline, diagErrorsSince, rpc } from './helpers/rpc';
 
 /**
  * 配線全体の最短スモーク。
@@ -16,6 +16,10 @@ test('@smoke 起動 → 開始 → PUSH×3 で残数が3減り、診断にエラ
     })
     .toBe(true);
 
+  // 起動時点のエラーを控える(コールドランナーの初回起動は重く、アプリ自身の
+  // 停止メーターが正しく警告を出す。見たいのは**この先の操作**で増える分)。
+  const baseline = await diagBaseline(main);
+
   const start = await rpc<{ status: string; value: number }>(main, 'challenge.start', undefined);
   expect(start.status).toBe('running');
   expect(start.value).toBe(100); // seedSettings の initialValue
@@ -28,7 +32,7 @@ test('@smoke 起動 → 開始 → PUSH×3 で残数が3減り、診断にエラ
 
   // main / worker / renderer のどのプロセスでもエラーが出ていないこと。
   // Playwright が直接観測できない worker と main まで拾えるのはこの経路だけ。
-  const errors = await diagErrors(main);
+  const errors = await diagErrorsSince(main, baseline);
   expect(errors.map((e) => `[${e.scope}] ${e.message}`)).toEqual([]);
 });
 

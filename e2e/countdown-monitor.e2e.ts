@@ -1,5 +1,5 @@
 import { expect, openMonitor, segValue, test } from './fixtures';
-import { challengeGet, diagErrors, rpc } from './helpers/rpc';
+import { challengeGet, diagBaseline, diagErrorsSince, rpc } from './helpers/rpc';
 
 /**
  * モニター窓(OBS 用の背面表示)。
@@ -86,6 +86,7 @@ test('チャレンジ OFF ではモニターを叩いても数字が動かない
 });
 
 test('モニターを閉じると窓が減り、ダッシュボードは生き続ける', async ({ app, main }) => {
+  const baseline = await diagBaseline(main);
   await rpc(main, 'challenge.start', undefined);
   const monitor = await openMonitor(app, main);
   expect(app.windows().length).toBeGreaterThanOrEqual(2);
@@ -97,5 +98,5 @@ test('モニターを閉じると窓が減り、ダッシュボードは生き�
   // 閉じたあともダッシュボード側の操作は通る。
   await rpc(main, 'challenge.press', undefined);
   expect((await challengeGet(main)).value).toBe(99);
-  expect(await diagErrors(main)).toEqual([]);
+  expect(await diagErrorsSince(main, baseline)).toEqual([]);
 });

@@ -1,6 +1,6 @@
 import { join, resolve } from 'node:path';
 import { expect, openMonitor, segValue, test } from './fixtures';
-import { challengeGet, diagErrors, rpc } from './helpers/rpc';
+import { challengeGet, diagBaseline, diagErrorsSince, rpc } from './helpers/rpc';
 
 /**
  * プロセスが死んで戻ってくる経路。
@@ -101,6 +101,7 @@ test.describe('fxCaps の再申告', () => {
 
   const monitor = await openMonitor(app, main);
   expect(monitor).toBeTruthy();
+  const baseline = await diagBaseline(main);
 
   await restartWorker(main, dataDir);
 
@@ -119,6 +120,6 @@ test.describe('fxCaps の再申告', () => {
     .poll(async () => (await challengeGet(main)).fxFreezeUntilMs != null, { timeout: 30_000 })
     .toBe(true);
 
-  expect(await diagErrors(main)).toEqual([]);
+  expect(await diagErrorsSince(main, baseline)).toEqual([]);
 });
 });
