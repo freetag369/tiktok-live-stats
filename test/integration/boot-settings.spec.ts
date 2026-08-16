@@ -52,8 +52,26 @@ describe('loadSettings — 読めないときに落ちない', () => {
     const s = loadSettings(dir);
     expect(s.settingsVersion).toBe(SETTINGS_VERSION);
     expect(s.dbPath).toBe(join(dir, 'db', 'analytics.db'));
-    // ホットキーの既定はプラットフォームで違う(mac の F9 はメディアキーで届かない)。
-    expect(s.challenge.hotkey).toBe(process.platform === 'darwin' ? 'Control+Alt+9' : 'F9');
+  });
+
+  it('既定のチャレンジ設定は同梱デフォ由来 — boot-settings の defaultHotkey() は到達しない', () => {
+    // defaultSettings は `loadChallengeDefault(dataDir) ?? {…, hotkey: defaultHotkey()}`。
+    // 同梱の resources/challenge-default.json は**常に存在する**ので左辺が必ず勝ち、
+    // プラットフォーム別の defaultHotkey()(mac だけ Control+Alt+9)には到達しない。
+    //
+    // ⚠️ その結果 mac でも既定ホットキーが F9 になる。boot-settings.ts のコメントが
+    // 言うとおり mac の F9 はメディアキーで、globalShortcut.register は成功するのに
+    // 一度も発火しない — 一番わかりにくい壊れ方をする。ここは**現状を記録する**
+    // テストで、直すかどうかは製品側の判断(同梱デフォは全プラットフォーム共通の
+    // 1ファイルなので、mac だけ差し替えるには読み込み後の後処理が要る)。
+    const bundled = JSON.parse(
+      readFileSync(join(resolve('resources'), 'challenge-default.json'), 'utf8')
+    ) as { hotkey?: string };
+    const s = loadSettings(dir);
+    expect(s.challenge.hotkey).toBe(bundled.hotkey);
+    // プラットフォームに関係なく同じ値になることを明示する(Windows で偶然通って
+    // mac で落ちる、という今回の取りこぼしの再発防止)。
+    expect(s.challenge.hotkey).toBe('F9');
   });
 
   it('壊れた JSON は既定へ倒れ、ディスク上のファイルは書き換えない', () => {
