@@ -1,151 +1,187 @@
 /**
  * 演出終了時の「持ち越しキュー」ドレイン方針。
  *
- * モニターの排他規約: 据え置き(heldValue)の持ち主は常に1人。ルーレット/
- * カットイン/ブースト/ストック着弾の各 finish は、末尾で持ち越しキューから
- * **次の1演出だけ**を選んで開始し、何も無ければ保留中のいいね着弾
- * (pendingStrike)を流す。この「どのキューをどの順で見るか」が4箇所の
- * finish にインラインで重複しており、安全弁(expire)経路がこの連鎖を持たず
- * キューが宙に浮くバグの温床だった — 方針をここに一本化する。
+ * モニターの排他規約: 据え置き(heldValue)の持ち主は常に1人。各 finish は
+ * 末尾で持ち越しキューから**次の1演出だけ**を選んで開始する。「どのキューを
+ * どの順で見るか」の権威は **fx-priority.ts の FX_PRIORITY_ORDER**(ユーザー決定の
+ * 8ランク序列)で、ここはそれをキュー走査に写すだけ — 順序リテラルを二重に
+ * 持たない(かつては 'roulette-first'/'standard' の2順序がここに直書きされて
+ * いたが、序列の一元化で廃止した)。
  *
- * 順序は2種類:
- * - 'roulette-first': finishRoulette 用。自キュー(スピンの連鎖)を優先するが、
- *                     **ブーストだけはさらに先** — worker のフィーバーは絶対時刻で
- *                     走る(worker はルーレットでは凍結しない)ので、スピン連鎖の
- *                     後ろに並ばせると planBoostStart の期限切れで演出ごと消える。
- *                     ルーレットの値は適用済みで、表示が後回しになっても失われない。
- * - 'standard':       finishBandFx / finishStockCutin / finishBoostFx / expire 用。
- *                     ブースト(タップのゲーム性を持つので待たせない)→ カットイン
- *                     → スピンの順。
+ * strike(いいね満タン/ストック満タンの保留着弾)は序列②③の一級市民。
+ * かつては「誰も始まらなかったときだけ流すフォールスルー」で、ルーレットや
+ * カットインに常に追い越されていた(ユーザー実機検証で確認された実害)。
  *
- * achieved(CLEAR 演出)は常に最初に取り出して「再生」する — 開始スロットは
- * 消費しない(リザルトは独立タイマーで出るため、次演出と並走してよい)。
+ * achieved(CLEAR 演出)は序列外 — 常に最初に取り出して「再生」する。開始
+ * スロットは消費しない(リザルトは独立タイマーで出るため、次演出と並走してよい)。
  *
- * shared に置くのは live-rows.ts / challenge.ts の appendChallengeLog と同じ理由 —
- * レンダラのテスト環境がこのリポジトリに無いので、決定ロジックを純関数として
- * ここへ抽出して node のテストで固定する。キュー配列は in-place で shift する。
+ * shared に置くのは live-rows.ts / fx-stage.ts と同じ理由 — レンダラのテスト環境が
+ * このリポジトリに無いので、決定ロジックを純関数として node のテストで固定する。
+ * キュー配列は in-place で shift する。
  */
 
-export type FxDrainOrder = 'roulette-first' | 'standard';
+import { DRAIN_PRIORITY, FX_DRAIN_KINDS, fxRank, strikeClass, type FxDrainKind } from './fx-priority';
 
-export interface FxDrainQueues<T> {
-  /** CLEAR 演出の持ち越し(1件)。呼び出し側は戻り値の achieved を再生したら null に戻すこと。 */
-  achieved: T | null;
-  /** 他演出中に届いたブースト(4件上限は積む側の規約)。 */
-  boosts: T[];
-  /** 他演出中に届いたカットイン(2件上限は積む側の規約)。 */
-  bands: T[];
-  /** 他演出中に届いたルーレット(ROULETTE_QUEUE_MAX は積む側の規約)。 */
-  roulettes: T[];
+/** 保留着弾の合算(pendingStrike)。like/stock を1本のチェーンに畳む既存設計のまま。 */
+export interface FxStrikePending {
+  like: number;
+  stock: number;
 }
 
-export interface FxDrainResult<T> {
+/**
+ * T = 素の effect(boosts/bands)。R = ルーレットキューの要素型 — レンダラは
+ * 連鎖の譲り合い(リール境界プリエンプション)の再開位置を持つラッパー
+ * `{ e, resumeAt, queuedAtMs }` を入れる。既定 R=T なのでラッパーを使わない
+ * テストは従来どおり素の effect で書ける。ここは要素の中身を一切覗かない。
+ */
+export interface FxDrainQueues<T, R = T> {
+  /** CLEAR 演出の持ち越し(1件)。呼び出し側は戻り値の achieved を再生したら null に戻すこと。 */
+  achieved: T | null;
+  /** 保留着弾の合算(1件)。取り出し側が null へ戻す(shift と同じ「先に取る」規律)。 */
+  strike: FxStrikePending | null;
+  /** 他演出中に届いたブースト(PENDING_BOOSTS_MAX は積む側の規約)。 */
+  boosts: T[];
+  /** 他演出中に届いたカットイン(PENDING_BANDS_MAX は積む側の規約)。 */
+  bands: T[];
+  /** 初見(入室)ルーレット(JOIN_ROULETTE_QUEUE_MAX は積む側の規約)。 */
+  joinRoulettes: R[];
+  /** ギフトルーレット(ROULETTE_QUEUE_MAX は積む側の規約)。 */
+  roulettes: R[];
+}
+
+export type FxDrainNext<T, R = T> =
+  | { kind: 'strike'; strike: FxStrikePending }
+  | { kind: 'boost'; effect: T }
+  | { kind: 'band'; effect: T }
+  | { kind: 'join-roulette'; effect: R }
+  | { kind: 'roulette'; effect: R };
+
+export interface FxDrainResult<T, R = T> {
   /** 先に「再生」すべき CLEAR 演出(開始スロットを消費しない)。 */
   achieved: T | null;
   /** 次に「開始」すべき演出。null = 開始するものが無い。 */
-  next: { kind: 'roulette' | 'boost' | 'band'; effect: T } | null;
-  /**
-   * 保留中のいいね着弾(drainPendingStrike)を流してよいか。次演出を始める
-   * パスでは流さない — start* の冒頭 flushStrike に出したばかりのチェーンを
-   * 畳ませないため(finishRoulette の従来コメントの規約)。
-   */
-  drainStrike: boolean;
+  next: FxDrainNext<T, R> | null;
 }
 
-export function drainFxQueues<T>(q: FxDrainQueues<T>, order: FxDrainOrder): FxDrainResult<T> {
+/**
+ * ドレイン種別の走査順。FX_PRIORITY_ORDER から導出する(ここに並びを直書き
+ * しない)。strike は like/stock で②/③に割れるが、どちらも boost(④)より
+ * 上なので走査位置は常に先頭 — 実クラスは strikeClass() が権威。
+ */
+export const FX_DRAIN_SEQ: readonly FxDrainKind[] = [...FX_DRAIN_KINDS].sort(
+  (a, b) => fxRank(DRAIN_PRIORITY[a]) - fxRank(DRAIN_PRIORITY[b])
+);
+
+export function drainFxQueues<T, R = T>(q: FxDrainQueues<T, R>): FxDrainResult<T, R> {
   const achieved = q.achieved;
-  const take = (kind: 'roulette' | 'boost' | 'band', arr: T[]): FxDrainResult<T> | null => {
-    const e = arr.shift();
-    return e === undefined ? null : { achieved, next: { kind, effect: e }, drainStrike: false };
-  };
-  const seq: Array<['roulette' | 'boost' | 'band', T[]]> =
-    order === 'roulette-first'
-      ? [
-          ['boost', q.boosts],
-          ['roulette', q.roulettes],
-          ['band', q.bands],
-        ]
-      : [
-          ['boost', q.boosts],
-          ['band', q.bands],
-          ['roulette', q.roulettes],
-        ];
-  for (const [kind, arr] of seq) {
-    const r = take(kind, arr);
-    if (r) return r;
+  for (const kind of FX_DRAIN_SEQ) {
+    // どの分岐も「返す前にキューから取る」規律(shift-before-return)を守る —
+    // runFxDrain の停止性(各周回は必ず1要素消費する)の根拠。
+    if (kind === 'strike') {
+      if (q.strike !== null) {
+        const strike = q.strike;
+        q.strike = null;
+        return { achieved, next: { kind, strike } };
+      }
+    } else if (kind === 'boost' || kind === 'band') {
+      const e = (kind === 'boost' ? q.boosts : q.bands).shift();
+      if (e !== undefined) return { achieved, next: { kind, effect: e } };
+    } else {
+      const e = (kind === 'join-roulette' ? q.joinRoulettes : q.roulettes).shift();
+      if (e !== undefined) return { achieved, next: { kind, effect: e } };
+    }
   }
-  return { achieved, next: null, drainStrike: true };
+  return { achieved, next: null };
+}
+
+/**
+ * 次に出るドレイン種別を**取り出さずに**覗く。finishRoulette の BGM 即断
+ * (次がルーレット系なら鳴りっぱなし/カットイン系なら即断)と、連鎖の
+ * 譲り判定のログ用。
+ */
+export function peekNextDrainKind<T, R = T>(q: FxDrainQueues<T, R>): FxDrainKind | null {
+  for (const kind of FX_DRAIN_SEQ) {
+    if (kind === 'strike' ? q.strike !== null : kind === 'boost' ? q.boosts.length > 0 : kind === 'band' ? q.bands.length > 0 : kind === 'join-roulette' ? q.joinRoulettes.length > 0 : q.roulettes.length > 0) {
+      return kind;
+    }
+  }
+  return null;
+}
+
+/**
+ * 待機中ドレインの最高ランク(最小添字)。空なら null。strike は内容依存
+ * (like 含み=②/stock のみ=③)なので strikeClass で実クラスを引く。
+ * pickStageNext のバナー vs ドレイン比較の入力。
+ */
+export function bestDrainRank<T, R = T>(q: FxDrainQueues<T, R>): number | null {
+  let best: number | null = null;
+  const consider = (rank: number): void => {
+    if (best === null || rank < best) best = rank;
+  };
+  if (q.strike !== null) consider(fxRank(strikeClass(q.strike)));
+  if (q.boosts.length > 0) consider(fxRank(DRAIN_PRIORITY.boost));
+  if (q.bands.length > 0) consider(fxRank(DRAIN_PRIORITY.band));
+  if (q.joinRoulettes.length > 0) consider(fxRank(DRAIN_PRIORITY['join-roulette']));
+  if (q.roulettes.length > 0) consider(fxRank(DRAIN_PRIORITY.roulette));
+  return best;
 }
 
 /**
  * 1回の runFxDrain で試す最大件数。到達しない上限(下の停止性の議論を参照)で、
  * 将来 start が新たにキューへ積むようになった場合の暴走止め。
  * **各キューの上限を上げたらここも上げること** — 到達可能になると
- * 「まだ残っているのに drainStrike へ倒れる」= 持ち越しが1周ぶん遅れる。
+ * 「まだ残っているのに idle へ倒れる」= 持ち越しが1周ぶん遅れる。
+ * 見積: strike(1) + boosts(4) + bands(4) + joinRoulettes(4) + roulettes(24) + 1 = 38 < 64。
  */
 export const FX_DRAIN_MAX_STEPS = 64;
 
-export interface FxDrainStep<T> {
-  kind: 'roulette' | 'boost' | 'band';
-  effect: T;
-}
-
-export interface FxDrainRun<T> {
+export interface FxDrainRun<T, R = T> {
   /** 先に「再生」した CLEAR 演出(開始スロットを消費しない)。 */
   achieved: T | null;
-  /** 実際に開始した演出。null = 誰も始まらなかった。 */
-  started: FxDrainStep<T> | null;
+  /** 実際に開始した演出。null = 誰も始まらなかった(idle — 保留バナー回収へ)。 */
+  started: FxDrainNext<T, R> | null;
   /** 断られて捨てた演出(捨てた順・ログ用)。 */
-  skipped: FxDrainStep<T>[];
-  /** 保留着弾を流してよいか。started === null と常に一致する。 */
-  drainStrike: boolean;
+  skipped: FxDrainNext<T, R>[];
 }
 
 /**
  * 「何かが実際に始まるまで」ドレインし続けるドライバ。
  *
- * 従来の呼び出し側は drainFxQueues の結果を**1件だけ**試し、start* が断った場合
- * (素材欠損 / prefers-reduced-motion / 期限切れ)でもそのまま return していた。
- * 断られると hold が張られず onIdle も drainPendingStrike も走らないので、
- * pendingStrike が宙に浮いたまま floatHoldState().strikePending が true で固着し、
- * 以降のいいね/ストックのバナーが shouldDeferFloat で**永久に**保留される。
- * 正しくは「断られたら次のキューへ落ちる」で、出口は必ず
- * 「started(誰かが始まった)」か「drainStrike(誰も始まらなかった)」の2つだけ。
+ * start が断った場合(素材欠損 / prefers-reduced-motion / 期限切れ / 据え置け
+ * ない strike)は次のキューへ落ちる。出口は必ず「started(誰かが始まった)」か
+ * 「started: null(誰も始まらなかった = idle)」の2つだけ — 従来の drainStrike
+ * フラグは strike の一級市民化で廃止し、idle 時の保留バナー回収は呼び出し側の
+ * started === null 分岐が担う。
  *
- * 停止性: drainFxQueues は next を返す前にキューから shift 済みなので、各周回は
- * 必ず return するか要素を1つ消費する。start は積まない(3つの start* は effect を
- * 読むだけ)ので、上限は boosts(4) + bands(4) + roulettes(24) + 1 = 33 < 64。
- * maxSteps に達した場合も **drainStrike: true** 側へ倒す — pendingStrike を
- * 宙に浮かせないことを最優先する。
- *
- * drainFxQueues 本体は1文字も変えない(test/unit/fx-drain.spec.ts の順序契約を維持)。
+ * 停止性: drainFxQueues は next を返す前にキューから取り済みなので、各周回は
+ * 必ず return するか要素を1つ消費する。start は積まない(各 start* は effect を
+ * 読むだけ)。maxSteps に達した場合も started: null 側へ倒す。
  */
-export function runFxDrain<T>(
-  q: FxDrainQueues<T>,
-  order: FxDrainOrder,
+export function runFxDrain<T, R = T>(
+  q: FxDrainQueues<T, R>,
   hooks: {
     /** CLEAR 演出の再生。最初の1回だけ、どの start よりも前に呼ばれる。 */
     playAchieved?: (e: T) => void;
     /** 演出の開始。false = 断った(次のキューへ落ちる)。 */
-    start: (kind: 'roulette' | 'boost' | 'band', effect: T) => boolean;
+    start: (next: FxDrainNext<T, R>) => boolean;
   },
   maxSteps: number = FX_DRAIN_MAX_STEPS
-): FxDrainRun<T> {
+): FxDrainRun<T, R> {
   let achieved: T | null = null;
-  const skipped: FxDrainStep<T>[] = [];
+  const skipped: FxDrainNext<T, R>[] = [];
   for (let i = 0; i < maxSteps; i++) {
-    const r = drainFxQueues(q, order);
+    const r = drainFxQueues(q);
     if (r.achieved !== null && achieved === null) {
       achieved = r.achieved;
       // 2周目以降に同じ CLEAR を拾わせない(再生は1回だけ)。
       q.achieved = null;
       hooks.playAchieved?.(r.achieved);
     }
-    if (!r.next) return { achieved, started: null, skipped, drainStrike: true };
-    if (hooks.start(r.next.kind, r.next.effect)) {
-      return { achieved, started: r.next, skipped, drainStrike: false };
+    if (!r.next) return { achieved, started: null, skipped };
+    if (hooks.start(r.next)) {
+      return { achieved, started: r.next, skipped };
     }
     skipped.push(r.next);
   }
-  return { achieved, started: null, skipped, drainStrike: true };
+  return { achieved, started: null, skipped };
 }

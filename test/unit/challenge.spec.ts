@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteReelCount, rouletteReelPlan, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type {
   ChallengeConfig,
   ChallengeEffect,
@@ -1819,6 +1819,35 @@ describe('rouletteDraws / rouletteReelPlan — effect からの再生計画', ()
     expect(rouletteReelPlan(rlEffect()).reels).toHaveLength(3);
     expect(rouletteReelPlan(rlEffect()).restCount).toBe(0);
   });
+
+  describe('rouletteRemainingAmount — 据え置き会計のスライス権威(§6b の再開位置)', () => {
+    // reels = [5, 1000, 10](rest 無し)。
+    it('resumeAt=0 は全リール直和(rest 無し)', () => {
+      expect(rouletteRemainingAmount(rlEffect(), 0)).toBe(1015);
+    });
+
+    it('中間の resumeAt は消化済みリールを数えない', () => {
+      expect(rouletteRemainingAmount(rlEffect(), 1)).toBe(1010);
+      expect(rouletteRemainingAmount(rlEffect(), 2)).toBe(10);
+    });
+
+    it('最終リール後(resumeAt=reels.length)は rest のみ — rest 無しなら 0', () => {
+      expect(rouletteRemainingAmount(rlEffect(), 3)).toBe(0);
+      // rouletteReels=1 → reels=[5]・rest=1010。リールを回し切っても rest は残る。
+      expect(rouletteRemainingAmount(rlEffect({ rouletteReels: 1 }), 1)).toBe(1010);
+    });
+
+    it('rest 込みの中間位置 = 残りリール + rest(startRoulette の据え置きと同じ式)', () => {
+      const e = rlEffect({ rouletteReels: 2 }); // reels=[5, 1000]・rest=10
+      expect(rouletteRemainingAmount(e, 0)).toBe(1015);
+      expect(rouletteRemainingAmount(e, 1)).toBe(1010);
+      expect(rouletteRemainingAmount(e, 2)).toBe(10);
+    });
+
+    it('sub 方向は負のまま合算する(符号は据え置き側で clamp する契約)', () => {
+      expect(rouletteRemainingAmount(rlEffect({ rouletteDirection: 'sub' }), 1)).toBe(-1010);
+    });
+  });
 });
 
 describe('sameRouletteBoard / mergeRoulette — キュー連結の規約', () => {
@@ -1846,6 +1875,19 @@ describe('sameRouletteBoard / mergeRoulette — キュー連結の規約', () =>
     expect(sameRouletteBoard(rlEffect(1), rlEffect(2, { rouletteSegments: [5, 11] }))).toBe(false);
     expect(sameRouletteBoard(rlEffect(1), rlEffect(2, { rouletteLabel: 'バラ' }))).toBe(false);
     expect(sameRouletteBoard(rlEffect(1), rlEffect(2, { rouletteDirection: 'sub' }))).toBe(false);
+  });
+
+  it('入室由来(rouletteOrigin)は同盤面のギフトルーレットと畳まれない(join プレフィックス分離)', () => {
+    // label 一致は起こりうる(ユーザーがギフト行に「初見さん」と付けられる)ので、
+    // 表示名・盤面・向きが全一致でも由来が違えばキーが分かれる構造を固定する。
+    const joinFx = { rouletteOrigin: 'join' as const };
+    expect(sameRouletteBoard(rlEffect(1, joinFx), rlEffect(2))).toBe(false);
+    expect(rouletteBoardKey(rlEffect(1, joinFx))).not.toBe(rouletteBoardKey(rlEffect(2)));
+    // join どうしは従来どおり畳める(溢れの末尾連結が単一盤面で必ず成立する前提)。
+    expect(sameRouletteBoard(rlEffect(1, joinFx), rlEffect(2, joinFx))).toBe(true);
+    // キーの形は 'join|' プレフィックス(欠損 = ギフト由来は空プレフィックス)。
+    expect(rouletteBoardKey(rlEffect(1, joinFx)).startsWith('join|')).toBe(true);
+    expect(rouletteBoardKey(rlEffect(1)).startsWith('|')).toBe(true);
   });
 
   it('連結は出目を並べ、値は合算し、見出しは先頭の人に残す', () => {

@@ -498,6 +498,14 @@ export const DEFAULT_JOIN_ROULETTE: JoinRouletteConfig = {
 export const JOIN_ROULETTE_MIN_GAP_MS = 30_000;
 
 /**
+ * 入室ルーレット専用キュー(モニターの優先度⑥)の上限。入室ルーレットは単一設定 =
+ * 単一盤面なので、溢れは末尾連結(mergeRoulette)で必ず吸収できる。さらに worker 側の
+ * JOIN_ROULETTE_MIN_GAP_MS クールダウンが供給を絞るため、実質溢れない —
+ * この値は演出事故(旧 worker 混在等)への安全弁で、設定項目にはしない。
+ */
+export const JOIN_ROULETTE_QUEUE_MAX = 4;
+
+/**
  * 超焦らし(大当たり寸止め系)の3種。ROULETTE_PATTERNS から段位ではなく名前で
  * 引く — heavy には doublefake も居るので TIER フィルタでは取れない
  * (ROULETTE_ULTRA_PATTERNS と同じ「一覧から filter」の流儀)。
@@ -1169,9 +1177,15 @@ export function rouletteDraws(
  * 経路(playFx の分岐が明示的に忌避している最悪の見え方)へ落ちる頻度が上がる。
  * 畳まれた 1 本をどの行の音で鳴らすかは mergeRoulette / finishDrain が
  * **先頭 a に固定**して決着させる(nickname と同じ規約)。
+ *
+ * **rouletteOrigin(由来印)は入れる。** rouletteId と違って由来は「出目 index の
+ * 意味」の一部 — 入室とギフトは再生キューが別(入室は優先度⑥の専用キュー)なので、
+ * 表示名・盤面が全一致しても畳んでしまうと片方のキューへ吸われて他方が消える。
+ * label('初見さん')による衝突回避はユーザー編集で破れる(ギフト行に同名を
+ * 付けられる)ため、構造で分離する。
  */
 export function rouletteBoardKey(e: ChallengeEffect): string {
-  return `${e.rouletteLabel ?? ''}|${e.rouletteDirection ?? 'add'}|${(e.rouletteSegments ?? []).join(',')}`;
+  return `${e.rouletteOrigin ?? ''}|${e.rouletteLabel ?? ''}|${e.rouletteDirection ?? 'add'}|${(e.rouletteSegments ?? []).join(',')}`;
 }
 
 /** 同じ盤面か(rouletteBoardKey の等値)。 */
@@ -1286,6 +1300,20 @@ export function rouletteReelPlan(e: ChallengeEffect): {
     restAmount: rest.reduce((s, d) => s + d.amount, 0),
     restCount: rest.length,
   };
+}
+
+/**
+ * resumeAt 本目以降の「まだ見せていない」増減量の合計(回さない rest ぶん込み)。
+ *
+ * モニターの据え置き会計の**唯一のスライス権威** — startRoulette の据え置きと
+ * pendingStageAmount(舞台待ちの持ち越し合算)の両方がこれを使う。計算を呼び出し
+ * 側に散らすと、連鎖の譲り合い(§6b)でキューへ戻した残りリールを片方だけ
+ * 全リール直和で数え、再開時に数字が巻き戻る。
+ * resumeAt が reels.length 以上なら rest のみ(最終リール後 = restAmount)。
+ */
+export function rouletteRemainingAmount(e: ChallengeEffect, resumeAt: number): number {
+  const plan = rouletteReelPlan(e);
+  return plan.reels.slice(resumeAt).reduce((s, d) => s + d.amount, 0) + plan.restAmount;
 }
 
 /**

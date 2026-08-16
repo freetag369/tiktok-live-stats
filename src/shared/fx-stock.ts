@@ -10,11 +10,9 @@
  * 「同じ行が先頭へ滑る」として見せ、連続ルーレット/連続ギフトの残数(×N)は
  * スピン/ショットを消費するたび同じ行の上で減っていく。
  *
- * 並び順は固定: playing → clear → boost → band → roulette → workerQueue。
- * 根拠: achieved は常に最初に「再生」され(fx-drain.ts の drainFxQueues)、
- * キューは 'standard' 順 boost → band → roulette でドレインする。'roulette-first'
- * では band と roulette が入れ替わるが、表示はブレさせず 'standard' 側に固定する
- * (順番が近似でも「何が待っているか」が伝わることを優先)。
+ * 並び順: playing → clear → 以降は **fx-priority.ts の序列**(STOCK_KIND_PRIORITY
+ * 経由で導出)→ workerQueue。順序リテラルをここに直書きしない — ドレインの
+ * 消化順(fx-drain.ts も同じ表から導出)と表示順が構造的に一致する。
  * workerQueue(ChallengeState.fxQueue — カットイン/ブースト再生中に届き、凍結明けまで
  * recentEffects に載らないイベントの予告)は後段。凍結明けに effect 化されて
  * レンダラーのキューへ移ると key が wq: から effect.id ベースへ変わる(行は入れ替わる)。
@@ -25,15 +23,34 @@
  */
 
 import type { ChallengeFxQueueItem } from './dto';
+import { fxRank, type FxPriorityClass } from './fx-priority';
 
 /** メイン行の表示上限(再生中の行を含む)。溢れは "+N" 行1つに畳む。 */
 export const FX_STOCK_DISPLAY_MAX = 5;
 
 export type FxStockKind =
-  | 'clear' // CLEAR 演出の持ち越し(pendingAchieved)
+  | 'clear' // CLEAR 演出の持ち越し(pendingAchieved)— 序列外(並走再生)なので常に先頭側
   | 'boost' // フィーバー(pendingBoosts)
   | 'band' // ギフトカットイン(pendingBands — 帯/フルカットとも。表示ラベルは「ギフト」)
-  | 'roulette'; // ルーレット(rouletteQueue)
+  | 'join-roulette' // 初見(入室)ルーレット(joinRouletteQueue)
+  | 'roulette'; // ギフトルーレット(rouletteQueue)
+
+/**
+ * 登録簿4(fx-priority.ts の規約): ストック表示種別 → 優先クラス。
+ * FxStockKind に新種別を足すと satisfies が型エラーになる = ここへの登録と
+ * ユーザーへの順位確認が強制される。clear は序列外なので載せない。
+ */
+export const STOCK_KIND_PRIORITY = {
+  boost: 'boost',
+  band: 'band',
+  'join-roulette': 'join-roulette',
+  roulette: 'other',
+} as const satisfies Record<Exclude<FxStockKind, 'clear'>, FxPriorityClass>;
+
+/** キューセクションの表示順(fx-priority の序列から導出)。 */
+export const STOCK_SECTION_ORDER: readonly Exclude<FxStockKind, 'clear'>[] = (
+  Object.keys(STOCK_KIND_PRIORITY) as Exclude<FxStockKind, 'clear'>[]
+).sort((a, b) => fxRank(STOCK_KIND_PRIORITY[a]) - fxRank(STOCK_KIND_PRIORITY[b]));
 
 /** キュー1件ぶんの識別スナップショット(effect.id + 行為者)。 */
 export interface FxStockQueuedRef {
@@ -53,7 +70,7 @@ export interface FxStockBandRef extends FxStockQueuedRef {
 
 /** 再生中の演出(先頭行)。remaining はいま回している1本を含む残数。 */
 export interface FxStockPlaying {
-  kind: 'roulette' | 'band';
+  kind: 'roulette' | 'join-roulette' | 'band';
   id: number;
   nickname?: string;
   remaining: number;
@@ -92,6 +109,8 @@ export interface FxStockSnapshot {
   boosts: FxStockQueuedRef[];
   /** pendingBands(積む側上限 PENDING_BANDS_MAX)。 */
   bands: FxStockBandRef[];
+  /** joinRouletteQueue(積む側上限 JOIN_ROULETTE_QUEUE_MAX)。 */
+  joinRoulettes: FxStockRouletteRef[];
   /** rouletteQueue(積む側上限 ROULETTE_QUEUE_MAX)。 */
   roulettes: FxStockRouletteRef[];
   /** ワーカー凍結キューの予告(ChallengeState.fxQueue、到着順)。 */
@@ -112,26 +131,35 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
     });
   }
   if (s.achievedPending) all.push({ key: 'clear', kind: 'clear', name: '', count: 1, playing: false });
-  for (const b of s.boosts) {
-    all.push({ key: `boost:${b.id}`, kind: 'boost', name: b.nickname ?? '', count: 1, playing: false });
-  }
-  for (const b of s.bands) {
-    all.push({
-      key: `band:${b.id}`,
-      kind: 'band',
-      name: b.nickname ?? '',
-      count: Math.max(1, b.rep),
-      playing: false,
-    });
-  }
-  for (const r of s.roulettes) {
-    all.push({
-      key: `roulette:${r.id}`,
-      kind: 'roulette',
-      name: r.nickname ?? '',
-      count: Math.max(1, r.spins),
-      playing: false,
-    });
+  // キューセクションは fx-priority の序列順(STOCK_SECTION_ORDER)で並べる —
+  // 実際のドレイン消化順と表示順が常に一致する。
+  for (const kind of STOCK_SECTION_ORDER) {
+    if (kind === 'boost') {
+      for (const b of s.boosts) {
+        all.push({ key: `boost:${b.id}`, kind, name: b.nickname ?? '', count: 1, playing: false });
+      }
+    } else if (kind === 'band') {
+      for (const b of s.bands) {
+        all.push({
+          key: `band:${b.id}`,
+          kind,
+          name: b.nickname ?? '',
+          count: Math.max(1, b.rep),
+          playing: false,
+        });
+      }
+    } else {
+      const refs = kind === 'join-roulette' ? s.joinRoulettes : s.roulettes;
+      for (const r of refs) {
+        all.push({
+          key: `${kind}:${r.id}`,
+          kind,
+          name: r.nickname ?? '',
+          count: Math.max(1, r.spins),
+          playing: false,
+        });
+      }
+    }
   }
   for (const w of s.workerQueue) {
     all.push({

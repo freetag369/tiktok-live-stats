@@ -8,17 +8,22 @@ import {
   BANNER_MS,
   BANNER_QUEUE_MAX,
   BANNER_STARVE_MS,
+  DRAIN_STARVE_MS,
   STAGE_GAP_BANNER_MS,
   STAGE_GAP_CUTIN_MS,
   bannerDurationMs,
   bannerEndAtFor,
+  bannerWinsByRank,
+  bestQueuedRank,
   clampBannerEndAt,
   clampStarveServedAt,
   enqueueBanner,
   pickStageNext,
   stageWaitMs,
+  takeNextBanner,
   type StageNext,
 } from '@shared/fx-stage';
+import { bannerRank, fxRank, type FxBannerKind } from '@shared/fx-priority';
 
 /**
  * 舞台(stage)の排他判定。「±N 浮上バナーが消えてから次の演出を始める」の
@@ -316,6 +321,107 @@ describe('pickStageNext — 渋滞シーケンス(v0.7.2 回帰: 満タン/ス�
         lastStarveServeMs: now,
       })
     ).toBe('banner');
+  });
+});
+
+describe('pickStageNext — ランク比較(fx-priority の序列参加)', () => {
+  const base = {
+    hasDrain: true,
+    queuedCount: 1,
+    oldestQueuedAtMs: 99_999, // 飢餓弁には遠く届かない直近
+    nowMs: 100_000,
+    lastStarveServeMs: 0,
+  };
+
+  it('フォロー(①)のバナーは全ドレインに勝つ', () => {
+    for (const drain of ['strike-like', 'boost', 'join-roulette', 'band', 'other'] as const) {
+      expect(
+        pickStageNext({ ...base, bannerBestRank: fxRank('follow'), drainBestRank: fxRank(drain) })
+      ).toBe('banner');
+    }
+  });
+
+  it('お助け(⑤)のバナーは⑥⑦⑧に勝ち、②③④には負ける', () => {
+    const helper = fxRank('helper');
+    for (const drain of ['join-roulette', 'band', 'other'] as const) {
+      expect(pickStageNext({ ...base, bannerBestRank: helper, drainBestRank: fxRank(drain) })).toBe('banner');
+    }
+    for (const drain of ['strike-like', 'strike-stock', 'boost'] as const) {
+      expect(pickStageNext({ ...base, bannerBestRank: helper, drainBestRank: fxRank(drain) })).toBe('drain');
+    }
+  });
+
+  it('同ランクは drain 勝ち・⑧バナーは従来どおり drain 優先(飢餓弁のみ)', () => {
+    const other = fxRank('other');
+    expect(pickStageNext({ ...base, bannerBestRank: other, drainBestRank: other })).toBe('drain');
+    expect(pickStageNext({ ...base, bannerBestRank: other, drainBestRank: fxRank('band') })).toBe('drain');
+  });
+
+  it('ランク欄を省略した旧経路は従来挙動(drain 優先)に一致する', () => {
+    expect(pickStageNext(base)).toBe('drain');
+  });
+
+  it('bannerWinsByRank は片方でも null なら false(スタンプ判定に使う)', () => {
+    expect(bannerWinsByRank({ ...base, bannerBestRank: 0, drainBestRank: null })).toBe(false);
+    expect(bannerWinsByRank({ ...base, bannerBestRank: null, drainBestRank: 3 })).toBe(false);
+    expect(bannerWinsByRank({ ...base, bannerBestRank: 0, drainBestRank: 3 })).toBe(true);
+  });
+});
+
+describe('pickStageNext — ドレイン側飢餓弁(DRAIN_STARVE_MS)', () => {
+  const now = 500_000;
+  const base = {
+    hasDrain: true,
+    queuedCount: 1,
+    oldestQueuedAtMs: now - 100,
+    nowMs: now,
+    lastStarveServeMs: 0,
+    bannerBestRank: fxRank('follow'), // ランクでは常にバナーが勝つ状況
+    drainBestRank: fxRank('band'),
+  };
+
+  it('最古のドレインが DRAIN_STARVE_MS 待ったらランク比較を跳ばして drain(境界含む)', () => {
+    expect(pickStageNext({ ...base, oldestDrainWaitingSinceMs: now - DRAIN_STARVE_MS })).toBe('drain');
+    expect(pickStageNext({ ...base, oldestDrainWaitingSinceMs: now - DRAIN_STARVE_MS + 1 })).toBe('banner');
+  });
+
+  it('null/省略なら弁は働かない(旧経路互換)', () => {
+    expect(pickStageNext({ ...base, oldestDrainWaitingSinceMs: null })).toBe('banner');
+    expect(pickStageNext(base)).toBe('banner');
+  });
+});
+
+describe('takeNextBanner / bestQueuedRank / enqueueBanner のランク対応', () => {
+  type B = { kind: FxBannerKind; tag: string };
+  const rankOf = (b: B): number => bannerRank(b.kind);
+  const b = (kind: FxBannerKind, tag: string): B => ({ kind, tag });
+
+  it('takeNextBanner は最高ランク・同ランク内 FIFO で取り出す(in-place)', () => {
+    const q = [b('like-float', 'L1'), b('follow', 'F1'), b('gift-card', 'G1'), b('follow', 'F2')];
+    expect(takeNextBanner(q, rankOf)?.tag).toBe('F1'); // 同ランク(follow×2)は先着勝ち
+    expect(takeNextBanner(q, rankOf)?.tag).toBe('F2');
+    expect(takeNextBanner(q, rankOf)?.tag).toBe('L1'); // ⑧同士は FIFO
+    expect(takeNextBanner(q, rankOf)?.tag).toBe('G1');
+    expect(takeNextBanner(q, rankOf)).toBeUndefined();
+  });
+
+  it('bestQueuedRank は最小ランク・空は null', () => {
+    expect(bestQueuedRank([], rankOf)).toBeNull();
+    expect(bestQueuedRank([b('gift-card', 'g'), b('helper', 'h')], rankOf)).toBe(fxRank('helper'));
+  });
+
+  it('enqueueBanner + rankOf は「最低ランクの最古」から捨てる(フォローを失わない)', () => {
+    const q = [b('like-float', 'L1'), b('follow', 'F1'), b('like-float', 'L2')];
+    const r = enqueueBanner(q, b('helper', 'H1'), 3, rankOf);
+    expect(r.dropped).toBe(1);
+    expect(q.map((x) => x.tag)).toEqual(['F1', 'L2', 'H1']); // 落ちたのは最低ランク最古の L1
+  });
+
+  it('enqueueBanner の rankOf 省略は従来どおり最古から', () => {
+    const q = [1, 2, 3];
+    const r = enqueueBanner(q, 4, 3);
+    expect(r.dropped).toBe(1);
+    expect(q).toEqual([2, 3, 4]);
   });
 });
 

@@ -152,6 +152,9 @@ describe('ChallengeEngine — 入室ルーレット', () => {
     expect(fx.rouletteLabel).toBe(DEFAULT_JOIN_ROULETTE.label);
     // モニターはこの印で短縮と超焦らしカウントを免除する(常にフル尺の契約)。
     expect(fx.rouletteJoin).toBe(true);
+    // 由来印 — モニターの専用キュー(優先度⑥)振り分けが読む。label 推定は
+    // ユーザー編集で衝突しうるので、この焼き込みが唯一のソース。
+    expect(fx.rouletteOrigin).toBe('join');
     expect(fx.nickname).toBe('viewer-j1');
     expect(fx.valueAfter).toBe(s.value);
     // ギフトではないので gift 系フィールドは載せない(モニターは 🎰 プレースホルダ)。
@@ -307,6 +310,8 @@ describe('ChallengeEngine — 入室ルーレット', () => {
     // 本番(join 経路)と effect の形を揃える — 試写でも入室ルーレットは
     // 短縮・超焦らしカウントの対象外として再生される。
     expect(fx.rouletteJoin).toBe(true);
+    // 由来印も本番と同型 — 試写だけ通常キューに乗る逆事故を防ぐ。
+    expect(fx.rouletteOrigin).toBe('join');
   });
 
   it('testEffect(行指定)の試写には rouletteJoin が載らない(ギフト扱い)', () => {
@@ -318,6 +323,8 @@ describe('ChallengeEngine — 入室ルーレット', () => {
     const fx = e.get().recentEffects[0]!;
     expect(fx.kind).toBe('roulette');
     expect(fx.rouletteJoin).toBeUndefined();
+    // 由来印もギフト経路には付けない — 付くと専用キュー(優先度⑥)へ吸われる。
+    expect(fx.rouletteOrigin).toBeUndefined();
   });
 
   it('ギフトルーレットとは独立に数える(両方有効でも spins は経路ごとに増える)', () => {
@@ -334,5 +341,11 @@ describe('ChallengeEngine — 入室ルーレット', () => {
     expect(s.stats.rouletteSpins).toBe(2);
     expect(s.stats.joinUp).toBe(5);
     expect(s.stats.giftUp).toBe(5);
+    // 由来印はライブでも経路ごと — ギフト由来(recentEffects[0]、後着)には付けず、
+    // 入室由来([1])にだけ付く。ここが崩れるとモニターのキュー振り分けが交差する。
+    const [giftFx, joinFx] = s.recentEffects;
+    expect(giftFx!.rouletteOrigin).toBeUndefined();
+    expect(giftFx!.rouletteJoin).toBeUndefined();
+    expect(joinFx!.rouletteOrigin).toBe('join');
   });
 });

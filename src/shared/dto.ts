@@ -1185,6 +1185,13 @@ export interface ChallengeEffect {
    */
   rouletteJoin?: true;
   /**
+   * kind='roulette': 入室(初見)ルーレット由来である印。ギフトルーレットには載らない。
+   * モニターはこれで専用キュー(優先度⑥)へ振り分ける。rouletteLabel での推定は不可 —
+   * label はユーザー編集可能でギフト行に「初見さん」と付けられると衝突する。
+   * rouletteSegments と同じ「effect 1件で自己完結」の流儀。
+   */
+  rouletteOrigin?: 'join';
+  /**
    * kind='gift' でダイヤ帯域カットインが一致したときのクリップ id。
    * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニターの設定は
    * 120秒ポーリング(CFG_POLL_MS)で古くなりうるため、演出パラメータは cfg からではなく

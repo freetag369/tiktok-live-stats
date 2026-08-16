@@ -24,6 +24,7 @@ const LABELS: Record<FxStockKind, string> = {
   boost: 'ブースト',
   // 内部名は band(帯/フルカットのカットイン)だが、視聴者向けには「ギフト」(ユーザー指定)。
   band: 'ギフト',
+  'join-roulette': '初見ルーレット',
   roulette: 'ルーレット',
 };
 

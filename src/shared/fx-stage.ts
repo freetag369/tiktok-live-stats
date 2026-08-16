@@ -72,6 +72,15 @@ export const BANNER_STARVE_MS = 8000;
 export type StageNext = 'drain' | 'banner' | 'idle';
 
 /**
+ * ドレイン側の飢餓弁。序列①⑤(フォロー/お助け)のバナーはランク比較で
+ * ドレインの⑥⑦⑧に勝ち続けられるため、お助け連打が band/boost キュー(各4)を
+ * 溢れさせて「値だけ動いて演出が出ない」最悪形に落ちうる — バナー飢餓弁
+ * (BANNER_STARVE_MS)の対称形として、ドレイン最古がこれ以上待ったら
+ * ランク比較を跳ばして1件流す。
+ */
+export const DRAIN_STARVE_MS = 10_000;
+
+/**
  * バナーの実尺をクラス文字列から引く。`pushFloat(node, cls)` の cls は
  * `'gift-card t3 bad'` のような空白区切りなので、**トークン一致**で見る
  * (`includes` だと `banner-gift-cardish` のような将来のクラスで誤爆する)。
@@ -144,23 +153,58 @@ export interface StagePick {
   nowMs: number;
   /**
    * 飢餓弁が最後にバナーを通した時刻。0 = 未発火(遥か過去)。呼び出し側は
-   * 実際にバナーを供給した瞬間だけ now を書き、後方ステップは
-   * clampStarveServedAt で引き戻すこと。
+   * **飢餓弁で**バナーを供給した瞬間だけ now を書き(ランク勝ちの供給では
+   * 刻まない — bannerWinsByRank で判別)、後方ステップは clampStarveServedAt で
+   * 引き戻すこと。
    */
   lastStarveServeMs: number;
+  /**
+   * 待機ドレインの最高ランク(fx-drain の bestDrainRank)。null/省略 =
+   * ランク比較をしない(予約のみ・旧経路互換)。ランクの権威は fx-priority.ts。
+   */
+  drainBestRank?: number | null;
+  /** 順番待ちバナーの最高ランク。null/省略 = ランク比較をしない。 */
+  bannerBestRank?: number | null;
+  /**
+   * ドレイン最古の待機開始時刻(キューが空→非空になった瞬間)。null/省略 =
+   * ドレイン側飢餓弁を使わない。
+   */
+  oldestDrainWaitingSinceMs?: number | null;
 }
 
 /**
- * 舞台が空いた瞬間に何を出すか。**既定はカットイン優先** — 持ち越しキューは
- * 浅く(PENDING_BANDS_MAX=4 / pendingBoosts 2)、溢れると「値だけ動いて演出が
- * 出ない」最悪の見え方になるので、待たせる実害が大きいのはこちら。
- * バナー側は飢餓弁でしか割り込ませず、発火は BANNER_STARVE_MS の窓につき
- * 1回まで(前回発火からの経過も同じ定数で判定)— 渋滞が続いても drain と
- * バナーが交互に番を得る。
+ * バナーがランク比較でドレインに勝つか。**同ランクは drain 勝ち** — 持ち越し
+ * キューは浅く(各4件)、溢れの実害が大きいのはドレイン側という既存判断を
+ * タイブレークとして残す。呼び出し側はこれが false のバナー供給(= 飢餓弁 or
+ * ドレイン不在)のときだけ lastStarveServeMs を刻む。
+ */
+export function bannerWinsByRank(s: StagePick): boolean {
+  return s.bannerBestRank != null && s.drainBestRank != null && s.bannerBestRank < s.drainBestRank;
+}
+
+/**
+ * 舞台が空いた瞬間に何を出すか。判定は3段:
+ * 1. **ドレイン側飢餓弁**(DRAIN_STARVE_MS)— 上位バナーの連流でも最古の
+ *    ドレインが待ちすぎたら先に流す(キュー溢れ=演出消失の防止が最優先)。
+ * 2. **ランク比較**(fx-priority の序列)— フォロー(①)・お助け(⑤)の
+ *    バナーは、それより下位のドレイン(⑥初見/⑦カットイン/⑧ギフトルーレット)
+ *    より先に出る。同ランクは drain 勝ち(bannerWinsByRank)。
+ * 3. **従来のバナー飢餓弁** — ⑧のバナー(ギフトカード等)は既定でカットイン
+ *    優先のまま、最古が BANNER_STARVE_MS 待ったら窓につき1回だけ割り込む。
+ * ランク欄(drainBestRank / bannerBestRank)を省略した呼び出しは従来挙動
+ * (drain 優先+バナー飢餓弁のみ)に一致する。
  */
 export function pickStageNext(s: StagePick): StageNext {
   const queued = s.queuedCount > 0;
   if (!s.hasDrain) return queued ? 'banner' : 'idle';
+  if (
+    queued &&
+    s.oldestDrainWaitingSinceMs != null &&
+    s.nowMs - s.oldestDrainWaitingSinceMs >= DRAIN_STARVE_MS
+  ) {
+    return 'drain'; // ドレイン側飢餓弁 — ランク比較より先(キュー溢れの防止が最優先)
+  }
+  if (queued && bannerWinsByRank(s)) return 'banner';
   if (
     s.nowMs - s.lastStarveServeMs >= BANNER_STARVE_MS && // 弁の再発火窓(1発/窓)
     queued &&
@@ -173,15 +217,55 @@ export function pickStageNext(s: StagePick): StageNext {
 }
 
 /**
- * 上限つきの enqueue(in-place)。溢れたぶんは**最古から**落として件数を返す。
- * 新しい通知のほうが配信の「今」に近いので、落とすなら古いほうという判断。
+ * 順番待ちから「最高ランク・同ランク内は最古(FIFO)」の1枚を取り出す
+ * (in-place splice)。ランクは fx-priority の bannerRank を rankOf として注入 —
+ * fx-stage は数値しか見ない(層の分離)。
  */
-export function enqueueBanner<T>(q: T[], item: T, max: number = BANNER_QUEUE_MAX): { dropped: number } {
+export function takeNextBanner<T>(q: T[], rankOf: (t: T) => number): T | undefined {
+  if (q.length === 0) return undefined;
+  let best = 0;
+  for (let i = 1; i < q.length; i++) {
+    if (rankOf(q[i]!) < rankOf(q[best]!)) best = i; // 厳密な < なので同ランクは先着が勝つ
+  }
+  return q.splice(best, 1)[0];
+}
+
+/** 順番待ちの最高ランク(最小値)。空なら null。 */
+export function bestQueuedRank<T>(q: readonly T[], rankOf: (t: T) => number): number | null {
+  let best: number | null = null;
+  for (const item of q) {
+    const r = rankOf(item);
+    if (best === null || r < best) best = r;
+  }
+  return best;
+}
+
+/**
+ * 上限つきの enqueue(in-place)。溢れたぶんは落として件数を返す。
+ * - rankOf 省略時(旧経路互換): **最古から**落とす — 新しい通知のほうが配信の
+ *   「今」に近い。
+ * - rankOf 指定時: **最低ランクの中の最古**から落とす — フォロー(①)や
+ *   お助け(⑤)を like-float(⑧)より先に失わないため。
+ */
+export function enqueueBanner<T>(
+  q: T[],
+  item: T,
+  max: number = BANNER_QUEUE_MAX,
+  rankOf?: (t: T) => number
+): { dropped: number } {
   q.push(item);
   const limit = Math.max(0, Math.floor(max));
   let dropped = 0;
   while (q.length > limit) {
-    q.shift();
+    if (rankOf === undefined) {
+      q.shift();
+    } else {
+      let worst = 0;
+      for (let i = 1; i < q.length; i++) {
+        if (rankOf(q[i]!) > rankOf(q[worst]!)) worst = i; // 厳密な > なので同ランクは最古が落ちる
+      }
+      q.splice(worst, 1);
+    }
     dropped++;
   }
   return { dropped };

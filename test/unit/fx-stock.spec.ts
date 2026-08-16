@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EMPTY_FX_STOCK,
   FX_STOCK_DISPLAY_MAX,
+  STOCK_SECTION_ORDER,
   buildFxStock,
   fxStockKey,
   type FxStockSnapshot,
@@ -28,6 +29,7 @@ function snap(over: Partial<FxStockSnapshot> = {}): FxStockSnapshot {
     achievedPending: false,
     boosts: [],
     bands: [],
+    joinRoulettes: [],
     roulettes: [],
     workerQueue: [],
     ...over,
@@ -241,5 +243,31 @@ describe('monitor.css との整合(テキスト検査)', () => {
   it('廃止済みスタイル(.fxs-strike* / .fxs-subdot)が残っていない', () => {
     expect(css).not.toMatch(/\.fxs-strike/);
     expect(css).not.toMatch(/\.fxs-subdot/);
+  });
+});
+
+describe('fx-priority 序列との整合(v0.8.0)', () => {
+  it('STOCK_SECTION_ORDER は優先度表から導出される(boost→join→band→roulette)', () => {
+    expect(STOCK_SECTION_ORDER).toEqual(['boost', 'join-roulette', 'band', 'roulette']);
+  });
+
+  it('初見ルーレットはカットインより上・ギフトルーレットより上に並ぶ', () => {
+    const v = buildFxStock(
+      snap({
+        boosts: [{ id: 1, nickname: 'ぶ' }],
+        bands: [{ id: 2, nickname: 'か', rep: 1 }],
+        joinRoulettes: [{ id: 3, nickname: 'しょ', spins: 1 }],
+        roulettes: [{ id: 4, nickname: 'る', spins: 2 }],
+      })
+    );
+    expect(v.items.map((i) => i.kind)).toEqual(['boost', 'join-roulette', 'band', 'roulette']);
+    expect(v.items[1]).toMatchObject({ key: 'join-roulette:3', name: 'しょ' });
+  });
+
+  it('再生中の join-roulette も先頭行になれる', () => {
+    const v = buildFxStock(
+      snap({ playing: { kind: 'join-roulette', id: 9, nickname: '初', remaining: 1 } })
+    );
+    expect(v.items[0]).toMatchObject({ kind: 'join-roulette', playing: true, key: 'join-roulette:9' });
   });
 });

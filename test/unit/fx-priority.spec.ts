@@ -1,0 +1,135 @@
+import { describe, expect, it } from 'vitest';
+import type { ChallengeEffect } from '@shared/dto';
+import {
+  BANNER_PRIORITY,
+  DRAIN_PRIORITY,
+  FX_BANNER_KINDS,
+  FX_DRAIN_KINDS,
+  FX_PRIORITY_ORDER,
+  bannerRank,
+  bestRank,
+  fxClassForEffect,
+  fxRank,
+  shouldYieldSpinChain,
+  strikeClass,
+} from '@shared/fx-priority';
+
+/**
+ * 演出の優先順位の凍結。**順位を変えるときは必ずこのテストの期待値を一緒に
+ * 編集する** — それが「順位変更は明示的な決定を伴う」の強制点であり、
+ * fx-priority.ts の規約(新演出はユーザーに位置を確認して登録)の値レベル担保。
+ * 型レベル(satisfies / 網羅 switch)は typecheck が担うので、ここは値だけ見る。
+ */
+
+describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16)', () => {
+  it('8ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
+    expect(FX_PRIORITY_ORDER).toEqual([
+      'follow',
+      'strike-like',
+      'strike-stock',
+      'boost',
+      'helper',
+      'join-roulette',
+      'band',
+      'other',
+    ]);
+  });
+
+  it('strike-like と strike-stock は隣接する(pendingStrike を合算1件で扱える根拠)', () => {
+    // ②③の間に他の演出が挟まると「いいね+ストックの2段着弾を1チェーンで流す」
+    // 既存設計(queueStrike の合算)と矛盾する — 並び替えるならまず設計を見直すこと。
+    expect(fxRank('strike-stock')).toBe(fxRank('strike-like') + 1);
+  });
+
+  it('登録簿の種別一覧も凍結(登録漏れ・無断追加の検出)', () => {
+    expect(FX_DRAIN_KINDS).toEqual(['strike', 'boost', 'join-roulette', 'band', 'roulette']);
+    expect(FX_BANNER_KINDS).toEqual([
+      'follow',
+      'helper',
+      'gift-card',
+      'comment',
+      'like-float',
+      'stock-float',
+      'roulette-result',
+      'roulette-rest',
+      'boost-announce',
+      'boost-result',
+    ]);
+    // 全登録が有効なクラスを指す(satisfies の値レベル二重化)。
+    for (const k of FX_DRAIN_KINDS) expect(FX_PRIORITY_ORDER).toContain(DRAIN_PRIORITY[k]);
+    for (const k of FX_BANNER_KINDS) expect(FX_PRIORITY_ORDER).toContain(BANNER_PRIORITY[k]);
+  });
+
+  it('ギフトルーレットは「その他」・バナーはフォロー/お助け以外すべて「その他」', () => {
+    expect(DRAIN_PRIORITY.roulette).toBe('other');
+    expect(BANNER_PRIORITY.follow).toBe('follow');
+    expect(BANNER_PRIORITY.helper).toBe('helper');
+    for (const k of FX_BANNER_KINDS) {
+      if (k !== 'follow' && k !== 'helper') expect(BANNER_PRIORITY[k]).toBe('other');
+    }
+  });
+});
+
+describe('fxClassForEffect — effect kind の網羅分類', () => {
+  const base = { id: 1, amount: 0, valueAfter: 100, atMs: 0 };
+  const eff = (over: Partial<ChallengeEffect> & Pick<ChallengeEffect, 'kind'>): ChallengeEffect =>
+    ({ ...base, ...over }) as ChallengeEffect;
+
+  it.each([
+    [eff({ kind: 'achieved' }), 'parallel'],
+    [eff({ kind: 'follow' }), 'follow'],
+    [eff({ kind: 'gauge-full' }), 'strike-like'],
+    [eff({ kind: 'stock-full' }), 'strike-stock'],
+    [eff({ kind: 'boost-start' }), 'boost'],
+    [eff({ kind: 'boost-end' }), 'boost'],
+    [eff({ kind: 'roulette', rouletteOrigin: 'join' }), 'join-roulette'],
+    [eff({ kind: 'roulette' }), 'other'],
+    [eff({ kind: 'gift', fanStamp: true }), 'helper'],
+    [eff({ kind: 'gift', fxBandClip: 'band1' }), 'band'],
+    [eff({ kind: 'gift' }), 'other'],
+    [eff({ kind: 'press' }), 'other'],
+    [eff({ kind: 'like' }), 'other'],
+    [eff({ kind: 'comment' }), 'other'],
+  ] as const)('%# 番目の分類', (e, expected) => {
+    expect(fxClassForEffect(e)).toBe(expected);
+  });
+
+  it('お助け(fanStamp)はカットイン付きでも helper(⑤)が勝つ', () => {
+    // 実運用のお助けには全面カット5秒が割り当たっている(fan-stamp.ts のコメント)。
+    // fanStamp を band 扱いにすると「お助け=⑤」のユーザー序列が実質空文になる。
+    expect(fxClassForEffect(eff({ kind: 'gift', fanStamp: true, fxBandClip: 'cut-x' }))).toBe('helper');
+  });
+});
+
+describe('strikeClass / shouldYieldSpinChain / bestRank', () => {
+  it('strike は like を含めば②・stock のみなら③', () => {
+    expect(strikeClass({ like: 3, stock: 0 })).toBe('strike-like');
+    expect(strikeClass({ like: 3, stock: 5 })).toBe('strike-like');
+    expect(strikeClass({ like: 0, stock: 5 })).toBe('strike-stock');
+  });
+
+  it('譲り判定の真理値表 — gift(⑧)は全上位に譲り、join(⑥)は band/other に譲らない', () => {
+    // gift ルーレット(other)は上位すべてに譲る。
+    for (const w of ['follow', 'strike-like', 'strike-stock', 'boost', 'helper', 'join-roulette', 'band'] as const) {
+      expect(shouldYieldSpinChain('other', [w])).toBe(true);
+    }
+    expect(shouldYieldSpinChain('other', ['other'])).toBe(false); // 同格には譲らない
+    // join ルーレットは④⑤以上にだけ譲る。
+    for (const w of ['follow', 'strike-like', 'strike-stock', 'boost', 'helper'] as const) {
+      expect(shouldYieldSpinChain('join-roulette', [w])).toBe(true);
+    }
+    expect(shouldYieldSpinChain('join-roulette', ['band'])).toBe(false);
+    expect(shouldYieldSpinChain('join-roulette', ['other'])).toBe(false);
+    expect(shouldYieldSpinChain('join-roulette', ['join-roulette'])).toBe(false);
+    // 空では譲らない。混在は最上位で判定。
+    expect(shouldYieldSpinChain('other', [])).toBe(false);
+    expect(shouldYieldSpinChain('join-roulette', ['other', 'follow'])).toBe(true);
+  });
+
+  it('bestRank は最小添字・空は null', () => {
+    expect(bestRank([])).toBeNull();
+    expect(bestRank(['other', 'boost', 'band'])).toBe(fxRank('boost'));
+    expect(bannerRank('follow')).toBe(0);
+    expect(bannerRank('gift-card')).toBe(fxRank('other'));
+  });
+});

@@ -731,7 +731,13 @@ export class ChallengeEngine {
           // **spec.rouletteId ではなく実際に回った gr.id** を焼くこと — この経路は
           // 対象行が消えていたら「最初の有効な行」へ倒すので、spec を鵜呑みにすると
           // 実演した盤面と鳴る音がズレる。
-          ...(spec.join ? { rouletteJoin: true as const } : gr ? { rouletteId: gr.id } : {}),
+          // rouletteOrigin(由来印)も本番と同型に — 試写だけ専用キューに乗らないと
+          // 「実演では出るのに本番で出ない」の逆事故(実演だけ通常キュー)が起きる。
+          ...(spec.join
+            ? { rouletteJoin: true as const, rouletteOrigin: 'join' as const }
+            : gr
+              ? { rouletteId: gr.id }
+              : {}),
           nickname: 'テスト',
         };
         break;
@@ -843,6 +849,9 @@ export class ChallengeEngine {
           // モニターはこの印で短縮(キュー消化・マージ由来のコンボ)と超焦らし
           // カウントを免除する — 初見さんの1本は常にフル尺・抽選パターンのまま。
           rouletteJoin: true,
+          // 由来印 — モニターの専用キュー(優先度⑥)振り分けと rouletteBoardKey の
+          // ギフトルーレット分離が読む。label での推定はユーザー編集で衝突しうる。
+          rouletteOrigin: 'join',
           nickname,
           atMs: this.now(),
         });

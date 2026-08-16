@@ -77,9 +77,61 @@ describe('ホールド番犬(時間ベースの最後の脱出口)', () => {
   it('expireRoulette は持ち越しを捨てない(abortRoulette との役割の違い)', () => {
     // rouletteQueue / pendingAchieved を捨てると、番犬発火のたびにキュー済みスピンと
     // CLEAR 演出が黙って消える。捨ててよいのは reset/stop の abortRoulette だけ。
+    // (v0.8.0: ドレイン順序の一元化で scheduleDrain の order 引数は廃止 —
+    //  期待値を 'roulette-first' 付きから引数なしへ更新した。)
     const fn = fnBody('expireRoulette');
     expect(fn).not.toContain('rouletteQueue.current = []');
+    expect(fn).not.toContain('joinRouletteQueue.current = []');
     expect(fn).not.toContain('pendingAchieved.current = null');
-    expect(fn).toContain("scheduleDrain('roulette-first')");
+    expect(fn).toContain('scheduleDrain()');
+  });
+});
+
+describe('演出優先順位一元化 v0.8.0(§6b 連鎖の譲り合い・据え置き会計)', () => {
+  it('finishRoulette: 確定バナー(pushFloat)は譲り判定・コンボ直呼びより前', () => {
+    // 譲るときも「止まったリールの額」は先に見せる — バナーが譲り分岐の後ろに
+    // 回ると、譲った演出が終わるまでどのリールの額か読めなくなる。
+    const fn = fnBody('finishRoulette');
+    const banner = fn.indexOf('pushFloat(');
+    const yieldAt = fn.indexOf('shouldYieldSpinChain');
+    const chainAt = fn.indexOf('startRoulette(e, true, at + 1)');
+    expect(banner).toBeGreaterThanOrEqual(0);
+    expect(yieldAt, '譲り判定(shouldYieldSpinChain)が無い').toBeGreaterThanOrEqual(0);
+    expect(chainAt, 'コンボ直呼びが無い').toBeGreaterThanOrEqual(0);
+    expect(banner).toBeLessThan(yieldAt);
+    expect(banner).toBeLessThan(chainAt);
+  });
+
+  it('譲り分岐: unshift(残りリールの返却)が rouletteHold 解除より前', () => {
+    // 逆順だと、hold が落ちた瞬間の pumpStage 再入が「キューに残りが無い」状態を
+    // 観測し、据え置き(pendingStageAmount)から残りリールぶんが漏れる。
+    const fn = fnBody('finishRoulette');
+    const branch = fn.slice(fn.indexOf('shouldYieldSpinChain'), fn.indexOf('startRoulette(e, true, at + 1)'));
+    const unshiftAt = branch.indexOf('.unshift(');
+    const holdAt = branch.indexOf('rouletteHold.current = false');
+    expect(unshiftAt, '譲り分岐に unshift が無い').toBeGreaterThanOrEqual(0);
+    expect(holdAt, '譲り分岐に hold 解除が無い').toBeGreaterThanOrEqual(0);
+    expect(unshiftAt).toBeLessThan(holdAt);
+  });
+
+  it('譲り分岐(more 判定〜コンボ直呼び)は据え置きを解かない', () => {
+    // ここで null 収束させると、譲った瞬間に残りリールの出目が数字へ先漏れする。
+    // 張り替えは pumpStage の applyStageHold(同一フラッシュ)が行う。
+    const fn = fnBody('finishRoulette');
+    const branch = fn.slice(fn.indexOf('if (more)'), fn.indexOf('startRoulette(e, true, at + 1)'));
+    expect(branch).not.toContain('setHeldValue(null)');
+  });
+
+  it.each(['startRoulette', 'startBandFx', 'startBoostFx', 'startStrikeFromPending'])(
+    '%s は据え置き会計を heldValueFor に一本化している',
+    (fn) => {
+      // 4つの開始点が同じ式を共有することが「先漏れ・巻き戻りが出ない」の担保。
+      expect(fnBody(fn)).toContain('heldValueFor(');
+    }
+  );
+
+  it('pendingStageAmount はルーレットを rouletteRemainingAmount(resumeAt 起点)で数える', () => {
+    // 全リール直和のままだと §6b の連鎖再開で消化済みリールぶん数字が巻き戻る。
+    expect(fnBody('pendingStageAmount')).toContain('rouletteRemainingAmount(');
   });
 });
