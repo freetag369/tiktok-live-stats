@@ -18,7 +18,8 @@ export default tseslint.config(
   },
   {
     // renderer は DOM、main/worker は Node。混在プロジェクトなので両方許す。
-    files: ['src/**/*.{ts,tsx}', 'test/**/*.ts'],
+    // e2e は Playwright(Node)で走りつつ page.evaluate の中身は DOM。同じ理由でここへ。
+    files: ['src/**/*.{ts,tsx}', 'test/**/*.ts', 'e2e/**/*.ts'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
   {

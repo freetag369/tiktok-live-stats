@@ -501,6 +501,10 @@ export class ChallengeEngine {
         return this.get();
       }
     }
+    // 機能そのものが OFF なら数字は動かさない。ゲートを**テスト実演ブロックの後**に
+    // 置くのは、設定画面の「▶ モニター」が OFF のまま実演するのが正しい使い方だから
+    // (有効化する前に演出を見て決める)。実演のタップ計数は上で return 済み。
+    if (!this.getConfig().enabled) return this.get();
     if (this.status !== 'running') return this.get();
     const nowMs = this.now();
     // 期限切れブーストの清算は flushFxFreeze の冒頭(settleBoost)が行う。
@@ -769,6 +773,11 @@ export class ChallengeEngine {
    * リプレイの視聴者は既に DB に記録済みで初見ではない)。
    */
   handleEvent(e: NormalizedEvent, joinFirstEver = false): boolean {
+    // 機能そのものが OFF なら妨害も応援も受け付けない。以前は enabled を見るのが
+    // ホットキー登録(main/index.ts)とダッシュボードのカード表示(LiveDashboard.tsx)
+    // だけで、OFF にしてもギフト・いいね・フォローが数字を動かし続けていた
+    // (モニターを開いていればクリックでも減った)。
+    if (!this.getConfig().enabled) return false;
     if (this.status !== 'running') return false;
     // 凍結期限が来ていればここで解除する(2Hz tick と並ぶ lazy 解除の入口)。
     this.flushFxFreeze(this.now());

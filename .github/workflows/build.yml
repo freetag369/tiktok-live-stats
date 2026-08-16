@@ -10,6 +10,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# @playwright/test は playwright に依存し、その postinstall が Chromium/Firefox/
+# WebKit(約500MB)を落とす。_electron.launch はアプリ自身の Electron を使うので
+# 1つも要らない。**全ジョブ**で止める — check / win / mac の npm ci が無関係に
+# 1〜3分遅くなるのを防ぐ。
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
 concurrency:
   # PR の古い実行は打ち切る。タグのリリースビルドは途中で殺さない。
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,6 +40,33 @@ jobs:
       - run: npm run lint
       - run: npm test
 
+  # 実アプリ(Electron)起動の E2E。全 push / PR ではスモークだけ回す —
+  # 「Electron が起動し worker が上がり RPC が往復する」という最も壊れやすい
+  # 配線を守るのが目的で、フルは下の win(タグ時)が持つ。
+  e2e:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Electron は headless モードを持たない(Chromium と違う)。BrowserWindow に X が要る。
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      # -a は空いている :N を自動で選ぶ。--no-sandbox は ubuntu 24.04 の AppArmor が
+      # 非特権 user namespace を制限して zygote が起動できないため(fixtures.ts 側で付与)。
+      - run: xvfb-run -a npm run test:e2e:smoke
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-linux
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
   win:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
@@ -46,6 +80,17 @@ jobs:
       # lint とテストをリリースのゲートにする — typecheck だけでは実行時バグを通す。
       - run: npm run lint
       - run: npm test
+      # 実際の配布先は Windows。monitor-window.ts の全画面分岐や node:sqlite の
+      # Windows パスはここでしか通らない。導入初期は continue-on-error で
+      # リリースを止めない(安定を確認したら外す)。
+      - run: npm run test:e2e
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-win
+          path: playwright-report/
+          retention-days: 7
       # THIRD-PARTY-NOTICES.md is gitignored — regenerate it or the in-app
       # licenses pane ships empty.
       - run: npm run notices

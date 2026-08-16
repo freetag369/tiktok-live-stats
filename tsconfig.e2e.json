@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2023",
+    // page.evaluate のコールバックは**ページ側で走る**ので DOM lib が要る。
+    // tsconfig.node.json は lib: ["ES2023"] だけなので相乗りできない — それが
+    // E2E を独立プロジェクトにしている唯一にして決定的な理由。
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    // 型検査のためだけ(src/shared の内部が @shared/* で相互参照している)。
+    // **実行時**は Playwright の esbuild がこれを解決しないので、e2e からは
+    // 値を import せず import type の相対パスだけを使う規約を守ること。
+    "paths": { "@shared/*": ["src/shared/*"] },
+    "tsBuildInfoFile": "./tsconfig.e2e.tsbuildinfo"
+  },
+  // paths を持たせない: Playwright のランナーは自前の esbuild で回すので
+  // @shared/* の実行時解決が効かない。共有型は import type の相対パスで取り、
+  // e2e からは**値を import しない**のを規約にする(型は消えるので安全)。
+  // 共有型を import type で借りるため。node / web の両プロジェクトも同じく
+  // src/shared/** を include しており、3つ目として同じ流儀に乗る。
+  "include": ["e2e/**/*.ts", "playwright.config.ts", "src/shared/**/*.ts"]
+}

@@ -14,6 +14,7 @@ import type { ConfirmOptions } from '../components/ConfirmDialog';
 import { useConfirm } from '../components/ConfirmDialog';
 import { ObservedLegend, ViewerTable } from '../components/ViewerTable';
 import { useChallengeSe } from '../lib/useChallengeSe';
+import { challengeCardView } from './challenge-card-view';
 
 /** data 未着時に毎レンダー新しい [] を作らないための安定参照。 */
 const EMPTY_ROWS: ViewerTableRow[] = [];
@@ -686,11 +687,14 @@ function ChallengeCard(): React.JSX.Element | null {
 
   if (!enabled || !settings) return null;
 
-  const value = challenge?.value ?? settings.challenge.initialValue;
-  const initial = challenge?.initialValue ?? settings.challenge.initialValue;
-  const done = Math.max(0, initial - value);
-  const elapsedMs =
-    challenge?.startedMs != null ? (challenge.achievedMs ?? Date.now()) - challenge.startedMs : null;
+  // 表示条件の導出は challenge-card-view.ts の純関数へ切り出してある
+  // (PUSH の活性・確認ダイアログの出し分け・モニター未表示の警告は配信事故に
+  // 直結するので、コンポーネントの外で単体テストできる形にした)。
+  const view = challengeCardView(challenge, settings.challenge, monitorOpen, Date.now());
+  const value = view.value;
+  const initial = view.initial;
+  const done = view.done;
+  const elapsedMs = view.elapsedMs;
   // PUSH/開始/停止が無言で失敗すると配信事故になる — 必ずトーストへ落とす。
   const call = (
     m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press' | 'challenge.toggleRank'
@@ -705,10 +709,10 @@ function ChallengeCard(): React.JSX.Element | null {
     });
   // 一度でも開始していれば途中の値と統計がある。reset だけが startedMs を消すので、
   // これがそのまま「失うものがあるか」の判定になる(バッジの一時停止中と同じ条件)。
-  const hasRun = challenge?.startedMs != null;
+  const hasRun = view.hasRun;
   // モニターに全画面ランキングが出ているか。worker は表示中だけ rankBoard を
   // 載せるので、キーの有無がそのまま表示状態になる(別途フラグを持たない)。
-  const rankShown = challenge?.rankBoard != null;
+  const rankShown = view.rankShown;
 
   return (
     <div className={`card challenge-card${running || achieved ? ' stuck' : ''}${achieved ? ' cleared' : ''}`}>

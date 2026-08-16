@@ -341,9 +341,11 @@ function ingestChallenge(incoming: ChallengeState): Partial<LiveState> {
   // start / reset の検知。worker 側は recentEffects を空にするだけで「消せ」とは
   // 言ってこないので、startedMs の変化(start=新しい時刻 / reset=null)で判断する。
   // status 遷移だけを見ると stop→start の往復を取りこぼす。
+  let cleared = false;
   if (lastStartedMs !== undefined && lastStartedMs !== incoming.startedMs) {
     logEntries = [];
     lastLoggedId = null;
+    cleared = true;
     // ラン境界ではリングが空になるので世代印も戻す(後退判定の材料が無くなる)。
     seenMaxEffectId = 0;
     seenEffects = null;
@@ -374,7 +376,14 @@ function ingestChallenge(incoming: ChallengeState): Partial<LiveState> {
 
   const next = appendChallengeLog(logEntries, state, lastLoggedId);
   lastLoggedId = next.lastId;
-  if (next.log === logEntries) return { challenge: state };
+  if (next.log === logEntries) {
+    // ラン境界で空にしたときは、積む effect がゼロでもストアへ届ける必要がある。
+    // appendChallengeLog は「新着なし」で入力の配列をそのまま返す規約なので、
+    // ここで返さないと zustand 側は前のランのログを持ったままになる —
+    // リセットの確認ダイアログが「ログがすべて消えて」と約束しているのに、
+    // 次の演出が来るまで前ランの履歴が画面に残っていた。
+    return cleared ? { challenge: state, challengeLog: logEntries } : { challenge: state };
+  }
   logEntries = next.log;
   return { challenge: state, challengeLog: next.log };
 }

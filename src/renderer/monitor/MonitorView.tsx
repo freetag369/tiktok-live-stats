@@ -103,6 +103,7 @@ import { playBandBgm, type BgmHandle } from '../lib/bgm';
 import { MiniFx } from './MiniFx';
 import { RouletteFx } from './RouletteFx';
 import { SevenSeg } from './SevenSeg';
+import { countdownClass, segDigits } from './seg-class';
 import { LikeGauge } from './LikeGauge';
 import { WakeRow } from './WakeRow';
 import { FxStockRow } from './FxStockRow';
@@ -3817,7 +3818,7 @@ export function MonitorView(): React.JSX.Element {
   const lowThreshold = cfg?.challenge.lowThreshold ?? 10;
   const running = challenge.status === 'running';
   const achieved = challenge.status === 'achieved';
-  const digits = Math.max(4, String(challenge.initialValue).length);
+  const digits = segDigits(challenge.initialValue);
   // 据え置き中はこちらを出す。桁数(initialValue 由来)と status は据え置かない。
   const shownValue = heldValue ?? challenge.value;
   const showAvatars = cfg?.loadAvatars ?? true;
@@ -3826,11 +3827,7 @@ export function MonitorView(): React.JSX.Element {
   // punch-* は React の className では持たない — 付け外しは punchKey の
   // useLayoutEffect(classList リプレイ)が担う。ここに足すと二重管理になり、
   // 同方向の連続パンチでアニメーションが再スタートしなくなる。
-  const segCls = [
-    'countdown',
-    achieved ? 'clear' : '',
-    running && shownValue <= lowThreshold ? 'low' : '',
-  ].join(' ');
+  const segCls = countdownClass({ status: challenge.status, shownValue, lowThreshold });
 
   return (
     // stage-viewport がウィンドウ全面、stage-scale が 540×960 の固定ステージを

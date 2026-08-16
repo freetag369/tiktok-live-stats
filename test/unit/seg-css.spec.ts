@@ -40,9 +40,16 @@ describe('パンチの classList リプレイ(key 再マウントの廃止)', ()
   });
 
   it('segCls は punch-* を持たない(React className との二重管理の防止)', () => {
-    const m = SRC.match(/const segCls = \[[\s\S]*?\]\.join/);
-    expect(m).toBeTruthy();
+    // 規則そのものは seg-class.ts へ切り出し済み(test/renderer/seg-class.spec.ts が
+    // 「punch-* を含めない」を全 status で検証する)。ここは配線だけを見る —
+    // MonitorView が自前で組み直していたら、その式に punch-* が混ざりうる。
+    const m = SRC.match(/const segCls = countdownClass\([\s\S]*?\);/);
+    expect(m, 'segCls は countdownClass から作ること').toBeTruthy();
     expect(m![0]).not.toContain('punch-');
+    // 切り出し先も punch-* を**文字列として**持たない。コメントでの言及は許す
+    // (className に載るのはクォートされた文字列だけなので、そこだけを見る)。
+    const SEG_CLASS = readFileSync(resolve('src/renderer/monitor/seg-class.ts'), 'utf8');
+    expect(SEG_CLASS).not.toMatch(/['"`]punch-/);
   });
 
   it('punchglow は punch-* クラスにだけスコープされる(無条件発火の再発防止)', () => {
