@@ -1,6 +1,6 @@
 {
   "name": "tiktok-live-stats",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "TikTok LIVE 配信のリスナー履歴を PC 内に蓄積するライバー支援ツール",
   "license": "AGPL-3.0-only",
   "author": "tiktok-live-stats contributors",
