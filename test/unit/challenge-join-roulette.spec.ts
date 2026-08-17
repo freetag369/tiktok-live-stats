@@ -3,12 +3,12 @@ import {
   DEFAULT_CHALLENGE,
   DEFAULT_GIFT_BAND_FX,
   DEFAULT_JOIN_ROULETTE,
+  DEFAULT_ROULETTE_PATTERNS,
   GIFT_FX_FREEZE_MARGIN_MS,
   JOIN_ROULETTE_MIN_GAP_MS,
   validateChallengeConfig,
 } from '@shared/challenge';
 import type { ChallengeConfig, JoinRouletteConfig, RoulettePattern } from '@shared/dto';
-import { ROULETTE_PATTERNS } from '@shared/dto';
 import type { GiftEvent, JoinEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
 
@@ -125,7 +125,7 @@ describe('validateJoinRoulette — 旧 settings.json との互換', () => {
       },
     });
     expect(v.joinRoulette.segments).toEqual(DEFAULT_JOIN_ROULETTE.segments);
-    expect(v.joinRoulette.patterns).toEqual([...ROULETTE_PATTERNS]);
+    expect(v.joinRoulette.patterns).toEqual([...DEFAULT_ROULETTE_PATTERNS]);
   });
 });
 

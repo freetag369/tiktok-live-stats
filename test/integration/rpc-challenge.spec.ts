@@ -43,6 +43,7 @@ function baseCfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   base.giftFullCut.enabled = false;
   base.tapBoost.enabled = false;
   base.fanStamp.enabled = false;
+  base.stampTriggers.enabled = false;
   base.roulettes = [];
   return { ...base, enabled: true, initialValue: 100, pressStep: 1, ...over };
 }

@@ -110,6 +110,15 @@ export function normalize(ctx: NormalizeCtx, libType: string, data: Any, now = D
       if (!v) return null;
       const content = str(data.content);
       const b = baseOf(ctx, data, 'chat', v.userId, now, content);
+      // スタンプ(サブスクエモート)。実データでは `emotes: [{ index, emote: { emoteId } }]`
+      // の形で届く(スタンプだけのメッセージは content が ' ')。emotesList は
+      // ライブラリ世代違いの保険。出現順・重複込みで載せる(個数トリガーの材料)。
+      const rawEmotes = (data.emotes ?? data.emotesList) as unknown;
+      const emoteIds = Array.isArray(rawEmotes)
+        ? rawEmotes
+            .map((x) => idStr((x as Any)?.emote?.emoteId ?? (x as Any)?.emoteId))
+            .filter((id) => id !== '')
+        : [];
       return {
         ...b,
         kind: 'comment',
@@ -117,6 +126,7 @@ export function normalize(ctx: NormalizeCtx, libType: string, data: Any, now = D
         content,
         lang: str(data.contentLanguage) || undefined,
         isQuestion: false,
+        ...(emoteIds.length > 0 ? { emoteIds } : {}),
       };
     }
 
@@ -231,9 +241,21 @@ export function normalize(ctx: NormalizeCtx, libType: string, data: Any, now = D
     case 'emote': {
       const v = viewerOf(data.user);
       if (!v) return null;
-      const emoteId = idStr(data.emoteList?.[0]?.emote?.emoteId ?? data.emoteList?.[0]?.emoteId);
+      // 全件を出現順で拾う(チャット添付と同じくスタンプトリガーの材料)。
+      // emoteId(先頭1件)は既存呼び出しの後方互換のため残す。
+      const list = (data.emoteList ?? []) as Any[];
+      const emoteIds = list
+        .map((x) => idStr(x?.emote?.emoteId ?? x?.emoteId))
+        .filter((id: string) => id !== '');
+      const emoteId = emoteIds[0] ?? '';
       const b = baseOf(ctx, data, 'emote', v.userId, now, emoteId);
-      return { ...b, kind: 'emote', viewer: v, emoteId: emoteId || undefined };
+      return {
+        ...b,
+        kind: 'emote',
+        viewer: v,
+        emoteId: emoteId || undefined,
+        ...(emoteIds.length > 0 ? { emoteIds } : {}),
+      };
     }
 
     case 'roomUser': {

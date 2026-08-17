@@ -1,4 +1,5 @@
 import type { NormalizedEvent, NormViewer, UserId } from '@shared/events';
+import type { StampTriggerMatch } from '@shared/challenge';
 import type {
   ChallengeBoostCue,
   ChallengeConfig,
@@ -39,6 +40,7 @@ import {
   matchGiftFullCut,
   matchGiftRule,
   matchRoulette,
+  matchStampTriggers,
   matchTapBoost,
   tapBoostActivationCount,
   TAP_BOOST_COUNT_MS,
@@ -71,6 +73,17 @@ interface RunParticipant {
  * 配列で effect を溜めずスカラに畳むのは fx-floats.ts の PendingFloat と同じ理由:
  * 「窓内に何件来ても flush で出るバナーは必ず1枚」を構造で担保するため。
  */
+/**
+ * お助け合算経路(accumulateFanStampFx / fanStampCoalesceOp)の入力。gift イベントの
+ * 部分型 — スタンプ(サブスクエモート)トリガーも同じ経路を通すために、実際に
+ * 読むフィールドだけへ絞ってある(スタンプは repeatCount=一致個数・diamonds=0)。
+ */
+interface FanStampFxSource {
+  viewer: NormViewer;
+  repeatCount: number;
+  diamonds: number;
+}
+
 interface FanStampAcc {
   /** 畳んだ合計増減(バナーの ±N)。 */
   amount: number;
@@ -161,6 +174,8 @@ export class ChallengeEngine {
   private seenLikeMsgIds = new BoundedSet<string>(1024);
   /** comment の msgId 重複排除(like と同じ再接続バックログ対策)。 */
   private seenCommentMsgIds = new BoundedSet<string>(1024);
+  /** emote(WebcastEmoteChatMessage)の msgId 重複排除(comment と同じ対策)。 */
+  private seenEmoteMsgIds = new BoundedSet<string>(512);
   /**
    * ラン中の参加者集計。CLEAR リザルトの TOP5 と、モニターに常時出るライブ TOP3
    * (ChallengeState.runRank)の**唯一のソース**。集計範囲は「開始→達成」の
@@ -1006,8 +1021,8 @@ export class ChallengeEngine {
           // label は validateJoinRoulette が空を許さないので必ず載る —
           // rouletteBoardKey がギフトルーレットと衝突しないのはこの label のおかげ。
           rouletteLabel: jr.label,
-          // モニターはこの印で短縮(キュー消化・マージ由来のコンボ)と超焦らし
-          // カウントを免除する — 初見さんの1本は常にフル尺・抽選パターンのまま。
+          // モニターはこの印で短縮(16 本目以降・合算 effect)と超焦らしカウントを
+          // 免除する — 初見さんの1本は本数に関係なく常にフル尺・抽選パターンのまま。
           rouletteJoin: true,
           // 由来印 — モニターの専用キュー(優先度⑥)振り分けと rouletteBoardKey の
           // ギフトルーレット分離が読む。label での推定はユーザー編集で衝突しうる。
@@ -1028,6 +1043,19 @@ export class ChallengeEngine {
       // 再接続バックログの二重適用ガード(like と同じ)。規則ガードより前に通す —
       // 規則なしの間に届いた msgId も、後から規則を足した再配信では二重に数えない。
       if (!this.seenCommentMsgIds.add(e.msgId)) return false;
+      // スタンプ(サブスクエモート)トリガー。コメント妨害より**先勝ち** — スタンプ
+      // だけのメッセージは content が ' ' なのでキーワードに当たらないが、本文と
+      // スタンプが同居するメッセージで両方発動する紛らわしさを作らない(fanStamp が
+      // ギフト規則に対して果たすのと同じ役割)。emoteId は設定と突き合わせる唯一の
+      // 手掛かりなので、載っていたら一致の成否まで必ず記録する(gift の受信行と同じ)。
+      if (e.emoteIds !== undefined && e.emoteIds.length > 0) {
+        const st = matchStampTriggers(cfg, e.emoteIds);
+        this.stampDiag(
+          `受信 emoteIds=[${e.emoteIds.join(',')}]` +
+            (st ? ` → 一致 ×${st.count} 合計=${st.amount}` : ' → 不一致')
+        );
+        if (st) return this.applyStampTrigger(e.viewer, st);
+      }
       // 規則は到着時点の cfg で確定させる(バンド判定と同じ規約 — 凍結明けに
       // 読み直すと、同じコメントの判定が設定変更のタイミングで揺れる)。
       const rule = matchCommentRule(cfg, e.content);
@@ -1046,6 +1074,22 @@ export class ChallengeEngine {
         this.dirty = true;
         return true;
       });
+    }
+
+    // スタンプ(サブスクエモート)単独メッセージ(WebcastEmoteChatMessage)。実データの
+    // 本線はチャット添付(上の comment 分岐)だが、ライブラリはエモート専用型も
+    // 定義しているので、どちらで届いても同じトリガーが効くようにする。
+    if (e.kind === 'emote') {
+      if (!this.seenEmoteMsgIds.add(e.msgId)) return false;
+      const ids = e.emoteIds ?? (e.emoteId !== undefined ? [e.emoteId] : []);
+      if (ids.length === 0) return false;
+      const st = matchStampTriggers(cfg, ids);
+      this.stampDiag(
+        `受信(単独) emoteIds=[${ids.join(',')}]` +
+          (st ? ` → 一致 ×${st.count} 合計=${st.amount}` : ' → 不一致')
+      );
+      if (!st) return false;
+      return this.applyStampTrigger(e.viewer, st);
     }
 
     // いいね = 妨害。likeEvery 件ごとに likeStep 増える(余りは繰り越し)。
@@ -1668,6 +1712,16 @@ export class ChallengeEngine {
    */
   private socialDiag(message: string): void {
     this.diag(`[challenge/social] ${message}`);
+  }
+
+  /**
+   * スタンプ(サブスクエモート)トリガーの診断ログ。giftDiag と同じ出口・同じ
+   * 生存条件(handleEvent 冒頭の status ガードの後段でしか呼ばれない)。
+   * emoteId は配信中に設定値と突き合わせる唯一の手掛かり(gift の受信行と同じ理由)
+   * なので、emote が載ったメッセージは一致の成否まで必ず記録する。
+   */
+  private stampDiag(message: string): void {
+    this.diag(`[challenge/stamp] ${message}`);
   }
 
   /**
@@ -2491,7 +2545,7 @@ export class ChallengeEngine {
    * 合算窓の中に届いたお助け1件を積む。**値・統計はここでは触らない**
    * (fanStampCoalesceOp が済ませている) — ここは見た目と音の材料だけ。
    */
-  private accumulateFanStampFx(e: NormalizedEvent & { kind: 'gift' }, amount: number, flash: boolean): void {
+  private accumulateFanStampFx(e: FanStampFxSource, amount: number, flash: boolean): void {
     const acc: FanStampAcc = this.fanStampFx ?? {
       amount: 0,
       count: 0,
@@ -2576,7 +2630,7 @@ export class ChallengeEngine {
    * ランキング(touchParticipant)は gift 分岐の冒頭・この op の外で済んでいるので
    * 合算しても全件そのまま反映される。
    */
-  private fanStampCoalesceOp(e: NormalizedEvent & { kind: 'gift' }, amount: number, flash: boolean): void {
+  private fanStampCoalesceOp(e: FanStampFxSource, amount: number, flash: boolean): void {
     if (amount < 0) this.stats.giftDown += -amount;
     else if (amount > 0) this.stats.giftUp += amount;
     this.value = Math.max(0, this.value + amount);
@@ -2588,6 +2642,54 @@ export class ChallengeEngine {
     if (this.value === 0) this.flushFanStampFx(true);
     this.maybeAchieve(atMs);
     this.dirty = true;
+  }
+
+  /**
+   * スタンプ(サブスクエモート)トリガーの適用。**お助け(fanStamp)のギフト経路の
+   * 縮図** — バンド/カットイン/ルーレットが構造的に絡まない(スタンプはギフトでは
+   * ない)ので、giftOp から値適用と fanStamp バナー・合算窓だけを写した形。
+   * 統計も giftUp/giftDown を使う — モニター・リザルトの「お助け」集計と同じ枠で
+   * 見えるのがユーザー決定(演出をお助けと同じにする、の一部)。
+   *
+   * 合算窓の判定・クランプは gift 経路(handleEvent の fs 分岐)と同じ形。窓の中は
+   * 縮退 op(fanStampCoalesceOp)へ、外は effect 1件+窓張りへ。
+   */
+  private applyStampTrigger(viewer: NormViewer, st: StampTriggerMatch): boolean {
+    const src: FanStampFxSource = { viewer, repeatCount: st.count, diamonds: 0 };
+    if (this.fanStampFxUntilMs !== null) {
+      // 時計の後方ステップ対策(gift 経路のクランプと同じ理由・同じ上限)。
+      const gNow = this.now();
+      this.fanStampFxUntilMs = clampFutureMs(
+        this.fanStampFxUntilMs,
+        gNow,
+        Math.max(FAN_STAMP_FX_WINDOW_MS, (this.fxFreezeUntilMs ?? 0) - gNow)
+      );
+    }
+    if (this.fanStampFxUntilMs !== null && this.now() < this.fanStampFxUntilMs) {
+      return this.applyOrQueue(() => this.fanStampCoalesceOp(src, st.amount, st.flash));
+    }
+    return this.applyOrQueue(() => {
+      // 値まわりは fanStampCoalesceOp / giftOp と一字一句同じにしてある。
+      if (st.amount < 0) this.stats.giftDown += -st.amount;
+      else if (st.amount > 0) this.stats.giftUp += st.amount;
+      this.value = Math.max(0, this.value + st.amount);
+      const atMs = this.now();
+      this.pushEffect({
+        kind: 'gift',
+        fanStamp: true,
+        amount: st.amount,
+        ...(st.flash ? { flash: true as const } : {}),
+        nickname: viewer.nickname ?? viewer.displayId,
+        ...(st.count > 1 ? { giftCount: st.count } : {}),
+        diamonds: 0,
+        atMs,
+      });
+      // 合算窓を張る(gift 経路の fs 分岐と同じ式)。スタンプにカットインは無いが、
+      // 凍結中に届いた場合は凍結明けまで窓を伸ばす — バナーが出るのは明けてからなので。
+      this.fanStampFxUntilMs = Math.max(atMs + FAN_STAMP_FX_WINDOW_MS, this.fxFreezeUntilMs ?? 0);
+      this.maybeAchieve(atMs);
+      this.dirty = true;
+    });
   }
 
   /**

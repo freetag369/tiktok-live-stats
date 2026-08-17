@@ -9,6 +9,8 @@ import type {
   ChallengeSeSlot,
   ChallengeState,
   FanStampConfig,
+  StampTriggerConfig,
+  StampTriggerRule,
   TapBoostConfig,
   TapBoostRule,
   GiftBandFxConfig,
@@ -91,25 +93,105 @@ export const ROULETTE_SPIN_MID_MS = 7500;
  */
 export const ROULETTE_SPIN_HEAVY_MS = 12000;
 /**
- * ultra(超激アツ: dragon/unicorn/whale/phoenix/lion)の尺。全画面動画(2〜4本)と
- * マス移動が交互に進む(ウィンドウ表は roulette-fx.ts の ROULETTE_PATTERN_TIMING.clips)。
- * 動画クリップの実尺の合計 + マス移動の間合いで決まる値であり、他段位のような
- * 倍率設計ではない。JOIN_ROULETTE_MIN_GAP_MS はこの値 + 確定見せより長いこと。
+ * 超激アツ(ultra)の振り付け(絶対 ms)。**尺はここから導出する。**
+ *
+ * ultra は全パターン共通の一本道(カウントダウン式の激アツ)なので、各拍の間合いを
+ * 並べたこの表が唯一の権威で、ROULETTE_SPIN_ULTRA_MS はその総和。割合(0..1)への
+ * 変換は roulette-fx.ts の ultraTiming()、動きの実体は monitor.css の
+ * rl-run-ultra で、百分率はこの表から起こして roulette-css.spec が機械照合する。
+ *
+ * 流れ:
+ *   走り込み → 再加速(3秒で速度2倍) → 効果音① + ドン(出目が ×2 に膨らむ)
+ *   → [動画 → 溶暗 → マス移動 → 間 → ドン(×3 → ×4 → ×5) → 間] を3回
+ *   → 動画4 → 溶暗 → マス移動(止まりそう) → 間 → マス移動(着地) → 溜め
+ *   → ドン + 効果音②(戻り) + 出目が元に戻って確定
+ *
+ * 倍率は**見せかけ**(リールのマスの表示だけ)で、worker が確定済みの出目も
+ * 7セグの据え置きも一切動かさない — RouletteFx.tsx の解説を参照。
  */
-export const ROULETTE_SPIN_ULTRA_MS = 24000;
+export const ROULETTE_ULTRA_BEATS = {
+  /** 走り込み(減速)。ここまでは他段位と同じ初速に見える。 */
+  runInMs: 5760,
+  /**
+   * 再加速。走り込みで残した距離をこの3秒で取り返し、**速度が2倍**になってから
+   * 制動して当選の5マス手前に着く(マス移動が5回あるため)。走行距離
+   * (roulette-fx.ts の RUN_BASE.ultra)は増やさない — 増やすと盤面を広げることになり、
+   * リール実幅が伸びて OBS でコマ落ちする。
+   */
+  accelMs: 3000,
+  /**
+   * 効果音①+ドン(×2)から動画1が画面を覆うまでの読ませ時間。
+   * **0 にすると倍率が見えないまま動画に隠れる** — この演出の主役は数字なので、
+   * 覆う前に必ず読ませる。
+   */
+  leadMs: 900,
+  /**
+   * 動画4枠の実尺(ms)。素材(assets/fx/rl/<pattern>-<n>.mp4)は 24fps で
+   * 93 / 72 / 57 / 52 フレームちょうどにトリムしてあり、この値はその換算
+   * (端数は 0.33ms 以内)。**素材を差し替えるときはフレーム数を合わせること** —
+   * ズレは半フレーム以内に保つ(roulette-fx.ts の clips の解説)。
+   */
+  clipMs: [3875, 3000, 2375, 2167],
+  /** 動画終端の一撃から溶暗が終わり切るまで(= monitor.css の .rl-clip.out の尺)。 */
+  fadeMs: 480,
+  /** マス移動1回(行き過ぎ→据え)。 */
+  stepMs: 480,
+  /** 「間」。ドンの前後に等しく置く(ユーザー仕様の 0.5 秒)。 */
+  gapMs: 500,
+  /** 着地してから確定までの溜め(ユーザー仕様の 2 秒)。ここだけ無音で引っぱる。 */
+  tailMs: 2000,
+} as const;
+
+/**
+ * ROULETTE_ULTRA_BEATS の総和 = ultra の尺。
+ * 動画ごとに「溶暗 + マス移動」、間はドンの前後に2つずつ。最後の動画だけドンが無く、
+ * 代わりに「間 + 5回目のマス移動」が入る。
+ */
+function ultraSpinMs(b: typeof ROULETTE_ULTRA_BEATS): number {
+  const clips = b.clipMs.length;
+  return (
+    b.runInMs +
+    b.accelMs +
+    b.leadMs +
+    b.clipMs.reduce((s, c) => s + c, 0) +
+    clips * (b.fadeMs + b.stepMs) +
+    (clips - 1) * 2 * b.gapMs +
+    (b.gapMs + b.stepMs) +
+    b.tailMs
+  );
+}
+
+/**
+ * ultra(超激アツ)の尺。全画面動画4本とマス移動5回、出目の倍率フェイクで構成される
+ * 一本道で、値は ROULETTE_ULTRA_BEATS の総和(= 30,897ms)。他段位のような倍率設計
+ * ではない。JOIN_ROULETTE_MIN_GAP_MS はこの値 + 確定見せより長いこと。
+ */
+export const ROULETTE_SPIN_ULTRA_MS = ultraSpinMs(ROULETTE_ULTRA_BEATS);
 /**
  * 当選ブロックの発光(確定見せ)の尺。**確定するまで色を出さない**設計にした結果、
  * 色・符号・発光・確定音の全部がこの窓に入るので 600ms では山場が一瞬で終わる。
  */
 export const ROULETTE_REVEAL_MS = 900;
-/** 短縮スピンの確定見せ。コンボ消化中は総尺を詰めたいので通常より短くする。 */
+/** 短縮スピンの確定見せ。短縮する場面では総尺を詰めたいので通常より短くする。 */
 export const ROULETTE_REVEAL_FAST_MS = 450;
 /**
- * 同一ギフト(同じ人の連打)のコンボ2本目以降の短縮スピン。連打でも体感が
- * 間延びしない長さ。キュー消化(別ギフトの並び)は短縮しない — 消化スピンも
- * フル尺で回す(かつてはキュー詰まり時も短縮していたが廃止)。
+ * 短縮スピンの尺。**発動条件の権威は roulette-spin.ts の planRouletteSpin** —
+ * (a) 連打の ROULETTE_FULL_REELS 本目より後のリール、(b) 凍結明け/キュー満杯の
+ * 合算 effect(coalesced ≥ 2)の2本目以降、の2つだけ。
+ * キュー消化(別ギフトの並び)は短縮しない — 消化スピンもフル尺で回す。
+ * 連打の序盤も短縮しない(2026-08-17 のユーザー決定で廃止 — 抽選パターンを
+ * 捨てずに全部見せる)。
+ *
+ * 【この尺の下限は BANNER_MS】確定バナーは finishRoulette が**無条件 immediate**
+ * で出し、バナーは単枠置換(showBannerNow の setFloats([1枚]))なので、
+ * 「スピン + 確定見せ」= 確定バナーの再生周期がバナー尺(1600ms)を下回ると、
+ * 前のリールの ±N が floatup の途中(旧 900+450=1350ms = 84% 地点 = まさに
+ * 浮上区間)で DOM ごと消える。900 のままだと連打16本目以降と合算 effect
+ * (coalesced ≥ 2)の2本目以降で**毎回**その早死にが起きていた。
+ * 1150 + ROULETTE_REVEAL_FAST_MS(450) = 1600 = BANNER_MS。
+ * 不変条件は fx-stage.spec.ts が固定する — **下げるならバナー尺ごと**。
  */
-export const ROULETTE_SPIN_FAST_MS = 900;
+export const ROULETTE_SPIN_FAST_MS = 1150;
 /**
  * **別のギフト**のスピンへ移るときの間合い(ms)。
  *
@@ -136,11 +218,30 @@ export const ROULETTE_QUEUE_MAX = 24;
 export const ROULETTE_DRAWS_MAX = 200;
 /**
  * 1ギフトメッセージあたり実際にリールを回す本数の上限。
- * 1本目だけが段位の尺で回り、2本目以降は fast(900ms)+ 確定見せ(450ms)。
- * 最悪(ultra)で 24.9 + 19×1.35 ≒ 50.5秒。これを超える連打は残りを合算バナー
- * 1枚で締める(**値は抽選回数ぶん全部適用済み** — 削るのは見た目だけ)。
+ * これを超える連打は残りを合算バナー1枚で締める(**値は抽選回数ぶん全部
+ * 適用済み** — 削るのは見た目だけ)。
  */
 export const ROULETTE_REELS_MAX = 20;
+/**
+ * **フル尺で回すリールの本数。** 1〜ROULETTE_FULL_REELS 本目は抽選パターン
+ * どおりの尺(rouletteSpinMs = 6/7.5/12/24秒)、それ以降 ROULETTE_REELS_MAX
+ * 本目までは fast(1150 + 450ms)、超過は合算バナー1枚。
+ * **ROULETTE_REELS_MAX 以下であること**(roulette-spin.spec が凍結)。
+ *
+ * 尺の予算(既定盤面 30/25/20/15/9/1% での段位分布 light 66.5 / mid 25.3 /
+ * heavy 6.6 / ultra 1.6%):
+ * - 1本の期待値 ≒ 7.96秒 → **実勢の最悪 ≒ 15×7.96 + 5×1.6 ≒ 2分5秒**
+ * - 理論最悪(15本すべて ultra)は 15×24.9 + 5×1.6 = 381.5秒。到達確率は
+ *   0.016^15 ≒ 10^-28 なので設計制約として扱わない
+ * - **他演出の最大待ちは総尺ではなく「1リールの尺」(最長 24.9秒)** —
+ *   finishRoulette の §6b(shouldYieldSpinChain)がリール境界ごとに上位序列へ
+ *   譲るため。PENDING_BANDS_MAX / BOOST_ARM_MAX_MS の見積りはこちらで読むこと
+ *
+ * ≤v0.7.7 は「1本目だけ段位の尺・2本目以降は必ず fast」で最悪 50.5秒だった。
+ * 2026-08-17 のユーザー決定で本数による歯止めへ置換(抽選済みのパターンを
+ * 捨てずに全部見せる)。
+ */
+export const ROULETTE_FULL_REELS = 15;
 /**
  * 据え置きの安全弁。onAnimationEnd が来なくても(タブ非表示等)この時刻で必ず
  * ラッチを解いて worker 値へ収束させる — startStrike の STRIKE_ABORT_MS と同じ役割。
@@ -271,6 +372,8 @@ export const CHALLENGE_SE_SLOTS: readonly ChallengeSeSlot[] = [
   'roulette-near',
   'roulette-kick',
   'roulette-hit',
+  'roulette-hype',
+  'roulette-hype-back',
   'boost-start',
   'boost-end',
   'achieved',
@@ -314,6 +417,16 @@ export const CHALLENGE_SE_SOUND_IDS: readonly string[] = [
   'reel-kick',
   'reel-hit',
   'clear-fanfare',
+  // 超激アツ(ultra)のカウントダウン式演出用のボイス。前4つが開始側(roulette-hype)、
+  // 後3つが戻り側(roulette-hype-back)の想定だが、**どのスロットにも割り当てられる** —
+  // カタログは1本で、スロットごとの絞り込みはしない(既存の流儀)。
+  'hype-kakugo',
+  'hype-iyashi',
+  'hype-yoroshiku',
+  'hype-kiitenaiyo',
+  'back-kuh',
+  'back-uh',
+  'back-ite',
 ];
 
 /**
@@ -376,6 +489,9 @@ export const DEFAULT_MINI_FX: Record<ChallengeSeSlot, string> = {
   'roulette-near': 'off',
   'roulette-kick': 'off',
   'roulette-hit': 'off',
+  // 超激アツは全画面動画とリールが主演出。簡易演出を重ねると幕の上が渋滞する。
+  'roulette-hype': 'off',
+  'roulette-hype-back': 'off',
   // ブーストはカットイン+カウンタが主演出なので簡易演出は既定 off。
   'boost-start': 'off',
   'boost-end': 'off',
@@ -407,6 +523,10 @@ export const DEFAULT_SE_SOUNDS: Record<ChallengeSeSlot, string> = {
   'roulette-near': 'reel-stop',
   'roulette-kick': 'reel-kick',
   'roulette-hit': 'reel-hit',
+  // 超激アツの再加速が終わった合図 — 「覚悟を決めましょう」で溜めに入る。
+  'roulette-hype': 'hype-kakugo',
+  // 膨らんだ出目が元に戻る瞬間の悲鳴。3本の中では一番短く歯切れがよい「くっ！」。
+  'roulette-hype-back': 'back-kuh',
   'boost-start': 'boost-tap',
   'boost-end': 'boost-hit',
   achieved: 'clear-fanfare',
@@ -432,6 +552,8 @@ export const DEFAULT_SE_VOLUMES: Record<ChallengeSeSlot, number> = {
   'roulette-near': 100,
   'roulette-kick': 100,
   'roulette-hit': 100,
+  'roulette-hype': 100,
+  'roulette-hype-back': 100,
   'boost-start': 100,
   'boost-end': 100,
   achieved: 100,
@@ -442,6 +564,28 @@ export const DEFAULT_SE_VOLUMES: Record<ChallengeSeSlot, number> = {
  * giftId 7934 は実配信で受領確認済み(resources/gift-aliases.default.json 参照)。
  * weight は合計 100 にしてある — 設定UIの確率表示がそのまま % になる。+1000 は 1%。
  */
+/**
+ * 出荷時に許可する終盤パターン。**オプトインの ultra を除いた全部。**
+ *
+ * 「パターンを増やしたら黙って全員の配信で出る」を避けるための仕切り。新しい
+ * 超激アツは絵と音の好みが分かれるので、既定では出さず設定画面のチェックで
+ * 選ばせる(ユーザー決定)。ここが sanitizeRoulettePatterns の**キー欠損時の
+ * フォールバック**でもあるので、出荷 JSON(patterns キーを持たない)・
+ * DEFAULT_ROULETTE・DEFAULT_JOIN_ROULETTE・「既定に戻す」の**全経路が同じ結論**になる。
+ *
+ * 保存済み settings.json は既に明示配列を持つので、新パターンはそこにも現れない
+ * (= 既存ユーザーの配信も勝手に変わらない)。オプトインを解除して全員に出したく
+ * なったら、この配列から除外を外すだけでよい。
+ */
+export const ROULETTE_OPT_IN_PATTERNS: readonly RoulettePattern[] = [
+  'heartme',
+  'hearttouch',
+  'heartbday',
+  'heartbloom',
+];
+export const DEFAULT_ROULETTE_PATTERNS: readonly RoulettePattern[] = ROULETTE_PATTERNS.filter(
+  (p) => !ROULETTE_OPT_IN_PATTERNS.includes(p)
+);
 export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
   id: 'rl-heart_me',
   // モニターの見出しは「ハートミー ○○がルーレット」。TikTok から届く実名は
@@ -461,7 +605,7 @@ export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
   ],
   direction: 'add',
   // 既定は全パターン許可 — 欠損キーの旧 settings.json もここへ倒れる(移行代わり)。
-  patterns: [...ROULETTE_PATTERNS],
+  patterns: [...DEFAULT_ROULETTE_PATTERNS],
 };
 
 /**
@@ -483,19 +627,20 @@ export const DEFAULT_JOIN_ROULETTE: JoinRouletteConfig = {
   label: '初見さん',
   segments: DEFAULT_ROULETTE.segments.map((s) => ({ ...s })),
   direction: 'add',
-  patterns: [...ROULETTE_PATTERNS],
+  patterns: [...DEFAULT_ROULETTE_PATTERNS],
 };
 
 /**
  * 入室ルーレットの連続発火を抑えるクールダウン(ms)。最長の1スピンの演出尺
- * (ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS ≒ 24.9秒)より長め — レイドや
+ * (ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS ≒ 31.8秒)より長め — レイドや
  * target:'all' の高頻度入室でモニターのキュー(ROULETTE_QUEUE_MAX)と
  * リングバッファを初見ルーレットだけで食い潰さないための安全弁。
- * (heavy 12秒化で 10→15秒、ultra 24秒化で 15→30秒。test/unit が不等式を固定。)
+ * (heavy 12秒化で 10→15秒、ultra 24秒化で 15→30秒、ultra のカウントダウン式
+ *  激アツ化(30.9秒)で 30→35秒。test/unit が不等式を固定。)
  * 窓内の入室は値ごと黙って捨てる(演出起点の機能なので値の完全性は要らない)。
  * 設定項目にはしない — UI を増やさず定数で持つ。
  */
-export const JOIN_ROULETTE_MIN_GAP_MS = 30_000;
+export const JOIN_ROULETTE_MIN_GAP_MS = 35_000;
 
 /**
  * 入室ルーレット専用キュー(モニターの優先度⑥)の上限。入室ルーレットは単一設定 =
@@ -578,8 +723,10 @@ export const GIFT_FX_FREEZE_MAX_TOTAL_MS = 45_000;
 export const CLIP_QUEUE_MAX = 3;
 /**
  * 他演出中に届いたカットイン(バンド/全面カット)の持ち越し上限。
- * 連打ルーレットの連鎖は最長 ~32 秒(ROULETTE_REELS_MAX 本)続くので、その裏で
- * 溜まるぶんを飲めるだけ確保する — 溢れるとそのギフトの演出が丸ごと消える。
+ * 連打ルーレットの連鎖そのものは数分に伸びうるが(ROULETTE_FULL_REELS 参照)、
+ * カットインは fx-priority で⑦= ルーレット⑧より上位なので **§6b がリール境界で
+ * 必ず譲る** — つまり溜まる窓は連鎖の総尺ではなく**1リールの尺**(最長 24.9 秒)。
+ * その裏で溜まるぶんを飲めるだけ確保する — 溢れるとそのギフトの演出が丸ごと消える。
  * **上げたら FX_DRAIN_MAX_STEPS の見積もりも更新すること。**
  */
 export const PENDING_BANDS_MAX = 4;
@@ -602,7 +749,12 @@ export const PENDING_BOOSTS_MAX = 4;
  *    ブーストは fx-priority で④だが「再生中の演出は中断しない」規約なので待つ。
  *  - バナー飢餓弁 DRAIN_STARVE_MS(10 秒)+ delta/ドレインの遅延。
  *  - 別のフィーバーは塞げない(アームが凍結を張るので連打コンボは直列化される)。
- *  - ルーレット連鎖は既に譲る(collectWaitingClasses が 'boost' を積む)。
+ *  - ルーレット連鎖は既に譲る(collectWaitingClasses が 'boost' を積む)。譲りの
+ *    粒度は**リール境界**なので、待ちは連鎖の総尺ではなく1リールの尺で有界
+ *    (ROULETTE_FULL_REELS の導入で 1.6 秒 → 最長 24.9 秒。到着直後に ultra が
+ *    始まった最悪で 24.9 + 確定バナー 1.6 + 間合い 0.5 ≒ 27 秒 < 60 秒。直前が
+ *    フィーバー結果バナーだった場合だけ STAGE_GAP_BOOST_RESULT_MS(2 秒)が
+ *    上乗せされて ≒ 29 秒 — **それでも 60 秒には遠いので据え置きでよい**)。
  * **短くしてはいけない** — 20〜45 秒だと正当な長尺カットインの最中に期限が切れ、
  * 「起動カットインが飛ばされる」症状がそのまま再発する。
  *
@@ -721,6 +873,30 @@ export const DEFAULT_ROULETTE_SOUND: RouletteSoundConfig = {
 };
 
 /**
+ * 応援(direction:'sub')のルーレットの回転ループ音。妨害の既定 'spin-reel2'
+ * (旋律のあるジングル)に対して、これは旋律の無いクリック列 — **同じカタログの中で
+ * 一番音色が遠い**ので、緑のルーレットが回り出した瞬間に音だけでも見分けが付く。
+ * 'spin-slot' を使わないのは、BGM の 'bgm-roulette2' と**同一の音声ファイル**
+ * (renderer/lib/bgm.ts)で、BGM を併用している人だと差が消えるため。
+ */
+export const ROULETTE_SUB_SPIN_SE = 'spin-reel1';
+
+/**
+ * 応援(sub)共通サウンドの既定。**保存済みの共通からの派生**にするのが要点 —
+ * 回転ループ音が出荷既定のままの人にだけ差を付け、自分で選び直している人には
+ * その選択をそのまま引き継ぐ(migrateChallengeSeSounds の「旧既定のままの
+ * スロットだけ寄せる」と同じ流儀)。差分は**回転ループ音1項目だけ** — BGM を
+ * 足すのは変えすぎで、DEFAULT_ROULETTE_SOUND が BGM を切っている理由
+ * (停止まわりの3音が埋もれる)にも反する。
+ */
+export function defaultRouletteSoundSub(common: RouletteSoundConfig): RouletteSoundConfig {
+  return {
+    ...common,
+    spinSe: common.spinSe === DEFAULT_ROULETTE_SOUND.spinSe ? ROULETTE_SUB_SPIN_SE : common.spinSe,
+  };
+}
+
+/**
  * ダイヤの全面カットの既定。バラ(1💎)とローザ(10💎)に専用のフルスクリーン
  * カットインを割り当てる。**帯域(DEFAULT_GIFT_BAND_FX)より先に評価される**ので、
  * この2つのギフトでは band1(びっくりした魚)は再生されない。
@@ -809,6 +985,63 @@ export const DEFAULT_FAN_STAMP: FanStampConfig = {
   suppressBandFx: true,
   flash: true,
 };
+
+/**
+ * v0.7.8(SETTINGS_VERSION 8)で出荷したスタンプ行。**この配列は増やさない** —
+ * 設定移行(migrateChallengeStampTriggers)が配るのはこの15行だけで、
+ * DEFAULT_STAMP_TRIGGERS.rules を参照させると次の世代で既定が増えたときに
+ * v8 の段が新しい行まで配って二重適用になる(FULL_CUT_CLIPS_V3 と同じ理由)。
+ *
+ * 番号は「ようくん☀️🦊ﾒﾀﾙｱｰﾄ / @metafact8」のサブスクエモートの emoteId で、
+ * 2026-08-17 に実配信のチャットから取得し画像と照合した実測値(プロジェクト直下の
+ * 「ファンスタ番号一覧_metafact8.md」が権威)。**emoteId は配信者ごとに違う**ので、
+ * 他の配信者の環境ではこの15行は構造的に一度も一致しない — 設定画面に15行並ぶ
+ * だけで誤発火は起きない。それを承知のうえで出荷既定に載せるという判断。
+ *
+ * 量は全行 -1(お助け)。DEFAULT_FAN_STAMP.amountEach と設定画面の新規行の
+ * 既定に揃えてある — 増やしたい人は行ごとに設定画面で変える前提。
+ */
+export const STAMP_TRIGGER_RULES_V8: readonly StampTriggerRule[] = [
+  { id: 'stamp-okaeri', label: 'おかえり', emoteId: '7673028474703203092', amountEach: -1, enabled: true },
+  { id: 'stamp-yahho', label: 'やっほー', emoteId: '7673028113942088469', amountEach: -1, enabled: true },
+  { id: 'stamp-menlevup', label: 'メンレベUP↗', emoteId: '7672235836915747604', amountEach: -1, enabled: true },
+  { id: 'stamp-naigifu', label: 'ナイギフ', emoteId: '7672236083434703637', amountEach: -1, enabled: true },
+  { id: 'stamp-welcome', label: 'ようこそ', emoteId: '7671092908083137301', amountEach: -1, enabled: true },
+  { id: 'stamp-matane', label: 'またね', emoteId: '7671092908083170069', amountEach: -1, enabled: true },
+  { id: 'stamp-ganbare', label: 'がんばれ', emoteId: '7671092908083202837', amountEach: -1, enabled: true },
+  { id: 'stamp-pachipachi', label: 'ぱちぱち', emoteId: '7671092908083235605', amountEach: -1, enabled: true },
+  { id: 'stamp-warai', label: '笑', emoteId: '7671092908083333909', amountEach: -1, enabled: true },
+  { id: 'stamp-omedeto', label: 'おめでとう', emoteId: '7671092908083366677', amountEach: -1, enabled: true },
+  { id: 'stamp-e', label: 'え?', emoteId: '7671092908083399445', amountEach: -1, enabled: true },
+  { id: 'stamp-iine', label: 'いいね♡', emoteId: '7671092908083432213', amountEach: -1, enabled: true },
+  { id: 'stamp-tap', label: 'TAP', emoteId: '7671093685229472533', amountEach: -1, enabled: true },
+  { id: 'stamp-good', label: 'グッド(👍)', emoteId: '7671094445665700628', amountEach: -1, enabled: true },
+  { id: 'stamp-hightouch', label: 'ハイタッチ(🙌)', emoteId: '7671096936174439188', amountEach: -1, enabled: true },
+];
+
+/**
+ * チャットスタンプ(サブスクエモート)トリガーの既定。
+ *
+ * v0.7.7 までは行が空だった(「emoteId はクリエイター固有なので既定を置きようがない」)
+ * が、v0.7.8 で STAMP_TRIGGER_RULES_V8 の15行を出荷既定として載せた。既に
+ * settings.json を持っているユーザーには既定を直しても届かないので、同じ15行を
+ * migrateChallengeStampTriggers(SETTINGS_VERSION 8)が一度だけ配る。
+ */
+export const DEFAULT_STAMP_TRIGGERS: StampTriggerConfig = {
+  enabled: true,
+  flash: true,
+  // readonly 配列から可変配列を作る(DEFAULT_GIFT_FULL_CUT が
+  // FULL_CUT_CLIPS.map(fullCutRuleFor) でやっているのと同じ形)。
+  rules: STAMP_TRIGGER_RULES_V8.map((r) => ({ ...r })),
+};
+
+/**
+ * スタンプトリガーの行数上限。サブスクエモートは1配信者につき十数種が実勢
+ * (実測: 15種)なので、その倍を天井にする(TAP_BOOST_RULES_MAX と同じ役割)。
+ * v0.7.8 で出荷既定が15行になったため、内訳は「出荷の15 + 利用者の15」。
+ * 他の配信者は出荷分を消して自分の番号を入れる想定なので枠は足りる。
+ */
+export const STAMP_TRIGGER_RULES_MAX = 30;
 
 /** タップブーストの倍率の clamp。1 は「溜めて一括反映」だけ欲しい人向けに許す。 */
 export const TAP_BOOST_MULT_MIN = 1;
@@ -993,6 +1226,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[],
   joinRoulette: structuredClone(DEFAULT_JOIN_ROULETTE),
   rouletteSound: { ...DEFAULT_ROULETTE_SOUND },
+  rouletteSoundSub: defaultRouletteSoundSub(DEFAULT_ROULETTE_SOUND),
   rouletteTease: structuredClone(DEFAULT_ROULETTE_TEASE),
   // モニターのリールは確定済みの出目の遅延再生なので、伏せないとログが
   // 常にリールより先に答えを出す。既定でネタバレを止める。
@@ -1016,6 +1250,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX),
   giftRepeatFx: structuredClone(DEFAULT_GIFT_REPEAT_FX),
   fanStamp: structuredClone(DEFAULT_FAN_STAMP),
+  stampTriggers: structuredClone(DEFAULT_STAMP_TRIGGERS),
   tapBoost: structuredClone(DEFAULT_TAP_BOOST),
 };
 
@@ -1284,6 +1519,10 @@ export function mergeRoulette(
  *   2. e.rouletteJoin → cfg.joinRoulette.sound ?? 共通
  *   3. それ以外(id 欠損 / 行を削除した / id を変えた)→ 共通
  *
+ * 「共通」は**出目の方向で2組に分かれる**(rouletteCommonSound)。行の sound 上書きは
+ * 方向より強い — 「この行だけ上書きする」は明示的なユーザー意思で、方向別共通が
+ * それを覆すと**チェックしても何も変わらない死んだコントロール**になる。
+ *
  * rouletteId を先に見るのは、畳み込み(mergeRoulette / finishDrain)が音の持ち主を
  * 先頭 a に固定するのと足並みを揃えるため。実効の effect ではギフト行(rouletteId)と
  * 入室(rouletteJoin)は排他なので、通常はどちらを先に見ても同値。
@@ -1297,18 +1536,46 @@ export function mergeRoulette(
  * `cfg?.challenge.rouletteSound` → undefined → playBandBgm(undefined) → null で
  * 無音、という縮退と 1:1 に保つ)。
  */
+export function rouletteCommonSound(
+  cfg: ChallengeConfig,
+  direction: 'add' | 'sub'
+): RouletteSoundConfig {
+  return direction === 'sub' ? cfg.rouletteSoundSub : cfg.rouletteSound;
+}
+
+/** @see rouletteCommonSound — 解説は上のコメントブロック。 */
 export function resolveRouletteSound(
   cfg: ChallengeConfig | null | undefined,
   e: ChallengeEffect
 ): RouletteSoundConfig | null {
   if (!cfg) return null;
-  const common = cfg.rouletteSound;
+  // 方向の権威は **effect の焼き込み**(e.rouletteDirection)であって cfg の行の
+  // direction ではない。行を消した/ id を変えた場合(下の 3.)でも正しい向きの共通へ
+  // 倒れ、モニターの 120 秒ポーリング(CFG_POLL_MS)で古い cfg を読んでも
+  // 「過去のスピンの音が後から変わる」が起きない。
+  const common = rouletteCommonSound(cfg, e.rouletteDirection === 'sub' ? 'sub' : 'add');
   if (e.rouletteId != null && e.rouletteId !== '') {
     const rl = cfg.roulettes.find((r) => r.id === e.rouletteId);
     if (rl) return rl.sound ?? common;
   }
   if (e.rouletteJoin) return cfg.joinRoulette.sound ?? common;
   return common;
+}
+
+/**
+ * 設定UI「回転中のサウンドをこの行だけ上書きする」チェックの切り替え → 行の
+ * sound 値。オンは**そのときの共通の丸ごとコピー**を種にする — チェックした瞬間に
+ * 鳴る音を変えないため。DEFAULT_ROULETTE_SOUND を種にしないこと(共通を編集済みの
+ * ユーザーでは、チェックした途端に既定の音へ戻る)。オフは undefined — 保存時に
+ * validateRouletteSoundOverride がキーごと落とし、行は共通へ復帰する(以後の
+ * 共通の変更にも再び追従する)。ギフト行(ChallengeRouletteConfig)と入室
+ * (JoinRouletteConfig)の両方がこの1実装を使う。
+ */
+export function rouletteSoundOverrideToggle(
+  on: boolean,
+  common: RouletteSoundConfig
+): RouletteSoundConfig | undefined {
+  return on ? { ...common } : undefined;
 }
 
 /**
@@ -1640,10 +1907,13 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeTapBoostCorgi(
-    migrateChallengeGiftFullCutTriggersV5(
-      migrateChallengeGiftFullCutTriggers(
-        migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+  return migrateChallengeStampTriggers(
+    migrateChallengeTapBoostCorgi(
+      migrateChallengeGiftFullCutTriggersV5(
+        migrateChallengeGiftFullCutTriggers(
+          migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+          fromVersion
+        ),
         fromVersion
       ),
       fromVersion
@@ -1675,6 +1945,45 @@ export function migrateChallengeTapBoostCorgi(
   return {
     ...cfg,
     tapBoost: { ...cfg.tapBoost, rules: [...rules, structuredClone(CORGI_TAP_BOOST_RULE)] },
+  };
+}
+
+/**
+ * v8: お助けのスタンプ行(STAMP_TRIGGER_RULES_V8 の15件)を、**まだ持っていない
+ * 番号だけ**1回だけ足す。v0.7.7 までの既定は空配列だったので、既定を直しただけでは
+ * 保存済みの settings.json(stampTriggers キーを持っている)には届かない。
+ *
+ * ⚠ validateStampTriggers の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
+ * ユーザーが消した行がその場で復活する(migrateChallengeGiftFullCut と同じ理由)。
+ *
+ * 既存判定は id ではなく **emoteId 一致** — 自分で同じ番号の行を作っている人に
+ * 二重に配らないため(migrateChallengeTapBoostCorgi の giftId 照合と同型)。
+ * id の重複も避ける: validateStampTriggers は validateTapBoost と違って id を振り直さない
+ * ので、同じ id が2行並ぶと設定画面の `key={r.id}` が壊れる(手編集の設定への保険。
+ * UI が作る id は `stamp-<base36>-<n>` なので実際にはぶつからない)。
+ * 上限に達している設定には足さない・残り枠ぶんだけ足す。
+ *
+ * 行を消した人に世代印経由で配り直すことは無い(上がるのは1回だけ)。ただし
+ * 「チャレンジ設定をすべて既定に戻す」「同梱デフォで更新」は既定を読み直すので、
+ * そこからは15行が戻る — 世代とは無関係の、既定に戻すボタン本来の挙動。
+ */
+export function migrateChallengeStampTriggers(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 8) return cfg;
+  const rules = cfg.stampTriggers.rules;
+  const room = STAMP_TRIGGER_RULES_MAX - rules.length;
+  if (room <= 0) return cfg;
+  const have = new Set(rules.map((r) => r.emoteId));
+  const usedIds = new Set(rules.map((r) => r.id));
+  const add = STAMP_TRIGGER_RULES_V8.filter(
+    (r) => !have.has(r.emoteId) && !usedIds.has(r.id)
+  ).slice(0, room);
+  if (add.length === 0) return cfg;
+  return {
+    ...cfg,
+    stampTriggers: { ...cfg.stampTriggers, rules: [...rules, ...add.map((r) => ({ ...r }))] },
   };
 }
 
@@ -1775,6 +2084,9 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
       }))
     : [];
 
+  // 応援側の既定は**検証済みの共通からの派生**なので、先にローカルへ取り出す。
+  const rouletteSound = validateRouletteSound(c.rouletteSound);
+
   const gd = c.giftDefault;
   const giftDefault =
     gd && typeof gd === 'object' && (gd.mode === 'fixed' || gd.mode === 'perDiamond') &&
@@ -1805,7 +2117,12 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     giftDefault,
     roulettes: validateRoulettes(raw),
     joinRoulette: validateJoinRoulette(c.joinRoulette),
-    rouletteSound: validateRouletteSound(c.rouletteSound),
+    rouletteSound,
+    // 保存済み settings.json にこのキーは無い。**欠損が既定へ倒れること自体が
+    // 移行の代わり**(stockCutinVolume / rouletteTease と同じ手口)。検証は行別上書きと
+    // 同じ validateRouletteSoundOverride を流用する — あれは null / 非オブジェクト /
+    // 配列をまとめて undefined にするので、**欠損も型崩れも同じ既定へ倒れる**。
+    rouletteSoundSub: validateRouletteSoundOverride(c.rouletteSoundSub) ?? defaultRouletteSoundSub(rouletteSound),
     rouletteTease: validateRouletteTease(c.rouletteTease),
     // 既定 true なので `!== false`(seEnabled と同じ向き。`=== true` にすると
     // 既定が反転する)。保存済み settings.json にこのキーは無いが、
@@ -1836,6 +2153,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     giftBandFx: validateGiftBandFx(c.giftBandFx),
     giftRepeatFx: validateGiftRepeatFx(c.giftRepeatFx),
     fanStamp: validateFanStamp(c.fanStamp),
+    stampTriggers: validateStampTriggers(c.stampTriggers),
     tapBoost: validateTapBoost(c.tapBoost),
   };
 }
@@ -2072,6 +2390,40 @@ function validateFanStamp(raw: unknown): FanStampConfig {
   };
 }
 
+/**
+ * チャットスタンプ(サブスクエモート)トリガーの検証。既存流儀どおり throw せず
+ * サニタイズする。旧 settings.json(stampTriggers キー無し)は既定 = 出荷の15行へ倒れる
+ * ので、**キーを持たない設定にはこの欠損フォールバックが移行を兼ねる**。キーを持っていて
+ * rules が空配列の設定(v0.7.7 の保存済み)にはここは効かない — そちらは
+ * migrateChallengeStampTriggers(SETTINGS_VERSION 8)だけが配れる。
+ * emoteId は数字の ID 文字列なので小文字化はしない(trim のみ)。id の無い行は捨てる
+ * (validateGiftFullCut と同じ規約 — UI の key と行の同一性が立たないため)。
+ */
+function validateStampTriggers(raw: unknown): StampTriggerConfig {
+  const d = DEFAULT_STAMP_TRIGGERS;
+  const c = raw as Partial<StampTriggerConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  const rules: StampTriggerRule[] = [];
+  if (Array.isArray(c.rules)) {
+    for (const r of c.rules as Array<Partial<StampTriggerRule>>) {
+      if (rules.length >= STAMP_TRIGGER_RULES_MAX) break;
+      if (typeof r.id !== 'string' || r.id === '') continue;
+      rules.push({
+        id: r.id,
+        label: typeof r.label === 'string' ? r.label.trim() : '',
+        emoteId: typeof r.emoteId === 'string' ? r.emoteId.trim() : '',
+        // 負数を許すので Math.max(0, ...) はしない(fanStamp.amountEach と同じ clamp)。
+        amountEach:
+          typeof r.amountEach === 'number' && Number.isFinite(r.amountEach)
+            ? Math.min(999_999, Math.max(-999_999, Math.round(r.amountEach)))
+            : 0,
+        enabled: r.enabled !== false,
+      });
+    }
+  }
+  return { enabled: c.enabled !== false, flash: c.flash !== false, rules };
+}
+
 /** 旧・単一 tapBoost の形。**export しない** — 読むのは validateTapBoost だけ。 */
 interface LegacyTapBoost {
   giftId: string;
@@ -2214,9 +2566,13 @@ function validateRoulettes(raw: unknown): ChallengeRouletteConfig[] {
  * 抽選(drawRoulettePattern)が空で止まらないための二重防御の保存側。
  */
 function sanitizeRoulettePatterns(raw: unknown): RoulettePattern[] {
-  if (!Array.isArray(raw)) return [...ROULETTE_PATTERNS];
+  // 欠損・全滅は **DEFAULT_ROULETTE_PATTERNS**(オプトインの ultra を除く)へ倒す。
+  // ROULETTE_PATTERNS へ倒すと、patterns キーを持たない出荷 JSON でオプトインが
+  // 勝手に有効になる(= 既定オフの意味が無くなる)。
+  if (!Array.isArray(raw)) return [...DEFAULT_ROULETTE_PATTERNS];
+  // 明示配列にオプトインが入っていれば尊重する — ユーザーが選んだものは通す。
   const out = ROULETTE_PATTERNS.filter((p) => raw.includes(p));
-  return out.length > 0 ? out : [...ROULETTE_PATTERNS];
+  return out.length > 0 ? out : [...DEFAULT_ROULETTE_PATTERNS];
 }
 
 /**
@@ -2526,6 +2882,41 @@ export function matchTapBoost(
   return null;
 }
 
+/** matchStampTriggers の結果。1メッセージ内の一致スタンプを合算した値。 */
+export interface StampTriggerMatch {
+  /** 一致した全スタンプの増減合計(符号込み)。 */
+  amount: number;
+  /** 一致したスタンプの個数(バナーの ×N)。 */
+  count: number;
+  /** StampTriggerConfig.flash(一致が1つでもあれば設定値をそのまま)。 */
+  flash: boolean;
+}
+
+/**
+ * チャットスタンプ(サブスクエモート)の判定。1メッセージに複数スタンプが載るので
+ * boolean ではなく**合算結果**を返す — 同じスタンプ2連打(emoteIds に同じ id が
+ * 2回)は2個ぶん数える。行は emoteId 完全一致・上から先勝ち(同じ emoteId を
+ * 2行に書いた誤設定では上の行の量が勝つ)。一致ゼロは null。
+ */
+export function matchStampTriggers(
+  cfg: ChallengeConfig,
+  emoteIds: readonly string[] | undefined
+): StampTriggerMatch | null {
+  const c = cfg.stampTriggers;
+  if (!c.enabled || c.rules.length === 0) return null;
+  if (!emoteIds || emoteIds.length === 0) return null;
+  let amount = 0;
+  let count = 0;
+  for (const id of emoteIds) {
+    if (id === '') continue;
+    const r = c.rules.find((x) => x.enabled && x.emoteId !== '' && x.emoteId === id);
+    if (!r) continue;
+    amount += r.amountEach;
+    count += 1;
+  }
+  return count === 0 ? null : { amount, count, flash: c.flash };
+}
+
 /**
  * ルーレット見出しの文言。回転パネル(RouletteFx)・確定バナー・盤面なしの
  * フォールバックバナーの3箇所で同じ文にするための唯一の出所。
@@ -2537,12 +2928,24 @@ export function matchTapBoost(
  * &lt;b&gt; でニックネームを括る都合で1本の文字列にはできないので、前後の2片で返す。
  * prefix は末尾に区切りの空白を含む(suffix は先頭空白なし)。
  */
-export function rouletteHeadline(e: { rouletteLabel?: string; giftName?: string }): {
+export function rouletteHeadline(e: {
+  rouletteLabel?: string;
+  giftName?: string;
+  // ChallengeEffect は 'add' をキーごと省くが、設定画面や RouletteFx は明示的に
+  // 'add' を持つので両方受ける。判定は 'sub' の一致だけなので意味は変わらない。
+  rouletteDirection?: 'add' | 'sub';
+}): {
   prefix: string;
   suffix: string;
 } {
   const name = (e.rouletteLabel ?? '').trim() || (e.giftName ?? '').trim();
-  return { prefix: name !== '' ? `${name} ` : '', suffix: 'がルーレット' };
+  return {
+    prefix: name !== '' ? `${name} ` : '',
+    // 減らす(応援)の行は「お助け」を名乗る。**結果は漏れない** — 出目は
+    // sanitizeRouletteSegments が 1 以上へ clamp するので sub の行では全マスが
+    // 必ず負で、どのマスが当たりかとは無関係(RouletteFx.tsx のアンチリーク節参照)。
+    suffix: e.rouletteDirection === 'sub' ? 'がルーレットでお助け!' : 'がルーレット',
+  };
 }
 
 /**

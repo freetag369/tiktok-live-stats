@@ -28,6 +28,13 @@ import boostHitUrl from '../assets/se/boost-hit.mp3';
 import reelKickUrl from '../assets/se/reel-kick.mp3';
 import reelHitUrl from '../assets/se/reel-hit.mp3';
 import clearFanfareUrl from '../assets/se/clear-fanfare.mp3';
+import hypeKakugoUrl from '../assets/se/hype-kakugo.mp3';
+import hypeIyashiUrl from '../assets/se/hype-iyashi.mp3';
+import hypeYoroshikuUrl from '../assets/se/hype-yoroshiku.mp3';
+import hypeKiitenaiyoUrl from '../assets/se/hype-kiitenaiyo.mp3';
+import backKuhUrl from '../assets/se/back-kuh.mp3';
+import backUhUrl from '../assets/se/back-uh.mp3';
+import backIteUrl from '../assets/se/back-ite.mp3';
 
 /**
  * チャレンジ演出の効果音カタログ(素材の由来は assets/se/CREDITS.md)。Kenney の CC0 と
@@ -90,6 +97,29 @@ export const SE_SOUNDS: readonly SeSound[] = [
   { id: 'reel-kick', label: 'ルーレット キック(専用)', url: reelKickUrl, gain: 0.9 },
   { id: 'reel-hit', label: 'ルーレット確定(専用)', url: reelHitUrl, gain: 0.9 },
   { id: 'clear-fanfare', label: '達成(専用)', url: clearFanfareUrl, gain: 0.9 },
+  // 超激アツ(ultra)のカウントダウン式演出のボイス(作者提供)。上のバッチと違い
+  // **ピークではなく RMS を -17dB に揃えて**取り込んである — 素材の RMS が 7.6dB
+  // ばらついていて、ピーク合わせだけでは体感音量が合わなかった(短い叫びほど
+  // 波高が立つので、ピークを揃えると逆に小さく聞こえる)。結果は7本とも
+  // RMS -15.7〜-15.8dB・ピーク -2.1〜-6.5dB で、既存音の分布のほぼ中央。
+  // **既に揃っているので gain は引かない(1.0)。**
+  { id: 'hype-kakugo', label: '激熱ボイス「覚悟を決めましょう」', url: hypeKakugoUrl, gain: 1 },
+  { id: 'hype-iyashi', label: '激熱ボイス「癒しの力よ」', url: hypeIyashiUrl, gain: 1 },
+  {
+    id: 'hype-yoroshiku',
+    label: '激熱ボイス「よろしくお願いします」',
+    url: hypeYoroshikuUrl,
+    gain: 1,
+  },
+  {
+    id: 'hype-kiitenaiyo',
+    label: '激熱ボイス「こんなの聞いてないよ！？」',
+    url: hypeKiitenaiyoUrl,
+    gain: 1,
+  },
+  { id: 'back-kuh', label: '戻りボイス「くっ！」', url: backKuhUrl, gain: 1 },
+  { id: 'back-uh', label: '戻りボイス「うっ！」', url: backUhUrl, gain: 1 },
+  { id: 'back-ite', label: '戻りボイス「いてっ！」', url: backIteUrl, gain: 1 },
 ];
 
 const BY_ID = new Map(SE_SOUNDS.map((s) => [s.id, s]));

@@ -8,6 +8,7 @@ import {
   DEFAULT_ROULETTE_SOUND,
   mergeRoulette,
   resolveRouletteSound,
+  rouletteSoundOverrideToggle,
   sameRouletteBoard,
   validateChallengeConfig,
 } from '@shared/challenge';
@@ -188,6 +189,53 @@ describe('validateChallengeConfig — 行ごとの回転サウンド上書き', 
   });
 });
 
+describe('rouletteSoundOverrideToggle — 設定UIの「この行だけ上書き」チェック', () => {
+  it('オンは共通の丸ごとコピーを種にする — チェックした瞬間に音が変わらない', () => {
+    // DEFAULT_ROULETTE_SOUND を種にしてはいけない: 共通を編集済みのユーザーでは
+    // チェックした途端に既定の音へ戻る。編集済みの共通で固定する。
+    const common: RouletteSoundConfig = { ...OVERRIDE };
+    const seeded = rouletteSoundOverrideToggle(true, common);
+    expect(seeded).toEqual(common);
+    expect(seeded).not.toEqual(DEFAULT_ROULETTE_SOUND);
+    // 参照を配らない(コピー)— 行の編集が draft の共通オブジェクトと絡まない。
+    expect(seeded).not.toBe(common);
+  });
+
+  it('オフは undefined = キー削除で共通へ復帰', () => {
+    expect(rouletteSoundOverrideToggle(false, { ...OVERRIDE })).toBeUndefined();
+  });
+
+  it('オフの行(sound: undefined)は保存(検証)でキーごと消える — UI のラウンドトリップ', () => {
+    // チェックを外した draft は {...行, sound: undefined} の形で保存へ向かう。
+    // validateRouletteSoundOverride が undefined をキー無しへ倒すことで、
+    // 保存後の再取得(setDraft(s.challenge))では「共通に従う」に戻っている。
+    const v = validateChallengeConfig({
+      ...structuredClone(DEFAULT_CHALLENGE),
+      roulettes: [
+        { ...structuredClone(DEFAULT_ROULETTE), sound: rouletteSoundOverrideToggle(false, OVERRIDE) },
+      ],
+      joinRoulette: {
+        ...structuredClone(DEFAULT_JOIN_ROULETTE),
+        sound: rouletteSoundOverrideToggle(false, OVERRIDE),
+      },
+    } as unknown);
+    expect('sound' in v.roulettes[0]!).toBe(false);
+    expect('sound' in v.joinRoulette).toBe(false);
+  });
+
+  it('オンの種(共通コピー)は検証を素通りする — 保存しただけで値が動かない', () => {
+    const common: RouletteSoundConfig = { ...OVERRIDE };
+    const v = validateChallengeConfig({
+      ...structuredClone(DEFAULT_CHALLENGE),
+      rouletteSound: { ...common },
+      roulettes: [
+        { ...structuredClone(DEFAULT_ROULETTE), sound: rouletteSoundOverrideToggle(true, common) },
+      ],
+    } as unknown);
+    expect(v.roulettes[0]!.sound).toEqual(common);
+  });
+});
+
 describe('resolveRouletteSound — 行ごとの音の解決', () => {
   it('行が sound を持たなければ共通へ倒れる', () => {
     const c = cfg();
@@ -347,5 +395,23 @@ describe('resolveRouletteSound のモニター配線(ソース不変条件)', ()
 
   it('共通 rouletteSound の直読みは残っていない(配線剥がれの検出)', () => {
     expect(src.includes('cfg?.challenge.rouletteSound')).toBe(false);
+  });
+});
+
+/**
+ * 設定画面の配線のソース不変条件(上の MonitorView と同じ流儀)。
+ * 行別サウンドは「JSON 手編集でしか設定できない」期間が実在した機能なので、
+ * 編集UIの配線が剥がれたら(エディタをどこかの行から外したら)ここで検出する。
+ */
+describe('行別サウンド編集UIの配線(ソース不変条件)', () => {
+  const src = readFileSync(resolve('src/renderer/screens/Challenge.tsx'), 'utf8');
+
+  it('上書きエディタがギフト行と入室ルーレットの両方に居る', () => {
+    const uses = src.match(/<RouletteRowSoundEditor\b/g) ?? [];
+    expect(uses.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('チェック切替は shared の rouletteSoundOverrideToggle を通す(種の規約を UI が再発明しない)', () => {
+    expect(src.includes('rouletteSoundOverrideToggle(')).toBe(true);
   });
 });

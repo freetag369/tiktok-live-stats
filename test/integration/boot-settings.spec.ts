@@ -270,7 +270,7 @@ describe('デフォ保存(challenge-default.json)', () => {
   });
 
   it('同梱の challenge-default.json は検証を通り、移行後が不動点になる', () => {
-    // 同梱ファイルは settingsVersion 5、コードは 7 なので毎回2段の移行が走る。
+    // 同梱ファイルは settingsVersion 5、コードは 8 なので毎回3段の移行が走る。
     // 「手編集で壊した」「新しい移行段が同梱ファイルに対して冪等でない」の両方をここが捕まえる。
     const bundled = JSON.parse(readFileSync(join(bundledDir(), 'challenge-default.json'), 'utf8')) as {
       settingsVersion?: number;

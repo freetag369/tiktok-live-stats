@@ -1,6 +1,6 @@
 import type { RoulettePattern, RouletteSpinKey, RouletteTier } from './dto';
 import { ROULETTE_PATTERNS, ROULETTE_PATTERN_TIER } from './dto';
-import { ROULETTE_SEGMENTS_MAX } from './challenge';
+import { ROULETTE_SEGMENTS_MAX, ROULETTE_SPIN_ULTRA_MS, ROULETTE_ULTRA_BEATS } from './challenge';
 
 /**
  * ギフトルーレット演出の幾何とパターン — 純関数のみ。DOM も React も触らない。
@@ -52,12 +52,15 @@ export const ROULETTE_BLOCK_GAP = 6;
  * 通常スピンの走行距離の基準(ブロック数)。light/mid/heavy は尺(rouletteSpinMs)へ
  * 比例させ、序盤のリール速度を段位に依らずほぼ一定に保つ(44/6秒 ≒ 55/7.5秒 ≒
  * 88/12秒)。比例させないと heavy が「初速の遅いスピン」に見えてカクつきになる。
- * ultra は heavy と同距離 — 走り込みが尺の先頭 ~24% に収まる(残りは動画ウィンドウ
- * とマス移動)ので初速は保たれ、TARGET/STRIP の幾何も不変で済む。距離を増やすと
- * TARGET が動いて「ノード数・shift が全スピン一律」の構造ごと組み直しになる。
+ * ultra は heavy と同距離 — 走り込み(ROULETTE_ULTRA_BEATS.runInMs)と再加速
+ * (accelMs)で同じ距離を食い切る配分にしてあり、残りは動画ウィンドウとマス移動。
+ * **再加速で「速度が2倍」に見せるぶんは走り込み側を緩めて捻出する**(総距離は不変)
+ * ので初速は保たれ、TARGET/STRIP の幾何も不変で済む。距離を増やすと
+ * TARGET が動いて「ノード数・shift が全スピン一律」の構造ごと組み直しになるうえ、
+ * リール実幅が伸びて OBS でコマ落ちする。
  */
 const RUN_BASE: Record<RouletteTier, number> = { light: 44, mid: 55, heavy: 88, ultra: 88 };
-/** 短縮スピン(コンボ2本目以降)の走行距離の基準。900ms に収まる距離。 */
+/** 短縮スピン(16 本目以降・合算 effect)の走行距離の基準。900ms に収まる距離。 */
 const RUN_BASE_FAST = 10;
 
 /**
@@ -226,6 +229,19 @@ export interface RoulettePatternTiming {
    */
   stepAts: readonly number[];
   /**
+   * 超激アツ(ultra)専用: 「ドン」— 出目の倍率が上がる瞬間(スピン尺 0..1 の割合)。
+   * 添字 i の拍で表示倍率が (i + 2) 倍になる(×2 → ×3 → ×4 → ×5)。先頭の拍だけは
+   * 効果音①(roulette-hype)も一緒に鳴らす合図を兼ねる。
+   *
+   * **倍率は見せかけで、リールのマスの表示にしか掛からない** — worker が確定済みの
+   * 出目も、7セグの据え置き(heldValue)も動かさない。元の数字へ戻すのは
+   * RouletteFx の finish()(= スピン終端)で、そこが「確定」の瞬間になる。
+   *
+   * 各拍は**動画に覆われていない隙間**に置くこと(覆われると数字が読めず演出が死ぬ)。
+   * ultra 以外と 'fast' は未定義。
+   */
+  donAts?: readonly number[];
+  /**
    * 超激アツ(ultra)専用: 全画面動画のウィンドウ列(スピン尺 0..1 の割合)。
    * at = 動画の表示+再生開始(最初のウィンドウは quietAt と同時刻 — 回転ループ音を
    * ここで閉じる)、out = 動画終端の「一撃」の瞬間 = 溶暗の開始(RL_CLIP_FADE_MS)。
@@ -250,16 +266,62 @@ export interface RouletteClipWindow {
 /**
  * 動画の溶暗(フェードアウト)の実時間(ms)。monitor.css の **`.rl-clip.out` の
  * animation** と同期(transition は使わない — 理由は monitor.css の解説)。
- * 480 = 0.02 × ROULETTE_SPIN_ULTRA_MS。これは「一撃 → リールの拍」の標準間隔
- * (16窓中10窓)と一致し、**溶暗が終わり切った瞬間に拍が始まる**設計になる。
+ * 振り付け表と同じ値を使う — ultra は「一撃 → 溶暗 → マス移動」が全窓で等間隔で、
+ * **溶暗が終わり切った瞬間に拍が始まる**設計だから、別々に持つとすぐズレる。
  */
-export const RL_CLIP_FADE_MS = 480;
+export const RL_CLIP_FADE_MS = ROULETTE_ULTRA_BEATS.fadeMs;
 /**
  * 溶暗の完了から <video> を DOM から外すまでの余白(ms)。
  * 0 だと React のコミット遅延ぶんだけアニメーションの最後が切られて、
  * 直そうとしている「プツッ」がフェードの尻尾で再発する。
  */
 export const RL_CLIP_REMOVE_MS = 600;
+
+/**
+ * 超激アツ(ultra)の振り付けを割合(0..1)へ落とす。**9パターン全部がこの1本を使う** —
+ * 個別に書き並べると「同じ動きのはずが1つだけズレている」を型でも値でも検出できない。
+ *
+ * 拍の割り当て(ROULETTE_ULTRA_BEATS の解説と対):
+ * - `donAts[0]` = 再加速の終わり。効果音①と同時に出目が ×2 へ膨らむ。
+ * - 動画1〜3: 一撃(out) → 溶暗 → マス移動(`stepAts`) → 間 → ドン(×3/×4/×5) → 間
+ * - 動画4: 一撃 → 溶暗 → マス移動(**`nearAt`** = 当選の1つ手前へ入る) → 間 →
+ *   マス移動(**`kickAts`** = 着地の叩き込み) → 溜め → 終端で確定
+ *
+ * `nearAt` / `kickAts` の意味づけは他段位と同じ(「止まりそう」と締めの一撃)なので、
+ * 音も既存スロットがそのまま乗る。マス移動は5回あるが `stepAts` は3つ — 残り2つは
+ * near と kick が担うので、「stepAts は1スピン4発まで」の抑制はそのまま守られる。
+ */
+function ultraTiming(): RoulettePatternTiming {
+  const b = ROULETTE_ULTRA_BEATS;
+  const r = (ms: number): number => ms / ROULETTE_SPIN_ULTRA_MS;
+  const clips: RouletteClipWindow[] = [];
+  const stepAts: number[] = [];
+  const donAts: number[] = [];
+  let t = b.runInMs + b.accelMs;
+  donAts.push(r(t)); // ×2(効果音①と同時)。動画が覆う前に leadMs だけ読ませる。
+  t += b.leadMs;
+  let nearAt = 0;
+  let kickAt = 0;
+  for (const [i, len] of b.clipMs.entries()) {
+    const at = t;
+    const out = at + len;
+    clips.push({ at: r(at), out: r(out) });
+    t = out + b.fadeMs; // 溶暗が終わり切ってからマス移動 = 一撃がリールを押した因果
+    if (i === b.clipMs.length - 1) {
+      nearAt = r(t);
+      t += b.stepMs + b.gapMs;
+      kickAt = r(t);
+      t += b.stepMs;
+    } else {
+      stepAts.push(r(t));
+      t += b.stepMs + b.gapMs;
+      donAts.push(r(t));
+      t += b.gapMs;
+    }
+  }
+  // 残りは b.tailMs(着地 → 確定の溜め)。終端 = スピン尺そのものなので拍は要らない。
+  return { nearAt, quietAt: clips[0]!.at, kickAts: [kickAt], stepAts, donAts, clips };
+}
 
 /**
  * パターンごとの SE タイミング。**monitor.css の対応キーフレームと散文で同期しない** —
@@ -281,66 +343,19 @@ export const ROULETTE_PATTERN_TIMING: Record<RoulettePattern | 'fast', RouletteP
   jackstop: { nearAt: 0.66, quietAt: 0.48, kickAts: [0.88], stepAts: [0.58] },
   jackslip: { nearAt: 0.7, quietAt: 0.48, kickAts: [], stepAts: [0.76, 0.82, 0.88] },
   jackback: { nearAt: 0.68, quietAt: 0.5, kickAts: [0.88], stepAts: [0.74] },
-  // ── 超激アツ(ultra・24秒)。quietAt = clips[0].at(最初の動画で回転音を閉じる)。
-  //    各 clips[].out(動画の一撃)の直後に step/kick/near が続く — 上の clips の解説を参照。
-  dragon: {
-    nearAt: 0.855,
-    quietAt: 0.27,
-    kickAts: [0.92, 0.955],
-    stepAts: [0.495, 0.695],
-    clips: [
-      { at: 0.27, out: 0.475 },
-      { at: 0.53, out: 0.675 },
-      { at: 0.73, out: 0.835 },
-    ],
-  },
-  unicorn: {
-    nearAt: 0.79,
-    quietAt: 0.27,
-    kickAts: [],
-    stepAts: [0.5, 0.53, 0.86, 0.93],
-    clips: [
-      { at: 0.27, out: 0.478 },
-      { at: 0.56, out: 0.768 },
-    ],
-  },
-  whale: {
-    nearAt: 0.815,
-    quietAt: 0.265,
-    kickAts: [0.945],
-    stepAts: [0.493, 0.665],
-    clips: [
-      { at: 0.265, out: 0.473 },
-      { at: 0.52, out: 0.645 },
-      { at: 0.695, out: 0.795 },
-      { at: 0.835, out: 0.925 },
-    ],
-  },
-  phoenix: {
-    nearAt: 0.815,
-    quietAt: 0.3,
-    kickAts: [0.95],
-    stepAts: [0.485, 0.66],
-    clips: [
-      // out は「拍の 480ms 前」に置く(溶暗が終わってから羽ばたきの衝撃波が届く)。
-      { at: 0.3, out: 0.465 },
-      { at: 0.515, out: 0.64 },
-      { at: 0.69, out: 0.79 },
-      { at: 0.83, out: 0.93 },
-    ],
-  },
-  lion: {
-    nearAt: 0.865,
-    quietAt: 0.27,
-    kickAts: [0.49, 0.695, 0.935],
-    stepAts: [],
-    clips: [
-      // out は「飛び掛かり(kick 0.49)の 480ms 前」— 爪の一撃が消えてから叩き込む。
-      { at: 0.27, out: 0.47 },
-      { at: 0.53, out: 0.675 },
-      { at: 0.74, out: 0.844 },
-    ],
-  },
+  // ── 超激アツ(ultra)。**9パターンとも同じ振り付け**(カウントダウン式の激アツ)。
+  //    尺・拍・動画枠はすべて ROULETTE_ULTRA_BEATS から ultraTiming() が起こす。
+  //    パターンごとに違うのは **流す動画の絵** だけ(assets/fx/rl/<pattern>-<n>.mp4)。
+  //    monitor.css 側も rl-run-ultra 1本を全パターンで共有する。
+  dragon: ultraTiming(),
+  unicorn: ultraTiming(),
+  whale: ultraTiming(),
+  phoenix: ultraTiming(),
+  lion: ultraTiming(),
+  heartme: ultraTiming(),
+  hearttouch: ultraTiming(),
+  heartbday: ultraTiming(),
+  heartbloom: ultraTiming(),
   fast: { nearAt: 1, quietAt: 1, kickAts: [], stepAts: [] },
 };
 

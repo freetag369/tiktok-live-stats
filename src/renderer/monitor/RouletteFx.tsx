@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { RoulettePattern } from '@shared/dto';
 import { rouletteHeadline, rouletteRevealMs, rouletteSpinMs } from '@shared/challenge';
 import { isJackPattern } from '@shared/roulette-tease';
@@ -12,6 +12,11 @@ import {
   rouletteStrip,
 } from '@shared/roulette-fx';
 import { rouletteClipUrl } from '../lib/fx';
+import {
+  type RouletteDirection,
+  rouletteBlockSign,
+  roulettePanelClass,
+} from './roulette-class';
 import { num } from '@shared/format';
 
 /**
@@ -38,12 +43,18 @@ import { num } from '@shared/format';
  * - 超焦らし系(jackstop/jackslip/jackback)のゴーストブロック(.rl-jack)は、
  *   当選の1つ手前の固定スロットに「盤面の一番下の出目」を被せる — 値も位置も
  *   当選と無相関なので、これ自体は何も漏らさない(monitor.css の解説を参照)。
+ * - **向き(direction)だけは最初から出してよい。** 減らす(応援)の行は緑テーマで、
+ *   全マスに `-` が付く。direction は**行ごとの属性**で当選 index に依存せず、
+ *   しかも出目は 1 以上へ clamp される(sanitizeRouletteSegments)ので、"sub" の行は
+ *   **全マスが必ず負** — どのマスが当たりかは一切漏れない。**ゴーストにも同じ符号を
+ *   付けること**(片方だけだと本物と見分けが付いてフェイクが成立しなくなる)。
  */
 
 export function RouletteFx({
   segments,
   index,
   amount,
+  direction,
   fast,
   pattern,
   seed,
@@ -57,6 +68,8 @@ export function RouletteFx({
   onKick,
   onStep,
   onSpinQuiet,
+  onDon,
+  onSettle,
   onDone,
 }: {
   /** 盤面(表示順の出目の絶対値)。effect.rouletteSegments。 */
@@ -65,7 +78,13 @@ export function RouletteFx({
   index: number;
   /** 符号適用後の実増減量。正=妨害(赤)、負=応援(緑)。確定まで表に出さない。 */
   amount: number;
-  /** キュー消化中の短縮スピン。段の演出は入らず単調減速になる。 */
+  /**
+   * 出目の方向。effect.rouletteDirection(worker の焼き込み)そのもの。
+   * 'sub' で緑テーマ + 全マスのマイナス表示になる。**amount の符号から推論しない** —
+   * 「effect 1件で自己完結」の規約に合わせ、盤面の見た目は行の属性から決める。
+   */
+  direction?: RouletteDirection;
+  /** 短縮スピン(ROULETTE_FULL_REELS 超のリール・合算 effect)。段の演出は入らず単調減速になる。 */
   fast: boolean;
   /** 終盤の演出パターン。effect.roulettePattern。 */
   pattern: RoulettePattern;
@@ -108,6 +127,17 @@ export function RouletteFx({
    * リール停止(onDone)より前に来る。冪等に扱うこと — 保険で停止時にも呼ぶ。
    */
   onSpinQuiet?: () => void;
+  /**
+   * 超激アツ(ultra)の「ドン」— 出目の表示倍率が上がった瞬間。
+   * mult は上がったあとの倍率(2→3→4→5)、first は先頭の拍(= 激熱の合図)かどうか。
+   * 呼び出し側が音と画面揺れを足す(onKick / onStep と同じ分担)。
+   */
+  onDon?: (mult: number, first: boolean) => void;
+  /**
+   * 超激アツの締め — 膨らんだ出目が元の数字へ戻る瞬間(= 確定と同時)。
+   * finish() から呼ぶので、animationend でも安全弁のアンマウントでも必ず1回。
+   */
+  onSettle?: () => void;
   onDone: () => void;
 }): React.JSX.Element {
   const [hit, setHit] = useState(false);
@@ -119,6 +149,21 @@ export function RouletteFx({
    * 出目には依存しない — アンチリークの構造は崩れない。
    */
   const [clip, setClip] = useState<{ n: number; out: boolean } | null>(null);
+  /**
+   * 超激アツ(ultra)の出目の表示倍率。**見せかけ専用** — リールのマスに書く数字にしか
+   * 掛からず、worker が確定済みの出目にも 7セグの据え置き(heldValue)にも触らない。
+   * 1 = 素の出目。ドンのたびに 2 → 3 → 4 → 5 と上がり、finish() で 1 に戻る =
+   * 「膨らんだ数字が元に戻って確定」の瞬間になる。
+   *
+   * 全マスに一律で掛けるので当選 index は漏れない(このファイル冒頭の
+   * 「結果を先に見せないための約束」は崩れない)。桁が増えて箱からはみ出すのは
+   * 既存の 5桁以上の出目と同じ挙動 — ステップ幅は --rl-w 固定のままなので
+   * 着地の代数(min-width:0 の解説)には影響しない。
+   */
+  const [mult, setMult] = useState(1);
+  /** ドンの打撃(rl-don)の再生キー。classList リプレイで毎回頭から再生する。 */
+  const [donKey, setDonKey] = useState(0);
+  const windowRef = useRef<HTMLDivElement | null>(null);
   const timers = useRef<number[]>([]);
   /**
    * 完了をちょうど1回にするラッチ。リールに付くアニメーションは1本だけだが、
@@ -152,8 +197,9 @@ export function RouletteFx({
   const run = rouletteRun(seed, segments.length, key);
   const shift = -(ROULETTE_TARGET_BLOCK - 1) * ROULETTE_BLOCK_W;
   const sign = amount < 0 ? '-' : '+';
-  const bad = amount >= 0;
-  const head = rouletteHeadline({ rouletteLabel, giftName });
+  // 応援(sub)は回転中から全マスに符号を出す。null = 従来どおり確定まで出さない。
+  const blockSign = rouletteBlockSign(direction);
+  const head = rouletteHeadline({ rouletteLabel, giftName, rouletteDirection: direction });
 
   function finish(): void {
     if (done.current) return;
@@ -162,9 +208,31 @@ export function RouletteFx({
     onSpinQuiet?.();
     // 遮蔽ウィンドウで消灯タイマーが遅れても、確定見せを動画に覆わせない(冪等)。
     setClip(null);
+    // 超激アツで膨らませた出目を素へ戻す。**戻すのはここだけ** — タイマーではなく
+    // 完了ラッチに置くことで、animationend が先でも安全弁のアンマウントが先でも
+    // 「確定した数字が倍のまま」で固まらない。倍率が動いていなければ何も起きない。
+    if (mult !== 1) {
+      setMult(1);
+      setDonKey((k) => k + 1);
+      onSettle?.();
+    }
     setHit(true);
     timers.current.push(window.setTimeout(onDone, rouletteRevealMs(key)));
   }
+
+  /**
+   * ドンの打撃を classList リプレイで再生する(MonitorView の punch-* と同じ手口)。
+   * className に混ぜると、連続するドンで React が同じ文字列を書き戻してアニメーションが
+   * 再スタートしない。donKey===0 はマウント直後 = まだ打っていないので何もしない。
+   */
+  useLayoutEffect(() => {
+    if (donKey === 0) return;
+    const el = windowRef.current;
+    if (!el) return;
+    el.classList.remove('rl-don');
+    void el.offsetWidth; // リフローで CSS アニメーションのリスタートを確定させる
+    el.classList.add('rl-don');
+  }, [donKey]);
 
   /**
    * 超激アツ動画の autoplay を明示的に観測し、ref cleanup でメディアリソースを
@@ -225,6 +293,18 @@ export function RouletteFx({
     if (onSpinQuiet && t.quietAt < 1) {
       timers.current.push(window.setTimeout(onSpinQuiet, Math.round(spinMs * t.quietAt)));
     }
+    // 超激アツの「ドン」(ultra の行にだけ donAts がある)。i 番目で倍率が i+2 倍に
+    // なる。**動画に覆われていない隙間に置いてある**(ROULETTE_ULTRA_BEATS の
+    // leadMs / gapMs)ので、膨らんだ数字は必ず読める。
+    for (const [i, at] of (t.donAts ?? []).entries()) {
+      timers.current.push(
+        window.setTimeout(() => {
+          setMult(i + 2);
+          setDonKey((k) => k + 1);
+          onDon?.(i + 2, i === 0);
+        }, Math.round(spinMs * at))
+      );
+    }
     // 超激アツの動画ウィンドウ(ultra の行にだけ clips がある。fast は 'fast' 行 =
     // 未定義なので自然に素通り)。at で表示、out で一撃=溶暗開始、
     // +RL_CLIP_REMOVE_MS で撤去(溶暗の完了より後 — 余白ぶん遅らせないと
@@ -256,7 +336,7 @@ export function RouletteFx({
 
   return (
     <>
-      <div className={`roulette-panel ${bad ? 'bad' : 'good'}${hit ? ' hit' : ''}`}>
+      <div className={roulettePanelClass({ direction, amount, hit })}>
       <div className="rl-head">
         {giftIconUrl ? <img src={giftIconUrl} alt="" /> : <span>🎰</span>}
         {/* .rl-head は flex(gap 8px)なので、区切りの空白は CSS 側に任せて trim する。 */}
@@ -265,7 +345,14 @@ export function RouletteFx({
         {head.suffix}
       </div>
       <div
-        className={`rl-window rl-p-${key}`}
+        ref={windowRef}
+        /*
+         * rl-x / rl-x<N> は超激アツの倍率表示。素のスピンでは mult===1 なので
+         * 一切付かない = 既存の見た目は不変。色は方向テーマ(増やす=金/減らす=緑)の
+         * 中で段階的に熱くする — 全マス一律なので当選は漏れず、確定の瞬間には
+         * mult が 1 に戻って素の白へ帰る。
+         */
+        className={`rl-window rl-p-${key}${mult > 1 ? ` rl-x rl-x${mult}` : ''}`}
         style={
           {
             '--rl-w': `${ROULETTE_BLOCK_W}px`,
@@ -290,8 +377,13 @@ export function RouletteFx({
             {strip.map((v, i) => (
               // 目印はここでは付けない — 付けた瞬間に答えが DOM と画面に出る。
               <div key={i} className={hit && i === ROULETTE_TARGET_BLOCK ? 'rl-block win' : 'rl-block'}>
-                {hit && i === ROULETTE_TARGET_BLOCK ? <span className="rl-sign">{sign}</span> : null}
-                {num(v)}
+                {hit && i === ROULETTE_TARGET_BLOCK ? (
+                  <span className="rl-sign">{sign}</span>
+                ) : blockSign !== null ? (
+                  <span className="rl-sign">{blockSign}</span>
+                ) : null}
+                {/* mult は超激アツの見せかけ倍率。素のスピンでは常に 1 = 挙動不変。 */}
+                {num(v * mult)}
               </div>
             ))}
             {/*
@@ -308,6 +400,8 @@ export function RouletteFx({
                   left: `calc(var(--rl-w) * ${ROULETTE_TARGET_BLOCK - 1} + var(--rl-gap))`,
                 }}
               >
+                {/* 本物と同一見た目が命 — 応援の行ではゴーストにも符号をそろえる。 */}
+                {blockSign !== null ? <span className="rl-sign">{blockSign}</span> : null}
                 {num(segments[segments.length - 1] ?? 0)}
               </div>
             ) : null}
@@ -319,6 +413,19 @@ export function RouletteFx({
         <div className="rl-pointer rl-pointer-bottom">▲</div>
         {/* 暗転レイヤ(blackout のみ)。veil・ポインタより後 = 最前面で窓を呑む。 */}
         {key === 'blackout' ? <div className="rl-blackout" /> : null}
+        {/*
+         * 倍率バッジ(超激アツのみ)。「数字が増えた」を数字の色だけに頼らず明示する。
+         * **key={mult} で毎回作り直す** — 同じ要素を使い回すと2回目以降の
+         * ドンで pop アニメーションが再生されない(punch-* の classList リプレイと
+         * 同じ問題。こちらは要素ごと差し替わるので key で足りる)。
+         * 窓の右上に置くのは、中央のマス(= 読ませたい数字)を隠さないため。
+         * 終盤は左右が rl-veil で覆われる領域だが、バッジはその上に出る(DOM 順)。
+         */}
+        {mult > 1 ? (
+          <div key={mult} className="rl-mult">
+            ×{mult}倍
+          </div>
+        ) : null}
       </div>
       </div>
       {/*

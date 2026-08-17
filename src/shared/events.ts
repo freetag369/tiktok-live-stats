@@ -52,6 +52,12 @@ export type CommentEvent = EventBase & {
   content: string;
   lang?: string;
   isQuestion: boolean;
+  /**
+   * コメントに添付されたスタンプ(サブスクエモート)の emoteId。**出現順・重複込み**
+   * (同じスタンプ2連打は2要素)— スタンプトリガー(matchStampTriggers)が個数で
+   * 数えるため。スタンプだけのメッセージは content が ' ' で届く。無ければ省略。
+   */
+  emoteIds?: string[];
 };
 
 export type LikeEvent = EventBase & {
@@ -105,7 +111,13 @@ export type EnvelopeEvent = EventBase & {
   peopleCount?: number;
 };
 
-export type EmoteEvent = EventBase & { kind: 'emote'; viewer: NormViewer; emoteId?: string };
+export type EmoteEvent = EventBase & {
+  kind: 'emote';
+  viewer: NormViewer;
+  emoteId?: string;
+  /** 全スタンプの emoteId(出現順・重複込み)。emoteId は先頭1件の後方互換。 */
+  emoteIds?: string[];
+};
 
 export type RoomStatsEvent = EventBase & {
   kind: 'roomStats';

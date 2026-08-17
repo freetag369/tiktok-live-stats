@@ -135,12 +135,12 @@ describe('走行距離と幾何の不変条件', () => {
 
 describe('drawRoulettePattern — 終盤パターンの抽選', () => {
   it('パターンは18種', () => {
-    expect(ROULETTE_PATTERNS).toHaveLength(18);
+    expect(ROULETTE_PATTERNS).toHaveLength(22);
   });
 
   it('rand=0 は先頭、rand→1 は末尾', () => {
     expect(drawRoulettePattern(() => 0)).toBe('slow');
-    expect(drawRoulettePattern(() => 0.999999)).toBe('lion');
+    expect(drawRoulettePattern(() => 0.999999)).toBe('heartbloom');
   });
 
   it('全パターンが出る', () => {
@@ -177,20 +177,25 @@ describe('drawRoulettePattern — 終盤パターンの抽選', () => {
     expect(drawRoulettePattern(() => 0, [])).toBe('slow');
     expect(drawRoulettePattern(() => 0, undefined)).toBe('slow');
     expect(drawRoulettePattern(() => 0.999999, ['bogus'] as unknown as RoulettePattern[])).toBe(
-      'lion'
+      'heartbloom'
     );
   });
 });
 
 describe('段位(tier)と尺 — 信頼度方式の骨格', () => {
-  it('全18パターンに段位があり、heavy/ultra の顔ぶれが固定されている', () => {
+  it('全22パターンに段位があり、heavy/ultra の顔ぶれが固定されている', () => {
     for (const p of ROULETTE_PATTERNS) {
       expect(['light', 'mid', 'heavy', 'ultra']).toContain(ROULETTE_PATTERN_TIER[p]);
     }
     const heavy = ROULETTE_PATTERNS.filter((p) => ROULETTE_PATTERN_TIER[p] === 'heavy');
     expect(new Set(heavy)).toEqual(new Set(['doublefake', 'jackstop', 'jackslip', 'jackback']));
     const ultra = ROULETTE_PATTERNS.filter((p) => ROULETTE_PATTERN_TIER[p] === 'ultra');
-    expect(new Set(ultra)).toEqual(new Set(['dragon', 'unicorn', 'whale', 'phoenix', 'lion']));
+    expect(new Set(ultra)).toEqual(
+      new Set([
+        'dragon', 'unicorn', 'whale', 'phoenix', 'lion',
+        'heartme', 'hearttouch', 'heartbday', 'heartbloom',
+      ])
+    );
   });
 
   it('light の尺は従来の 6000ms のまま(要件: 軽いパターンは現行どおり)', () => {
@@ -293,13 +298,13 @@ describe('drawRoulettePattern — レア度の条件付け', () => {
   it('境界の規約は帯に依らず不変: rand=0 は先頭、rand→1 は末尾の正重み', () => {
     for (const rarity of [undefined, 0.005, 0.08, 0.3]) {
       expect(drawRoulettePattern(() => 0, undefined, rarity)).toBe('slow');
-      expect(drawRoulettePattern(() => 0.999999, undefined, rarity)).toBe('lion');
+      expect(drawRoulettePattern(() => 0.999999, undefined, rarity)).toBe('heartbloom');
     }
   });
 
   it('レア出目でも軽いパターンが出得る(逆演出)/ 通常出目でも超激アツが出得る(ガセ)', () => {
     expect(drawRoulettePattern(() => 0, undefined, 0.005)).toBe('slow'); // 大当たりの静かな変動
-    expect(drawRoulettePattern(() => 0.999999, undefined, 0.3)).toBe('lion'); // ガセ超激アツ
+    expect(drawRoulettePattern(() => 0.999999, undefined, 0.3)).toBe('heartbloom'); // ガセ超激アツ
   });
 
   it('許可リストとの合成でも rarity は効く(pool 内の段位だけで再正規化)', () => {
@@ -400,7 +405,12 @@ describe('ROULETTE_PATTERN_TIMING — SE タイミングの不変条件', () => 
   it('締めの一撃を持つパターンでは、最後のキックが「止まりそう」より後', () => {
     // restart(再点火)と blackout(暗転)のキックは中盤の衝撃なので対象外。
     // lion のキックは全ステップにあるが、最後の飛び掛かりは near の後。
-    for (const p of ['kick', 'overrun', 'doublefake', 'jackstop', 'jackback', 'dragon', 'whale', 'phoenix', 'lion'] as const) {
+    for (const p of [
+      'kick', 'overrun', 'doublefake', 'jackstop', 'jackback',
+      'dragon', 'whale', 'phoenix', 'lion',
+      // hearttouch は借り元の unicorn が kickAts 空なので対象外。
+      'heartme', 'heartbday', 'heartbloom',
+    ] as const) {
       const t = ROULETTE_PATTERN_TIMING[p];
       expect(t.kickAts.at(-1)!).toBeGreaterThan(t.nearAt);
     }
@@ -441,8 +451,10 @@ describe('ROULETTE_PATTERN_TIMING.clips — 超激アツの動画ウィンドウ
         expect(w.out, `${p}[${i}]`).toBeGreaterThan(w.at);
         // 短すぎるウィンドウは一撃の振り付けが入らない(実尺 2 秒強が下限)。
         expect(ms(w.out) - ms(w.at), `${p}[${i}] 実尺`).toBeGreaterThanOrEqual(2160);
-        // 最終ウィンドウの後にもフィナーレ(キック/シーソー)と着地の余地を残す。
-        expect(ms(w.out), `${p}[${i}]`).toBeLessThanOrEqual(22320);
+        // 最終ウィンドウの後にもフィナーレ(止まりそう → 締めの一撃 → 着地 → 溜め)の
+        // 余地を残す。**尺に対する割合で見る** — 定数で焼くと尺が動いた瞬間に
+        // 「設計は変わっていないのに落ちる」テストになる(24秒 → 30.9秒で踏んだ)。
+        expect(ms(w.out), `${p}[${i}]`).toBeLessThanOrEqual(Math.round(0.93 * ROULETTE_SPIN_ULTRA_MS));
         if (i + 1 < clips.length) {
           // 溶暗 → 撤去(RL_CLIP_REMOVE_MS)→ 素のリールが見える時間、が隙間に収まる。
           expect(ms(clips[i + 1]!.at) - ms(w.out), `${p}[${i}]→[${i + 1}]`).toBeGreaterThanOrEqual(

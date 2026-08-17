@@ -46,6 +46,21 @@ export const STAGE_GAP_BANNER_MS = 350;
 export const STAGE_GAP_CUTIN_MS = 500;
 
 /**
+ * **フィーバー結果バナー(boost-result)のあとだけ**に置く追加の間合い。
+ * 2026-08-17 ユーザー決定 —「N 浮上後、次のキュー開始まで2秒待機(ブースト演出のみ)」。
+ *
+ * 清算発表(ロールアップ → 発射 → 着弾)の直後に出る「フィーバー! タップ×N」は
+ * その配信回の山場の締めなので、他のバナーと同じ 500ms で次の演出へ流すと読む前に
+ * 次の絵が始まる。**ここだけ**を伸ばすのが要件で、ルーレット確定・カットイン・
+ * 着弾のあとの間合いは STAGE_GAP_CUTIN_MS(500ms)のまま — 全体を伸ばすと
+ * バナーの排出速度が落ちて順番待ちが渋滞する側へ倒れる。
+ *
+ * 乗るのは **'cutin'(= 演出の開始)だけ**。順番待ちバナー同士の間合い
+ * (STAGE_GAP_BANNER_MS)には乗せない。
+ */
+export const STAGE_GAP_BOOST_RESULT_MS = 2000;
+
+/**
  * 順番待ちの上限。ユーザー決定は「渋滞しても1件も捨てない・尺は常に一定」だが、
  * 上限のない FIFO はメモリと遅延が無限に伸びる(いいね祭り+フォロー連打で
  * 「2分前のフォロー通知が今出る」になる)。到達しない想定の暴走止めとして置く —
@@ -140,6 +155,29 @@ export function clampBannerEndAt(curEndAt: number, nowMs: number): number {
  */
 export function clampStarveServedAt(curMs: number, nowMs: number): number {
   return Math.min(curMs, nowMs);
+}
+
+/**
+ * フィーバー結果バナーを出した瞬間に張る「演出を始めてよい時刻」。
+ * = そのバナーが消える時刻(bannerEndAt)+ STAGE_GAP_BOOST_RESULT_MS。
+ * 舞台ラッチと同じ**絶対時刻**で持つので、タイマーが遮蔽で失われても
+ * 「今」が過ぎれば誰も何もしなくても自然に解放される。
+ */
+export function boostGapUntilFor(bannerEndAt: number): number {
+  return bannerEndAt + STAGE_GAP_BOOST_RESULT_MS;
+}
+
+/** boostGapUntil の正当な最大先行幅(clampBannerEndAt と同じ導出)。 */
+export const BOOST_GAP_LATCH_MAX_AHEAD_MS = BANNER_GIFT_CARD_MS + STAGE_GAP_BOOST_RESULT_MS;
+
+/**
+ * 後方ステップ(NTP 巻き戻し・サスペンド/レジューム)で未来に固着した
+ * boostGapUntil を不変条件の上限まで引き戻す(短縮方向のみ — 時計が単調な限りは
+ * 恒等関数)。clampBannerEndAt と同型で、**時刻ラッチには必ずクランプを付ける**
+ * という規律に従う。これが無いとステップ後に演出が全死する。
+ */
+export function clampBoostGapUntil(curMs: number, nowMs: number): number {
+  return Math.min(curMs, nowMs + BOOST_GAP_LATCH_MAX_AHEAD_MS);
 }
 
 /** pickStageNext の入力。 */

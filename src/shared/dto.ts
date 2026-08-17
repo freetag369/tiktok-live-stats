@@ -472,6 +472,10 @@ export const ROULETTE_PATTERNS = [
   'whale', //      クジラ — 尾撃ち×3 → ブリーチ(飛沫スラム)終い
   'phoenix', //    フェニックス — 羽ばたきの衝撃波×3 → 再生の爆発終い
   'lion', //       ライオン — 全ステップが飛び掛かり(キック)。最後の1つ前で止まらない
+  'heartme', //     ハートミー — ハート型ロケットが開いて撃ち出す。振り付けは phoenix と同一値の流用
+  'hearttouch', //  ハートタッチ — 2つのハートが触れ合って融合する。振り付けは unicorn と同一値の流用
+  'heartbday', //   ハートの誕生日 — ハート型ケーキのロウソクが爆ぜる。振り付けは dragon と同一値の流用
+  'heartbloom', //  花咲ハート — ハート型の花が満開に開く。振り付けは lion と同一値の流用
 ] as const;
 export type RoulettePattern = (typeof ROULETTE_PATTERNS)[number];
 
@@ -506,8 +510,12 @@ export const ROULETTE_PATTERN_TIER: Record<RoulettePattern, RouletteTier> = {
   whale: 'ultra',
   phoenix: 'ultra',
   lion: 'ultra',
+  heartme: 'ultra',
+  hearttouch: 'ultra',
+  heartbday: 'ultra',
+  heartbloom: 'ultra',
 };
-/** スピン尺・走行距離の引数キー。'fast' はコンボ2本目以降の短縮スピン。 */
+/** スピン尺・走行距離の引数キー。'fast' は 16 本目以降(と合算 effect)の短縮スピン。 */
 export type RouletteSpinKey = RoulettePattern | 'fast';
 
 /** ルーレットの出目1件。amount は表示値(絶対値)、適用方向は direction が決める。 */
@@ -556,7 +564,8 @@ export interface ChallengeRouletteConfig {
    */
   patterns: RoulettePattern[];
   /**
-   * この行だけの回転サウンド。**キー欠損 = cfg.rouletteSound(共通)に従う**(既定)。
+   * この行だけの回転サウンド。**キー欠損 = 方向に対応する共通に従う**(既定) —
+   * direction が 'add' なら cfg.rouletteSound、'sub' なら cfg.rouletteSoundSub。
    * 上書きするときだけ4項目まとめて1組で持つ(部分継承はしない)。旧 settings.json は
    * 全行がこのキーを持たないので、**欠損が共通へ倒れること自体が移行の代わり**になる
    * (SETTINGS_VERSION は上げない)。検証は validateRoulette、実効値の解決は
@@ -588,7 +597,10 @@ export interface JoinRouletteConfig {
   direction: 'add' | 'sub';
   /** 終盤の演出パターン許可リスト。ChallengeRouletteConfig.patterns と同じ規約。 */
   patterns: RoulettePattern[];
-  /** この入室ルーレットだけの回転サウンド。ChallengeRouletteConfig.sound と同じ規約。 */
+  /**
+   * この入室ルーレットだけの回転サウンド。ChallengeRouletteConfig.sound と同じ規約
+   * (キー欠損は direction に対応する共通へ倒れる)。
+   */
   sound?: RouletteSoundConfig;
 }
 
@@ -612,8 +624,9 @@ export interface RouletteTeaseConfig {
 }
 
 /**
- * ルーレット回転中のサウンド。**共通の既定1組 + 行ごとの任意上書き**。
- * cfg.rouletteSound がすべてのルーレットの既定で、sound を持つ行
+ * ルーレット回転中のサウンド。**方向ごとの共通2組 + 行ごとの任意上書き**。
+ * cfg.rouletteSound(増やす/妨害)と cfg.rouletteSoundSub(減らす/応援)が
+ * それぞれの向きのルーレットの既定で、sound を持つ行
  * (ChallengeRouletteConfig / JoinRouletteConfig)だけがそれを**丸ごと**差し替える
  * — フィールド単位の継承はしない(設定UIを「共通に従う」チェック1個で
  * 説明しきれる粒度に保つため)。
@@ -812,6 +825,42 @@ export interface FanStampConfig {
 }
 
 /**
+ * チャットスタンプ(サブスクエモート)トリガーの1行。ギフトではなく
+ * WebcastChatMessage / WebcastEmoteChatMessage の emote として届くスタンプを
+ * お助け(fanStamp)と同じ演出・同じ合算窓で増減に割り当てる。
+ *
+ * emoteId は**完全一致のみ**(giftName のような部分一致の保険が無いのは、
+ * emote に名前がそもそも載って来ないため — 表示用の label はマッチに使わない)。
+ */
+export interface StampTriggerRule {
+  /** 行の識別子。UI の key 用(GiftFullCutRule.id と同じ役割)。 */
+  id: string;
+  /** 設定画面の行見出し(例: ようこそ)。表示専用でマッチには一切使わない。 */
+  label: string;
+  /** エモートの emoteId 完全一致。'' はどのスタンプにも一致しない。 */
+  emoteId: string;
+  /**
+   * スタンプ1個あたりの増減。負=減らす(お助け)、正=増える(妨害)。
+   * 0 は「演出だけ出して値は動かさない」(FanStampConfig.amountEach と同じ clamp)。
+   */
+  amountEach: number;
+  enabled: boolean;
+}
+
+/**
+ * チャットスタンプ(サブスクエモート)トリガー。**1メッセージに複数スタンプ**が
+ * 載って届くので、一致した全スタンプの合計を1回で適用し、演出はお助けの
+ * 合算バナー(fanStamp effect)を流用する。値の増減はギフトの増減規則とは
+ * 独立(スタンプはギフトではないので、そもそもあちらの規則を通らない)。
+ */
+export interface StampTriggerConfig {
+  enabled: boolean;
+  /** true ならモニターに照明フラッシュ演出(FanStampConfig.flash と同じ)。 */
+  flash: boolean;
+  rules: StampTriggerRule[];
+}
+
+/**
  * タップブースト(フィーバー)の設定。トリガーギフトが届くと
  * ①起動カットイン(introClip・固定 TAP_BOOST_INTRO_MS = 5秒)→
  * ②カウントダウン(countClip・固定 TAP_BOOST_COUNT_MS = 3秒。3・2・1 は映像
@@ -938,8 +987,22 @@ export interface ChallengeConfig {
    * (enabled:false)へ倒すので移行は不要。
    */
   joinRoulette: JoinRouletteConfig;
-  /** ルーレット回転中のBGM・ループ音。**すべてのルーレットの既定**(行ごとに sound で上書き可)。 */
+  /**
+   * ルーレット回転中のBGM・ループ音。**出目の方向が 'add'(増やす/妨害)の
+   * ルーレットの既定**(行ごとに sound で上書き可)。
+   */
   rouletteSound: RouletteSoundConfig;
+  /**
+   * 出目の方向が 'sub'(減らす/応援)のルーレットの既定。rouletteSound と同じ
+   * 立ち位置の**別の1組**で、項目単位の継承も相互追従もしない — 「応援のルーレットは
+   * 音でも見分けが付く」ためのもの(見た目の緑テーマと対)。
+   *
+   * 旧 settings.json にこのキーは無いので、**欠損時のフォールバックが移行の代わり**
+   * になる(SETTINGS_VERSION は上げない。rouletteTease / 行別 sound と同じ手口)。
+   * 既定は共通からの派生で、回転ループ音だけを差し替える — defaultRouletteSoundSub。
+   * 実効値の解決は resolveRouletteSound、共通の選択は rouletteCommonSound が唯一の実装。
+   */
+  rouletteSoundSub: RouletteSoundConfig;
   /**
    * 超焦らし(jack 3種)のカウント方式。全ルーレット共通で1組。旧 settings.json に
    * キーが無ければ validateRouletteTease が既定(enabled:true・3種全部)へ倒す。
@@ -1012,6 +1075,11 @@ export interface ChallengeConfig {
    */
   fanStamp: FanStampConfig;
   /**
+   * チャットスタンプ(サブスクエモート)トリガー。ギフト経路とは独立に
+   * comment / emote イベントの emoteId で発動し、演出は fanStamp を流用する。
+   */
+  stampTriggers: StampTriggerConfig;
+  /**
    * タップブースト(フィーバー)。fanStamp の**次・ルーレットより先**に評価され、
    * 一致したギフトは増減規則を通らない(matchTapBoost — fanStamp と同じ先勝ち規約)。
    */
@@ -1046,6 +1114,11 @@ export type ChallengeSeSlot =
   | 'roulette-near'
   | 'roulette-kick'
   | 'roulette-hit'
+  // 超激アツ(ultra)のカウントダウン式演出だけで鳴る2つ。再加速のあとの合図と、
+  // 膨らんだ出目が元に戻る瞬間の悲鳴。他のスロットと違い**ボイス素材**を想定して
+  // いるので、既定も専用録りを当てる(challenge.ts の DEFAULT_SE_SOUNDS)。
+  | 'roulette-hype'
+  | 'roulette-hype-back'
   | 'boost-start'
   | 'boost-end'
   | 'achieved';
@@ -1179,9 +1252,9 @@ export interface ChallengeEffect {
   rouletteId?: string;
   /**
    * kind='roulette': 入室ルーレット(初見さん/すべての入室)の印。モニターはこの
-   * effect を短縮(キュー消化・マージ由来のコンボ2本目以降)と超焦らしカウント
-   * (rouletteTease)の対象外にする — 常にフル尺で、worker 抽選のパターンを
-   * そのまま再生する。欠損(旧 worker 混在)はギフト扱いへ倒す(演出上の劣化のみ)。
+   * effect を短縮(16 本目以降・合算 effect の2本目以降)と超焦らしカウント
+   * (rouletteTease)の対象外にする — **本数に関係なく**常にフル尺で、worker 抽選の
+   * パターンをそのまま再生する。欠損(旧 worker 混在)はギフト扱いへ倒す(演出上の劣化のみ)。
    */
   rouletteJoin?: true;
   /**
@@ -1679,12 +1752,18 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  *    ルーレットのキックと確定/ブーストのタップ開始と着弾/達成)の効果音を、
  *    Kenney の汎用ライブラリ音から演出ごとの専用録りへ差し替え
  *    (migrateChallengeSeSounds)。寄せるのは旧既定のままだったスロットだけ。
+ * 6: 全面カットのトリガーを実データへ再修復(migrateChallengeGiftFullCutTriggersV5)。
+ *    v5 が推定で書いた値のうち実配信で一度も当たらなかった行(ミニ花火)を、
+ *    受信で確認できた giftId / giftName へ寄せ直す。
  * 7: タップブーストを複数ルール化し、コーギー(gift 6267)の行を1回だけ追加
  *    (migrateChallengeTapBoostCorgi)。単一→配列の入れ替え自体は validateTapBoost が
  *    吸収するので世代印は不要だが、**既存の保存済み設定へ新しい行を配る**のは
  *    validate ではできない(UI の cfg.set も通るので、消した行がその場で復活する)。
+ * 8: お助けのスタンプトリガーの既定行15件を追加(migrateChallengeStampTriggers)。
+ *    v0.7.7 までの既定は空配列だったので、stampTriggers キーを既に持っている
+ *    保存済み設定には既定の変更が届かない。配るのは STAMP_TRIGGER_RULES_V8 だけ。
  */
-export const SETTINGS_VERSION = 7;
+export const SETTINGS_VERSION = 8;
 
 export interface AppSettings {
   eulerApiKey: string;

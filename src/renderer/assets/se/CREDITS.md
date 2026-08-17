@@ -54,6 +54,50 @@ https://creativecommons.org/publicdomain/zero/1.0/
 | reel-hit.mp3 | `roulette-hit`(ルーレット確定) | 0.65 秒 | ルーレット確定.mp3 | 末尾無音を除去 → **+6.5dB** → mp3(192k) |
 | clear-fanfare.mp3 | `achieved`(達成 CLEAR) | 2.52 秒 | 達成.mp3 | 末尾無音を除去 → **+3.9dB** → mp3(192k) |
 
+## 超激アツ(ultra)のカウントダウン式演出のボイス7件(2026-08-18 追加)
+
+**同じ「作者提供」だが、上の10件とは正規化の方針が違う。** 元素材はリポジトリ外の
+`Sound/` と `Sound/modorion/`(日本語ファイル名。id は ASCII スラッグ必須なので改名した)。
+
+| ファイル | 既定の割り当て | 実尺 | 元ファイル | ゲイン |
+|---|---|---|---|---|
+| hype-kakugo.mp3 | `roulette-hype`(激熱の合図) | 1.46 秒 | kakugowokimemasyou.mp3 | +8.6dB |
+| hype-iyashi.mp3 | (選択肢のみ) | 1.20 秒 | iyashinotikarayo.mp3 | +4.9dB |
+| hype-yoroshiku.mp3 | (選択肢のみ) | 1.23 秒 | yorosikuonegaisimasu.mp3 | +4.7dB |
+| hype-kiitenaiyo.mp3 | (選択肢のみ) | 1.25 秒 | 「こんなの聞いてないよ！？」.mp3 | +3.2dB |
+| back-kuh.mp3 | `roulette-hype-back`(出目が戻る瞬間) | 0.26 秒 | modorion/「くっ！」.mp3 | +4.6dB |
+| back-uh.mp3 | (選択肢のみ) | 0.18 秒 | modorion/「うっ！」.mp3 | +1.4dB |
+| back-ite.mp3 | (選択肢のみ) | 0.39 秒 | modorion/「いてっ！」.mp3 | +5.2dB |
+
+> ### ⚠️ ピーク合わせではなく RMS 合わせにした理由
+>
+> 元素材のピークは -9.1〜-11.9dB とよく揃っていたが、**RMS は -20.6〜-28.2dB で
+> 7.6dB もばらついていた**。上の10件と同じ「ピークを -1.5dB へ揃える」で取り込むと、
+> 短い叫び(「くっ！」「いてっ！」)ほど波高だけが立って**体感では小さく聞こえる**。
+> ボイスは1本ずつ独立に鳴る(重ならない)ので、揃えるべきは体感 = RMS のほう。
+>
+> レシピ: **①前後の無音を除去 → ②トリム後の RMS を測り直して -17.0dB へ揃える
+> → ③ `alimiter` で -1.5dBFS を上限に抑える → mp3(192k / mono / 44.1kHz)。**
+>
+> **②で「トリム後に測り直す」のが要点。** 戻り3本は末尾無音が大半で
+> (「くっ！」は 1.045 秒 → 0.261 秒)、無音込みの RMS を基準にすると **4.6dB 過大**に
+> なる(実際に一度踏んだ)。**頭の無音も落とす** — 残すとドンとの同期がずれる。
+>
+> 結果は7本とも **RMS -15.7〜-15.8dB(差 0.1dB)・ピーク -2.1〜-6.5dB**。既存 `assets/se/`
+> 直下の RMS 分布(-10.0〜-26.4、中央値 ≒ -16)のほぼ中央に着地したので、
+> **カタログの `gain` は 1.0**(引かない)。上の10件の 0.9 は「素材が小さすぎたぶんを
+> ピークで持ち上げた」補正なので、方針が違うここには適用しない。
+
+```
+# <出力> ごとに: ①トリムだけした wav を作る → ②その RMS を測る → ③ゲイン+リミッタ
+TRIM="silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0,areverse,\
+silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0,areverse"
+ffmpeg -i "<元ファイル>" -af "$TRIM" -ac 1 -ar 44100 -c:a pcm_s16le tmp.wav
+ffmpeg -i tmp.wav -af volumedetect -f null -            # mean_volume を読む
+ffmpeg -i tmp.wav -af "volume=<-17.0 - mean>dB,alimiter=limit=0.8414:attack=5:release=60,\
+aformat=sample_fmts=fltp" -ac 1 -ar 44100 -c:a libmp3lame -b:a 192k <出力>.mp3
+```
+
 妨害の2つと 2026-08-14 追加の10件が ogg ではなく mp3 なのは提供された素材の形式
 そのままだから(単発音なので `band/` の BGM と同じくエンコーダ遅延の継ぎ目問題は
 起きない — 継ぎ目が問題になるのはループ素材だけ)。`reel-stop` / `reel-confirm` の2つは

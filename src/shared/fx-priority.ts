@@ -14,6 +14,12 @@
  * 走り(worker はルーレットでは凍結しない)、下位に回すと planBoostStart の期限切れ
  * で映像演出ごと消えるため、短尺の満タン系にだけ道を譲る位置をユーザーが選んだ。
  *
+ * 序列と**遮蔽(shared/fx-occlusion.ts)は別軸**。序列は「いつ出すか」、遮蔽は
+ * 「被さっている幕の下で何を出すか」。満タン系②③は舞台キューを迂回して常時実行
+ * (fx-strike-route.ts)なので、カットイン中は序列ではなく遮蔽で見え方が決まる —
+ * ルーレットの暗幕越しなら全部見せ、不透明カットインの下では音だけにする
+ * (2026-08-17 ユーザー決定)。
+ *
  * 「優先」は**待ち行列の取り出し順の並び替えのみ** — 再生中の演出は中断しない
  * (唯一の例外はルーレット連鎖のリール境界の譲り合い = shouldYieldSpinChain)。
  * achieved(CLEAR)は序列外の「並走再生」(開始スロットを消費しない)なので
@@ -92,8 +98,12 @@ export const BANNER_PRIORITY = {
   'stock-float': 'other',
   'roulette-result': 'other',
   'roulette-rest': 'other',
-  'boost-announce': 'other',
-  'boost-result': 'other',
+  // フィーバーのバナーは effect 側の分類(fxClassForEffect の boost-start /
+  // boost-end → 'boost' = ④)と揃える。⑧のままだと bannerWinsByRank が厳密 <
+  // 判定なので、band(⑦)のドレインが1件でもキューに居る限り**構造的に永久に
+  // 勝てず**、フィーバー結果が出ないまま順番待ちの底に沈む(2026-08-17 修正)。
+  'boost-announce': 'boost',
+  'boost-result': 'boost',
 } as const satisfies Record<FxBannerKind, FxPriorityClass>;
 
 export function bannerRank(kind: FxBannerKind): number {

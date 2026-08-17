@@ -1,21 +1,25 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FLOAT_ABORT_MS } from '@shared/challenge';
+import { FLOAT_ABORT_MS, rouletteRevealMs, rouletteSpinMs } from '@shared/challenge';
 import {
   BANNER_GIFT_CARD_MS,
   BANNER_LATCH_MAX_AHEAD_MS,
   BANNER_MS,
   BANNER_QUEUE_MAX,
   BANNER_STARVE_MS,
+  BOOST_GAP_LATCH_MAX_AHEAD_MS,
   DRAIN_STARVE_MS,
   STAGE_GAP_BANNER_MS,
+  STAGE_GAP_BOOST_RESULT_MS,
   STAGE_GAP_CUTIN_MS,
   bannerDurationMs,
   bannerEndAtFor,
   bannerWinsByRank,
   bestQueuedRank,
+  boostGapUntilFor,
   clampBannerEndAt,
+  clampBoostGapUntil,
   clampStarveServedAt,
   enqueueBanner,
   pickStageNext,
@@ -62,6 +66,16 @@ describe('バナー尺と monitor.css の同期', () => {
     // ラッチが切れたのにバナーがまだ画面に残っている、が起きない不等式。
     // 間合いを伸ばしたらここが落ちて気づく。
     expect(FLOAT_ABORT_MS).toBeGreaterThanOrEqual(BANNER_GIFT_CARD_MS + STAGE_GAP_CUTIN_MS);
+  });
+
+  it('ルーレット短縮スピンの1周期はバナー尺を下回らない', () => {
+    // 確定バナーは finishRoulette が**無条件 immediate** で出し、バナーは単枠置換
+    // (showBannerNow の setFloats([1枚]))なので、次の確定が来た瞬間に前の ±N は
+    // アニメーション途中でも DOM ごと消える。「スピン + 確定見せ」がバナー尺を
+    // 下回ると、連打16本目以降と合算 effect(coalesced >= 2)の2本目以降で**毎回**
+    // 浮上しきる前に切られる(旧 900+450=1350ms = floatup の 84% 地点)。
+    // 下げるならバナー尺(BANNER_MS)ごと下げること。
+    expect(rouletteSpinMs('fast') + rouletteRevealMs('fast')).toBeGreaterThanOrEqual(BANNER_MS);
   });
 
   it('間合いはバナー間 ≦ カットイン間', () => {
@@ -428,6 +442,28 @@ describe('takeNextBanner / bestQueuedRank / enqueueBanner のランク対応', (
 describe('MonitorView のソース不変条件(レンダラのテスト環境が無いための機械的な担保)', () => {
   const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
 
+  it('ラッチの読み取りは全部クランプを通る(素の bannerEndAt を読むと全死する)', () => {
+    // 時計の後方ステップ(NTP 巻き戻し・サスペンド復帰)でラッチが未来に固着すると、
+    // クランプ無しの読み手だけが「永久に待ち」を返す。pushFloat の free 判定は
+    // それが起きると**バナーが1枚も即時表示されない**側へ倒れていた。
+    // 素の stageWaitMs を呼んでよいのは stageWaitFor と flushPendingFloat の
+    // 2箇所だけで、どちらも引数に clampBannerEndAt( を挟んでいること。
+    const calls = [...SRC.matchAll(/stageWaitMs\(([^;]*?)\)/g)].map((m) => m[1]!);
+    expect(calls.length).toBe(2);
+    for (const args of calls) expect(args).toContain('clampBannerEndAt(');
+  });
+
+  it('CLEAR のリザルト画面は演出の持ち越し(pendingAchieved)を追い越さない', () => {
+    // 追い越すと「黒画面が先・CLEAR のフラッシュが後」になる(フィーバー清算は
+    // 3.3 秒かかるので base が必ず古く、fxHoldBusy 解除の瞬間に wait===0 だった)。
+    const at = SRC.indexOf('if (!hasResult) {');
+    expect(at, 'リザルト切り替えの effect が見つからない').toBeGreaterThanOrEqual(0);
+    const body = SRC.slice(at, at + 2000);
+    expect(body).toContain('pendingAchieved.current !== null');
+    // 永久に出ない側へ倒れないよう、待ちには必ず上限を置く。
+    expect(body).toContain('RESULT_PENDING_ABORT_MS');
+  });
+
   it('舞台の占有は時刻ラッチで持つ(boolean 固着 = モニターの全死)', () => {
     expect(SRC).toContain('bannerEndAt');
     // ラッチを true/false のフラグに退化させていない。
@@ -459,6 +495,30 @@ describe('MonitorView のソース不変条件(レンダラのテスト環境が
   it('バナーは据え置き(heldValue)の持ち主にならない', () => {
     const fn = SRC.match(/function showBannerNow\([\s\S]*?\n {2}\}/)?.[0];
     expect(fn!).not.toContain('setHeldValue');
+  });
+
+  it('演出開始の間合いは stageWaitFor 経由で読む(直読みするとブースト後の2秒が抜ける)', () => {
+    // 'cutin' の待ちは stageBusy / applyStageHold / pumpStage の3箇所が読む。
+    // どれか1つでも stageWaitMs を直読みすると、そこだけ間合いが 500ms に戻り、
+    // 「据え置きが先に解けて数字が worker 値まで進み、演出開始で巻き戻る」
+    // (MonitorView の値変化 effect のコメントにある実測症状)へ落ちる。
+    expect(SRC).not.toMatch(/stageWaitMs\([^)]*'cutin'/);
+    expect([...SRC.matchAll(/stageWaitFor\('cutin'/g)].length).toBe(2); // stageBusy / applyStageHold
+    const fn = SRC.match(/function pumpStage\([\s\S]*?\n {2}\}/)?.[0];
+    expect(fn, 'pumpStage が見つからない').toBeDefined();
+    expect(fn!).toContain("stageWaitFor(pick === 'drain' ? 'cutin' : 'banner'");
+  });
+
+  it('カットイン再生中はドレイン飢餓弁の時計を止める(止めないとバナーが全死する)', () => {
+    // 再生中の時間を「待たされた時間」に算入すると、カットイン尺 >= DRAIN_STARVE_MS
+    // のたびに終了時点で弁が開いており、pickStageNext の1段目が毎回 'drain' を
+    // 返してバナーが1枚も出なくなる(実配信の diag.log で順番待ち 60 件を実測)。
+    const fn = SRC.match(/function pumpStage\([\s\S]*?\n {2}\}/)?.[0];
+    expect(fn, 'pumpStage が見つからない').toBeDefined();
+    const holdAt = fn!.indexOf('if (anyCutinHold()) {');
+    expect(holdAt).toBeGreaterThanOrEqual(0);
+    const branch = fn!.slice(holdAt, holdAt + 1200);
+    expect(branch).toMatch(/drainWaitingSinceMs\.current = Date\.now\(\)/);
   });
 
   it('飢餓弁の発火記録は3箇所だけが書く(スタンプ / clamp / idle リセット)', () => {
@@ -525,5 +585,38 @@ describe('clampBannerEndAt — 時計の後方ステップからの回復', () =
 
   it('上限は最長バナー尺と同値(これより短いと正常なギフトカードを切り詰める)', () => {
     expect(BANNER_LATCH_MAX_AHEAD_MS).toBe(BANNER_GIFT_CARD_MS);
+  });
+});
+
+describe('ブースト結果バナーだけの追加間合い', () => {
+  const NOW = 1_700_000_000_000;
+
+  it('起点はバナーが消える時刻(= 消えてから2秒)', () => {
+    const bannerEndAt = NOW + BANNER_MS;
+    expect(boostGapUntilFor(bannerEndAt)).toBe(bannerEndAt + STAGE_GAP_BOOST_RESULT_MS);
+    // 実効: 浮上 1.6 秒 + 2 秒 = 3.6 秒後にようやく次の演出。
+    expect(boostGapUntilFor(bannerEndAt) - NOW).toBe(BANNER_MS + STAGE_GAP_BOOST_RESULT_MS);
+  });
+
+  it('共通の間合いより必ず長い(でないと足す意味がない)', () => {
+    expect(STAGE_GAP_BOOST_RESULT_MS).toBeGreaterThan(STAGE_GAP_CUTIN_MS);
+  });
+
+  it('未設定(0 = 遥か過去)は待ちを作らない', () => {
+    expect(clampBoostGapUntil(0, NOW) - NOW).toBeLessThanOrEqual(0);
+  });
+
+  it('後方ステップで未来に固着したラッチを上限まで引き戻す(短縮方向のみ)', () => {
+    const alive = boostGapUntilFor(NOW + BANNER_MS);
+    expect(clampBoostGapUntil(alive, NOW)).toBe(alive); // 正常運転では恒等
+    const stuck = NOW + 600_000; // 時計が10分巻き戻った直後の見え方
+    expect(clampBoostGapUntil(stuck, NOW)).toBe(NOW + BOOST_GAP_LATCH_MAX_AHEAD_MS);
+  });
+
+  it('上限は「最長バナー尺 + 追加間合い」(正当な待ちを切り詰めない)', () => {
+    expect(BOOST_GAP_LATCH_MAX_AHEAD_MS).toBe(BANNER_GIFT_CARD_MS + STAGE_GAP_BOOST_RESULT_MS);
+    expect(BOOST_GAP_LATCH_MAX_AHEAD_MS).toBeGreaterThanOrEqual(
+      boostGapUntilFor(NOW + BANNER_GIFT_CARD_MS) - NOW
+    );
   });
 });

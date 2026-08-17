@@ -60,13 +60,25 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16)',
     for (const k of FX_BANNER_KINDS) expect(FX_PRIORITY_ORDER).toContain(BANNER_PRIORITY[k]);
   });
 
-  it('ギフトルーレットは「その他」・バナーはフォロー/お助け以外すべて「その他」', () => {
+  it('ギフトルーレットは「その他」・バナーは由来のある3種以外すべて「その他」', () => {
     expect(DRAIN_PRIORITY.roulette).toBe('other');
     expect(BANNER_PRIORITY.follow).toBe('follow');
     expect(BANNER_PRIORITY.helper).toBe('helper');
+    // フィーバーのバナーは effect 側(fxClassForEffect の boost-start / boost-end)と
+    // 同じ④。⑧のままだと band(⑦)のドレインに bannerWinsByRank(厳密 <)で
+    // **構造的に永久に負け**、結果バナーが順番待ちの底に沈む(2026-08-17 修正)。
+    expect(BANNER_PRIORITY['boost-announce']).toBe('boost');
+    expect(BANNER_PRIORITY['boost-result']).toBe('boost');
+    const named = new Set(['follow', 'helper', 'boost-announce', 'boost-result']);
     for (const k of FX_BANNER_KINDS) {
-      if (k !== 'follow' && k !== 'helper') expect(BANNER_PRIORITY[k]).toBe('other');
+      if (!named.has(k)) expect(BANNER_PRIORITY[k]).toBe('other');
     }
+  });
+
+  it('フィーバーのバナーは band / ギフトルーレットのドレインに勝てる', () => {
+    // 「勝てない」= 渋滞中にフィーバー結果が一度も出ない、という実害の回帰検知。
+    expect(bannerRank('boost-result')).toBeLessThan(fxRank(DRAIN_PRIORITY.band));
+    expect(bannerRank('boost-result')).toBeLessThan(fxRank(DRAIN_PRIORITY.roulette));
   });
 });
 

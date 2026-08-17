@@ -1316,6 +1316,23 @@ body {
 
 /* ── 演出レイヤ(ステージ内に重ねる) ─────────────────────────────────── */
 
+/*
+ * この z-index:50 は、着弾(いいね満杯/ストック満杯)の見え方の前提になっている。
+ * 内側の .fx-canvas(粒子)・.flash・.mini は、.monitor-root 直下・z-index なしの
+ * .fx-clip-opaque(opacity .96 = ギフト/ストック/ブーストのカットイン)より
+ * **必ず手前**に描かれる。だから「ギフト中・ブースト再生中は音だけ聞こえる」
+ * (2026-08-17 ユーザー決定)は CSS では作れず、着弾側が
+ * shared/fx-occlusion.ts の plan で黙ることで成立している
+ * (MonitorView の impactStrikeVisuals / stockImpactVisuals)。
+ *
+ * 逆に .roulette-screen はこのレイヤの**中**にある半透明の暗幕(rgba(5,3,10,.8))
+ * なので、その下の .fx-clip / .fx-strike は約 20% 透けて「後ろで少し見える」。
+ * こちらは JS 側で何もしていない — 重なり順がそのまま仕様。
+ *
+ * この z-index を動かすと、着弾のコードは無傷のまま見え方だけが黙って壊れる。
+ * test/unit/fx-backdrop.spec.ts が z-index:50・クリップの z-index 不在・暗幕の α・
+ * JSX の並びの4点を見張っている。
+ */
 .fx-layer {
   position: absolute;
   inset: 0;
@@ -2121,10 +2138,10 @@ body {
  * 赤へ倒す — 数字だけ赤・枠は緑という読み違えを作らない。
  */
 .float.banner-helper {
-  --fl-lamp: #7dffbf;
-  --fl-glow: rgba(74, 217, 145, 0.5);
-  --fl-bg-1: rgba(14, 66, 42, 0.96);
-  --fl-bg-2: rgba(4, 22, 14, 0.94);
+  --fl-lamp: var(--help-lamp);
+  --fl-glow: var(--help-glow);
+  --fl-bg-1: var(--help-bg-1);
+  --fl-bg-2: var(--help-bg-2);
 }
 
 .float.banner-helper.bad {
@@ -2568,7 +2585,15 @@ body {
  *                   再生の爆発と同時にスラム
  * .rl-p-lion        【超激アツ】ライオンの動画3本。全ステップが飛び掛かり
  *                   (クラウチ→スラム→キャッチ)
- * .rl-p-fast        キュー消化の短縮スピン。段は入れず単調に減速する(900ms に保持や
+ * .rl-p-heartme       【超激アツ】ハートミーの動画4本。ハート型ロケットが開いて撃ち出す。
+ *                   振り付けは phoenix と同一値の流用(rl-run-heartme は改名コピー)
+ * .rl-p-hearttouch    【超激アツ】ハートタッチの動画2本。2つのハートが触れ合って融合する。
+ *                   振り付けは unicorn と同一値の流用(rl-run-hearttouch は改名コピー)
+ * .rl-p-heartbday     【超激アツ】ハートの誕生日の動画3本。ハート型ケーキのロウソクが爆ぜる。
+ *                   振り付けは dragon と同一値の流用(rl-run-heartbday は改名コピー)
+ * .rl-p-heartbloom    【超激アツ】花咲ハートの動画3本。ハート型の花が満開に開く。
+ *                   振り付けは lion と同一値の流用(rl-run-heartbloom は改名コピー)
+ * .rl-p-fast        短縮スピン(16 本目以降・合算 effect)。段は入れず単調に減速する(900ms に保持や
  *                   フェイク停止は入らず、入れても「止まりかけて再加速」になるだけ)
  *
  * 段の位置は「当選の k 個手前」= calc(var(--rl-shift) + var(--rl-w) * k)。
@@ -2614,13 +2639,24 @@ body {
   align-items: center;
   justify-content: center;
   pointer-events: none;
-  /* 暗幕 + 金の後光(パチンコの大当たりスポット)。中央だけ薄く温める。 */
+  /*
+   * 暗幕 + 後光(パチンコの大当たりスポット)。中央だけ薄く温める。
+   * 後光の色は**パネルの親であるこの要素**の背景なので、.roulette-panel 側に
+   * 宣言した --rl-* では届かない — ここだけ独立して持つ(緑は .help で差し替え)。
+   * 暗幕そのもの(rgba(5,3,10,.8))は中立の黒のまま。
+   */
+  --rl-spot: rgba(140, 80, 12, 0.32);
   background:
-    radial-gradient(80% 60% at 50% 42%, rgba(140, 80, 12, 0.32), transparent 70%),
+    radial-gradient(80% 60% at 50% 42%, var(--rl-spot), transparent 70%),
     rgba(5, 3, 10, 0.8);
   animation: rl-screen-in 220ms ease-out both;
   /* パネル実幅 約486px(窓450 + パディング36)。縦 540: 486×1.06 ≈ 515px */
   --rl-fs: 1.06;
+}
+
+/* 減らす(応援)= お助けテーマ。後光も緑へ(パネル側の --rl-* は親に届かない)。 */
+.roulette-screen.help {
+  --rl-spot: rgba(16, 96, 60, 0.34);
 }
 
 .landscape .roulette-screen {
@@ -2741,6 +2777,45 @@ body {
  * リールの走行・着地の幾何はここでは持たない(rl-run-* が権威)。
  */
 .roulette-panel {
+  /*
+   * 【パチンコ役物カラーセット】.float の --fl-* と同じ規約 — variant
+   * (.help = 減らす/応援)は**この変数だけを差し替える**。幾何・尺・キーフレーム名は
+   * 一切触らない(test/unit/roulette-css.spec.ts が機械照合している)。
+   *
+   * **var() のフォールバックを消さないこと。** --rl-lamp は radial-gradient() の中で
+   * 使われており、未定義だと gradient が invalid になって background-image 宣言ごと
+   * 落ちる = ランプが無言で消える(2787 付近の既存コメントと同じ罠の色版)。
+   */
+  --rl-metal-hi: #fff7cf;
+  --rl-metal-1: #ffdf7e;
+  --rl-metal-2: #b8860f;
+  --rl-metal-3: #6e4a00;
+  --rl-bg-1: rgba(62, 42, 12, 0.97);
+  --rl-bg-2: rgba(20, 12, 4, 0.95);
+  --rl-sheen: rgba(255, 235, 190, 0.05);
+  --rl-lamp: #ffd75e;
+  --rl-glow: rgba(255, 190, 60, 0.45);
+  /* 電飾の色サイクル幅。360deg = 全色を一周(金は赤の隣なので自然)。 */
+  --rl-disco: 360deg;
+  --rl-halo-1: rgba(255, 224, 110, 0.85);
+  --rl-halo-2: rgba(255, 180, 40, 0.5);
+  --rl-hit-1: rgba(255, 224, 110, 0.85);
+  --rl-hit-2: rgba(255, 200, 70, 0.55);
+  --rl-head-glow: rgba(255, 200, 120, 0.3);
+  --rl-glass: rgba(12, 5, 18, 0.42);
+  --rl-rim-1: rgba(255, 214, 90, 0.35);
+  --rl-rim-2: rgba(255, 214, 90, 0.4);
+  --rl-streak-1: rgba(255, 220, 140, 0.15);
+  --rl-streak-2: rgba(255, 120, 200, 0.11);
+  --rl-flash: rgba(255, 240, 200, 0.35);
+  --rl-face-1: rgba(74, 54, 100, 0.95);
+  --rl-face-2: rgba(26, 16, 44, 0.95);
+  --rl-ink: rgba(255, 250, 235, 0.92);
+  --rl-ink-glow: rgba(255, 200, 120, 0.25);
+  --rl-rays: rgba(255, 232, 150, 0.32);
+  --rl-pointer: #ffe9a8;
+  --rl-pointer-1: rgba(255, 190, 60, 0.95);
+  --rl-pointer-2: rgba(255, 150, 30, 0.6);
   position: absolute;
   left: 50%;
   top: 14%;
@@ -2759,28 +2834,79 @@ body {
     repeating-conic-gradient(
         from -90deg at 50% 130%,
         transparent 0deg 9deg,
-        rgba(255, 235, 190, 0.05) 9deg 18deg
+        var(--rl-sheen) 9deg 18deg
       )
       padding-box,
-    linear-gradient(180deg, rgba(62, 42, 12, 0.97), rgba(20, 12, 4, 0.95)) padding-box,
+    linear-gradient(180deg, var(--rl-bg-1), var(--rl-bg-2)) padding-box,
     linear-gradient(
         168deg,
-        #fff7cf 0%,
-        #ffdf7e 16%,
-        #b8860f 38%,
-        #6e4a00 52%,
-        #b8860f 64%,
-        #ffdf7e 82%,
-        #fff7cf 100%
+        var(--rl-metal-hi) 0%,
+        var(--rl-metal-1) 16%,
+        var(--rl-metal-2) 38%,
+        var(--rl-metal-3) 52%,
+        var(--rl-metal-2) 64%,
+        var(--rl-metal-1) 82%,
+        var(--rl-metal-hi) 100%
       )
       border-box;
   box-shadow:
     inset 0 0 0 1px rgba(0, 0, 0, 0.6),
     inset 0 14px 22px -16px rgba(255, 255, 255, 0.4),
     inset 0 -12px 20px -14px rgba(0, 0, 0, 0.65),
-    0 0 34px rgba(255, 190, 60, 0.45),
+    0 0 34px var(--rl-glow),
     0 12px 34px rgba(0, 0, 0, 0.65);
   animation: rl-pop 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * 【減らす(応援)= お助けテーマ】variant は**変数の差し替えだけ**(基底の規約どおり)。
+ * 幾何・尺・キーフレーム名・cue マーカーには一切触っていないので、
+ * test/unit/roulette-css.spec.ts の機械照合はすべて無傷のまま。
+ *
+ * ランプ・グロー・盤面は tokens.css の --help-* を参照する = お助けバナーと同じ緑。
+ * 金メッキ4段は明度(L*)を金と揃えて色相だけ回してあるので、金と同じ立体感が出る。
+ *
+ * --rl-ink(マスの数字)を**緑にしないこと**。回転中に色が付くと当選が近づく瞬間に
+ * 答えが見えるという旧不具合の再来になる(基底の 4930 付近の解説を参照)。ほぼ白のまま。
+ */
+.roulette-panel.help {
+  --rl-metal-hi: #e8fff2;
+  --rl-metal-1: var(--help-lamp);
+  --rl-metal-2: #2fae72;
+  --rl-metal-3: #0e5836;
+  --rl-bg-1: var(--help-bg-1);
+  --rl-bg-2: var(--help-bg-2);
+  --rl-sheen: rgba(210, 255, 232, 0.05);
+  --rl-lamp: var(--help-lamp);
+  --rl-glow: var(--help-glow);
+  /*
+   * 電飾の色サイクルを 360deg(全色一周)から 60deg へ絞る。**意味の衝突を避けるため** —
+   * 一周させると周期の 1/3 が赤〜マゼンタになり、このアプリで赤が持つ「妨害/増加」の
+   * 意味と真っ向からぶつかる。加えて filter: hue-rotate() は sRGB の線形行列近似なので、
+   * G が飽和した緑を回すとチャンネルがクリップして灰色に沈む(OBS の低ビットレートで特に汚い)。
+   * 60deg なら緑⇄ティール/シャルトリューズの帯に収まり、多色感だけが残る。
+   */
+  --rl-disco: 60deg;
+  --rl-halo-1: rgba(125, 255, 191, 0.85);
+  --rl-halo-2: rgba(45, 200, 130, 0.5);
+  --rl-hit-1: rgba(125, 255, 191, 0.85);
+  --rl-hit-2: rgba(60, 210, 140, 0.55);
+  --rl-head-glow: rgba(125, 255, 191, 0.3);
+  --rl-glass: rgba(6, 20, 14, 0.42);
+  --rl-rim-1: rgba(125, 255, 191, 0.35);
+  --rl-rim-2: rgba(125, 255, 191, 0.4);
+  --rl-streak-1: rgba(150, 255, 205, 0.15);
+  /* 副条は**別色のまま**。金がピンクと2色でチラつくのが速度感の正体なので、緑側もシアンで2色。 */
+  --rl-streak-2: rgba(90, 230, 255, 0.11);
+  --rl-flash: rgba(210, 255, 232, 0.35);
+  --rl-face-1: rgba(30, 86, 62, 0.95);
+  --rl-face-2: rgba(8, 30, 21, 0.95);
+  --rl-ink: rgba(236, 255, 246, 0.92);
+  --rl-ink-glow: rgba(125, 255, 191, 0.25);
+  --rl-rays: rgba(150, 255, 205, 0.32);
+  --rl-pointer: #b4ffd8;
+  --rl-pointer-1: var(--green);
+  --rl-pointer-2: rgba(30, 180, 110, 0.6);
 }
 
 /*
@@ -2798,13 +2924,13 @@ body {
     radial-gradient(
       circle closest-side at 50% 50%,
       #fff 18%,
-      #ffd75e 45%,
+      var(--rl-lamp, #ffd75e) 45%,
       rgba(255, 255, 255, 0) 72%
     ),
     radial-gradient(
       circle closest-side at 50% 50%,
       #fff 18%,
-      #ffd75e 45%,
+      var(--rl-lamp, #ffd75e) 45%,
       rgba(255, 255, 255, 0) 72%
     );
   background-size: 26px 8px;
@@ -2814,7 +2940,7 @@ body {
     13px bottom;
   /* チェイス + 色サイクル(パチンコの多色電飾)。hue-rotate は基準の金色ごと
      回すので、drop-shadow を各キーフレームへ書かず1本の filter に同居させる。 */
-  filter: drop-shadow(0 0 4px #ffd75e);
+  filter: drop-shadow(0 0 4px var(--rl-lamp, #ffd75e));
   animation:
     rl-lamp-chase 800ms linear infinite,
     rl-lamp-disco 2.8s linear infinite;
@@ -2830,7 +2956,7 @@ body {
 
 @keyframes rl-lamp-disco {
   to {
-    filter: drop-shadow(0 0 4px #ffd75e) hue-rotate(360deg);
+    filter: drop-shadow(0 0 4px var(--rl-lamp, #ffd75e)) hue-rotate(var(--rl-disco, 360deg));
   }
 }
 
@@ -2851,8 +2977,8 @@ body {
   pointer-events: none;
   opacity: 0;
   box-shadow:
-    0 0 36px 6px rgba(255, 224, 110, 0.85),
-    0 0 90px 22px rgba(255, 180, 40, 0.5);
+    0 0 36px 6px var(--rl-halo-1),
+    0 0 90px 22px var(--rl-halo-2);
 }
 
 .roulette-panel.hit::after {
@@ -2889,7 +3015,7 @@ body {
   /* 打ち抜き文字風(.f-txt と同じ): 黒の落とし込み + 金ランプの照り返し */
   text-shadow:
     0 2px 0 rgba(0, 0, 0, 0.7),
-    0 0 12px rgba(255, 200, 120, 0.3);
+    0 0 12px var(--rl-head-glow);
   /* ギフト名の前置き(「ハートミー ○○がルーレット」)が入るぶん、窓幅まで許す。 */
   max-width: calc(var(--rl-w, 150px) * 3);
   overflow: hidden;
@@ -2929,12 +3055,12 @@ body {
   background: linear-gradient(
     180deg,
     rgba(0, 0, 0, 0.62),
-    rgba(12, 5, 18, 0.42) 30%,
-    rgba(12, 5, 18, 0.42) 70%,
+    var(--rl-glass) 30%,
+    var(--rl-glass) 70%,
     rgba(0, 0, 0, 0.66)
   );
   box-shadow:
-    inset 0 0 0 2px rgba(255, 214, 90, 0.35),
+    inset 0 0 0 2px var(--rl-rim-1),
     inset 0 0 0 3px rgba(0, 0, 0, 0.6),
     inset 0 14px 18px -10px rgba(0, 0, 0, 0.85),
     inset 0 -14px 18px -10px rgba(0, 0, 0, 0.85);
@@ -2990,9 +3116,9 @@ body {
   background: repeating-linear-gradient(
     100deg,
     transparent 0 34px,
-    rgba(255, 220, 140, 0.15) 34px 40px,
+    var(--rl-streak-1) 34px 40px,
     transparent 40px 58px,
-    rgba(255, 120, 200, 0.11) 58px 63px,
+    var(--rl-streak-2) 58px 63px,
     transparent 63px 88px
   );
   animation: rl-streak 620ms linear infinite;
@@ -3015,7 +3141,7 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.95), rgba(255, 240, 200, 0.35) 45%, transparent 75%);
+  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.95), var(--rl-flash) 45%, transparent 75%);
   animation: rl-win-flash 480ms ease-out both;
 }
 
@@ -3082,20 +3208,22 @@ body {
 .rl-p-jackback .roulette-reel {
   animation-name: rl-run-jackback;
 }
-.rl-p-dragon .roulette-reel {
-  animation-name: rl-run-dragon;
-}
-.rl-p-unicorn .roulette-reel {
-  animation-name: rl-run-unicorn;
-}
-.rl-p-whale .roulette-reel {
-  animation-name: rl-run-whale;
-}
-.rl-p-phoenix .roulette-reel {
-  animation-name: rl-run-phoenix;
-}
-.rl-p-lion .roulette-reel {
-  animation-name: rl-run-lion;
+
+/*
+ * 超激アツ(ultra)は9パターンとも同じ振り付け = rl-run-ultra 1本を共有する。
+ * 違うのは流す動画の絵だけ(assets/fx/rl/<pattern>-<n>.mp4)。パターンを増やすときは
+ * ここのセレクタ列と shared/roulette-fx.ts の ultraTiming() の両方に足すこと。
+ */
+.rl-p-dragon .roulette-reel,
+.rl-p-unicorn .roulette-reel,
+.rl-p-whale .roulette-reel,
+.rl-p-phoenix .roulette-reel,
+.rl-p-lion .roulette-reel,
+.rl-p-heartme .roulette-reel,
+.rl-p-hearttouch .roulette-reel,
+.rl-p-heartbday .roulette-reel,
+.rl-p-heartbloom .roulette-reel {
+  animation-name: rl-run-ultra;
 }
 
 /* 短縮スピン(キュー消化)。段は入れず、末速 0 まで単調に減速するだけ。 */
@@ -3965,267 +4093,173 @@ body {
 }
 
 /*
- * ── 超激アツ(ultra・24秒・全画面動画×マス移動) ─────────────────────────────
+ * ── 超激アツ(ultra・カウントダウン式の激熱・全画面動画×マス移動) ────────────
  *
- * 共通構造: 0→24% で走り込み(run 88+ジッタ → k=4。初速は他段位と同等)、以降は
- * 「全画面動画(cue:clip = ROULETTE_PATTERN_TIMING.clips[].at)→ 動画終端の一撃
- * (out)→ その直後にリールが1マス叩き込まれる(cue:step / cue:kick)」の繰り返し。
+ * **9パターンとも同じ振り付け**なのでキーフレームは rl-run-ultra の1本だけ。
+ * パターンごとに違うのは流す動画の絵(assets/fx/rl/<pattern>-<n>.mp4)だけで、
+ * 尺・拍・動画枠は shared/challenge.ts の ROULETTE_ULTRA_BEATS が唯一の権威。
+ * ここの百分率はその表から起こした値で、roulette-css.spec が cue マーカーで
+ * 機械照合する — **片方だけ動かすとテストが落ちる。**
+ *
+ * 流れ(百分率は spinMs = 30,897ms に対する割合):
+ *   0 → 18.64%   走り込み。ここは他段位と同じ初速で入り、末尾は**crawl まで落とす**
+ *                 (落とし切らないと次の再加速が「速くなった」と読めない)。
+ *   18.64 → 28.35% ★再加速。3秒かけて速度が走り込み末速の約2倍まで上がり、
+ *                 制動して当選の5マス手前(k=5)で止まる。**走行距離は増やさない** —
+ *                 走り込み側を緩めて距離を残し、それをここで取り返す配分にしてある
+ *                 (増やすと盤面が伸びて OBS でコマ落ちする。roulette-fx.ts の RUN_BASE)。
+ *   28.35%       cue:don — 効果音①と同時に出目の表示が ×2 へ膨らむ(数字は JS 側)。
+ *   31.27%       cue:quiet + cue:clip — 動画1。以降は
+ *                 「動画 → 終端の一撃 → 溶暗(480ms)→ マス移動 → 間 → ドン → 間」の反復。
+ *   マス移動は5回(k=5→4→3→2→1→当選)。前半3回が cue:step、4回目が cue:near
+ *   (当選の1つ手前へ入る = 他段位と同じ「止まりそう」)、5回目が cue:kick(着地)。
+ *   93.53 → 100% 完全ホールド(2秒の溜め)。終端で JS が倍率を素へ戻して確定する。
+ *
  * 動画が画面を覆っている間リールは同値ホールド — マス移動は必ず**見える隙間**で
  * 起こす(動画の一撃がリールを押した、という因果を作るのが眼目)。
- * k=3 以下への最初のステップは 48% 以降(veil 規約)— clip1 の out をその手前に
- * 置いて調整してある。cue:quiet は clip1 の at と同時刻(動画が来たら回転音を閉じる)。
- * 最初のウィンドウ開始(24〜30%)は veil 閉鎖(46%)前だが、動画そのものが
- * 全画面の目隠しなので読み取りの心配はない(ホールド中の中央は k=4 = 当選の
- * 4つ手前で、ジッタにより無情報)。
+ * 目隠し(rl-veil)は 46% で閉じ切るが、それ以前の中央は k=5 = 当選の5つ手前で、
+ * 走行ジッタにより無情報。動画そのものも全画面の目隠しとして効いている。
  */
-
-/* dragon — 黄金龍。尾撃ち→火炎→大火炎の3サイクル、二段キック終い。 */
-@keyframes rl-run-dragon {
+@keyframes rl-run-ultra {
   0% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
     animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
   }
+  /* 発進の予備動作。他段位と同じ「一度引いてから出る」入り。 */
   3% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
-    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
+    animation-timing-function: cubic-bezier(0.15, 0.62, 0.34, 0.94);
   }
-  24% {
+  /*
+   * 走り込み終了 = k=9。**末速をここまで落とし切るのが肝**(出口の傾きは上の
+   * ベジェの (1-y2)/(1-x2) ≒ 0.09)。次の区間が同じ距離感で加速するので、
+   * 「止まりかけたのに速くなった」が成立する。速度比は控制点で調整する。
+   */
+  18.6425% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 9));
+    animation-timing-function: cubic-bezier(0.35, 0.28, 0.62, 1);
+  }
+  /*
+   * cue:don — 再加速の終わり。効果音①(roulette-hype)と同時に出目が ×2 へ。
+   * ここから先は当選の5マス手前でホールドし、動画とマス移動の反復に入る。
+   */
+  28.3523% {
+    /* cue:don */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5));
+    animation-timing-function: linear;
+  }
+  /* 動画1。回転ループ音もここで閉じる(cue:quiet)。 */
+  31.2652% {
+    /* cue:quiet */
+    /* cue:clip */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5));
+    animation-timing-function: linear;
+  }
+  /* 動画1の一撃 → 溶暗が明けて1マス叩き込み(k5→k4)。行き過ぎ 0.08 → 据え。 */
+  45.3604% {
+    /* cue:step */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5));
+    animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
+  }
+  46.1% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3.92));
+    animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
+  }
+  46.9139% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
     animation-timing-function: linear;
   }
-  27% { /* cue:quiet */ /* cue:clip */
+  /* ドン ×3。数字だけが動く(リールはホールド)。 */
+  48.5322% {
+    /* cue:don */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
     animation-timing-function: linear;
   }
-  49.5% { /* cue:step */
-    /* 動画1(尾撃ち)の一撃直後。1マス叩き込み(行き過ぎ 0.08 → 据え)。 */
+  50.1505% {
+    /* cue:clip */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
+    animation-timing-function: linear;
+  }
+  61.4137% {
+    /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
     animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
   }
-  50.6% {
+  62.15% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2.92));
     animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
-  51.5% {
+  62.9673% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: linear;
   }
-  53% { /* cue:clip */
+  /* ドン ×4。 */
+  64.5856% {
+    /* cue:don */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: linear;
   }
-  69.5% { /* cue:step */
+  66.2039% {
+    /* cue:clip */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
+    animation-timing-function: linear;
+  }
+  75.4442% {
+    /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
   }
-  70.6% {
+  76.18% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.92));
     animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
-  71.5% {
+  76.9977% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
   }
-  73% { /* cue:clip */
+  /* ドン ×5。最後の倍率。 */
+  78.6161% {
+    /* cue:don */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
   }
-  84.6% {
-    /* 動画3のフェード中に k=1 へ寄り始める(到着 = cue:near)。 */
+  80.2343% {
+    /* cue:clip */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.4, 1);
-  }
-  85.5% { /* cue:near */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
     animation-timing-function: linear;
   }
-  92% { /* cue:kick */
-    /* 溜め→キック1。当選を 0.1 行き過ぎて弾かれる。 */
+  /*
+   * 動画4の一撃 → 当選の1つ手前へ(cue:near)。ここから先は他段位の終盤と同じ
+   * 「止まりそう → 締めの一撃」で、音も既存スロットがそのまま乗る。
+   */
+  88.8015% {
+    /* cue:near */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
+    animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
+  }
+  89.55% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.94));
+    animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
+  }
+  90.355% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
     animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
+  }
+  /* 締めの一撃。当選を 0.08 行き過ぎてから叩き直して着地する。 */
+  91.9733% {
+    /* cue:kick */
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
+    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
   }
   92.75% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.07));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
-  }
-  94% {
-    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.1));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
-  }
-  95.5% { /* cue:kick */
-    /* 跳ね返り→キック2で叩き直して着地。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.14));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
-  }
-  96.8% {
-    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.04));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
-  }
-  98.2% {
-    transform: translateX(var(--rl-shift));
-    animation-timing-function: linear;
-  }
-  100% {
-    transform: translateX(var(--rl-shift));
-  }
-}
-
-/* unicorn — ユニコーン。角の一撃で2マス押し×1、長尺2サイクル、シーソー終い。 */
-@keyframes rl-run-unicorn {
-  0% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
-  }
-  3% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
-    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
-  }
-  24% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
-  }
-  27% { /* cue:quiet */ /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
-  }
-  50% { /* cue:step */
-    /* 角の一撃1段目(k4→3)。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
-  }
-  51.2% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: linear;
-  }
-  53% { /* cue:step */
-    /* 続けて2段目(k3→2)— 角の一撃は2マス押し。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
-  }
-  54.2% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.94));
-    animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
-  }
-  55.2% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  56% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  78.2% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.4, 1);
-  }
-  79% { /* cue:near */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: linear;
-  }
-  84.5% {
-    /* 溜めのあと、当選との境界でシーソー。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: cubic-bezier(0.35, 0, 0.45, 1);
-  }
-  86% { /* cue:step */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.45));
-    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
-  }
-  89.5% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.62));
-    animation-timing-function: cubic-bezier(0.42, 0, 0.58, 1);
-  }
-  93% { /* cue:step */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.3));
-    animation-timing-function: cubic-bezier(0.35, 0.6, 0.4, 1);
-  }
-  95.5% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.12));
-    animation-timing-function: cubic-bezier(0.3, 0.7, 0.35, 1);
-  }
-  98% {
-    transform: translateX(var(--rl-shift));
-    animation-timing-function: linear;
-  }
-  100% {
-    transform: translateX(var(--rl-shift));
-  }
-}
-
-/* whale — クジラ。尾撃ちのゆったり4サイクル、ブリーチ(飛沫スラム)終い。 */
-@keyframes rl-run-whale {
-  0% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
-  }
-  3% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
-    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
-  }
-  24% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
-  }
-  26.5% { /* cue:quiet */ /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
-  }
-  49.3% { /* cue:step */
-    /* 尾撃ち1。クジラは重量級 — 行き過ぎ無しのぬるっと1マス。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: cubic-bezier(0.25, 0.7, 0.35, 1);
-  }
-  51% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: linear;
-  }
-  52% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: linear;
-  }
-  66.5% { /* cue:step */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: cubic-bezier(0.25, 0.7, 0.35, 1);
-  }
-  68.2% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  69.5% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  80.7% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.4, 1);
-  }
-  81.5% { /* cue:near */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: linear;
-  }
-  83.5% { /* cue:clip */
-    /* k=1 のまま最後の動画(ブリーチ)が画面を覆う — 着地は見せない。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: linear;
-  }
-  94.5% { /* cue:kick */
-    /* ブリーチの飛沫と同時にスラム。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
-  }
-  95.3% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.06));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
-  }
-  96.6% {
     transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.08));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
+    animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
-  98% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
-  }
-  99% {
+  /*
+   * 着地。ここから 100% までは完全ホールド(ROULETTE_ULTRA_BEATS.tailMs = 2秒)。
+   * **無音で引っぱる溜め** — 終端で JS が倍率を素へ戻し、戻りボイスと確定発光が来る。
+   */
+  93.5269% {
     transform: translateX(var(--rl-shift));
     animation-timing-function: linear;
   }
@@ -4234,186 +4268,136 @@ body {
   }
 }
 
-/* phoenix — フェニックス。羽ばたきの衝撃波でテンポ速く刻む4サイクル、再生の爆発終い。 */
-@keyframes rl-run-phoenix {
+/*
+ * ── 超激アツの倍率表示(出目が ×2 → ×5 に膨らんで見える間だけ) ───────────────
+ *
+ * 素のスピンでは付かない(mult===1 のとき RouletteFx がクラスを出さない)ので、
+ * 既存パターンの見た目は一切変わらない。
+ *
+ * **色は方向テーマの中で段階的に熱くする。** 増やす(妨害)は金→橙→朱→白熱、
+ * 減らす(応援)はミント→若草→シアン→白熱。全マスに一律で掛かるので当選は漏れず、
+ * 確定の瞬間(finish で mult=1)に素の白へ戻る — だから「--rl-ink を方向色に
+ * 染めない」という基底の規約(.roulette-panel.help の解説)とも衝突しない。
+ * **ここで赤や緑の"当選色"に寄せないこと** — .rl-block.win と混ざると、
+ * 膨らんでいる最中に当たりが出たように見える。
+ */
+.rl-window.rl-x2 {
+  --rl-mult-ink: #ffe08a;
+  --rl-mult-glow: rgba(255, 190, 60, 0.5);
+}
+.rl-window.rl-x3 {
+  --rl-mult-ink: #ffc24a;
+  --rl-mult-glow: rgba(255, 150, 30, 0.6);
+}
+.rl-window.rl-x4 {
+  --rl-mult-ink: #ffa03a;
+  --rl-mult-glow: rgba(255, 110, 20, 0.7);
+}
+/*
+ * ×5 は最高潮。**金〜橙の続きで白へ抜かない** — 素の数字(ほぼ白)と見分けが付かず、
+ * 一番熱い瞬間が「もう確定した」ように見える(実機の見本で踏んだ)。かといって
+ * 赤へは寄せられない — .rl-block.win の「増やす」当選色が赤なので、膨らんでいる
+ * 最中に当たったように見える。**赤でも白でもないマゼンタ**が唯一空いている席。
+ */
+.rl-window.rl-x5 {
+  --rl-mult-ink: #ff6ec0;
+  --rl-mult-glow: rgba(255, 60, 170, 0.9);
+}
+/* 減らす(応援)は緑の帯の中で熱くする — 金〜朱は「増やす」の意味を持つので使わない。 */
+.roulette-panel.help .rl-window.rl-x2 {
+  --rl-mult-ink: #c9ffe4;
+  --rl-mult-glow: rgba(125, 255, 191, 0.5);
+}
+.roulette-panel.help .rl-window.rl-x3 {
+  --rl-mult-ink: #8affd8;
+  --rl-mult-glow: rgba(90, 255, 190, 0.6);
+}
+/* 段が上がるほど**緑から離してシアンへ**振る — 「減らす」の当選色が緑なので、
+   濃い緑へ寄せると当たりに見える。上の rl-x5 の解説と同じ理由。 */
+.roulette-panel.help .rl-window.rl-x4 {
+  --rl-mult-ink: #4fe0ff;
+  --rl-mult-glow: rgba(60, 210, 255, 0.75);
+}
+.roulette-panel.help .rl-window.rl-x5 {
+  --rl-mult-ink: #22c4ff;
+  --rl-mult-glow: rgba(20, 180, 255, 0.9);
+}
+
+/*
+ * 倍率バッジ「×2倍」。**窓の右上**に置く — 中央のマス(読ませたい数字)を隠さない
+ * 位置で、かつ rl-veil・ポインタより後(DOM 順)なので終盤の目隠しの上に出る。
+ * 出現は毎回 key で作り直すので、入りのキーフレームがそのまま再生される。
+ * 入りも消えも @keyframes に統一(transition は使わない — .rl-clip と同じ規約)。
+ */
+.rl-mult {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  z-index: 3;
+  padding: 1px 10px 2px;
+  border-radius: 999px;
+  font-family: var(--num);
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: #1a0d02;
+  background: linear-gradient(180deg, #fff6dc, var(--rl-mult-ink));
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.55),
+    0 0 22px var(--rl-mult-glow),
+    0 6px 14px rgba(0, 0, 0, 0.5);
+  animation: rl-mult-pop 380ms cubic-bezier(0.16, 1.6, 0.36, 1) both;
+}
+
+@keyframes rl-mult-pop {
   0% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+    opacity: 0;
+    transform: scale(0.4) rotate(-12deg);
   }
-  3% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
-    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
-  }
-  24% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
-  }
-  30% { /* cue:quiet */ /* cue:clip */
-    /* 走り込みのあと 1.4 秒リールを見せてから動画1 — 「来るぞ」の間。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
-  }
-  48.5% { /* cue:step */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
-  }
-  49.6% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2.9));
-    animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
-  }
-  50.5% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: linear;
-  }
-  51.5% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: linear;
-  }
-  66% { /* cue:step */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
-  }
-  67.1% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.9));
-    animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
-  }
-  68% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  69% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  80.7% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.4, 1);
-  }
-  81.5% { /* cue:near */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: linear;
-  }
-  83% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: linear;
-  }
-  95% { /* cue:kick */
-    /* 再生の爆発と同時にスラム。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
-  }
-  95.75% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.08));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
-  }
-  97% {
-    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.06));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
-  }
-  98.2% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.02));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
-  }
-  99.2% {
-    transform: translateX(var(--rl-shift));
-    animation-timing-function: linear;
+  55% {
+    opacity: 1;
+    transform: scale(1.18) rotate(3deg);
   }
   100% {
-    transform: translateX(var(--rl-shift));
+    opacity: 1;
+    transform: scale(1) rotate(-4deg);
   }
 }
 
-/* lion — ライオン。全ステップが飛び掛かり(クラウチ→スラム→キャッチ)。 */
-@keyframes rl-run-lion {
+/*
+ * ドン — 超激アツで出目の表示倍率が上がる瞬間(と、最後に元へ戻る瞬間)の一撃。
+ * 7セグの punch-strike と同じ「縦に潰れて戻る」性格を窓そのものに当てる:
+ * 数字が主役の演出なので、リールを動かさずに**箱ごと殴られた**と見せる。
+ *
+ * 付け外しは RouletteFx の classList リプレイ(remove → リフロー → add)。
+ * className に混ぜると、連続するドンで React が同じ文字列を書き戻すだけになり
+ * アニメーションが再スタートしない(MonitorView の punch-* で潰した回帰と同型)。
+ * ultra には rl-cam-* が付かないので animation プロパティの取り合いは起きない。
+ * 入りも消えも @keyframes に統一し、0%/100% を明示する(.rl-clip と同じ規約 —
+ * transition 併用と暗黙キーフレームはフェードを殺す)。
+ */
+.rl-window.rl-don {
+  animation: rl-don 420ms cubic-bezier(0.16, 1.6, 0.36, 1);
+}
+
+@keyframes rl-don {
   0% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * var(--rl-run)));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 1);
+    transform: scale(1.16, 0.87);
   }
-  3% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * (var(--rl-run) + 0.06)));
-    animation-timing-function: cubic-bezier(0.06, 0.68, 0.18, 1);
+  22% {
+    transform: scale(0.94, 1.09);
   }
-  24% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
+  46% {
+    transform: scale(1.05, 0.97);
   }
-  27% { /* cue:quiet */ /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: linear;
-  }
-  49% { /* cue:kick */
-    /* 爪の一撃直後。クラウチ(後退 0.10)→ 1マス先を通り過ぎてキャッチ。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
-  }
-  49.9% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4.1));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
-  }
-  51% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2.88));
-    animation-timing-function: cubic-bezier(0.2, 0.9, 0.3, 1);
-  }
-  52% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: linear;
-  }
-  53% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: linear;
-  }
-  69.5% { /* cue:kick */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
-  }
-  70.4% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3.1));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
-  }
-  71.5% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.88));
-    animation-timing-function: cubic-bezier(0.2, 0.9, 0.3, 1);
-  }
-  72.5% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  74% { /* cue:clip */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: linear;
-  }
-  85.8% {
-    /* 動画3のフェード中ににじり寄り開始 — 獲物を見据える間。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.4, 1);
-  }
-  86.5% { /* cue:near */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: linear;
-  }
-  93.5% { /* cue:kick */
-    /* 深いクラウチ(0.12)→ 飛び掛かりで当選へ。 */
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
-    animation-timing-function: cubic-bezier(0.3, 0, 0.35, 1);
-  }
-  94.6% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.12));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
-  }
-  95.9% {
-    transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.12));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
-  }
-  97.2% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.04));
-    animation-timing-function: cubic-bezier(0.33, 0, 0.2, 1);
-  }
-  98.4% {
-    transform: translateX(var(--rl-shift));
-    animation-timing-function: linear;
+  72% {
+    transform: scale(0.99, 1.01);
   }
   100% {
-    transform: translateX(var(--rl-shift));
+    transform: scale(1, 1);
   }
 }
 
@@ -4770,6 +4754,15 @@ body {
 /* ステップ幅 = ブロック幅 + 左右マージン = var(--rl-w)。 */
 .roulette-reel .rl-block {
   flex: 0 0 calc(var(--rl-w) - var(--rl-gap) * 2);
+  /*
+   * 【min-width: 0 を消さないこと】flex アイテムの既定 min-width:auto は
+   * **中身が flex-basis を押し広げる**。桁の多い出目(5桁以上。応援の行は符号が
+   * 付くぶん更に早く到達する)でブロックが太ると、実ステップ幅が var(--rl-w) から
+   * ズレて**当選が窓の中央に着地しなくなる** — 走行距離も --rl-shift も 150px 前提の
+   * 代数(shared/roulette-fx.ts が権威)なので、見た目ではなく正しさの問題になる。
+   * basis を権威にして、入り切らない字は箱の外へはみ出させる(nowrap のまま)。
+   */
+  min-width: 0;
   height: 104px;
   margin: 0 var(--rl-gap);
   box-sizing: border-box;
@@ -4780,21 +4773,33 @@ body {
   /* ドラムの絵柄コマ: 深紫の盤面 + 上面のガラス写り込み + 金の細リム */
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent 42%),
-    linear-gradient(180deg, rgba(74, 54, 100, 0.95), rgba(26, 16, 44, 0.95));
+    linear-gradient(180deg, var(--rl-face-1), var(--rl-face-2));
   box-shadow:
-    inset 0 0 0 2px rgba(255, 214, 90, 0.4),
+    inset 0 0 0 2px var(--rl-rim-2),
     inset 0 0 0 3px rgba(0, 0, 0, 0.5),
     inset 0 10px 16px -12px rgba(255, 255, 255, 0.45);
   font-family: var(--num);
   font-size: 40px;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
-  color: rgba(255, 250, 235, 0.92);
+  color: var(--rl-ink);
   text-shadow:
     0 2px 8px rgba(0, 0, 0, 0.7),
-    0 0 12px rgba(255, 200, 120, 0.25);
+    0 0 12px var(--rl-ink-glow);
   white-space: nowrap;
 }
+
+/* 数字そのものの色替え。基底(直上)より詳細度が高い。
+ * **基底より後ろに置くこと** — roulette-css.spec の ruleBody は
+ * セレクタの最初の一致を返すので、前に置くと基底の検査がこちらを掴む。 */
+.rl-window.rl-x .roulette-reel .rl-block {
+  color: var(--rl-mult-ink);
+  text-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.7),
+    0 0 20px var(--rl-mult-glow),
+    0 0 40px var(--rl-mult-glow);
+}
+
 
 /*
  * ゴーストブロック(jackstop/jackslip/jackback 専用) — 「一番下の出目が入りそうに
@@ -4975,7 +4980,7 @@ body {
   pointer-events: none;
   background: repeating-conic-gradient(
     from 0deg,
-    rgba(255, 232, 150, 0.32) 0deg 9deg,
+    var(--rl-rays) 0deg 9deg,
     transparent 9deg 26deg
   );
   border-radius: 50%;
@@ -4990,8 +4995,14 @@ body {
   }
 }
 
+/*
+ * 符号。減らす(応援)では**全マス**に付く(RouletteFx)ので、素の 1em だと
+ * ブロック実幅 138px(= --rl-w 150 − --rl-gap 6 × 2)に対して桁を1つぶん食う。
+ * 0.8em にして増分をほぼ相殺する。
+ */
 .roulette-panel .rl-block .rl-sign {
   margin-right: 2px;
+  font-size: 0.8em;
 }
 
 @keyframes rl-win {
@@ -5023,8 +5034,8 @@ body {
     inset 0 0 0 1px rgba(0, 0, 0, 0.6),
     inset 0 14px 22px -16px rgba(255, 255, 255, 0.5),
     inset 0 -12px 20px -14px rgba(0, 0, 0, 0.65),
-    0 0 26px rgba(255, 224, 110, 0.85),
-    0 0 64px rgba(255, 200, 70, 0.55),
+    0 0 26px var(--rl-hit-1),
+    0 0 64px var(--rl-hit-2),
     0 12px 34px rgba(0, 0, 0, 0.65);
 }
 
@@ -5038,11 +5049,11 @@ body {
   left: 50%;
   font-size: 20px;
   line-height: 1;
-  color: #ffe9a8;
+  color: var(--rl-pointer);
   text-shadow:
     0 0 4px rgba(255, 255, 255, 0.6),
-    0 0 12px rgba(255, 190, 60, 0.95),
-    0 0 24px rgba(255, 150, 30, 0.6);
+    0 0 12px var(--rl-pointer-1),
+    0 0 24px var(--rl-pointer-2);
   transform: translateX(-50%);
   transform-origin: 50% 50%;
   animation: rl-point var(--rl-ms) linear both;
@@ -5149,6 +5160,24 @@ body {
   --fl-bg-2: rgba(22, 14, 4, 0.94);
 }
 
+/*
+ * 減らす(応援)のルーレット確定は「お助けと同じ緑」。盤面(.roulette-panel.help)と
+ * 同じ --help-* を参照するので、リールが止まってバナーへ移る瞬間に色が飛ばない。
+ * グローだけ大当たり格の --help-glow-strong(金の banner-roulette と同じ強さ)。
+ *
+ * **枠の金メッキ(--fl-metal-*)は差し替えない。** .float の variant 規約は
+ * 「フレームは全バナー共通の金、盤面色・ランプ色・グロー色で由来を読ませる」
+ * (基底 .float のコメント参照)で、お助けバナー自身もそれに従っている。
+ * 緑のパネル → 金枠+緑盤面のバナー、という並びは規約どおりで不整合ではない。
+ */
+.float.banner-roulette.help {
+  --fl-lamp: var(--help-lamp);
+  --fl-glow: var(--help-glow-strong);
+  --fl-bg-1: var(--help-bg-1);
+  --fl-bg-2: var(--help-bg-2);
+}
+
+/* ランプのチェイス倍速(大当たり格)は向きに関係なく効かせる。 */
 .float.banner-roulette::before {
   animation-duration: 480ms;
 }

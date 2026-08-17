@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { BOOST_ARM_MAX_MS, CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { BOOST_ARM_MAX_MS, CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_PATTERNS, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type {
   ChallengeConfig,
   ChallengeEffect,
@@ -9,7 +9,6 @@ import type {
   TapBoostConfig,
   TapBoostRule,
 } from '@shared/dto';
-import { ROULETTE_PATTERNS } from '@shared/dto';
 import type { CommentEvent, GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
@@ -2110,7 +2109,7 @@ describe('validateChallengeConfig — roulettes', () => {
     const legacy = { ...DEFAULT_ROULETTE } as Record<string, unknown>;
     delete legacy.patterns;
     const v = validateChallengeConfig({ ...DEFAULT_CHALLENGE, roulettes: [legacy] });
-    expect(v.roulettes[0]!.patterns).toEqual([...ROULETTE_PATTERNS]);
+    expect(v.roulettes[0]!.patterns).toEqual([...DEFAULT_ROULETTE_PATTERNS]);
   });
 
   it('patterns の未知値は除去し、重複は1つに、並びは正順へ正規化する', () => {
@@ -2128,7 +2127,7 @@ describe('validateChallengeConfig — roulettes', () => {
         ...DEFAULT_CHALLENGE,
         roulettes: [{ ...DEFAULT_ROULETTE, patterns: bad }],
       } as unknown);
-      expect(v.roulettes[0]!.patterns, JSON.stringify(bad)).toEqual([...ROULETTE_PATTERNS]);
+      expect(v.roulettes[0]!.patterns, JSON.stringify(bad)).toEqual([...DEFAULT_ROULETTE_PATTERNS]);
     }
   });
 

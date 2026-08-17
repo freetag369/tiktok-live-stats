@@ -49,7 +49,8 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
   mkdirSync(cfgDir, { recursive: true });
   const body = {
     // 無いと from=0 とみなされ migrateChallengeConfig が設定を書き換える。
-    settingsVersion: 7,
+    // SETTINGS_VERSION と同値にしておくこと(古いままだと移行段が走る)。
+    settingsVersion: 8,
     eulerApiKey: '',
     hostUniqueId: 'e2e-host',
     waitUntilLive: false,
@@ -75,6 +76,7 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
       giftFullCut: { enabled: false, rules: [] },
       tapBoost: { enabled: false, rules: [] },
       fanStamp: { enabled: false },
+      stampTriggers: { enabled: false, rules: [] },
       fxClipsEnabled: false,
       miniFxEnabled: false,
       seEnabled: false,

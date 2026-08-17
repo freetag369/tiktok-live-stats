@@ -9,6 +9,7 @@ import type {
   ChallengeSeSlot,
   ChallengeTestEffectSpec,
   FanStampConfig,
+  StampTriggerConfig,
   TapBoostConfig,
   TapBoostRule,
   GiftBandFxConfig,
@@ -26,6 +27,7 @@ import {
   CHALLENGE_SE_SLOTS,
   COMMENT_RULES_MAX,
   DEFAULT_FAN_STAMP,
+  STAMP_TRIGGER_RULES_MAX,
   DEFAULT_TAP_BOOST,
   DEFAULT_TAP_BOOST_RULE,
   DEFAULT_GIFT_BAND_FX,
@@ -39,6 +41,7 @@ import {
   DEFAULT_JOIN_ROULETTE,
   DEFAULT_ROULETTE,
   DEFAULT_SE_VOLUMES,
+  ROULETTE_FULL_REELS,
   ROULETTE_JACK_PATTERNS,
   ROULETTE_LABEL_MAX,
   ROULETTE_REELS_MAX,
@@ -56,6 +59,9 @@ import {
   TAP_BOOST_MULT_MIN,
   TAP_BOOST_RESULT_CLIPS,
   effectiveSeVolume,
+  rouletteCommonSound,
+  rouletteHeadline,
+  rouletteSoundOverrideToggle,
 } from '@shared/challenge';
 import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { fullCutRuleMatches } from '@shared/fx-cut';
@@ -110,6 +116,8 @@ const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   'roulette-near': 'ルーレット 止まりそう(あと1個の溜め)',
   'roulette-kick': 'ルーレット キック(衝撃系パターンの一撃)',
   'roulette-hit': 'ルーレット確定',
+  'roulette-hype': '超激アツ 激熱の合図(再加速の直後)',
+  'roulette-hype-back': '超激アツ 出目が元に戻る瞬間',
   'boost-start': 'ブースト タップ開始',
   'boost-end': 'ブースト着弾(一括減算)',
   achieved: '達成',
@@ -136,11 +144,20 @@ const SE_SLOT_HINTS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   'gift-t2': 'ダイヤ 100〜999 のギフトを受け取った瞬間',
   'gift-t3': 'ダイヤ 1000〜4999 のギフトを受け取った瞬間',
   'gift-t4': 'ダイヤ 5000〜 のギフトを受け取った瞬間',
-  helper: 'お助けギフト(ファンスタンプ)を受け取った瞬間。「お助け」タブでも同じ設定を変えられます',
+  helper:
+    'お助けギフト(ファンスタンプ)を受け取った瞬間と、出目の方向が「減らす(応援)」の' +
+    'ルーレットが止まって出目が確定する瞬間。「お助け」タブでも同じ設定を変えられます',
   roulette: 'リールが回り始める瞬間',
   'roulette-near': '当たりの1つ手前に着いて溜めに入る瞬間(モニター表示中のみ)',
   'roulette-kick': 'フェイク停止から蹴り出される瞬間。この演出が出たときだけ(モニター表示中のみ)',
-  'roulette-hit': 'リールが止まって出目が確定する瞬間(モニター表示中のみ)',
+  'roulette-hit':
+    'リールが止まって出目が確定する瞬間(モニター表示中のみ)。出目の方向が「減らす(応援)」の' +
+    '行では、代わりに「お助け(ファンスタンプ)」の音が鳴ります',
+  'roulette-hype':
+    '超激アツ(全画面動画つき)でリールが再加速し切った瞬間。ここから出目が ×2 → ×3 → ' +
+    '×4 → ×5 と膨らんでいきます(モニター表示中のみ)',
+  'roulette-hype-back':
+    '超激アツの最後、膨らんだ出目が元の数字へ落ちて確定する瞬間(モニター表示中のみ)',
   'boost-start':
     'ブーストの 3・2・1 カウントダウンが明けてタップウィンドウに入る瞬間(モニター表示中のみ)',
   'boost-end': '溜めたタップ数が7セグに着弾して一括減算される瞬間(モニター表示中のみ)',
@@ -224,6 +241,11 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
       // キック音は衝撃系パターン(キック・巻き戻し等)でしか鳴らないので、
       // 代表して「キック」を狙い撃ちで再生する。
       return { kind: 'roulette', pattern: 'kick' };
+    case 'roulette-hype':
+    case 'roulette-hype-back':
+      // 激熱の合図と戻りは超激アツ(ultra)でしか鳴らない。代表して「黄金龍」を回す
+      // — 1回のスピンで開始の合図・4回のドン・戻りまで全部まとめて確認できる。
+      return { kind: 'roulette', pattern: 'dragon' };
     case 'boost-start':
     case 'boost-end':
       // 1回の実演で起動カットイン → タップ開始 → 着弾までまとめて確認できる。
@@ -1021,7 +1043,9 @@ function GiftRepeatFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
         <br />
         このチェックが変えるのは<b>リールを何本見せるか</b>だけ。外すとリールは1本になり、
         残りは「残り◯回ぶん」の合算バナーでまとめて出ます(カウントの動きは同じ)。
-        リールは最大 {ROULETTE_REELS_MAX} 本まで(それ以上は同じく合算バナー)。
+        リールは <b>{ROULETTE_FULL_REELS} 本目まで抽選どおりのフル尺</b>で回り、
+        {ROULETTE_FULL_REELS + 1}〜{ROULETTE_REELS_MAX} 本目は短縮スピン、
+        それ以上は同じく合算バナーです。
       </div>
       <div className="row">
         <button className="btn small" onClick={() => patchRf({ ...DEFAULT_GIFT_REPEAT_FX })}>
@@ -1606,6 +1630,196 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
 }
 
 /**
+ * 回転サウンドの試聴コントローラ。RouletteSection が1個だけ持ち、共通と全行の
+ * フォームで共用する — どのフォームから鳴らしても**同時に鳴るのは常に1音**
+ * (別の♪を押すと前の試聴が止まる)。key は `${行の接頭辞}:bgm:${id}` の形で
+ * 行をまたいでも衝突しない。
+ */
+interface SoundAudition {
+  key: string | null;
+  toggle: (key: string, id: string, volume: number) => void;
+  stop: () => void;
+}
+
+/**
+ * 回転サウンドのフォーム一式(BGM / リール回転ループ音 / それぞれの音量 /
+ * 超激アツ動画の音量 = RouletteSoundConfig の全項目)。共通(rouletteSound)と
+ * 行別上書き(RouletteRowSoundEditor)で共用 — 選択肢・試聴・スライダーを
+ * 1実装に保つ。
+ */
+function RouletteSoundFields({
+  snd,
+  onPatch,
+  audition,
+  keyPrefix,
+}: {
+  snd: RouletteSoundConfig;
+  onPatch: (p: Partial<RouletteSoundConfig>) => void;
+  audition: SoundAudition;
+  keyPrefix: string;
+}): React.JSX.Element {
+  const bgmKey = `${keyPrefix}:bgm:${snd.bgm}`;
+  const spinKey = `${keyPrefix}:spin:${snd.spinSe}`;
+  return (
+    <>
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+        <label className="field" style={{ width: 230 }}>
+          BGM
+          <select value={snd.bgm} onChange={(e) => onPatch({ bgm: e.target.value })}>
+            <option value="off">鳴らさない(既定)</option>
+            {[...ROULETTE_BGM, ...BAND_BGM].map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="btn small"
+          disabled={snd.bgm === 'off'}
+          title={audition.key === bgmKey ? '試聴を停止' : 'このBGMを試聴'}
+          onClick={() => audition.toggle(bgmKey, snd.bgm, snd.bgmVolume)}
+        >
+          {audition.key === bgmKey ? '■' : '♪'}
+        </button>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          value={snd.bgmVolume}
+          disabled={snd.bgm === 'off'}
+          onChange={(e) => onPatch({ bgmVolume: Number(e.target.value) })}
+        />
+        <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.bgmVolume}</span>
+      </div>
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end', marginTop: 6 }}>
+        <label className="field" style={{ width: 230 }}>
+          リール回転音(ループ)
+          <select value={snd.spinSe} onChange={(e) => onPatch({ spinSe: e.target.value })}>
+            <option value="off">鳴らさない</option>
+            {ROULETTE_SPIN_SE.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="btn small"
+          disabled={snd.spinSe === 'off'}
+          title={audition.key === spinKey ? '試聴を停止' : 'この回転音を試聴'}
+          onClick={() => audition.toggle(spinKey, snd.spinSe, snd.spinSeVolume)}
+        >
+          {audition.key === spinKey ? '■' : '♪'}
+        </button>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          value={snd.spinSeVolume}
+          disabled={snd.spinSe === 'off'}
+          onChange={(e) => onPatch({ spinSeVolume: Number(e.target.value) })}
+        />
+        <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.spinSeVolume}</span>
+      </div>
+      <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6 }}>
+        <span style={{ width: 230, fontSize: 12 }}>超激アツ動画の音量</span>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          value={snd.clipVolume}
+          onChange={(e) => onPatch({ clipVolume: Number(e.target.value) })}
+        />
+        <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.clipVolume}</span>
+      </div>
+    </>
+  );
+}
+
+/**
+ * ルーレット1行ぶんの回転サウンド上書きエディタ。ギフトルーレット(RouletteRow)と
+ * 入室ルーレット(JoinRouletteSection)で共用。
+ *
+ * チェック = sound キーの有無と1:1。オンにした瞬間は共通の丸ごとコピーが種になる
+ * (rouletteSoundOverrideToggle)ので音は変わらず、以後この行は共通に追従しない —
+ * 項目単位の継承はしない(dto.ts の RouletteSoundConfig の規約)。オフに戻すと
+ * 編集内容は破棄され、共通へ復帰する。
+ */
+/**
+ * 出目の方向の表示名。**select の option と一字一句そろえること** — 行のセレクトと
+ * 共通サウンドの小見出しが同じ言葉で書かれているから、凡例なしで対応が読める。
+ */
+function directionLabel(direction: 'add' | 'sub'): string {
+  return direction === 'sub' ? '減らす(応援)' : '増やす(妨害)';
+}
+
+function RouletteRowSoundEditor({
+  sound,
+  common,
+  commonLabel,
+  onChange,
+  audition,
+  keyPrefix,
+}: {
+  /** 行の上書き。undefined = 共通に従う(キー無し)。 */
+  sound: RouletteSoundConfig | undefined;
+  /**
+   * この行の**方向に対応する**共通サウンド。チェックをオンにした瞬間の種になる。
+   * 方向別共通の導入後、素の cfg.rouletteSound を渡すと「チェックした瞬間に鳴る音を
+   * 変えない」という規約が減らす(応援)の行で破れる(緑の行が金の音に化ける)。
+   */
+  common: RouletteSoundConfig;
+  /** オフのときにどちらの共通へ従うかの表示名(「増やす(妨害)」/「減らす(応援)」)。 */
+  commonLabel: string;
+  onChange: (sound: RouletteSoundConfig | undefined) => void;
+  audition: SoundAudition;
+  keyPrefix: string;
+}): React.JSX.Element {
+  const overridden = sound != null;
+  return (
+    <div
+      style={{
+        border: '1px solid rgba(255,255,255,.12)',
+        borderRadius: 8,
+        padding: '8px 10px',
+        marginTop: 8,
+      }}
+    >
+      <label className="row" style={{ cursor: 'pointer', gap: 4 }}>
+        <input
+          type="checkbox"
+          checked={overridden}
+          onChange={(e) => {
+            // オフに戻すときは試聴も止める — フォームごと消えて ■ を押せなくなるため。
+            if (!e.target.checked) audition.stop();
+            onChange(rouletteSoundOverrideToggle(e.target.checked, common));
+          }}
+        />
+        <span>回転中のサウンドをこの行だけ上書きする</span>
+      </label>
+      {overridden ? (
+        <>
+          <div style={{ marginTop: 6 }}>
+            <RouletteSoundFields snd={sound} onPatch={(p) => onChange({ ...sound, ...p })} audition={audition} keyPrefix={keyPrefix} />
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            チェックした時点の共通サウンドのコピーから始まり、以後この行は共通の変更に追従しません
+            (全項目まるごと差し替え・項目単位の継承はしません)。チェックを外すと編集内容は破棄され、
+            共通に戻ります。「▶ モニターで回す」はこの行の音で鳴るので、上書きの確認に使えます。
+          </div>
+        </>
+      ) : (
+        <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 2 }}>
+          上の「回転中のサウンド(共通)」の<b>{commonLabel}</b>の設定で鳴ります
+          (出目の方向を変えると、参照する共通も切り替わります)。
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * ギフトルーレットの設定セクション。
  *
  * ルーレットは複数登録できる。**上から順に評価し、最初に一致した1件だけ**が回る
@@ -1614,15 +1828,19 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
  */
 function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
   const list = cfg.roulettes;
+  // 共通サウンドは**出目の方向ごとに2組**。行の上書きが無いとき、行の direction に
+  // 対応するほうが使われる(解決の権威は shared の rouletteCommonSound)。
   const snd = cfg.rouletteSound;
+  const sndSub = cfg.rouletteSoundSub;
   const patchAt = (i: number, p: Partial<ChallengeRouletteConfig>): void =>
     onPatch({ roulettes: list.map((r, j) => (j === i ? { ...r, ...p } : r)) });
   const patchSnd = (p: Partial<RouletteSoundConfig>): void =>
     onPatch({ rouletteSound: { ...snd, ...p } });
+  const patchSndSub = (p: Partial<RouletteSoundConfig>): void =>
+    onPatch({ rouletteSoundSub: { ...sndSub, ...p } });
 
   // 回転サウンドの試聴(GiftBandFxSection の auditionRef と同じ持ち方)。
-  // key は 'bgm:'/'spin:' の接頭辞付き — 同じ id が両スロットに現れることは
-  // 無いが、■/♪ 表示の判定を単純に保つため。
+  // ここで1個だけ持ち、共通と全行のフォームへ配る(SoundAudition のコメント参照)。
   const auditionRef = useRef<BgmHandle | null>(null);
   const [auditionKey, setAuditionKey] = useState<string | null>(null);
   useEffect(
@@ -1631,15 +1849,19 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
     },
     []
   );
-  const toggleAudition = (key: string, id: string, volume: number): void => {
-    const playing = auditionKey;
+  const stopAudition = (): void => {
     auditionRef.current?.stop(0);
     auditionRef.current = null;
     setAuditionKey(null);
+  };
+  const toggleAudition = (key: string, id: string, volume: number): void => {
+    const playing = auditionKey;
+    stopAudition();
     if (playing === key) return;
     auditionRef.current = playBandBgm(id, volume);
     if (auditionRef.current) setAuditionKey(key);
   };
+  const audition: SoundAudition = { key: auditionKey, toggle: toggleAudition, stop: stopAudition };
 
   return (
     <>
@@ -1672,78 +1894,16 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
           marginBottom: 10,
         }}
       >
-        <h4 style={{ margin: '0 0 8px' }}>回転中のサウンド(全ルーレット共通)</h4>
-        <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
-          <label className="field" style={{ width: 230 }}>
-            BGM
-            <select value={snd.bgm} onChange={(e) => patchSnd({ bgm: e.target.value })}>
-              <option value="off">鳴らさない(既定)</option>
-              {[...ROULETTE_BGM, ...BAND_BGM].map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="btn small"
-            disabled={snd.bgm === 'off'}
-            title={auditionKey === `bgm:${snd.bgm}` ? '試聴を停止' : 'このBGMを試聴'}
-            onClick={() => toggleAudition(`bgm:${snd.bgm}`, snd.bgm, snd.bgmVolume)}
-          >
-            {auditionKey === `bgm:${snd.bgm}` ? '■' : '♪'}
-          </button>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            value={snd.bgmVolume}
-            disabled={snd.bgm === 'off'}
-            onChange={(e) => patchSnd({ bgmVolume: Number(e.target.value) })}
-          />
-          <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.bgmVolume}</span>
-        </div>
-        <div className="row" style={{ gap: 8, alignItems: 'flex-end', marginTop: 6 }}>
-          <label className="field" style={{ width: 230 }}>
-            リール回転音(ループ)
-            <select value={snd.spinSe} onChange={(e) => patchSnd({ spinSe: e.target.value })}>
-              <option value="off">鳴らさない</option>
-              {ROULETTE_SPIN_SE.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="btn small"
-            disabled={snd.spinSe === 'off'}
-            title={auditionKey === `spin:${snd.spinSe}` ? '試聴を停止' : 'この回転音を試聴'}
-            onClick={() => toggleAudition(`spin:${snd.spinSe}`, snd.spinSe, snd.spinSeVolume)}
-          >
-            {auditionKey === `spin:${snd.spinSe}` ? '■' : '♪'}
-          </button>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            value={snd.spinSeVolume}
-            disabled={snd.spinSe === 'off'}
-            onChange={(e) => patchSnd({ spinSeVolume: Number(e.target.value) })}
-          />
-          <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.spinSeVolume}</span>
-        </div>
-        <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6 }}>
-          <span style={{ width: 230, fontSize: 12 }}>超激アツ動画の音量</span>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            value={snd.clipVolume}
-            onChange={(e) => patchSnd({ clipVolume: Number(e.target.value) })}
-          />
-          <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>音量 {snd.clipVolume}</span>
-        </div>
+        <h4 style={{ margin: '0 0 8px' }}>回転中のサウンド(共通)</h4>
+        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>増やす(妨害)の行</div>
+        <RouletteSoundFields snd={snd} onPatch={patchSnd} audition={audition} keyPrefix="common" />
+        <div style={{ fontSize: 12, fontWeight: 700, margin: '10px 0 4px' }}>減らす(応援)の行</div>
+        <RouletteSoundFields
+          snd={sndSub}
+          onPatch={patchSndSub}
+          audition={audition}
+          keyPrefix="common-sub"
+        />
         <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
           リールが回っている間だけ鳴ります。連続スピン中はBGMを止めません。回転音は終盤の
           「止まりそう」の間で自動的に静かになります。音量は効果音の設定とは独立です。
@@ -1751,6 +1911,15 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
           停止まわりの3音(回転 / 止まりそう / 確定)は「効果音」のセクションで差し替えます。
           「超激アツ動画の音量」は龍・獅子などの全画面動画に焼き込まれた効果音の音量です
           (効果音そのものをオフにすると動画も無音になります)。
+          行ごとに違う音にしたいときは、各ルーレット行と入室ルーレットの
+          「回転中のサウンドをこの行だけ上書きする」で差し替えられます。
+        </div>
+        <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+          各行の「出目の方向」に応じて、上の2組のどちらかで回ります(入室ルーレットも同じ)。
+          応援側の既定は回転音を<b>カチカチ</b>にしてあります(妨害はジングル)— 緑のルーレットが
+          回り出したことが音だけでも分かるようにするためです。
+          応援の行では<b>確定音</b>も「効果音」タブの<b>「お助け(ファンスタンプ)」</b>の音になります
+          (「ルーレット確定」ではありません)。
         </div>
       </div>
       <RouletteTeaseSection cfg={cfg} onPatch={onPatch} />
@@ -1763,6 +1932,8 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
         <RouletteRow
           key={rl.id}
           rl={rl}
+          commonSound={rouletteCommonSound(cfg, rl.direction)}
+          audition={audition}
           onPatch={(p) => patchAt(i, p)}
           onRemove={() => onPatch({ roulettes: list.filter((_, j) => j !== i) })}
           onTest={onTest}
@@ -1802,7 +1973,7 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
           既定(ハートミー1件)に戻す
         </button>
       </div>
-      <JoinRouletteSection cfg={cfg} onPatch={onPatch} onTest={onTest} testBusy={testBusy} />
+      <JoinRouletteSection cfg={cfg} onPatch={onPatch} onTest={onTest} testBusy={testBusy} audition={audition} />
     </>
   );
 }
@@ -1812,7 +1983,9 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
  * (rouletteSound と同じ立ち位置)。有効のとき、超焦らしは毎回の抽選ではなく
  * 「並びの最後のスピン」を数えて5回か7回に1回だけ必ず発動する — それ以外の回で
  * 抽選が大当たり系を引いたときは二段フェイク(同じ激アツ尺)に置き換わる。
- * 入室ルーレットと ▶ 試写は対象外(モニター側 startRoulette のゲート)。
+ * 対象は**リール1本の単発ルーレットだけ**。連打(コンボ)のリール・入室ルーレット・
+ * ▶ 試写は素通しで、抽選パターンがそのまま出る(ゲートは shared/roulette-spin.ts の
+ * planRouletteSpin)。
  */
 function RouletteTeaseSection({
   cfg,
@@ -1843,10 +2016,12 @@ function RouletteTeaseSection({
         <span>「大当たり〜」の超焦らしを5回か7回に1回だけ出す(おすすめ)</span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 4 }}>
-        並びの最後のスピンを数えて、ランダムに5回か7回に1回、チェックした超焦らしが必ず発動します。
+        <b>1本ずつ回るルーレット</b>の並びの最後のスピンを数えて、ランダムに5回か7回に1回、
+        チェックした超焦らしが必ず発動します。
         それ以外の回に抽選で「大当たり〜」を引いたときは二段フェイク(同じ激アツ・約12秒)に
         置き換わるので、超焦らしの「入りそう!」は乱発されません。切ると従来どおり毎回の抽選任せに
-        なります。入室ルーレットと ▶ の試し回しはこの仕組みの対象外です。
+        なります。連打(コンボ)のリール・入室ルーレット・▶ の試し回しはこの仕組みの対象外で、
+        抽選で引いた演出がそのまま出ます。
       </div>
       <div className="row" style={{ flexWrap: 'wrap', gap: '6px 14px', alignItems: 'center', marginTop: 8, marginLeft: 22 }}>
         {ROULETTE_JACK_PATTERNS.map((p) => {
@@ -1892,9 +2067,16 @@ function RouletteTeaseSection({
 /**
  * 入室ルーレットの設定。ギフトルーレットと違い**単一設定でトリガーギフトを
  * 持たない** — 視聴者の入室(初見さんのみ / すべて)で自動的に1スピン回る。
- * 回転中のサウンドは上の「全ルーレット共通」をそのまま使う。
+ * 回転中のサウンドは既定で上の「全ルーレット共通」— ギフト行と同じく
+ * RouletteRowSoundEditor でこの行だけ上書きできる。
  */
-function JoinRouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+function JoinRouletteSection({
+  cfg,
+  onPatch,
+  onTest,
+  testBusy,
+  audition,
+}: SectionProps & { audition: SoundAudition }): React.JSX.Element {
   const jr = cfg.joinRoulette;
   const patch = (p: Partial<JoinRouletteConfig>): void => onPatch({ joinRoulette: { ...jr, ...p } });
 
@@ -1908,7 +2090,7 @@ function JoinRouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
         対象「初見さんのみ」は、このツールで初めて記録された視聴者だけに回ります。
         同じ人はチャレンジ1回につき1度だけ。直前の発火から30秒以内の入室は間引かれます
         (レイド対策)。ライブ画面のボタンからもオン/オフできます。
-        入室ルーレットのスピンは短縮されず(キューが詰まっていても常にフル尺)、
+        入室ルーレットのスピンは短縮されず(本数やキューの詰まりに関係なく常にフル尺)、
         「超焦らしの出し方」のカウントの対象外 — 抽選で引いた焦らしがそのまま出ます。
       </div>
       <div
@@ -1971,7 +2153,8 @@ function JoinRouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
         </div>
         <div className="faint" style={{ fontSize: 11, marginTop: 4, marginBottom: 6 }}>
           モニターには「{jr.label.trim() !== '' ? jr.label.trim() : DEFAULT_JOIN_ROULETTE.label}{' '}
-          ○○がルーレット」と出ます(○○ = 入室した人の名前)。空で保存すると「
+          ○○{rouletteHeadline({ rouletteDirection: jr.direction }).suffix}」と出ます
+          (○○ = 入室した人の名前)。空で保存すると「
           {DEFAULT_JOIN_ROULETTE.label}」に戻ります。
           {jr.target === 'all'
             ? ' 対象が「すべての入室」のときは表示名の変更をおすすめします(例: ようこそ)。'
@@ -1985,6 +2168,14 @@ function JoinRouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
           testBusy={testBusy}
         />
         <RouletteSegmentsEditor segments={jr.segments} onChange={(segments) => patch({ segments })} />
+        <RouletteRowSoundEditor
+          sound={jr.sound}
+          common={rouletteCommonSound(cfg, jr.direction)}
+          commonLabel={directionLabel(jr.direction)}
+          onChange={(sound) => patch({ sound })}
+          audition={audition}
+          keyPrefix="join"
+        />
       </div>
     </>
   );
@@ -2015,6 +2206,22 @@ const ROULETTE_PATTERN_LABELS: Record<RoulettePattern, { label: string; hint: st
   whale: { label: '大鯨', hint: '尾撃ち×3→ブリーチと同時にスラム。動画4本(超激アツ・約24秒・動画演出)' },
   phoenix: { label: '不死鳥', hint: '羽ばたきの衝撃波で刻み、再生の爆発で着地。動画4本(超激アツ・約24秒・動画演出)' },
   lion: { label: '獅子', hint: '飛び掛かりの連続でマスが叩き込まれる。動画3本(超激アツ・約24秒・動画演出)' },
+  heartme: {
+    label: 'ハートミー',
+    hint: 'ハート型ロケットが開いて撃ち出す。動画4本(超激アツ・約24秒・動画演出)',
+  },
+  hearttouch: {
+    label: 'ハートタッチ',
+    hint: '2つのハートが触れ合って融合する。動画2本(超激アツ・約24秒・動画演出)',
+  },
+  heartbday: {
+    label: 'ハートの誕生日',
+    hint: 'ハート型ケーキのロウソクが爆ぜる。動画3本(超激アツ・約24秒・動画演出)',
+  },
+  heartbloom: {
+    label: '花咲ハート',
+    hint: 'ハート型の花が満開に開く。動画3本(超激アツ・約24秒・動画演出)',
+  },
 };
 
 /**
@@ -2096,8 +2303,13 @@ function RoulettePatternPicker({
       <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
         「大当たり〜」の3つは、盤面の<b>一番下の出目</b>が入りそうになる超焦らし演出です
         (どれが当たるかは変わりません)。出す頻度は上の「超焦らしの出し方」で決まります
-        (有効なら5回か7回に1回だけ)。短縮(焦らしなし)になるのは同じ人の連打(コンボ)の
-        2本目以降だけで、キューが詰まっていても消化スピンは短縮されません。
+        (有効なら5回か7回に1回だけ)。
+        <br />
+        <b>連打(コンボ)のリールはこのカウントの対象外</b>です — 抽選で引いた演出が
+        そのまま全部出ます(超焦らしも激アツも差し替えません)。カウントが進むのは
+        1本ずつ回るルーレットだけ。短縮(焦らしなし)になるのは
+        {ROULETTE_FULL_REELS + 1} 本目以降のリールだけで、キューが詰まっていても
+        消化スピンは短縮されません。
       </div>
     </div>
   );
@@ -2159,15 +2371,20 @@ function RouletteSegmentsEditor({
   );
 }
 
-/** ルーレット1件ぶんの設定行。トリガー・出目・確率をここで完結させる。 */
+/** ルーレット1件ぶんの設定行。トリガー・出目・確率・行別サウンドをここで完結させる。 */
 function RouletteRow({
   rl,
+  commonSound,
+  audition,
   onPatch,
   onRemove,
   onTest,
   testBusy,
 }: {
   rl: ChallengeRouletteConfig;
+  /** 共通の回転サウンド(行別上書きのチェックをオンにした瞬間の種)。 */
+  commonSound: RouletteSoundConfig;
+  audition: SoundAudition;
   onPatch: (p: Partial<ChallengeRouletteConfig>) => void;
   onRemove: () => void;
   onTest: OnTest;
@@ -2237,8 +2454,14 @@ function RouletteRow({
         </label>
       </div>
       <div className="faint" style={{ fontSize: 11, marginTop: 4, marginBottom: 6 }}>
-        モニターには「{rl.label.trim() !== '' ? rl.label.trim() : 'ギフト名'} ○○がルーレット」と出ます
+        {/* 文言はモニターと同じ rouletteHeadline から作る — 直書きするとドリフトする。 */}
+        モニターには「
+        {rouletteHeadline({ rouletteLabel: rl.label.trim() !== '' ? rl.label : 'ギフト名' }).prefix}
+        ○○{rouletteHeadline({ rouletteDirection: rl.direction }).suffix}」と出ます
         (○○ = 送信者の名前)。表示名が空のときは TikTok から届く実際のギフト名を使います。
+        {rl.direction === 'sub'
+          ? ' 減らす(応援)の行は、モニターの盤面もバナーも「お助け」と同じ緑になります。'
+          : ''}
       </div>
       <RoulettePatternPicker
         patterns={rl.patterns}
@@ -2250,6 +2473,14 @@ function RouletteRow({
       <RouletteSegmentsEditor
         segments={rl.segments}
         onChange={(segments) => onPatch({ segments })}
+      />
+      <RouletteRowSoundEditor
+        sound={rl.sound}
+        common={commonSound}
+        commonLabel={directionLabel(rl.direction)}
+        onChange={(sound) => onPatch({ sound })}
+        audition={audition}
+        keyPrefix={`rl:${rl.id}`}
       />
     </div>
   );
@@ -2712,11 +2943,138 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
         </>
       ) : null}
 
+      <StampTriggerBlock cfg={cfg} onPatch={onPatch} />
+
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn small" onClick={() => onPatch({ fanStamp: structuredClone(DEFAULT_FAN_STAMP) })}>
           お助け設定を既定に戻す
         </button>
       </div>
+    </>
+  );
+}
+
+/**
+ * チャットスタンプ(サブスクエモート)トリガーの編集ブロック。HelperSection の
+ * 一部 — 演出(バナー・効果音・簡易演出)はお助けの設定を丸ごと流用するので、
+ * ここにあるのはトリガー(emoteId)と増減量の表だけ。
+ *
+ * emoteId が type="text" なのはお助けの giftId と同じ理由(前置ゼロ・19桁の長い ID
+ * を number にすると精度で壊れる)。
+ */
+function StampTriggerBlock({
+  cfg,
+  onPatch,
+}: {
+  cfg: ChallengeConfig;
+  onPatch: (p: Partial<ChallengeConfig>) => void;
+}): React.JSX.Element {
+  const st = cfg.stampTriggers;
+  const patchSt = (p: Partial<StampTriggerConfig>): void => {
+    onPatch({ stampTriggers: { ...st, ...p } });
+  };
+  const patchRule = (i: number, p: Partial<StampTriggerConfig['rules'][number]>): void => {
+    patchSt({ rules: st.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+
+  return (
+    <>
+      <h4 style={{ margin: '18px 0 6px' }}>チャットのスタンプ(サブスクエモート)でも発動</h4>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={st.enabled} onChange={(e) => patchSt({ enabled: e.target.checked })} />
+        <span>スタンプでカウントを動かす</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        コメント欄に送られる<b>スタンプ(メンバー特典のエモート)</b>で発動します。ギフトではないので
+        ギフトの増減規則・カットインとは無関係です。バナー・効果音・照明は上の<b>お助けと同じ演出</b>を
+        使います(1つのメッセージに複数スタンプが載っていたら合計で1回動きます)。
+      </div>
+
+      {st.enabled ? (
+        <>
+          {st.rules.map((r, i) => (
+            <div key={r.id} className="row" style={{ gap: 8, marginBottom: 4 }}>
+              <input
+                type="checkbox"
+                checked={r.enabled}
+                title="この行を有効にする"
+                onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+              />
+              <label className="field" style={{ width: 120 }}>
+                {i === 0 ? '表示名(メモ)' : null}
+                <input
+                  type="text"
+                  placeholder="例: ようこそ"
+                  value={r.label}
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ flex: 1 }}>
+                {i === 0 ? 'スタンプの番号(emoteId)' : null}
+                <input
+                  type="text"
+                  placeholder="例: 7671092908083137301"
+                  value={r.emoteId}
+                  onChange={(e) => patchRule(i, { emoteId: e.target.value.trim() })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                {i === 0 ? '1個あたりの増減' : null}
+                <input
+                  type="number"
+                  value={r.amountEach}
+                  onChange={(e) => patchRule(i, { amountEach: Number(e.target.value) })}
+                />
+              </label>
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchSt({ rules: st.rules.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+
+          <div className="row" style={{ marginTop: 6, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={st.rules.length >= STAMP_TRIGGER_RULES_MAX}
+              onClick={() =>
+                patchSt({
+                  rules: [
+                    ...st.rules,
+                    {
+                      id: `stamp-${Date.now().toString(36)}-${clipSeq++}`,
+                      label: '',
+                      emoteId: '',
+                      amountEach: -1,
+                      enabled: true,
+                    },
+                  ],
+                })
+              }
+            >
+              スタンプを追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {STAMP_TRIGGER_RULES_MAX} 件(現在 {st.rules.length} 件)
+            </span>
+          </div>
+
+          <label className="row" style={{ cursor: 'pointer', marginTop: 6 }}>
+            <input type="checkbox" checked={st.flash} onChange={(e) => patchSt({ flash: e.target.checked })} />
+            <span>照明フラッシュ</span>
+          </label>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)、<b>0=演出だけ</b>(値は動かない)。
+            スタンプの番号(emoteId)は、チャレンジ実行中にスタンプが届くと診断ログ
+            (logs/diag.log の <b>[challenge/stamp] 受信</b> の行)に出ます — 設定と違う番号が
+            届いていないかもそこで確認できます。emoteId が空の行は何にも一致しません。
+          </div>
+        </>
+      ) : null}
     </>
   );
 }

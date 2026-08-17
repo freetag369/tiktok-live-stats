@@ -116,13 +116,28 @@ describe('フィーバーのアーム→コミット(起動カットインを削
 });
 
 describe('演出優先順位一元化 v0.8.0(§6b 連鎖の譲り合い・据え置き会計)', () => {
+  /**
+   * finishRoulette の「コンボ直呼び」と「連鎖分岐の入口」。**シグネチャや条件式を
+   * 変えたらここも直す** — 下の it は slice の境界にこのリテラルを使っており、
+   * ズレると indexOf が -1 を返して slice が黙って別の(多くは空の)範囲を検査する
+   * = テストが緑のまま無意味になる。だから必ず存在ガードを先に置く。
+   */
+  const CHAIN_CALL = 'startRoulette(e, at + 1)';
+  const MORE_BRANCH = 'if (more && !cutForAchieved)';
+
+  it('目印のリテラルがソースに実在する(slice が空振りしていないことの担保)', () => {
+    const fn = fnBody('finishRoulette');
+    expect(fn.includes(CHAIN_CALL), `コンボ直呼び ${CHAIN_CALL} が無い`).toBe(true);
+    expect(fn.includes(MORE_BRANCH), `連鎖分岐 ${MORE_BRANCH} が無い`).toBe(true);
+  });
+
   it('finishRoulette: 確定バナー(pushFloat)は譲り判定・コンボ直呼びより前', () => {
     // 譲るときも「止まったリールの額」は先に見せる — バナーが譲り分岐の後ろに
     // 回ると、譲った演出が終わるまでどのリールの額か読めなくなる。
     const fn = fnBody('finishRoulette');
     const banner = fn.indexOf('pushFloat(');
     const yieldAt = fn.indexOf('shouldYieldSpinChain');
-    const chainAt = fn.indexOf('startRoulette(e, true, at + 1)');
+    const chainAt = fn.indexOf(CHAIN_CALL);
     expect(banner).toBeGreaterThanOrEqual(0);
     expect(yieldAt, '譲り判定(shouldYieldSpinChain)が無い').toBeGreaterThanOrEqual(0);
     expect(chainAt, 'コンボ直呼びが無い').toBeGreaterThanOrEqual(0);
@@ -134,7 +149,7 @@ describe('演出優先順位一元化 v0.8.0(§6b 連鎖の譲り合い・据え
     // 逆順だと、hold が落ちた瞬間の pumpStage 再入が「キューに残りが無い」状態を
     // 観測し、据え置き(pendingStageAmount)から残りリールぶんが漏れる。
     const fn = fnBody('finishRoulette');
-    const branch = fn.slice(fn.indexOf('shouldYieldSpinChain'), fn.indexOf('startRoulette(e, true, at + 1)'));
+    const branch = fn.slice(fn.indexOf('shouldYieldSpinChain'), fn.indexOf(CHAIN_CALL));
     const unshiftAt = branch.indexOf('.unshift(');
     const holdAt = branch.indexOf('rouletteHold.current = false');
     expect(unshiftAt, '譲り分岐に unshift が無い').toBeGreaterThanOrEqual(0);
@@ -142,12 +157,46 @@ describe('演出優先順位一元化 v0.8.0(§6b 連鎖の譲り合い・据え
     expect(unshiftAt).toBeLessThan(holdAt);
   });
 
-  it('譲り分岐(more 判定〜コンボ直呼び)は据え置きを解かない', () => {
+  it('譲り分岐(連鎖分岐〜コンボ直呼び)は据え置きを解かない', () => {
     // ここで null 収束させると、譲った瞬間に残りリールの出目が数字へ先漏れする。
     // 張り替えは pumpStage の applyStageHold(同一フラッシュ)が行う。
     const fn = fnBody('finishRoulette');
-    const branch = fn.slice(fn.indexOf('if (more)'), fn.indexOf('startRoulette(e, true, at + 1)'));
+    const branch = fn.slice(fn.indexOf(MORE_BRANCH), fn.indexOf(CHAIN_CALL));
+    expect(branch.length, '連鎖分岐の範囲が空 — 目印がズレている').toBeGreaterThan(0);
     expect(branch).not.toContain('setHeldValue(null)');
+  });
+
+  it('達成の打ち切り: 確定バナーより後・譲り判定より前に判断する', () => {
+    // ゴール到達(pendingAchieved)が待っているなら連鎖は続けない — fxHoldBusy に
+    // roulette が入るので、続けると CLEAR もリザルトも最後の1本まで出ない
+    // (フル尺化で最悪2分)。譲り判定より前なのは「打ち切るなら譲るものが無い」から。
+    const fn = fnBody('finishRoulette');
+    const banner = fn.indexOf('pushFloat(');
+    const cutAt = fn.indexOf('cutForAchieved');
+    const yieldAt = fn.indexOf('shouldYieldSpinChain');
+    expect(cutAt, '達成の打ち切り(cutForAchieved)が無い').toBeGreaterThanOrEqual(0);
+    // 判定そのものは more の直後(バナーより前)、分岐の適用は譲り判定より前。
+    expect(fn.indexOf(MORE_BRANCH)).toBeLessThan(yieldAt);
+    expect(banner).toBeLessThan(yieldAt);
+    expect(fn).toContain('pendingAchieved.current !== null');
+  });
+
+  it('達成の打ち切り: hold と据え置きを必ず解く(固着させない)', () => {
+    // 打ち切りは連鎖の終端なので、!more と同じ後始末が要る。解かずに抜けると
+    // rouletteHold が孤児化して pumpStage が毎回 return = 舞台の全死になる。
+    const fn = fnBody('finishRoulette');
+    expect(fn).toContain('if (!more || cutForAchieved) {');
+    const tail = fn.slice(fn.indexOf('if (!more || cutForAchieved) {'));
+    expect(tail.slice(0, 200)).toContain('rouletteHold.current = false');
+    expect(tail.slice(0, 200)).toContain('setHeldValue(null)');
+  });
+
+  it('打ち切った残りリールは合算バナーで締める(値を黙って消さない)', () => {
+    // 値は worker で全部適用済み。畳むのは見た目だけなので、残量は shared の
+    // rouletteRemainingAmount(据え置き会計と同じ権威)から引く。
+    const fn = fnBody('finishRoulette');
+    expect(fn).toContain('rouletteRemainingAmount(e, restFrom)');
+    expect(fn).toContain('rouletteRestBanner(');
   });
 
   it.each(['startRoulette', 'startBandFx', 'startBoostFx', 'startStrikeFromPending'])(
@@ -255,5 +304,115 @@ describe('確定バナー保護 — バナーは単枠置換なのでビート�
     // コンボ中(rouletteHold 中はキューが開かない)に1枚も出なくなる。
     const fn = fnBody('finishRoulette');
     expect(fn).toContain('immediate: true');
+  });
+});
+
+describe('着弾の背面再生 — 遮蔽 occlusion(2026-08-17 ユーザー決定)', () => {
+  // 要望:「満杯・ストック満杯はキュー作動中も**後ろで**演出が再生される。
+  //        ルーレット中は後ろで少し見える、ギフト中・ブースト再生中は音だけ聞こえる」。
+  // 真理値表は shared/fx-occlusion.ts(fx-occlusion.spec.ts が凍結)、見え方を作る
+  // CSS と DOM 順は fx-backdrop.spec.ts。ここはレンダラ側の**配線**を見張る。
+
+  it('fnBody(strikeBeatNow) が末尾まで取れている(切り出し縮みの偽陽性を潰す)', () => {
+    // fnBody は `\n  }` までの最短一致。関数の途中に2スペースの `}` を作ると
+    // 切り出しが縮み、下の not.toContain 群が短い文字列に対して評価されて
+    // **落ちずに通ってしまう**。最後の1行の存在で範囲を証明しておく。
+    expect(fnBody('strikeBeatNow')).toContain('if (plan.fullClip) playClip(');
+  });
+
+  it('ビートは背面フル演出の全画面クリップを持つ(要望の本体)', () => {
+    const fn = fnBody('strikeBeatNow');
+    // フルチェーン(launchStrike / launchStock)しか持っていなかった2本をビートにも。
+    expect(fn).toContain('GAUGE_FULL_CLIP_URL');
+    expect(fn).toContain('STOCK_FULL_CLIP_URL');
+    // plan.fullClip は 'sheer' 限定 — 'none' で撃つと二重再生、'opaque' で撃つと
+    // clipQueue に溜まってカットイン明けに遅れて漏れる。素の playClip に戻さない。
+    expect(fn).toContain('if (plan.fullClip) playClip(');
+    // mode は既定の 'queue' — 第2引数を足すと再生中のクリップを打ち切ることになり、
+    // 「再生中の演出は中断しない」(fx-priority)の規約に反する。呼びが URL で
+    // 閉じていることが「引数は1つだけ」の機械的な証拠。
+    expect(fn).toContain('GAUGE_FULL_CLIP_URL);');
+  });
+
+  it('遮蔽の受け渡しは同期の try/finally(タイマーで開けっ放しにしない)', () => {
+    const fn = fnBody('strikeBeatNow');
+    expect(fn).toContain('const occ = maxOcclusion(imminent, currentOcclusion());');
+    expect(fn).toContain('} finally {');
+    expect(fn).toContain('beatOcclusion.current = prevOcc;');
+    // setTimeout で閉じると、遮蔽が開いたまま次の着弾が来て黙る(固着の再来)。
+    expect(fn).not.toContain('setTimeout');
+  });
+
+  it('visuals 2 本は plan 駆動 — 全画面クリップはビート側の責務のまま', () => {
+    for (const name of ['impactStrikeVisuals', 'stockImpactVisuals']) {
+      const fn = fnBody(name);
+      expect(fn, `${name} が plan 駆動でない`).toContain('const plan = impactPlanNow();');
+      // ここで全画面クリップを撃つと、チェーン経路(launchStrike / launchStock)と
+      // 二重に鳴る。fullClip は strikeBeatNow だけが読む。
+      expect(fn, `${name} は fullClip を読まない`).not.toContain('fullClip');
+    }
+  });
+
+  it('SE は遮蔽で落とさない — 「音だけ聞こえる」が「何も起きない」に退化しない', () => {
+    // useChallengeSe は gauge-full / stock-full を常に null にしている(二重再生の
+    // 防止)ので、この2行がモニター唯一の発音点。plan.se は seEnabled と一致する。
+    for (const name of ['impactStrikeVisuals', 'stockImpactVisuals']) {
+      expect(fnBody(name), `${name} の SE が plan.se ゲートでない`).toContain('if (plan.se && cfg) {');
+    }
+  });
+
+  it('パンチと据え置きは遮蔽の外(走行中のタップは演出より優先)', () => {
+    // 7セグのパンチを plan で黙らせると、カットインの下で押しても手応えが消える。
+    for (const name of ['impactStrikeVisuals', 'stockImpactVisuals']) {
+      const fn = fnBody(name);
+      const punch = fn.indexOf("setPunchDir('strike');");
+      expect(punch, `${name} のパンチが無い`).toBeGreaterThanOrEqual(0);
+      // 直前の行が plan ゲートになっていない(素の文として出ている)ことの確認。
+      expect(fn).toContain("    setPunchDir('strike');\n    setPunchKey((k) => k + 1);");
+    }
+  });
+
+  it('横取り 3 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
+    const calls = SRC.split('flushStrike(true, ').length - 1;
+    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(3);
+    for (const kind of ['roulette', 'band', 'boost']) {
+      expect(SRC, `${kind} の横取りが遮蔽を渡していない`).toContain(
+        `flushStrike(true, occlusionOfCutin('${kind}'));`
+      );
+    }
+  });
+
+  it('imminentOcc の畳み込みは maxOcclusion(先勝ちの .some に戻さない)', () => {
+    const from = SRC.indexOf('const imminentOcc: FxOcclusion =');
+    expect(from, 'imminentOcc が無い').toBeGreaterThanOrEqual(0);
+    const to = SRC.indexOf("const cutinImminent = imminentOcc !== 'none';", from);
+    expect(to, 'cutinImminent の導出が無い').toBeGreaterThan(from);
+    const fold = SRC.slice(from, to);
+    // .some() の先勝ちだと、ルーレットと帯域カットインが同一デルタに相乗りしたとき
+    // 'sheer' に倒れて「ギフト中は音だけ」が破れる。
+    expect(fold).toContain('maxOcclusion(');
+    expect(fold).not.toContain('.some(');
+    // 4 重ガードはどれ1つ落としてはいけない(:1120-1127 の実害コメント参照)—
+    // 始まらない演出を数えると、beat に落とした数字の据え置きを誰も引き取らない。
+    for (const guard of [
+      'lastPlayed.current === null',
+      'isChallengeEffectFresh(',
+      'rouletteWillSpin(',
+      'boostWillStart(',
+      'bandWillStart(',
+    ]) {
+      expect(fold, `4重ガードの ${guard} が落ちている`).toContain(guard);
+    }
+  });
+
+  it('currentOcclusion は opaqueCutinActive を土台にする(第2の真実を作らない)', () => {
+    // playGiftVisual(連打ギフトの2発目以降)が同じ述語を使っている。別式に分けると
+    // 「片方だけ幕を認識する」食い違いが出る。
+    const fn = fnBody('currentOcclusion');
+    expect(fn).toContain('opaqueCutinActive()');
+    expect(fn).toContain('rouletteHold.current');
+    // 4 ホールドを直接読み直す実装に戻していないこと。
+    expect(fn).not.toContain('bandHold');
+    expect(fn).not.toContain('boostHold');
   });
 });
