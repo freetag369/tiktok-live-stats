@@ -14,8 +14,8 @@ import { describe, expect, it } from 'vitest';
  * fx-stage.spec.ts / fx-hold-safety.spec.ts と同型の機械的担保。
  */
 
-const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
-const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8');
+const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
+const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8').replace(/\r\n/g, '\n');
 
 /** 行頭セレクタの非ネストブロックを切り出す。 */
 function cssBlock(selector: string): string {
@@ -48,7 +48,7 @@ describe('パンチの classList リプレイ(key 再マウントの廃止)', ()
     expect(m![0]).not.toContain('punch-');
     // 切り出し先も punch-* を**文字列として**持たない。コメントでの言及は許す
     // (className に載るのはクォートされた文字列だけなので、そこだけを見る)。
-    const SEG_CLASS = readFileSync(resolve('src/renderer/monitor/seg-class.ts'), 'utf8');
+    const SEG_CLASS = readFileSync(resolve('src/renderer/monitor/seg-class.ts'), 'utf8').replace(/\r\n/g, '\n');
     expect(SEG_CLASS).not.toMatch(/['"`]punch-/);
   });
 

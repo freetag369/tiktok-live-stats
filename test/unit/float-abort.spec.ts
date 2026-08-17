@@ -13,7 +13,7 @@ import { FLOAT_ABORT_MS } from '@shared/challenge';
  * CSS の尺を伸ばしたらこのテストが落ちて気づく。
  */
 
-const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8');
+const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8').replace(/\r\n/g, '\n');
 
 /** 秒/ミリ秒どちらの表記でも ms に正規化する。 */
 function toMs(value: string, unit: string): number {
@@ -56,7 +56,7 @@ describe('FLOAT_ABORT_MS と monitor.css の同期', () => {
      * ソース文字列マッチなので壊れやすい面はあるが、レンダラのテスト環境が
      * このリポジトリに無い以上、この契約を機械的に守る手段はここしかない。
      */
-    const src = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
+    const src = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
     expect(src).toContain('ev.pseudoElement');
   });
 });

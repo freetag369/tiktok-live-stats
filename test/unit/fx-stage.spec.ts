@@ -34,7 +34,7 @@ import { bannerRank, fxRank, type FxBannerKind } from '@shared/fx-priority';
  * 決定ロジックを、レンダラを起動せずに固定する(fx-drain.spec.ts と同型)。
  */
 
-const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8');
+const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8').replace(/\r\n/g, '\n');
 
 /** 秒/ミリ秒どちらの表記でも ms に正規化する(float-abort.spec.ts と同じ)。 */
 function toMs(value: string, unit: string): number {
@@ -440,7 +440,7 @@ describe('takeNextBanner / bestQueuedRank / enqueueBanner のランク対応', (
 });
 
 describe('MonitorView のソース不変条件(レンダラのテスト環境が無いための機械的な担保)', () => {
-  const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
+  const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
   it('ラッチの読み取りは全部クランプを通る(素の bannerEndAt を読むと全死する)', () => {
     // 時計の後方ステップ(NTP 巻き戻し・サスペンド復帰)でラッチが未来に固着すると、

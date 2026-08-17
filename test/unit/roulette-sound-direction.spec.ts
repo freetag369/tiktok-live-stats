@@ -219,7 +219,7 @@ describe('rouletteHeadline — 応援は「お助け」を名乗る', () => {
 
 /** 配線のソース検査 — 剥がれると設定が恒久的に効かなくなる種類の事故を止める。 */
 describe('配線 — 設定UIが共有ヘルパを使っている', () => {
-  const ui = readFileSync(resolve(__dirname, '../../src/renderer/screens/Challenge.tsx'), 'utf8');
+  const ui = readFileSync(resolve(__dirname, '../../src/renderer/screens/Challenge.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
   it('行エディタと入室ルーレットの両方が方向対応の種を渡す', () => {
     expect(ui.split('rouletteCommonSound(').length - 1).toBeGreaterThanOrEqual(2);

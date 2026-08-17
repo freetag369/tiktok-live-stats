@@ -18,7 +18,7 @@ import {
  * 古い worker が作った effect でも、見た目が1ドットも変わらないこと。
  */
 
-const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8');
+const CSS = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8').replace(/\r\n/g, '\n');
 
 describe('お助け合算 — 窓の長さ', () => {
   it('FAN_STAMP_FX_WINDOW_MS は monitor.css の .float の floatup 尺と同値', () => {

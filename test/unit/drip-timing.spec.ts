@@ -19,7 +19,7 @@ import { DELTA_MS } from '@shared/constants';
  * DOM lib なしの typecheck で落ちるため、ソース文字列から拾う。
  */
 
-const SRC = readFileSync(resolve('src/renderer/monitor/LikeGauge.tsx'), 'utf8');
+const SRC = readFileSync(resolve('src/renderer/monitor/LikeGauge.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
 function intConst(name: string): number {
   const m = SRC.match(new RegExp(`^const ${name} = (\\d+);$`, 'm'));

@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
  * diag.log にも console にも何も残らない — 網羅監査(2026-08-16)で検出。
  */
 
-const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
+const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
 describe('キュー溢れの痕跡(fxWarn)', () => {
   it('pendingBands 満杯の else 節に fxWarn がある(無言破棄の再発防止)', () => {

@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest';
  * 番犬期限の書き込み、(3) 番犬の存在と出口、をレンダラを起動せずに固定する。
  */
 
-const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
+const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
 /** コンポーネント直下(2スペースインデント)の関数本文を切り出す。 */
 function fnBody(name: string): string {

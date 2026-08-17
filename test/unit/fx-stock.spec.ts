@@ -213,7 +213,7 @@ describe('fxStockKey: setState 等値ガードの合成キー', () => {
 });
 
 describe('monitor.css との整合(テキスト検査)', () => {
-  const css = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8');
+  const css = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8').replace(/\r\n/g, '\n');
 
   it('.fx-stock は右下固定のオーバーレイ(position:absolute + right/bottom)', () => {
     const rule = /\.fx-stock\s*{[^}]*}/.exec(css)?.[0] ?? '';

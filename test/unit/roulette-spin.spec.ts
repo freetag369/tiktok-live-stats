@@ -192,7 +192,7 @@ describe('planRouletteSpin — 全入力の総当り不変条件', () => {
 });
 
 describe('MonitorView の配線(ソース不変条件)', () => {
-  const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
+  const SRC = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
   function fnBody(name: string): string {
     const m = SRC.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n {2}\\}`));

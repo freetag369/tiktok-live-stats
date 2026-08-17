@@ -14,7 +14,7 @@ import { SHAKE_ABORT_MS } from '@shared/challenge';
  */
 describe('SHAKE_ABORT_MS と monitor.css の同期', () => {
   it('安全弁は shake 系 animation-duration の最大値より長い', () => {
-    const css = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8');
+    const css = readFileSync(resolve('src/renderer/styles/monitor.css'), 'utf8').replace(/\r\n/g, '\n');
     // `.monitor-root.shake { animation: shake 450ms ... }` 系の尺を拾う。
     const durations = [...css.matchAll(/\.monitor-root\.shake[\w-]*\s*\{\s*animation:\s*[\w-]+\s+(\d+)ms/g)].map(
       (m) => Number(m[1])

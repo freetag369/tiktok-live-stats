@@ -386,7 +386,7 @@ describe('ChallengeEngine — 行の同一性の焼き込み', () => {
  */
 describe('resolveRouletteSound のモニター配線(ソース不変条件)', () => {
   // vitest の実行 cwd はリポジトリルート(他のソース検査 spec と同じ前提)。
-  const src = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
+  const src = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
   it('回転サウンドと ultra クリップ音量の両方が resolveRouletteSound を呼ぶ', () => {
     const calls = src.match(/resolveRouletteSound\(/g) ?? [];
@@ -404,7 +404,7 @@ describe('resolveRouletteSound のモニター配線(ソース不変条件)', ()
  * 編集UIの配線が剥がれたら(エディタをどこかの行から外したら)ここで検出する。
  */
 describe('行別サウンド編集UIの配線(ソース不変条件)', () => {
-  const src = readFileSync(resolve('src/renderer/screens/Challenge.tsx'), 'utf8');
+  const src = readFileSync(resolve('src/renderer/screens/Challenge.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
   it('上書きエディタがギフト行と入室ルーレットの両方に居る', () => {
     const uses = src.match(/<RouletteRowSoundEditor\b/g) ?? [];

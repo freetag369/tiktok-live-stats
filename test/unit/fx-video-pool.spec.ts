@@ -21,8 +21,8 @@ import { describe, expect, it } from 'vitest';
  * 機械的な担保)。
  */
 
-const MONITOR = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8');
-const ROULETTE = readFileSync(resolve('src/renderer/monitor/RouletteFx.tsx'), 'utf8');
+const MONITOR = readFileSync(resolve('src/renderer/monitor/MonitorView.tsx'), 'utf8').replace(/\r\n/g, '\n');
+const ROULETTE = readFileSync(resolve('src/renderer/monitor/RouletteFx.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
 /** コンポーネント直下(2スペースインデント)の関数本文を切り出す。 */
 function fnBody(src: string, name: string): string {
