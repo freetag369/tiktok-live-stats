@@ -27,6 +27,7 @@ function input(over: Partial<RouletteSpinInput> = {}): RouletteSpinInput {
     coalesced: 1,
     join: false,
     test: false,
+    hot: false,
     teaseEnabled: true,
     queueRest: 0,
     ...over,
@@ -146,10 +147,12 @@ describe('planRouletteSpin — 全入力の総当り不変条件', () => {
       for (const coalesced of [1, 2, 9]) {
         for (const join of [false, true]) {
           for (const test of [false, true]) {
-            for (const teaseEnabled of [false, true]) {
-              for (const queueRest of [0, 1, 5]) {
-                const s = { at, reels, coalesced, join, test, teaseEnabled, queueRest };
-                all.push({ s, label: JSON.stringify(s) });
+            for (const hot of [false, true]) {
+              for (const teaseEnabled of [false, true]) {
+                for (const queueRest of [0, 1, 5]) {
+                  const s = { at, reels, coalesced, join, test, hot, teaseEnabled, queueRest };
+                  all.push({ s, label: JSON.stringify(s) });
+                }
               }
             }
           }

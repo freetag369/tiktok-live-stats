@@ -572,6 +572,27 @@ export interface ChallengeRouletteConfig {
    * resolveRouletteSound が唯一の実装。
    */
   sound?: RouletteSoundConfig;
+  /**
+   * 激熱確定。**キー欠損 = 無効**(保存済み settings.json の全行がここへ倒れるので、
+   * 欠損が移行の代わりになる — sound / rouletteTease と同じ手口で SETTINGS_VERSION は
+   * 上げない)。有効な行は**100%** 激熱確定になり、出目に multiplier を掛けた値が
+   * そのままカウントへ適用される(演出だけの見せかけ倍率とは別物 — RouletteFx.tsx の
+   * mult の解説を参照)。multiplier は ROULETTE_HOT_MULT_MIN..MAX。
+   * **direction:'sub' の行では検証(validateRoulette)がキーごと落とす** — 応援側で
+   * 一気に 50 倍減らすのは別の企画なので、死んだ設定を構造的に作らない。
+   */
+  hot?: RouletteHotConfig;
+}
+
+/**
+ * 激熱確定の設定。ギフトルーレット行(ChallengeRouletteConfig.hot)専用で、入室
+ * ルーレットには持たせない — 入室は単一設定・盤面も1つなので、100% 発動の 50 倍が
+ * 入室のたびに走ると 43 秒の演出でモニターが埋まる。
+ */
+export interface RouletteHotConfig {
+  enabled: boolean;
+  /** 出目に掛ける実倍率。ROULETTE_HOT_MULT_MIN..MAX へ clamp される。 */
+  multiplier: number;
 }
 
 /**
@@ -1348,6 +1369,21 @@ export interface ChallengeEffect {
    * rouletteSegments と同じ「effect 1件で自己完結」の流儀。
    */
   rouletteOrigin?: 'join';
+  /**
+   * kind='roulette': 激熱確定の**実倍率**。載っているときは worker が既に
+   * `出目 × ここ` を値へ適用済みで、1スピンぶんの増減は
+   * `rouletteSegments[index] × (rouletteDirection === 'sub' ? -1 : 1) × rouletteHotMult`
+   * になる(復元は shared の rouletteDraws が唯一の実装)。**通常のルーレットには
+   * 載せない**(キーごと出さない = 既存 effect と JSON 比較が素直に保たれる)。
+   *
+   * **rouletteBoardKey に入れる。** rouletteOrigin と同じ理由 — 倍率が違えば同じ
+   * index が別の額を意味するので、畳み込み(mergeRoulette / worker の finishDrain)で
+   * 激熱と通常が混ざると値の復元が壊れる。
+   *
+   * モニターはこの有無で (a) 優先クラス 'hot-roulette'、(b) 8 秒の導入動画、
+   * (c) 倍率を戻さない確定、の3つを分岐する。
+   */
+  rouletteHotMult?: number;
   /**
    * kind='gift' でダイヤ帯域カットインが一致したときのクリップ id。
    * rouletteSegments と同じ「effect 1件で自己完結」の流儀 — モニターの設定は

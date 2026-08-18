@@ -144,3 +144,43 @@ describe('ingestChallenge — ラン境界で履歴ログを捨てる', () => {
     expect(logLen()).toBe(1);
   });
 });
+
+describe('ingestChallenge — 境界と認めるのは前進だけ(旧ランの後着は破棄)', () => {
+  it('reset 直後に旧ランのスナップショットが後着してもログを復活させない', () => {
+    store.setChallenge(challenge({ recentEffects: [fx(), fx()] }));
+    expect(logLen()).toBe(2);
+
+    // reset — ログが消え、確認ダイアログの「すべて消えます」が成立する。
+    store.setChallenge(challenge({ status: 'idle', startedMs: null, value: 100, recentEffects: [] }));
+    expect(logLen()).toBe(0);
+
+    // reset 直前に投げた press RPC の返り値(旧ランの startedMs とリング)が後着。
+    // 境界の再検出で watermark が白紙になり前ランのログが全件復活していた経路。
+    store.setChallenge(
+      challenge({ value: 55, recentEffects: [fx({ id: 2 }), fx({ id: 1 })] })
+    );
+    expect(logLen()).toBe(0);
+    // スナップショットごと破棄されるので、7セグの値も reset 後のまま。
+    expect(store.useLive.getState().challenge?.value).toBe(100);
+    expect(store.useLive.getState().challenge?.startedMs).toBeNull();
+  });
+
+  it('走行中に旧ランのスナップショットが後着しても破棄する', () => {
+    store.setChallenge(challenge({ recentEffects: [fx()] }));
+    store.setChallenge(challenge({ startedMs: NOW + 60_000, recentEffects: [] }));
+    expect(logLen()).toBe(0);
+
+    store.setChallenge(challenge({ value: 1, recentEffects: [fx({ id: 50 })] }));
+    expect(logLen()).toBe(0);
+    expect(store.useLive.getState().challenge?.startedMs).toBe(NOW + 60_000);
+  });
+
+  it('reset 後の新しい start(前ランより新しい startedMs)は境界として受け入れる', () => {
+    store.setChallenge(challenge({ recentEffects: [fx()] }));
+    store.setChallenge(challenge({ status: 'idle', startedMs: null, recentEffects: [] }));
+
+    store.setChallenge(challenge({ startedMs: NOW + 1000, recentEffects: [fx({ id: 1 })] }));
+    expect(logLen()).toBe(1);
+    expect(store.useLive.getState().challenge?.startedMs).toBe(NOW + 1000);
+  });
+});

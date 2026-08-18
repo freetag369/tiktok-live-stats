@@ -40,6 +40,7 @@ export type FxStockKind =
   | 'boost' // フィーバー(pendingBoosts)
   | 'band' // ギフトカットイン(pendingBands — 帯/フルカットとも。表示ラベルは「ギフト」)
   | 'join-roulette' // 初見(入室)ルーレット(joinRouletteQueue)
+  | 'hot-roulette' // 激熱確定ルーレット(hotRouletteQueue)
   | 'roulette' // ギフトルーレット(rouletteQueue)
   | 'follow'; // フォロー妨害の凍結中予告(workerQueue のみ — レンダラー側キューは持たない)
 
@@ -52,6 +53,7 @@ export const STOCK_KIND_PRIORITY = {
   boost: 'boost',
   band: 'band',
   'join-roulette': 'join-roulette',
+  'hot-roulette': 'hot-roulette',
   roulette: 'other',
   follow: 'follow',
 } as const satisfies Record<Exclude<FxStockKind, 'clear'>, FxPriorityClass>;
@@ -89,7 +91,7 @@ export interface FxStockBandRef extends FxStockQueuedRef {
 
 /** 再生中の演出(先頭行)。remaining はいま回している1本を含む残数。 */
 export interface FxStockPlaying {
-  kind: 'roulette' | 'join-roulette' | 'band';
+  kind: 'roulette' | 'join-roulette' | 'hot-roulette' | 'band';
   id: number;
   nickname?: string;
   remaining: number;
@@ -141,6 +143,8 @@ export interface FxStockSnapshot {
   bands: FxStockBandRef[];
   /** joinRouletteQueue(積む側上限 JOIN_ROULETTE_QUEUE_MAX)。 */
   joinRoulettes: FxStockRouletteRef[];
+  /** hotRouletteQueue(積む側上限 ROULETTE_HOT_QUEUE_MAX)。 */
+  hotRoulettes: FxStockRouletteRef[];
   /** rouletteQueue(積む側上限 ROULETTE_QUEUE_MAX)。 */
   roulettes: FxStockRouletteRef[];
   /** ワーカー凍結キューの予告(ChallengeState.fxQueue、到着順)。 */
@@ -179,7 +183,12 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
         });
       }
     } else {
-      const refs = kind === 'join-roulette' ? s.joinRoulettes : s.roulettes;
+      const refs =
+        kind === 'join-roulette'
+          ? s.joinRoulettes
+          : kind === 'hot-roulette'
+            ? s.hotRoulettes
+            : s.roulettes;
       for (const r of refs) {
         all.push({
           key: `${kind}:${r.id}`,
@@ -207,7 +216,10 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
     items,
     overflow: rest.length,
     overflowRouletteTotal: rest.reduce(
-      (s, it) => (it.kind === 'roulette' || it.kind === 'join-roulette' ? s + it.count : s),
+      (s, it) =>
+        it.kind === 'roulette' || it.kind === 'join-roulette' || it.kind === 'hot-roulette'
+          ? s + it.count
+          : s,
       0
     ),
   };

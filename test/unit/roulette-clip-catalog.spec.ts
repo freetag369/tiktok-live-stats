@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { ROULETTE_PATTERN_TIMING, rouletteUltraClipIds } from '@shared/roulette-fx';
 import type { RoulettePattern } from '@shared/dto';
 import { ROULETTE_PATTERN_TIER } from '@shared/dto';
+import { ROULETTE_HOT_PATTERNS } from '@shared/challenge';
 
 /**
  * 超激アツ動画クリップの id ⇄ 実ファイルの結合検査(fx-catalog.spec.ts の cut/ と
@@ -15,6 +16,12 @@ import { ROULETTE_PATTERN_TIER } from '@shared/dto';
  * 「孤児ファイル」「スラッグ打ち間違い」の両方を検出する厳格モードに自動で切り替わる。
  */
 const RL_DIR = join(__dirname, '../../src/renderer/assets/fx/rl');
+/**
+ * 激熱確定の導入動画。**サブディレクトリに分けてある** — rl/ 直下に置くと
+ * 下の「id ⇄ ファイルが 1:1」が孤児として弾く(あちらは非再帰・*.mp4 のみ)。
+ * renderer/lib/fx.ts の glob も別に持たせてある(rouletteHotIntroUrl)。
+ */
+const RL_HOT_DIR = join(RL_DIR, 'hot');
 
 describe('超激アツクリップのカタログ(shared/roulette-fx.ts)', () => {
   it('id は <pattern>-<n> 形式で、パターンは ultra 段位・n はウィンドウ数まで', () => {
@@ -41,5 +48,24 @@ describe.skipIf(!existsSync(RL_DIR))('超激アツクリップの実ファイル
       .map((f) => f.replace(/\.mp4$/, ''))
       .sort();
     expect(files).toEqual([...rouletteUltraClipIds()].sort());
+  });
+});
+
+describe.skipIf(!existsSync(RL_HOT_DIR))('激熱確定の導入動画(assets/fx/rl/hot/)', () => {
+  it('素材ファイルと ROULETTE_HOT_PATTERNS が一対一', () => {
+    const files = readdirSync(RL_HOT_DIR)
+      .filter((f) => f.endsWith('.mp4'))
+      .map((f) => f.replace(/\.mp4$/, ''))
+      .sort();
+    expect(files).toEqual([...ROULETTE_HOT_PATTERNS].sort());
+  });
+});
+
+describe('激熱確定の絵柄は超激アツ(ultra)であること', () => {
+  it('3種とも ultra 段位 = donAts を持つ(倍率の段が乗る唯一の段位)', () => {
+    for (const p of ROULETTE_HOT_PATTERNS) {
+      expect(ROULETTE_PATTERN_TIER[p], p).toBe('ultra');
+      expect(ROULETTE_PATTERN_TIMING[p].donAts, p).toBeTruthy();
+    }
   });
 });

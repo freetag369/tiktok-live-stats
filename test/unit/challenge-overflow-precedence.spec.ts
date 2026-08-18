@@ -5,6 +5,7 @@ import {
   DEFAULT_GIFT_BAND_FX,
   DEFAULT_ROULETTES,
   DEFAULT_TAP_BOOST,
+  GIFT_FX_PENDING_OPS_CRITICAL_EXTRA,
   GIFT_FX_PENDING_OPS_MAX,
 } from '@shared/challenge';
 import type { ChallengeConfig } from '@shared/dto';
@@ -365,5 +366,154 @@ describe('保留キュー溢れの診断 — エピソード先頭1行+サマリ
     t = NOW + 600_000;
     e.drainIfChanged();
     expect(overflow()).toHaveLength(0);
+  });
+});
+
+/**
+ * 溢れ弁の縮退と「重要 op」。doc(applyOrQueue)の「値の正しさ優先で演出だけを
+ * 捨てる」は、以前は overflowOp を渡す gift 経路でしか成立しておらず、follow /
+ * like / tapBoost はフル op が凍結中に即時実行されていた。とくに tapBoost は
+ * activateBoost が進行中のフィーバーを強制清算した上で凍結を最長 82 秒へ張り直す。
+ */
+describe('溢れ弁 — 凍結中にフル op を走らせない(縮退と重要op)', () => {
+  function boostCfg(): ChallengeConfig {
+    return cfg({
+      initialValue: 10_000,
+      followStep: 1,
+      giftBandFx: { ...structuredClone(DEFAULT_GIFT_BAND_FX), enabled: true },
+      tapBoost: {
+        ...structuredClone(DEFAULT_TAP_BOOST),
+        enabled: true,
+        rules: [{ ...structuredClone(DEFAULT_TAP_BOOST.rules[0]!), giftId: '9998' }],
+      },
+    });
+  }
+
+  function boostGift(): NormalizedEvent {
+    return gift({ giftId: '9998', giftName: 'Boost Gift', diamonds: 1 });
+  }
+
+  it('溢れたフォローはバナー(effect)を積まず、値だけ即時に入る', () => {
+    const e = engine(cfg({
+      initialValue: 10_000,
+      followStep: 1,
+      giftBandFx: { ...structuredClone(DEFAULT_GIFT_BAND_FX), enabled: true },
+    }));
+    e.start();
+    freeze(e);
+    fillQueue(e);
+
+    const before = e.get().value;
+    e.handleEvent(follow('overflow-banner'));
+    expect(e.get().value).toBe(before + 1);
+    // カットインの真上にフォローバナーを出さない — 凍結中の ring に follow が無い。
+    expect(e.get().recentEffects.some((x) => x.kind === 'follow')).toBe(false);
+  });
+
+  it('溢れたタップブーストは凍結中に発動せず、追加枠で保留され凍結明けに発動する', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    freeze(e);
+    const frozenUntil = e.get().fxFreezeUntilMs;
+    fillQueue(e);
+
+    e.handleEvent(boostGift());
+    // 以前はここで activateBoost が即時実行され、凍結が ~82 秒へ張り直されていた。
+    expect(e.get().boost ?? null).toBeNull();
+    expect(e.get().fxFreezeUntilMs).toBe(frozenUntil);
+
+    // 凍結明けのドレインで直列に発動する(課金ギフトのフィーバーは失わない)。
+    t = NOW + 600_000;
+    e.drainIfChanged();
+    expect(e.get().recentEffects.some((x) => x.kind === 'boost-start')).toBe(true);
+  });
+
+  it('重要opの追加枠も尽きたら破棄する — 即時実行には決して倒れない', () => {
+    const lines: string[] = [];
+    const c = boostCfg();
+    const e = new ChallengeEngine(() => c, () => NOW, () => 0, () => 0, (m) => lines.push(m));
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
+    e.start();
+    freeze(e);
+    fillQueue(e);
+    // 追加枠(EXTRA)をブーストギフトで埋め尽くす。
+    for (let i = 0; i < GIFT_FX_PENDING_OPS_CRITICAL_EXTRA; i += 1) e.handleEvent(boostGift());
+    const frozenUntil = e.get().fxFreezeUntilMs;
+
+    // 追加枠も満杯 — 破棄され、発動も凍結の張り直しも起きない。
+    expect(e.handleEvent(boostGift())).toBe(false);
+    expect(e.get().boost ?? null).toBeNull();
+    expect(e.get().fxFreezeUntilMs).toBe(frozenUntil);
+    expect(lines.filter((l) => l.includes('重要op'))).toHaveLength(1);
+  });
+});
+
+/** effect の amount は「画面上で実際に減った量」(press / boost-end / お助け共通)。 */
+describe('クランプ規約 — 残量を超える減算は実減少量を焼き込む', () => {
+  it('最後の1押しの press effect は残量ぶん(-step ではない)', () => {
+    const e = engine(cfg({ initialValue: 3, pressStep: 5 }));
+    e.start();
+    e.press(); // 3 - 5 → 0(実減少は 3)
+    const s = e.get();
+    expect(s.value).toBe(0);
+    const press = s.recentEffects.find((x) => x.kind === 'press')!;
+    // ラッチ表示の開始値 = valueAfter - amount = 3(押下前の値)に一致する。
+    expect(press.amount).toBe(-3);
+    expect(press.valueAfter).toBe(0);
+  });
+
+  it('清算の boost-end は残量でクランプした量を発表する', () => {
+    let t = NOW;
+    const c = cfg({
+      initialValue: 8,
+      pressStep: 1,
+      tapBoost: {
+        ...structuredClone(DEFAULT_TAP_BOOST),
+        enabled: true,
+        rules: [{ ...structuredClone(DEFAULT_TAP_BOOST.rules[0]!), giftId: '9998' }],
+      },
+    });
+    const e = engine(c, () => t);
+    e.start();
+    e.handleEvent(gift({ giftId: '9998', giftName: 'Boost Gift', diamonds: 1 }));
+    const startFx = e.get().recentEffects.find((x) => x.kind === 'boost-start')!;
+    const rule = c.tapBoost.rules[0]!;
+    const preMs = 5000 + 3000; // intro + count(boostCue が実測を握るので値は任意)
+    e.boostCue({ action: 'start', effectId: startFx.id, startedAtMs: NOW, preMs });
+    t = NOW + preMs + 1000;
+    for (let i = 0; i < 4; i += 1) e.press(); // 名目 4 × 倍率 = 残量 8 を超える
+    t = NOW + preMs + rule.durationSec * 1000 + 1;
+    e.drainIfChanged();
+
+    const s = e.get();
+    expect(s.value).toBe(0);
+    const end = s.recentEffects.find((x) => x.kind === 'boost-end')!;
+    // 名目(4 × pressStep × multiplier)ではなく、実際に減った 8 を発表する。
+    expect(end.amount).toBe(-8);
+    expect(end.boostTapCount).toBe(4);
+  });
+
+  it('お助けの gift effect と統計(giftDown)も残量でクランプ', () => {
+    const c = cfg({
+      initialValue: 5,
+      fanStamp: {
+        ...structuredClone(DEFAULT_FAN_STAMP),
+        enabled: true,
+        giftId: '7777',
+        amountEach: -1000,
+      },
+    });
+    const e = engine(c);
+    e.start();
+    e.handleEvent(gift({ giftId: '7777', giftName: 'Helper', diamonds: 1 }));
+    const s = e.get();
+    expect(s.value).toBe(0);
+    expect(s.status).toBe('achieved');
+    // 「ギフトで減らした数」が初期値を超えない。
+    expect(s.stats.giftDown).toBe(5);
+    const fx = s.recentEffects.find((x) => x.kind === 'gift')!;
+    expect(fx.amount).toBe(-5);
   });
 });

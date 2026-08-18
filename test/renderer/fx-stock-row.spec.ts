@@ -23,6 +23,7 @@ function snap(over: Partial<FxStockSnapshot> = {}): FxStockSnapshot {
     boosts: [],
     bands: [],
     joinRoulettes: [],
+    hotRoulettes: [],
     roulettes: [],
     workerQueue: [],
     ...over,

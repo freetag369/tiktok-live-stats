@@ -21,9 +21,13 @@ import {
   PENDING_BOOSTS_MAX,
   JOIN_ROULETTE_QUEUE_MAX,
   ROULETTE_CHAIN_GAP_MS,
+  ROULETTE_HOT_QUEUE_MAX,
   ROULETTE_QUEUE_MAX,
   SHAKE_ABORT_MS,
   rouletteAbortMs,
+  rouletteHotIntroMs,
+  rouletteHotMultOf,
+  rouletteHotMults,
   effectiveSeVolume,
   freshChallengeEffects,
   giftFxShots,
@@ -55,6 +59,7 @@ import { routeStrike } from '@shared/fx-strike-route';
 import {
   BANNER_PRIORITY,
   bannerRank,
+  fxClassForEffect,
   shouldYieldSpinChain,
   strikeClass,
   type FxBannerKind,
@@ -112,6 +117,7 @@ import {
   STRIKE_CLIP_URL,
   boostClipUrl,
   fxClipUrl,
+  rouletteHotIntroUrl,
 } from '../lib/fx';
 import { playSe } from '../lib/se';
 import { playBandBgm, type BgmHandle } from '../lib/bgm';
@@ -740,9 +746,37 @@ export function MonitorView(): React.JSX.Element {
     /** 実際に回す1本ぶんの出目・パターン・増減量(rouletteDraws の 1 要素)。 */
     draw: { index: number; pattern: RoulettePattern; amount: number };
   } | null>(null);
+  /**
+   * 激熱確定の導入フェーズ(スロットに入る前の全画面動画・ROULETTE_HOT_INTRO_MS)。
+   * **RouletteFx の外に置く** — リールの走行アニメはマウントで始まるので、
+   * 導入をコンポーネント内に入れると 8 秒ぶん走ってから見せることになる。
+   * null = 導入なし(通常のルーレットは常に null)。
+   */
+  const [rouletteIntro, setRouletteIntro] = useState<{
+    key: number;
+    effect: ChallengeEffect;
+    pattern: RoulettePattern;
+    src: string;
+  } | null>(null);
+  /**
+   * 導入の再生中フラグ(同期読み用)。currentOcclusion はタイマー越しにも呼ばれるので
+   * state ではなく ref を見る(rouletteHold と同じ流儀)。
+   */
+  const rouletteIntroOn = useRef(false);
+  /**
+   * 導入を打ち切ってリールへ進む手(startRoulette の beginSpin)。動画の再生失敗・
+   * onError のときに JSX から呼ぶ — 黒画面のまま 8 秒固まらせないための縮退。
+   * ref に置くのは、beginSpin が startRoulette のクロージャだから。
+   */
+  const rouletteIntroSkip = useRef<(() => void) | null>(null);
   const rouletteQueue = useRef<QueuedRoulette[]>([]);
   /** 入室(初見)ルーレット専用キュー(優先度⑥ — rouletteOrigin === 'join')。 */
   const joinRouletteQueue = useRef<QueuedRoulette[]>([]);
+  /**
+   * 激熱確定ルーレット専用キュー(優先度⑥.5 — rouletteHotMult が載っている)。
+   * 帯域カットインより先に消化される(fx-priority.ts の序列)。
+   */
+  const hotRouletteQueue = useRef<QueuedRoulette[]>([]);
   /**
    * ドレイン系キュー(strike / boosts / bands / join / roulettes)の**待機開始時刻**。
    * 全部空になったら null。pickStageNext のドレイン側飢餓弁(DRAIN_STARVE_MS)の
@@ -915,6 +949,9 @@ export function MonitorView(): React.JSX.Element {
   // effect が解除時に再実行されず「リザルトが永久に出ない」側へ静かに壊れる。
   const fxHoldBusy =
     roulette !== null ||
+    // 導入動画も「最前面のオーバーレイを描く state」— 落とすと CLEAR のリザルト画面が
+    // 8秒の導入の上に生える(boostSettle が漏れていたのと同じ事故)。
+    rouletteIntro !== null ||
     bandClip !== null ||
     stockCutin !== null ||
     boostClip !== null ||
@@ -1381,17 +1418,19 @@ export function MonitorView(): React.JSX.Element {
   // なるので、入れるとタイマーを 2Hz で張り直してしまう)。中身も lockActive しか
   // 読まないので、これで exhaustive-deps を満たしたまま張り直しは開始/終了の2回だけ。
   const lockActive = tapLock != null;
-  const [lockNowMs, setLockNowMs] = useState(0);
+  // 250ms の interval は再描画のポンプに徹し、残り時間は描画時点の now で計算する。
+  // state に now を持つと「tapLock 到着後の初回フレーム」だけ古い now(初期値 0、
+  // または前エピソードの最終値)で計算され、エポック秒級の残り時間が1フレーム出る。
+  const [, setLockTick] = useState(0);
   useEffect(() => {
     if (!lockActive) return;
-    setLockNowMs(Date.now());
-    const t = setInterval(() => setLockNowMs(Date.now()), 250);
+    const t = setInterval(() => setLockTick((n) => n + 1), 250);
     return () => clearInterval(t);
   }, [lockActive]);
   // 期限切れの表示落ちは worker の delta を待たずに済ませる(最大 500ms のズレでも
   // 「0秒」が居座ると復帰したのに封印中に見える)。倒す向きは常に安全側 =
   // 「表示が遅れて残る」ことはあっても「解けていないのに解けて見える」ことはない。
-  const lockLeftMs = tapLock != null ? Math.max(0, tapLock.endsAtMs - Math.max(lockNowMs, 0)) : 0;
+  const lockLeftMs = tapLock != null ? Math.max(0, tapLock.endsAtMs - Date.now()) : 0;
   const lockSecs = Math.ceil(lockLeftMs / 1000);
   const lockShown = tapLock != null && lockLeftMs > 0;
 
@@ -1507,6 +1546,9 @@ export function MonitorView(): React.JSX.Element {
    */
   function currentOcclusion(): FxOcclusion {
     if (opaqueCutinActive()) return 'opaque';
+    // 激熱確定の導入だけは**不透明**(全画面動画)。ルーレットの暗幕は半透明なので
+    // 通常は 'sheer' だが、導入中に粒子や満タン動画を撃つと動画の上に生える。
+    if (rouletteIntroOn.current) return 'opaque';
     return rouletteHold.current ? occlusionOfCutin('roulette') : 'none';
   }
   /**
@@ -1574,6 +1616,9 @@ export function MonitorView(): React.JSX.Element {
     // キューへ戻した連鎖の再開時に、消化済みリールぶん数字が巻き戻る。
     for (const w of rouletteQueue.current) n += rouletteRemainingAmount(w.e, w.resumeAt);
     for (const w of joinRouletteQueue.current) n += rouletteRemainingAmount(w.e, w.resumeAt);
+    // 激熱確定も同じ式で数える。落とすと倍率ぶん(最大 50 倍)の据え置きが不足し、
+    // リールが回る前に 7セグが答えを出してから巻き戻る。
+    for (const w of hotRouletteQueue.current) n += rouletteRemainingAmount(w.e, w.resumeAt);
     for (const e of pendingBands.current) n += e.amount;
     return n;
   }
@@ -1649,6 +1694,7 @@ export function MonitorView(): React.JSX.Element {
       pendingBoosts.current.length > 0 ||
       pendingBands.current.length > 0 ||
       joinRouletteQueue.current.length > 0 ||
+      hotRouletteQueue.current.length > 0 ||
       rouletteQueue.current.length > 0 ||
       pendingStrike.current !== null
     );
@@ -1666,6 +1712,7 @@ export function MonitorView(): React.JSX.Element {
       boosts: pendingBoosts.current,
       bands: pendingBands.current,
       joinRoulettes: joinRouletteQueue.current,
+      hotRoulettes: hotRouletteQueue.current,
       roulettes: rouletteQueue.current,
     };
   }
@@ -1684,6 +1731,7 @@ export function MonitorView(): React.JSX.Element {
       pendingBoosts.current.length > 0 ||
       pendingBands.current.length > 0 ||
       joinRouletteQueue.current.length > 0 ||
+      hotRouletteQueue.current.length > 0 ||
       rouletteQueue.current.length > 0;
     if (!waiting) drainWaitingSinceMs.current = null;
     else if (drainWaitingSinceMs.current === null) drainWaitingSinceMs.current = Date.now();
@@ -1714,6 +1762,11 @@ export function MonitorView(): React.JSX.Element {
         rep: giftFxShots(e).rep,
       })),
       joinRoulettes: joinRouletteQueue.current.map((w) => ({
+        id: w.e.id,
+        nickname: w.e.nickname,
+        count: spinsOf(w),
+      })),
+      hotRoulettes: hotRouletteQueue.current.map((w) => ({
         id: w.e.id,
         nickname: w.e.nickname,
         count: spinsOf(w),
@@ -2439,7 +2492,11 @@ export function MonitorView(): React.JSX.Element {
           hooks?.onNext?.('strike');
           return true;
         }
-        if (next.kind === 'roulette' || next.kind === 'join-roulette') {
+        if (
+          next.kind === 'roulette' ||
+          next.kind === 'join-roulette' ||
+          next.kind === 'hot-roulette'
+        ) {
           const w = next.effect;
           // 断るのは「盤面が無くて回す出目が1本も無い」ときだけ(playEffect の
           // rouletteWillSpin で弾いているので通常は来ない)。断る相手のために
@@ -2573,14 +2630,20 @@ export function MonitorView(): React.JSX.Element {
     // BGM はキュー消化の連鎖中は止めない(null のときだけ開始)— 連鎖が別の行へ
     // 跨いだ場合は先頭行の BGM を維持する(既知の妥協)。ループ音は
     // onSpinQuiet で毎回止まるので、スピンごとに頭から撃ち直す = 行別が正しく効く。
-    const snd = resolveRouletteSound(cfg?.challenge, e);
-    if (rouletteBgm.current === null) rouletteBgm.current = playBandBgm(snd?.bgm, snd?.bgmVolume ?? 0);
-    if (rouletteSpinSe.current === null) {
-      rouletteSpinSe.current = playBandBgm(snd?.spinSe, snd?.spinSeVolume ?? 0);
-    }
-    // 回転開始のジングルは**ギフト1件につき1回**(連打で N 本のリールでも1回)。
-    // useChallengeSe は stageSynced のとき鳴らさないので、ここが唯一の再生点。
-    if (at === 0) playSeSlot('roulette');
+    // **回転音はリールが出る瞬間に鳴らす**(激熱確定では導入 8 秒ぶん遅れる)。
+    // 導入動画は効果音を焼き込んであるので、その上に回転ループ音を重ねない。
+    const startSpinSound = (): void => {
+      const snd = resolveRouletteSound(cfg?.challenge, e);
+      if (rouletteBgm.current === null) {
+        rouletteBgm.current = playBandBgm(snd?.bgm, snd?.bgmVolume ?? 0);
+      }
+      if (rouletteSpinSe.current === null) {
+        rouletteSpinSe.current = playBandBgm(snd?.spinSe, snd?.spinSeVolume ?? 0);
+      }
+      // 回転開始のジングルは**ギフト1件につき1回**(連打で N 本のリールでも1回)。
+      // useChallengeSe は stageSynced のとき鳴らさないので、ここが唯一の再生点。
+      if (at === 0) playSeSlot('roulette');
+    };
     // 据え置き値は「適用済みの現在値」から**まだ見せていない出目**(このリール
     // 以降 + 回さない rest)と舞台待ちの持ち越し全部を戻した「このリールの適用前」。
     // 連打では1本止まるごとに数字が段階的に動く。スライス位置の権威は shared の
@@ -2599,6 +2662,9 @@ export function MonitorView(): React.JSX.Element {
       coalesced: e.coalesced ?? 1,
       join: e.rouletteJoin === true,
       test: e.test === true,
+      // 激熱確定は短縮も超焦らしの差し替えも免除する(倍率の段は ultra の
+      // donAts にしか無いので、どちらも倍率を消してしまう)。
+      hot: e.rouletteHotMult != null,
       teaseEnabled: tease?.enabled === true,
       queueRest: rouletteQueue.current.length,
     });
@@ -2618,11 +2684,15 @@ export function MonitorView(): React.JSX.Element {
     // spin は開始時に確定して state にも焼き込む。onDone で ref を読み直すと
     // 「呼ばれた時点の世代」と常に一致してしまい、世代チェックが素通りする。
     const spin = ++rouletteSpinId.current;
-    setRoulette({ key: ++fxKey, effect: e, fast: short, spin, at, draw });
     // ストック先頭行の ×N。コンボ2本目以降は finishRoulette からの直行で
     // pumpStage を通らないため、ここで明示的に写す(スピンごとに残数が減る)。
     playingFx.current = {
-      kind: e.rouletteOrigin === 'join' ? 'join-roulette' : 'roulette',
+      kind:
+        e.rouletteOrigin === 'join'
+          ? 'join-roulette'
+          : e.rouletteHotMult != null
+            ? 'hot-roulette'
+            : 'roulette',
       id: e.id,
       nickname: e.nickname,
       // キュー行の spinsOf と同じ1本の式(rouletteStockCount)。キュー行 → 先頭行の
@@ -2638,10 +2708,37 @@ export function MonitorView(): React.JSX.Element {
     // (超焦らしカウントの差し替え後の draw.pattern — jack⇔doublefake は同じ
     // heavy 段位なので尺は変わらないが、権威は常に差し替え後とする)。
     clearRouletteTimers();
-    const abortAfterMs = rouletteAbortMs(short ? 'fast' : draw.pattern) + ROULETTE_CHAIN_GAP_MS;
+    // 激熱確定の導入(スロットに入る前の全画面動画)。素材未投入は null =
+    // 導入を丸ごと飛ばしてスピンから始める(rouletteClipUrl と同じ 0 件許容)。
+    const introSrc = e.rouletteHotMult != null ? rouletteHotIntroUrl(draw.pattern) : null;
+    const introMs = introSrc != null ? rouletteHotIntroMs(e) : 0;
+    // **尺の権威は1本**: 安全弁・番犬・リール投入の遅延が同じ式から出る。
+    // 導入ぶんを足さないと、番犬と安全弁が導入 + スピンの途中(8秒手前)で発火して
+    // リールが消え、確定前に数字が最終値へ飛ぶ。
+    const abortAfterMs = introMs + rouletteAbortMs(short ? 'fast' : draw.pattern) + ROULETTE_CHAIN_GAP_MS;
     // 番犬の期限は安全弁と同じ権威尺から導く(連鎖では1本ごとに張り直される)。
     fxHoldDeadlines.current.roulette = Date.now() + abortAfterMs + FX_HOLD_GRACE_MS;
     rouletteTimers.current.push(window.setTimeout(() => finishRoulette(e, spin, at), abortAfterMs));
+    // リールを実際に出す。導入があるぶんだけ遅らせる — 据え置き(holdValue)は
+    // 既に張ってあるので、この 8 秒のあいだ数字は動かない(出目の先漏れなし)。
+    const beginSpin = (): void => {
+      // 世代が変わっていたら捨てる(abort / 次のスピンが先に始まった)。
+      if (spin !== rouletteSpinId.current || !rouletteHold.current) return;
+      rouletteIntroSkip.current = null;
+      rouletteIntroOn.current = false;
+      setRouletteIntro(null);
+      startSpinSound();
+      setRoulette({ key: ++fxKey, effect: e, fast: short, spin, at, draw });
+    };
+    if (introSrc != null && introMs > 0) {
+      rouletteIntroOn.current = true;
+      rouletteIntroSkip.current = beginSpin;
+      setRouletteIntro({ key: ++fxKey, effect: e, pattern: draw.pattern, src: introSrc });
+      rouletteTimers.current.push(window.setTimeout(beginSpin, introMs));
+    } else {
+      rouletteIntroSkip.current = null;
+      beginSpin();
+    }
     return true;
   }
 
@@ -2694,15 +2791,18 @@ export function MonitorView(): React.JSX.Element {
    * (専用素材を足すとスロットが4つ増えるだけで、音の性格は同じ)。
    * 数字を動かすのはリール側(RouletteFx の mult)— ここは音と揺れだけを足す。
    */
-  function donRoulette(_mult: number, first: boolean) {
+  function donRoulette(_mult: number, first: boolean, last: boolean) {
+    // 激熱確定では**最後の拍で設定倍率に到達し、そのまま確定する**ので、
+    // 先頭と同じ「激熱の合図」の声と強い揺れを当てる(戻りボイスは鳴らない)。
+    const payoff = first || (last && roulette?.effect.rouletteHotMult != null);
     if (cfg?.challenge.seEnabled) {
-      const slot: ChallengeSeSlot = first ? 'roulette-hype' : 'roulette-kick';
+      const slot: ChallengeSeSlot = payoff ? 'roulette-hype' : 'roulette-kick';
       playSe(
         cfg.challenge.seSounds[slot],
         effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes[slot])
       );
     }
-    pushShake(first ? 'shake-strong' : 'shake');
+    pushShake(payoff ? 'shake-strong' : 'shake');
   }
 
   /**
@@ -2721,6 +2821,48 @@ export function MonitorView(): React.JSX.Element {
   }
 
   /**
+   * 導入動画の再生失敗・onError の縮退。**幕を畳んで即リールへ進む** —
+   * 8 秒ぶんの黒画面で固まるより、導入を飛ばしてスピンを見せるほうが良い。
+   * 冪等(2回目以降は ref が null で何も起きない)。
+   */
+  function skipRouletteIntro(): void {
+    const go = rouletteIntroSkip.current;
+    rouletteIntroSkip.current = null;
+    if (go) {
+      fxWarn('激熱確定の導入動画を再生できない — スピンへ進む');
+      go();
+      return;
+    }
+    // 手が無い(既に進んだ)場合でも幕だけは残さない。
+    rouletteIntroOn.current = false;
+    setRouletteIntro(null);
+  }
+
+  /**
+   * ルーレット effect の優先クラス。**分類の権威は shared の fxClassForEffect 1本** —
+   * ここに条件式を書き写すと、序列を足したときに片方だけ古いまま残る。
+   * kind='roulette' が 'parallel'(序列外 = achieved 専用)になることは無いが、
+   * 型を狭めるためのフォールバックだけ置く。
+   */
+  function rouletteClassOf(e: ChallengeEffect): FxPriorityClass {
+    const c = fxClassForEffect(e);
+    return c === 'parallel' ? 'other' : c;
+  }
+  /** ルーレット effect の所属キュー(入室 / 激熱確定 / 通常)。上と対で1箇所に閉じる。 */
+  function rouletteQueueRefOf(e: ChallengeEffect): React.RefObject<QueuedRoulette[]> {
+    return e.rouletteOrigin === 'join'
+      ? joinRouletteQueue
+      : e.rouletteHotMult != null
+        ? hotRouletteQueue
+        : rouletteQueue;
+  }
+  /** ルーレットのバナー種別。激熱確定は序列⑥.5 に揃えた専用種別を使う。 */
+  function rouletteBannerKind(e: ChallengeEffect, rest: boolean): FxBannerKind {
+    if (e.rouletteHotMult != null) return rest ? 'roulette-rest-hot' : 'roulette-result-hot';
+    return rest ? 'roulette-rest' : 'roulette-result';
+  }
+
+  /**
    * §6b(連鎖の譲り合い)の判定に渡す「待機中の優先クラス」一覧。excludeSelf =
    * 回転中の連鎖自身のキュー(同格に譲らないのは shouldYieldSpinChain の厳密比較が
    * 保証するが、自分の並びを待機と数えない意図をここで明示する)。
@@ -2736,6 +2878,9 @@ export function MonitorView(): React.JSX.Element {
     if (pendingBands.current.length > 0) waiting.push('band');
     if (excludeSelf !== 'join-roulette' && joinRouletteQueue.current.length > 0) {
       waiting.push('join-roulette');
+    }
+    if (excludeSelf !== 'hot-roulette' && hotRouletteQueue.current.length > 0) {
+      waiting.push('hot-roulette');
     }
     if (excludeSelf !== 'other' && rouletteQueue.current.length > 0) waiting.push('other');
     return waiting;
@@ -2760,14 +2905,16 @@ export function MonitorView(): React.JSX.Element {
     } else if (nextKind === 'boost' || nextKind === 'band') {
       stopRouletteSound(0);
     }
-    // 'roulette' / 'join-roulette'(かつバナー非勝ち)は鳴りっぱなし。
+    // 'roulette' / 'join-roulette' / 'hot-roulette'(かつバナー非勝ち)は鳴りっぱなし。
   }
 
   /** finishRoulette 系のドレイン予約フック(ルーレット BGM の後始末)。 */
   function rouletteDrainHooks(): DrainHooks {
     return {
       onNext: (kind) => {
-        if (kind !== 'roulette' && kind !== 'join-roulette') stopRouletteSound(0);
+        if (kind !== 'roulette' && kind !== 'join-roulette' && kind !== 'hot-roulette') {
+          stopRouletteSound(0);
+        }
       },
       onIdle: () => stopRouletteSound(400),
     };
@@ -2780,6 +2927,9 @@ export function MonitorView(): React.JSX.Element {
     // finishBandFx と同じ自衛を、世代の一致判定つきで行う。
     if (!rouletteHold.current || spin !== rouletteSpinId.current) return;
     clearRouletteTimers();
+    // 導入中に安全弁が来た異常系でも幕を残さない(通常は beginSpin が畳み済み)。
+    rouletteIntroOn.current = false;
+    setRouletteIntro(null);
     const plan = rouletteReelPlan(e);
     // このリール1本ぶんの増減(effect 全体の合計ではない — 連打では別物)。
     const amount = plan.reels[at]?.amount ?? e.amount;
@@ -2827,9 +2977,12 @@ export function MonitorView(): React.JSX.Element {
     // どのリールの額なのか読めなくなる。1枚に置き換わるので「2列」にはならない。
     // §6b の譲り判定より必ず前 — 譲るときも「止まったリールの額」は先に見せる
     // (fx-hold-safety.spec の不変条件)。
-    pushFloat(rouletteBanner(e, amount), rouletteBannerClass({ direction: e.rouletteDirection, amount }), 'roulette-result', {
-      immediate: true,
-    });
+    pushFloat(
+      rouletteBanner(e, amount),
+      rouletteBannerClass({ direction: e.rouletteDirection, amount, hot: e.rouletteHotMult != null }),
+      rouletteBannerKind(e, false),
+      { immediate: true }
+    );
 
     if (cutForAchieved) {
       fxWarn('達成でルーレット連鎖を打ち切る', {
@@ -2843,13 +2996,15 @@ export function MonitorView(): React.JSX.Element {
       // だけ、残りリールを自キューへ戻して先を譲る(唯一の「連鎖への割り込み」点。
       // 回転中の1本は完走済みなので、譲りごとに連鎖は最低1リール進む = livelock
       // は構造的に起きない — shouldYieldSpinChain 参照)。
-      const selfClass: FxPriorityClass = e.rouletteOrigin === 'join' ? 'join-roulette' : 'other';
+      // 自分の優先クラスは effect の分類と同じ1本(fxClassForEffect)から引く —
+      // ここに条件式を書き写すと、序列を足したときに片方だけ古いままになる。
+      const selfClass = rouletteClassOf(e);
       if (shouldYieldSpinChain(selfClass, collectWaitingClasses(selfClass))) {
         // 【不変条件】resumeAt > 0 の要素は各キュー高々1件・常に先頭 — 作るのは
         // この unshift だけ(消費は runDrain の startRoulette(w.e, w.resumeAt)
         // で、必ず先頭から取り出す)。上限は MAX+1 を許容 — unshift は上限検査を
         // 通さない(完走済みの連鎖の残りを捨てるほうが実害が大きい)。
-        const selfQueue = e.rouletteOrigin === 'join' ? joinRouletteQueue : rouletteQueue;
+        const selfQueue = rouletteQueueRefOf(e);
         selfQueue.current.unshift({ e, resumeAt: at + 1, queuedAtMs: Date.now() });
         // 据え置きはここでは解かない — 解くと譲った瞬間に残りリールの出目が数字へ
         // 先漏れする。直後の pumpStage の applyStageHold が同一フラッシュで
@@ -2891,8 +3046,12 @@ export function MonitorView(): React.JSX.Element {
     if (restCount > 0) {
       pushFloat(
         rouletteRestBanner(e, restAmount, restCount),
-        rouletteBannerClass({ direction: e.rouletteDirection, amount: restAmount }),
-        'roulette-rest'
+        rouletteBannerClass({
+          direction: e.rouletteDirection,
+          amount: restAmount,
+          hot: e.rouletteHotMult != null,
+        }),
+        rouletteBannerKind(e, true)
       );
     }
 
@@ -2912,11 +3071,14 @@ export function MonitorView(): React.JSX.Element {
     stopRouletteSound(0);
     rouletteQueue.current = [];
     joinRouletteQueue.current = [];
+    hotRouletteQueue.current = [];
     drainWaitingSinceMs.current = null; // reset/stop 文脈 — 残キューは呼び出し側が続けて捨てる
     // pendingAchieved の破棄はリセット/停止の意図(唯一の呼び出し元は status==='idle'
     // の後片付け)。異常系の番犬経路は expireRoulette が**保全**する — 取り違えない。
     pendingAchieved.current = null;
     playingFx.current = null; // ストック先頭行(表示は idle エフェクトの refresh が写す)
+    rouletteIntroOn.current = false;
+    setRouletteIntro(null);
     if (!rouletteHold.current) return;
     rouletteHold.current = false;
     setRoulette(null);
@@ -2933,6 +3095,8 @@ export function MonitorView(): React.JSX.Element {
     clearRouletteTimers();
     stopRouletteSound(0);
     rouletteHold.current = false;
+    rouletteIntroOn.current = false;
+    setRouletteIntro(null);
     setRoulette(null);
     setHeldValue(null);
     playingFx.current = null; // 表示はドレイン経由の pumpStage が写す
@@ -4205,8 +4369,12 @@ export function MonitorView(): React.JSX.Element {
           });
           pushFloat(
             rouletteBanner(e),
-            rouletteBannerClass({ direction: e.rouletteDirection, amount: e.amount }),
-            'roulette-result'
+            rouletteBannerClass({
+              direction: e.rouletteDirection,
+              amount: e.amount,
+              hot: e.rouletteHotMult != null,
+            }),
+            rouletteBannerKind(e, false)
           );
           return;
         }
@@ -4220,8 +4388,10 @@ export function MonitorView(): React.JSX.Element {
           // 出ない」最悪の見え方になる(以前の挙動)。同じ盤面の末尾へ出目を連結して
           // 1件ぶんの枠で全部回す(worker の finishDrain と同じ畳み方)。
           const join = e.rouletteOrigin === 'join';
-          const q = join ? joinRouletteQueue.current : rouletteQueue.current;
-          const max = join ? JOIN_ROULETTE_QUEUE_MAX : ROULETTE_QUEUE_MAX;
+          const hot = e.rouletteHotMult != null;
+          // 所属キューの分岐は rouletteQueueRefOf(§6b の戻し先と同じ1本)。
+          const q = rouletteQueueRefOf(e).current;
+          const max = join ? JOIN_ROULETTE_QUEUE_MAX : hot ? ROULETTE_HOT_QUEUE_MAX : ROULETTE_QUEUE_MAX;
           if (q.length < max) {
             q.push({ e, resumeAt: 0, queuedAtMs: Date.now() });
             return;
@@ -4242,11 +4412,16 @@ export function MonitorView(): React.JSX.Element {
           fxWarn('ルーレット: キュー満杯で盤面違い — バナーのみ出す', {
             queued: q.length,
             join,
+            hot,
           });
           pushFloat(
             rouletteBanner(e),
-            rouletteBannerClass({ direction: e.rouletteDirection, amount: e.amount }),
-            'roulette-result'
+            rouletteBannerClass({
+              direction: e.rouletteDirection,
+              amount: e.amount,
+              hot: e.rouletteHotMult != null,
+            }),
+            rouletteBannerKind(e, false)
           );
           return;
         }
@@ -4798,11 +4973,36 @@ export function MonitorView(): React.JSX.Element {
             <MiniFx id={m.id} amount={m.amount} />
           </div>
         ))}
+        {/*
+          激熱確定の導入(スロットに入る前の 8 秒)。不透明の全画面動画で、
+          .roulette-screen と同じ層に置く(この間 currentOcclusion は 'opaque')。
+          音は素材に焼き込み(全面カット・rl-clip と同じ流儀)、音量は
+          rouletteSound.clipVolume、効果音オフなら muted。
+          再生に失敗したらリールへ即進む — 黒画面で 8 秒固まらせない。
+        */}
+        {rouletteIntro ? (
+          <video
+            key={rouletteIntro.key}
+            className="rl-hot-intro"
+            src={rouletteIntro.src}
+            autoPlay
+            muted={!(cfg?.challenge.seEnabled ?? true)}
+            playsInline
+            preload="auto"
+            ref={(v) => armVideoPlay(v, 'rl-hot-intro', () => skipRouletteIntro())}
+            onError={() => skipRouletteIntro()}
+          />
+        ) : null}
         {roulette ? (
           // 暗幕ラッパーには key を付けない — キュー消化の連鎖では roulette が
           // truthy のまま切り替わるため、ラッパー DOM を再利用させて暗幕の
           // フェードインがスピンごとに再生されるチラつきを防ぐ。
-          <div className={rouletteScreenClass(roulette.effect.rouletteDirection)}>
+          <div
+            className={rouletteScreenClass(
+              roulette.effect.rouletteDirection,
+              roulette.effect.rouletteHotMult != null
+            )}
+          >
             <RouletteFx
               key={roulette.key}
               segments={roulette.effect.rouletteSegments ?? []}
@@ -4819,6 +5019,13 @@ export function MonitorView(): React.JSX.Element {
               // cfg 未取得は null → 0 = 無音へ倒す — 設定が届く前に音だけ先に出さない。
               clipVolume={resolveRouletteSound(cfg?.challenge, roulette.effect)?.clipVolume ?? 0}
               seEnabled={cfg?.challenge.seEnabled ?? true}
+              // 激熱確定の本物の倍率の段。通常のルーレットでは undefined =
+              // 従来どおり ×2→×5 の見せかけで、確定の瞬間に 1 へ戻る。
+              hotMults={
+                roulette.effect.rouletteHotMult != null
+                  ? rouletteHotMults(rouletteHotMultOf(roulette.effect))
+                  : undefined
+              }
               onNearStop={nearStopRoulette}
               onKick={kickRoulette}
               onStep={stepRoulette}

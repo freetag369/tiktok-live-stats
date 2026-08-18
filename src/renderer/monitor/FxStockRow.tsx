@@ -28,6 +28,7 @@ const LABELS: Record<FxStockKind, string> = {
   // 内部名は band(帯/フルカットのカットイン)だが、視聴者向けには「ギフト」(ユーザー指定)。
   band: 'ギフト',
   'join-roulette': '初見ルーレット',
+  'hot-roulette': '激熱ルーレット',
   roulette: 'ルーレット',
   // 凍結中の予告(workerQueue)のみ — フォローはレンダラー側キューを持たない。
   follow: 'フォロー',

@@ -25,10 +25,13 @@ import {
   BOOST_COMMIT_MAX_LAG_MS,
   GIFT_FX_FREEZE_MARGIN_MS,
   GIFT_FX_FREEZE_MAX_MS,
+  GIFT_FX_PENDING_OPS_CRITICAL_EXTRA,
   GIFT_FX_PENDING_OPS_MAX,
   JOIN_ROULETTE_MIN_GAP_MS,
   LIKE_FX_WINDOW_MS,
   ROULETTE_DRAWS_MAX,
+  ROULETTE_HOT_PATTERNS,
+  rouletteHotMultiplier,
   drawRouletteIndex,
   rouletteRarity,
   giftFxRepeat,
@@ -500,6 +503,9 @@ export class ChallengeEngine {
     this.clearBoost();
     // お邪魔も同じ — 新ランは素の状態で始める(前ランの罰を持ち込まない)。
     this.clearTapLock();
+    // ▶実演の窓も破棄 — press() は実演ブロックを最優先で見るので、実演の残り窓を
+    // 跨いで開始すると開幕のタップが全部テストカウンタに吸われて実値が減らない。
+    this.clearTestBoost();
     this.armFreezeTimer();
     this.dirty = true;
     return this.get();
@@ -645,12 +651,22 @@ export class ChallengeEngine {
     if (this.boostUntilMs !== null && nowMs >= this.boostStartMs && nowMs < this.boostUntilMs) {
       if (this.boostPlain) {
         const step = this.boostPressStep * this.boostMultiplier;
+        // クランプ後の実減少量。effect の amount も「画面上で実際に減った量」で
+        // 揃える(flushPressFx と同じ規約 — 名目 step を焼くと、最後の1押しで
+        // モニターのラッチ表示(valueAfter - amount)が step ぶん上へ飛ぶ)。
+        const boostApplied = Math.min(step, this.value);
         // 1タップずつ即時に減る経路なので pressDownTotal に載せる(清算方式の
         // シネマティックとは逆 — あちらは settleBoost の発表で見せるので載せない)。
-        this.pressDownTotal += Math.min(step, this.value);
-        this.value = Math.max(0, this.value - step);
+        this.pressDownTotal += boostApplied;
+        this.value -= boostApplied;
         this.stats.presses++;
-        this.pushEffect({ kind: 'press', amount: -step, boostMultiplier: this.boostMultiplier, atMs: nowMs });
+        this.pushEffect({
+          kind: 'press',
+          // -0 を作らない(settleBoost の boost-end と同じ理由)。
+          amount: boostApplied === 0 ? 0 : -boostApplied,
+          boostMultiplier: this.boostMultiplier,
+          atMs: nowMs,
+        });
         // 凍結中(モニターが途中で開いてカットインが走った等)は達成を見送る —
         // 押下経路の達成は必ず演出明け(flushFxFreeze の末尾)に出す。
         if (!this.isFxFrozen()) this.maybeAchieve(nowMs);
@@ -690,7 +706,12 @@ export class ChallengeEngine {
         this.value -= introApplied;
         this.stats.presses++;
         this.pressDownTotal += introApplied;
-        this.pushEffect({ kind: 'press', amount: -introStep, atMs: this.now() });
+        // クランプ後の実減少量を焼く(flushPressFx / 通常経路と同じ規約)。
+        this.pushEffect({
+          kind: 'press',
+          amount: introApplied === 0 ? 0 : -introApplied,
+          atMs: this.now(),
+        });
         this.maybeAchieve(this.now());
         this.dirty = true;
       });
@@ -722,7 +743,9 @@ export class ChallengeEngine {
     this.value -= applied;
     this.stats.presses++;
     this.pressDownTotal += applied;
-    this.pushEffect({ kind: 'press', amount: -step, atMs: nowMs });
+    // effect の amount もクランプ後の applied で焼く — pressDownTotal と同じ
+    // 「画面上で実際に減った量」規約(凍結経路の flushPressFx と意味を揃える)。
+    this.pushEffect({ kind: 'press', amount: applied === 0 ? 0 : -applied, atMs: nowMs });
     this.maybeAchieve(nowMs);
     this.dirty = true;
     return this.get();
@@ -854,9 +877,11 @@ export class ChallengeEngine {
         const countMs = tb.countClip !== 'off' ? TAP_BOOST_COUNT_MS : 0;
         const resultMs = tb.resultClip !== 'off' ? TAP_BOOST_RESULT_MS : 0;
         // タップ計数のウィンドウを worker 側に登録する(値・統計・凍結は不変)。
-        // 実ブースト進行中は登録しない — モニターも他演出中の実演はスキップする
-        // ので、実カウンタを乗っ取らないのが正。
-        if (this.boostUntilMs === null) {
+        // 実ブースト進行中・**アーム中**は登録しない — モニターも他演出中の実演は
+        // スキップするので、実カウンタを乗っ取らないのが正。アーム中は
+        // boostUntilMs がまだ null(armedBoost ⟹ boostUntilMs === null の不変条件)
+        // なので、armedBoost も見ないと commit 後の実タップが実演に吸われる。
+        if (this.boostUntilMs === null && this.armedBoost === null) {
           this.testBoostStartMs = atMs + introMs + countMs;
           this.testBoostUntilMs = this.testBoostStartMs + durationMs;
           this.testBoostTapCount = 0;
@@ -923,19 +948,28 @@ export class ChallengeEngine {
         // パターン別 ▶ は「チェックする前に見てみたい」の道具なので、許可リストで
         // 弾くと試し見ができなくなる。抽選に任せる経路だけ許可リストへ従う
         // (rarity の条件付けもライブ経路と同じ — 実演と本番で分布を変えない)。
+        // 激熱確定は入室ルーレットには無い(RouletteHotConfig の解説)ので gr 側だけ見る。
+        // 実演でも本番と同じ倍率・同じ絵柄3種を通す — 「実演では出るのに本番で違う」を作らない。
+        const hotMult = rl.direction === 'sub' ? 1 : rouletteHotMultiplier(gr?.hot);
         const pat =
-          spec.pattern ?? drawRoulettePattern(this.fxRand, rl.patterns, rouletteRarity(rl.segments, idx));
+          spec.pattern ??
+          drawRoulettePattern(
+            this.fxRand,
+            hotMult > 1 ? ROULETTE_HOT_PATTERNS : rl.patterns,
+            rouletteRarity(rl.segments, idx)
+          );
         // 実演は常に1スピン。ライブ経路と同じ配列形で積む(モニターの再生経路を
         // 分岐させない — 分岐すると実演では出るのに本番で出ない事故が起きる)。
         e = {
           kind: 'roulette',
-          amount: rl.direction === 'sub' ? -seg.amount : seg.amount,
+          amount: (rl.direction === 'sub' ? -seg.amount : seg.amount) * hotMult,
           rouletteSegments: rl.segments.map((s) => s.amount),
           rouletteIndex: idx,
           rouletteIndexes: [idx],
           roulettePattern: pat,
           roulettePatterns: [pat],
           rouletteReels: 1,
+          ...(hotMult > 1 ? { rouletteHotMult: hotMult } : {}),
           ...(rl.direction === 'sub' ? { rouletteDirection: 'sub' as const } : {}),
           ...(rl.label !== '' ? { rouletteLabel: rl.label } : {}),
           // 本番(handleEvent の join 経路)と effect の形を揃える — 試写でも
@@ -1021,23 +1055,29 @@ export class ChallengeEngine {
       if (this.isFxFrozen() && this.pendingOps.length < GIFT_FX_PENDING_OPS_MAX) {
         this.socialDiag(`受信 userId=${e.viewer.userId} → 凍結中 → 保留 +${cfg.followStep}`);
       }
-      return this.applyOrQueue(
-        () => {
-          this.value += cfg.followStep;
-          this.stats.follows++;
-          this.socialDiag(`適用 +${cfg.followStep} nick=${JSON.stringify(nick ?? null)}(値 ${this.value})`);
-          // atMs は e.tsMs(TikTokサーバ時刻)ではなくローカル時計。モニターの
-          // 「5秒より古い演出はスキップ」判定と同じ時計で比較させるため。
-          // 凍結明けの実行でも this.now() を読むので、このゲートで死なない。
+      const followOp = (allowFx: boolean): void => {
+        this.value += cfg.followStep;
+        this.stats.follows++;
+        this.socialDiag(`適用 +${cfg.followStep} nick=${JSON.stringify(nick ?? null)}(値 ${this.value})`);
+        // atMs は e.tsMs(TikTokサーバ時刻)ではなくローカル時計。モニターの
+        // 「5秒より古い演出はスキップ」判定と同じ時計で比較させるため。
+        // 凍結明けの実行でも this.now() を読むので、このゲートで死なない。
+        if (allowFx) {
           this.pushEffect({
             kind: 'follow',
             amount: cfg.followStep,
             nickname: nick,
             atMs: this.now(),
           });
-          this.dirty = true;
-        },
-        undefined,
+        }
+        this.dirty = true;
+      };
+      return this.applyOrQueue(
+        () => followOp(true),
+        // キュー溢れ時はバナーを捨てて値だけ適用する(gift 経路の縮退 op と同型)。
+        // 以前は overflowOp が無く、フル op が凍結中に即時実行されてカットインの
+        // 真上にフォローバナーが出ていた。
+        () => followOp(false),
         // 凍結中の予告(演出ストック表示)。follow は 1 effect = 1人 なので count 無し。
         { kind: 'follow', ...(nick !== undefined ? { nickname: nick } : {}) }
       );
@@ -1132,19 +1172,26 @@ export class ChallengeEngine {
       const rule = matchCommentRule(cfg, e.content);
       if (!rule) return false;
       const nickname = e.viewer.nickname ?? e.viewer.displayId;
-      return this.applyOrQueue(() => {
+      const commentOp = (allowFx: boolean): boolean => {
         this.value += rule.amount; // 加算方向のみなので maybeAchieve もクランプも不要
         this.stats.commentUp += rule.amount;
-        this.pushEffect({
-          kind: 'comment',
-          amount: rule.amount,
-          nickname,
-          commentKeyword: rule.keyword,
-          atMs: this.now(),
-        });
+        if (allowFx) {
+          this.pushEffect({
+            kind: 'comment',
+            amount: rule.amount,
+            nickname,
+            commentKeyword: rule.keyword,
+            atMs: this.now(),
+          });
+        }
         this.dirty = true;
         return true;
-      });
+      };
+      // キュー溢れ時はバナーを捨てて値だけ適用する(follow と同じ縮退)。
+      return this.applyOrQueue(
+        () => commentOp(true),
+        () => commentOp(false)
+      );
     }
 
     // スタンプ(サブスクエモート)単独メッセージ(WebcastEmoteChatMessage)。実データの
@@ -1175,10 +1222,14 @@ export class ChallengeEngine {
       // イイネランキングはゲージ設定と独立に集計する(妨害 OFF でも順位は出す)。
       // dedup と同じく凍結中も即時 — 保留するのは値適用+演出だけ。
       this.touchParticipant(e.viewer).likes += add;
+      // 順位が動いたので 2Hz tick に相乗りさせる(gift 経路と同じ判断)。これが
+      // 無いと、いいね妨害が無効の設定ではモニター下部のライブ TOP3 が他の
+      // イベントが来るまで更新されなかった。
+      this.dirty = true;
 
       // ここから下は「いいね妨害」= カウント加算。無効なら値には触らない。
       if (cfg.likeEvery <= 0 || cfg.likeStep <= 0) return false;
-      return this.applyOrQueue(() => {
+      const likeOp = (allowFx: boolean): boolean => {
         this.likeCounter += add;
         // 区間集計は op の内側 — 凍結中の適用順を likeCounter(区間境界の定義)と
         // 揃える。閉包が e.viewer を掴むので到着時点のアバターURL が使える。
@@ -1198,14 +1249,18 @@ export class ChallengeEngine {
         this.stats.likeUp += amount;
         this.likeFxPending += amount;
         // 演出は合算窓ごとに1件だけ(窓内の分は flushLikeFx がまとめて出す)。
+        // 縮退時(allowFx=false)は積むだけ — 溜まった likeFxPending は次の
+        // 通常経路か flushLikeFx がまとめて出す。
         const nowMs = this.now();
-        // 過去時刻の記録なので未来はあり得ない — 時計の後方ステップで未来に
-        // 取り残されると、演出がステップ幅ぶん抑止される(値は無事)。
-        this.likeFxLastMs = clampFutureMs(this.likeFxLastMs, nowMs, 0);
-        if (nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
-          this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
-          this.likeFxPending = 0;
-          this.likeFxLastMs = nowMs;
+        if (allowFx) {
+          // 過去時刻の記録なので未来はあり得ない — 時計の後方ステップで未来に
+          // 取り残されると、演出がステップ幅ぶん抑止される(値は無事)。
+          this.likeFxLastMs = clampFutureMs(this.likeFxLastMs, nowMs, 0);
+          if (nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
+            this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
+            this.likeFxPending = 0;
+            this.likeFxLastMs = nowMs;
+          }
         }
         // 満タン = 区間の締め。1位を確定して集計をクリアする(ストック無効でも
         // 区間境界はゲージの機能なので必ず締める)。1バッチが複数区間を跨ぐ場合
@@ -1231,12 +1286,19 @@ export class ChallengeEngine {
             this.value += bonus; // 加算方向のみなので maybeAchieve もクランプも不要
             this.stats.likeStockUp += bonus;
             // 満杯はゲージ満タンより一桁稀なイベントなので合算窓は使わず即 push。
-            this.pushEffect({ kind: 'stock-full', amount: bonus, atMs: nowMs });
+            if (allowFx) this.pushEffect({ kind: 'stock-full', amount: bonus, atMs: nowMs });
           }
         }
         this.dirty = true;
         return true;
-      });
+      };
+      // キュー溢れ時は演出(いいねバナー/ストック満杯)を捨てて値だけ適用する。
+      // 以前は overflowOp が無くフル op が凍結中に即時実行され、「凍結中はいいね
+      // バナーを出さない」規約が溢れ時だけ破れていた。
+      return this.applyOrQueue(
+        () => likeOp(true),
+        () => likeOp(false)
+      );
     }
 
     if (e.kind === 'gift') {
@@ -1302,7 +1364,11 @@ export class ChallengeEngine {
             this.applyOrQueue(
               () => this.activateBoost(tb, e),
               undefined,
-              { kind: 'boost', nickname: boostNick }
+              { kind: 'boost', nickname: boostNick },
+              // critical: 溢れ弁の即時実行で activateBoost が凍結中に走ると、
+              // 進行中のフィーバーを窓の途中で強制清算した上で凍結を最長 82 秒へ
+              // 張り直す — 課金ギフトの発動なのでキャップを少し超えても積む。
+              true
             )
           ) {
             changed = true;
@@ -1338,13 +1404,15 @@ export class ChallengeEngine {
         const lockMs = this.tapLockTotalMs;
         const lockUntil = this.tapLockUntilMs ?? this.now();
         this.applyOrQueue(() => {
-          if (amount < 0) this.stats.giftDown += -amount;
-          else if (amount > 0) this.stats.giftUp += amount;
-          this.value = Math.max(0, this.value + amount);
+          // クランプは実行時(凍結明けの残量が基準 — clampDownAmount の doc 参照)。
+          const applied = this.clampDownAmount(amount);
+          if (applied < 0) this.stats.giftDown += -applied;
+          else if (applied > 0) this.stats.giftUp += applied;
+          this.value = Math.max(0, this.value + applied);
           const atMs = this.now();
           this.pushEffect({
             kind: 'tap-lock',
-            amount,
+            amount: applied,
             nickname: lockNick,
             tapLockMs: lockMs,
             tapLockUntilMs: lockUntil,
@@ -1386,10 +1454,19 @@ export class ChallengeEngine {
           const idxs: number[] = [];
           const pats: RoulettePattern[] = [];
           let total = 0;
+          // 激熱確定(行ごとの設定・100% 発動)。1 = 通常のルーレットで、以下の式は
+          // 従来と 1 バイトも変わらない。検証(validateRouletteHot)が direction:'sub' の
+          // 行から hot を落とすので、ここで向きを再判定する必要はない。
+          // 二重防御で direction も見る — 検証は 'sub' の行から hot を落とすが、
+          // 手編集の settings.json が通ってきたときに 0 クランプ(this.value の
+          // Math.max(0, ...))とモニターの据え置き会計がズレるのを防ぐ。
+          const hotMult = rl.direction === 'sub' ? 1 : rouletteHotMultiplier(rl.hot);
           for (let i = 0; i < draws; i++) {
             const idx = drawRouletteIndex(rl.segments, this.rand);
             const seg = rl.segments[idx]!;
-            const amount = rl.direction === 'sub' ? -seg.amount : seg.amount;
+            // **倍率込みで適用する。** モニター側の復元(shared の rouletteDraws)も
+            // 同じ式なので、据え置き会計と worker の値が常に一致する。
+            const amount = (rl.direction === 'sub' ? -seg.amount : seg.amount) * hotMult;
             if (amount < 0) this.stats.giftDown += -amount;
             else this.stats.giftUp += amount;
             this.stats.rouletteSpins++;
@@ -1401,7 +1478,16 @@ export class ChallengeEngine {
             // レア出目ほど激アツが出やすいがガセもある(結果の確定予告にはならない。
             // 詳細は roulette-fx.ts の ROULETTE_TIER_WEIGHTS)。fxRand の消費は
             // 従来どおり1抽選1回 — 出目(this.rand)の再現性には影響しない。
-            pats.push(drawRoulettePattern(this.fxRand, rl.patterns, rouletteRarity(rl.segments, idx)));
+            // 激熱確定は絵柄を3種(獅子・黄金龍・不死鳥)に固定する — 導入動画と
+            // スピンの絵を対にする仕様なので、行の patterns(チェック)は見ない。
+            // **fxRand の消費はどちらの枝でもちょうど1回**(drawRoulettePattern の規約)。
+            pats.push(
+              drawRoulettePattern(
+                this.fxRand,
+                hotMult > 1 ? ROULETTE_HOT_PATTERNS : rl.patterns,
+                rouletteRarity(rl.segments, idx)
+              )
+            );
             // 0 到達したら残りは回さない(達成後のイベントは元のタイムラインでも
             // 無視されるため — flushFxFreeze と同じ判断)。direction:'sub' のみ起きる。
             if (this.value === 0) break;
@@ -1419,6 +1505,9 @@ export class ChallengeEngine {
             // 見た目の尺だけ到着時点の cfg で確定させて焼き込む(fxRepeat と同じ流儀)。
             // **値は idxs.length 回ぶん適用済み** — ここで削れるのはリール本数だけ。
             rouletteReels: rouletteReelCount(cfg, idxs.length),
+            // 激熱確定の実倍率。通常は**キーごと出さない**(既存 effect と同一の形)。
+            // rouletteBoardKey に入るので、これがあるだけで畳み込みも分離される。
+            ...(hotMult > 1 ? { rouletteHotMult: hotMult } : {}),
             ...(rl.direction === 'sub' ? { rouletteDirection: 'sub' as const } : {}),
             // 表示名も effect に載せて自己完結させる(モニターの cfg は 120秒
             // ポーリング(CFG_POLL_MS)で古くなりうる — rouletteSegments と同じ理由)。
@@ -1500,7 +1589,8 @@ export class ChallengeEngine {
       );
       if (!m && !band && !fullCut) return false;
       const giftOp = (allowBand: boolean): void => {
-        const amount = m?.amount ?? 0;
+        // 応援(負)方向は残量でクランプ(clampDownAmount の doc 参照)。
+        const amount = this.clampDownAmount(m?.amount ?? 0);
         if (amount < 0) this.stats.giftDown += -amount;
         else if (amount > 0) this.stats.giftUp += amount;
         this.value = Math.max(0, this.value + amount);
@@ -1645,9 +1735,34 @@ export class ChallengeEngine {
     // 機能そのものを OFF にしたら封印も解除する — 「チャレンジを止める」が固着した
     // 封印からの逃げ道であり続けるため(main のホットキー登録もここで外れる)。
     // 行ごとの enabled: false では既存の封印を消さない(到着時点で確定の規約)。
-    if (!this.getConfig().enabled && this.tapLockUntilMs !== null) {
-      this.clearTapLock();
-      this.armFreezeTimer();
+    if (!this.getConfig().enabled) {
+      if (this.tapLockUntilMs !== null) {
+        this.clearTapLock();
+        this.armFreezeTimer();
+      }
+      // フィーバーと凍結も逃げ道に含める — 封印だけ解除しても、アーム済みの
+      // フィーバーが 60 秒後の期限切れで「無効化済み機能の全画面演出」を強制発動し、
+      // 凍結が保留 op を抱えたまま生き続けていた。stop() と同じ規約で畳む:
+      // まだ何も動いていない予約は無言で破棄、進行中の窓は清算して溜めタップを
+      // 闇に落とさない、保留 op は値だけ強制適用する(受け取り済みのギフト/いいねを
+      // 消さない)。
+      if (
+        this.armedBoost !== null ||
+        this.boostUntilMs !== null ||
+        this.fxFreezeUntilMs !== null ||
+        this.pendingOps.length > 0
+      ) {
+        this.stopping = true;
+        try {
+          this.armedBoost = null;
+          this.settleBoost(this.now(), true);
+          this.forceApplyPendingOps();
+        } finally {
+          this.stopping = false;
+        }
+      }
+      // ▶実演の窓も一緒に畳む — OFF 後の press が実演カウンタへ吸われない。
+      this.clearTestBoost();
     }
     this.dirty = true;
   }
@@ -1967,14 +2082,25 @@ export class ChallengeEngine {
    * キュー溢れ時は overflowOp(無ければ op)を即時実行する — 値の正しさ優先で
    * 演出だけを捨てる(ギフトの場合はカットイン抜きの op が渡ってくる)。
    * fx はモニターの演出ストック表示に出す予告(カットイン級のイベントだけ渡す)。
+   *
+   * critical: 溢れ弁で即時実行に倒してはいけない op(フィーバー発動など、凍結中に
+   * 走ると進行中の演出を強制清算した上で凍結を張り直すもの)。上限を追加ヘッド
+   * ルームぶんだけ超えてもキューに積み、それも尽きたら**実行せず破棄**する —
+   * 「凍結中にフル op が走る」だけは構造的に作らない。
    */
   private applyOrQueue(
     op: () => boolean | void,
     overflowOp?: () => boolean | void,
-    fx?: Omit<ChallengeFxQueueItem, 'id'>
+    fx?: Omit<ChallengeFxQueueItem, 'id'>,
+    critical = false
   ): boolean {
     if (!this.isFxFrozen()) return op() !== false;
-    if (this.pendingOps.length >= GIFT_FX_PENDING_OPS_MAX) {
+    if (critical) {
+      if (this.pendingOps.length >= GIFT_FX_PENDING_OPS_MAX + GIFT_FX_PENDING_OPS_CRITICAL_EXTRA) {
+        this.diag('[challenge] 保留キュー上限(重要op の追加枠も満杯)— フィーバー級の op を破棄');
+        return false;
+      }
+    } else if (this.pendingOps.length >= GIFT_FX_PENDING_OPS_MAX) {
       // 値は正しく入るが演出(カットイン/再凍結)は捨てる。連発しうるので
       // ログはエピソード先頭の1行だけ — 残件数はドレイン時のサマリが持つ。
       if (this.pendingOverflowCount++ === 0) {
@@ -2243,6 +2369,10 @@ export class ChallengeEngine {
     preMs: number,
     cinematic: boolean
   ): void {
+    // 実発動が常に優先(activateBoost と同じ判断)。実演の窓が生き残っていると
+    // press() の実演ブロックが先に食い、実フィーバーの全タップが実演カウンタへ
+    // 吸われて清算が 0 になる。
+    this.clearTestBoost();
     this.armedBoost = null;
     this.boostStartMs = startMs + (cinematic ? preMs : 0);
     this.boostUntilMs = this.boostStartMs + a.durationMs;
@@ -2314,19 +2444,25 @@ export class ChallengeEngine {
     const until = this.boostUntilMs;
     const tap = this.boostTapCount;
     const mult = this.boostMultiplier;
-    const amount = this.boostPlain ? 0 : tap * this.boostPressStep * mult;
+    const nominal = this.boostPlain ? 0 : tap * this.boostPressStep * mult;
+    // 発表も 0 でクランプした「実際に減る量」で行う — 値は Math.max(0, ...) で
+    // 守っていたのに effect には名目値を焼き込んでいたので、残量 < タップ合計の
+    // クライマックスで清算ロールアップが実際より大きい数字を発表していた
+    // (残り 30 でタップ合計 200 → 「-200 → 0」)。
+    const amount = Math.min(nominal, this.value);
     const resultMs = this.boostResultMs;
     const resultClip = this.boostResultClip;
     this.clearBoost();
-    if (amount > 0) {
-      this.value = Math.max(0, this.value - amount);
+    if (nominal > 0) {
+      this.value -= amount;
       this.stats.presses += tap;
-    } else if (this.fxFreezeUntilMs !== null) {
-      // タップ 0 = 発表するものが無い。activateBoost が発表シーケンス
-      // (resultMs + BOOST_SETTLE_BUDGET_MS)ぶん先まで張った凍結を「発表なし時代の
-      // 期限」(until + margin)まで引き戻す — 出ない演出のために保留イベントを
-      // 最大 8 秒待たせない。min() なので凍結を伸ばす方向には決して働かず、
-      // 遅延清算(lazy 解除)でも直後の flushFxFreeze がそのままドレインへ進める。
+    }
+    if (amount === 0 && this.fxFreezeUntilMs !== null) {
+      // 発表するものが無い(タップ 0、または既に 0 到達済み)。activateBoost が
+      // 発表シーケンス(resultMs + BOOST_SETTLE_BUDGET_MS)ぶん先まで張った凍結を
+      // 「発表なし時代の期限」(until + margin)まで引き戻す — 出ない演出のために
+      // 保留イベントを最大 8 秒待たせない。min() なので凍結を伸ばす方向には決して
+      // 働かず、遅延清算(lazy 解除)でも直後の flushFxFreeze がそのままドレインへ進める。
       this.fxFreezeUntilMs = Math.min(this.fxFreezeUntilMs, until + GIFT_FX_FREEZE_MARGIN_MS);
       this.armFreezeTimer();
     }
@@ -2338,6 +2474,7 @@ export class ChallengeEngine {
       boostMultiplier: mult,
       // 結果カットシーンの尺とクリップ(effect 1件で自己完結の流儀 — レンダラは
       // cfg を引き直さない)。発表シーケンスは boost-end 受信が起点なのでこちらが本線。
+      // 実際に減る量が 0 なら発表段そのものを省く(0 の発表はしない)。
       ...(amount > 0 && resultMs > 0 ? { boostResultMs: resultMs, boostResultClip: resultClip } : {}),
       atMs: nowMs,
     });
@@ -2516,7 +2653,12 @@ export class ChallengeEngine {
         ...(group.some((e) => e.flash) ? { flash: true } : {}),
       };
       if (last.kind === 'gift') {
-        if (group.some((e) => e.giftCount != null)) merged.giftCount = sum('giftCount');
+        // giftCount は連打(repeatCount > 1)のときだけ載る規約なので、単発は 1 と
+        // 数えて合算する — `?? 0` で畳むと「単発3件 + 5連打1件」の ×N が 8 ではなく
+        // 5 になる。
+        if (group.some((e) => e.giftCount != null)) {
+          merged.giftCount = group.reduce((a, e) => a + (e.giftCount ?? 1), 0);
+        }
         if (group.some((e) => e.diamonds != null)) merged.diamonds = sum('diamonds');
         // 反復演出は畳んだら意味を失う(1件ぶんの見た目で十分)。
         delete merged.fxRepeat;
@@ -2898,7 +3040,9 @@ export class ChallengeEngine {
    * ランキング(touchParticipant)は gift 分岐の冒頭・この op の外で済んでいるので
    * 合算しても全件そのまま反映される。
    */
-  private fanStampCoalesceOp(e: FanStampFxSource, amount: number, flash: boolean): void {
+  private fanStampCoalesceOp(e: FanStampFxSource, nominalAmount: number, flash: boolean): void {
+    // 応援(負)方向は残量でクランプ(clampDownAmount の doc 参照)。
+    const amount = this.clampDownAmount(nominalAmount);
     if (amount < 0) this.stats.giftDown += -amount;
     else if (amount > 0) this.stats.giftUp += amount;
     this.value = Math.max(0, this.value + amount);
@@ -2936,28 +3080,52 @@ export class ChallengeEngine {
     if (this.fanStampFxUntilMs !== null && this.now() < this.fanStampFxUntilMs) {
       return this.applyOrQueue(() => this.fanStampCoalesceOp(src, st.amount, st.flash));
     }
-    return this.applyOrQueue(() => {
-      // 値まわりは fanStampCoalesceOp / giftOp と一字一句同じにしてある。
-      if (st.amount < 0) this.stats.giftDown += -st.amount;
-      else if (st.amount > 0) this.stats.giftUp += st.amount;
-      this.value = Math.max(0, this.value + st.amount);
+    const stampOp = (allowFx: boolean): void => {
+      // 値まわりは fanStampCoalesceOp / giftOp と一字一句同じにしてある
+      // (応援方向の残量クランプ含む — clampDownAmount の doc 参照)。
+      const amount = this.clampDownAmount(st.amount);
+      if (amount < 0) this.stats.giftDown += -amount;
+      else if (amount > 0) this.stats.giftUp += amount;
+      this.value = Math.max(0, this.value + amount);
       const atMs = this.now();
-      this.pushEffect({
-        kind: 'gift',
-        fanStamp: true,
-        amount: st.amount,
-        ...(st.flash ? { flash: true as const } : {}),
-        nickname: viewer.nickname ?? viewer.displayId,
-        ...(st.count > 1 ? { giftCount: st.count } : {}),
-        diamonds: 0,
-        atMs,
-      });
+      if (allowFx) {
+        this.pushEffect({
+          kind: 'gift',
+          fanStamp: true,
+          amount,
+          ...(st.flash ? { flash: true as const } : {}),
+          nickname: viewer.nickname ?? viewer.displayId,
+          ...(st.count > 1 ? { giftCount: st.count } : {}),
+          diamonds: 0,
+          atMs,
+        });
+      }
       // 合算窓を張る(gift 経路の fs 分岐と同じ式)。スタンプにカットインは無いが、
       // 凍結中に届いた場合は凍結明けまで窓を伸ばす — バナーが出るのは明けてからなので。
+      // 縮退時も張る — 窓は「以降を合算に回す」ためのもので、後続の見た目は
+      // flushFanStampFx が出す。
       this.fanStampFxUntilMs = Math.max(atMs + FAN_STAMP_FX_WINDOW_MS, this.fxFreezeUntilMs ?? 0);
       this.maybeAchieve(atMs);
       this.dirty = true;
-    });
+    };
+    // キュー溢れ時はバナーを捨てて値だけ適用する(follow / like と同じ縮退)。
+    return this.applyOrQueue(
+      () => stampOp(true),
+      () => stampOp(false)
+    );
+  }
+
+  /**
+   * 応援(負)方向の増減を残量でクランプした「実際に減る量」へ正規化する。
+   * 値は Math.max(0, ...) で守られるのに統計(giftDown)と effect の amount が
+   * 名目値のままだと、残り 5 に -1000 のお助けで「ギフトで減らした数」が初期値を
+   * 超え、バナーも実際より大きい数字を出す — press / boost-end と同じ
+   * 「画面上で実際に減った量」規約に揃える。-0 は 0 に正規化する
+   * (JSON/表示/テストの等値比較が割れる)。妨害(正)方向はそのまま返す。
+   */
+  private clampDownAmount(nominal: number): number {
+    const clamped = Math.max(nominal, -this.value);
+    return clamped === 0 ? 0 : clamped;
   }
 
   /**

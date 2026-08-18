@@ -177,3 +177,34 @@ describe('ingestChallenge — effect ストリームは後退させない', () =
     detach();
   });
 });
+
+describe('setChallenge — 保留中の delta に上書きされない(適用順=受信順)', () => {
+  it('rAF 未発火の delta が保留中でも、press の即時反映が巻き戻らない', () => {
+    const detach = attachLive();
+    const run = NOW + 10; // このファイルは module 状態を共有するので前のテストより新しいランで始める
+    pushDelta(challenge([fx(400)], { startedMs: run, value: 100 }));
+
+    // delta が届くが rAF はまだ発火していない(保留中)。
+    onLiveHandler({
+      t: 'delta',
+      tick: 2,
+      atMs: NOW,
+      sessionId: 1,
+      totals: EMPTY_TOTALS,
+      viewers: [],
+      alerts: [],
+      challenge: challenge([fx(401), fx(400)], { startedMs: run, value: 98 }),
+      deferred: 0,
+    });
+
+    // その間の押下 — RPC 返り値は保留中の delta より新しい。即時に 7セグへ出る。
+    setChallenge(challenge([fx(402), fx(401), fx(400)], { startedMs: run, value: 97 }));
+    expect(useLive.getState().challenge?.value).toBe(97);
+
+    // 保留していた rAF が今さら発火しても、古い delta(98)へ巻き戻らない。
+    fireRaf();
+    expect(useLive.getState().challenge?.value).toBe(97);
+    expect(useLive.getState().challenge?.recentEffects[0]?.id).toBe(402);
+    detach();
+  });
+});

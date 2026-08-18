@@ -9,8 +9,14 @@
  * 序列はユーザー決定(2026-08-16 確定):
  *   ①follow ②strike-like(いいね満タン) ③strike-stock(ストック満タン)
  *   ④boost ④.5 tap-lock(お邪魔) ⑤helper(お助け) ⑥join-roulette(初見)
+ *   ⑥.5 hot-roulette(激熱確定ルーレット)
  *   ⑦band(カットイン)
  *   ⑧other(ギフトルーレット・コメント等リスト外全部)
+ * ⑥.5 hot-roulette は 2026-08-18 にユーザーが band の直前を選択。激熱確定は
+ * 「その回だけ倍率が本物になる」1本 43 秒の山場で、専用ギフトでしか出ない —
+ * 通常のギフトルーレット(⑧)と同じ列で待たせると、先に届いた普通のスピンの
+ * 後ろで数分待つことになり、視聴者が撃った瞬間との因果が読めなくなる。
+ * band より上なのは、カットインは何度でも出るが激熱確定は出ないから。
  * boost が④なのはリアルタイム性の例外(原案は⑦) — フィーバーは worker 絶対時刻で
  * 走り(worker はルーレットでは凍結しない)、下位に回すと planBoostStart の期限切れ
  * で映像演出ごと消えるため、短尺の満タン系にだけ道を譲る位置をユーザーが選んだ。
@@ -45,6 +51,7 @@ export const FX_PRIORITY_ORDER = [
   'tap-lock',
   'helper',
   'join-roulette',
+  'hot-roulette',
   'band',
   'other',
 ] as const;
@@ -59,7 +66,14 @@ export function fxRank(c: FxPriorityClass): number {
 // ── 登録簿1: ドレインキューの種別 ─────────────────────────────────────────
 // fx-drain.ts の FxDrainQueues のキューと1対1。新キューを足すときはここへ登録。
 
-export const FX_DRAIN_KINDS = ['strike', 'boost', 'join-roulette', 'band', 'roulette'] as const;
+export const FX_DRAIN_KINDS = [
+  'strike',
+  'boost',
+  'join-roulette',
+  'hot-roulette',
+  'band',
+  'roulette',
+] as const;
 export type FxDrainKind = (typeof FX_DRAIN_KINDS)[number];
 
 /**
@@ -70,6 +84,7 @@ export const DRAIN_PRIORITY = {
   strike: 'strike-like',
   boost: 'boost',
   'join-roulette': 'join-roulette',
+  'hot-roulette': 'hot-roulette', // 激熱確定(cfg.roulettes[].hot)は band の直前
   band: 'band',
   roulette: 'other', // ギフトルーレットは「その他」(ユーザー指定のリスト外)
 } as const satisfies Record<FxDrainKind, FxPriorityClass>;
@@ -91,6 +106,8 @@ export const FX_BANNER_KINDS = [
   'stock-float',
   'roulette-result',
   'roulette-rest',
+  'roulette-result-hot',
+  'roulette-rest-hot',
   'boost-announce',
   'boost-result',
   'tap-lock',
@@ -106,6 +123,12 @@ export const BANNER_PRIORITY = {
   'stock-float': 'other',
   'roulette-result': 'other',
   'roulette-rest': 'other',
+  // 激熱確定のバナーは effect 側の分類(fxClassForEffect の 'hot-roulette')と揃える。
+  // ⑧のままだと bannerWinsByRank の厳密 < 判定で band(⑦)のドレインに勝てず、
+  // 飢餓弁(BANNER_STARVE_MS)が開くまで確定額が読めない — boost-announce /
+  // tap-lock が 2026-08-17 に同じ罠で修正されたのと同型。
+  'roulette-result-hot': 'hot-roulette',
+  'roulette-rest-hot': 'hot-roulette',
   // フィーバーのバナーは effect 側の分類(fxClassForEffect の boost-start /
   // boost-end → 'boost' = ④)と揃える。⑧のままだと bannerWinsByRank が厳密 <
   // 判定なので、band(⑦)のドレインが1件でもキューに居る限り**構造的に永久に
@@ -144,7 +167,13 @@ export function fxClassForEffect(e: ChallengeEffect): FxPriorityClass | 'paralle
     case 'boost-end':
       return 'boost';
     case 'roulette':
-      return e.rouletteOrigin === 'join' ? 'join-roulette' : 'other';
+      // 入室(⑥)→ 激熱確定(⑥.5)→ 通常のギフトルーレット(⑧)。入室を先に見るのは
+      // 入室ルーレットが hot を持たない(RouletteHotConfig の解説)ので排他だから。
+      return e.rouletteOrigin === 'join'
+        ? 'join-roulette'
+        : e.rouletteHotMult != null
+          ? 'hot-roulette'
+          : 'other';
     case 'gift':
       // お助け(ファンスタンプ)は⑤。カットイン付きギフトは⑦。素のギフトは⑧。
       return e.fanStamp ? 'helper' : e.fxBandClip != null ? 'band' : 'other';

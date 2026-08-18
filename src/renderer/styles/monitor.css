@@ -2936,6 +2936,32 @@ body {
 }
 
 /*
+ * 激熱確定(hot)の導入動画 — **スロットに入る前**に流す 8 秒の全画面動画
+ * (ROULETTE_HOT_INTRO_MS)。ライオン/ドラゴン/フェニックスの3種で、
+ * 続けて同じ絵柄の超激アツスピンへつながる。
+ *
+ * .rl-clip と違って **.roulette-screen の外**に置く — 導入の間はまだリールを
+ * マウントしていない(走行アニメがマウントで始まってしまうため)。よってセレクタも
+ * 単独で、位置・不透明度・退場は .rl-clip の規約をそのまま踏襲する
+ * (入りも消えも @keyframes・transition と混ぜない。理由は上の解説)。
+ *
+ * この 8 秒間 currentOcclusion() は 'opaque' を返すので、粒子・満タン動画は
+ * 撃たれない(音だけ)。z-index は .roulette-screen と同じ層で、DOM 順で先に
+ * 置かれる = 続くスピンの暗幕が自然に上に重なる。
+ */
+.rl-hot-intro {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+  opacity: 0.96;
+  z-index: 2;
+  animation: rl-clip-in 240ms ease-out both;
+}
+
+/*
  * 既存の absolute 配置(left:50%/top:14%)を解除して flex 中央に任せ、拡大する。
  * 拡大は transform で行う — キーフレームは全て var(--rl-w) ベースなので
  * 着地・段の幾何は壊れない(寸法定数の唯一の出所 shared/roulette-fx.ts は不変)。
@@ -4526,6 +4552,56 @@ body {
   --rl-mult-ink: #ff6ec0;
   --rl-mult-glow: rgba(255, 60, 170, 0.9);
 }
+/*
+ * 激熱確定(hot)の倍率ランプ。**倍率の値ではなく段番号(1〜4)で当てる** —
+ * 設定倍率は 5〜50 の任意値なので、rl-x50 のようなクラスにすると定義が無く
+ * `--rl-mult-ink` が未定義になり、`.rl-window.rl-x .rl-block` の color 宣言が
+ * 計算時に無効化されて数字の色が落ちる(段番号なら常に4段で足りる)。
+ *
+ * 色は通常の超激アツ(rl-x2..x5)と同じ金〜マゼンタの道を辿り、**最終段だけ
+ * 金の確定色へ抜く** — 通常版は最高潮のマゼンタから素の白へ「戻って」確定するが、
+ * 激熱確定は戻らないので、最後は「そこで決まった」と読める色でなければならない。
+ */
+.rl-window.rl-xs1 {
+  --rl-mult-ink: #ffe08a;
+  --rl-mult-glow: rgba(255, 190, 60, 0.5);
+}
+.rl-window.rl-xs2 {
+  --rl-mult-ink: #ffa03a;
+  --rl-mult-glow: rgba(255, 110, 20, 0.7);
+}
+.rl-window.rl-xs3 {
+  --rl-mult-ink: #ff6ec0;
+  --rl-mult-glow: rgba(255, 60, 170, 0.9);
+}
+/* 確定段。**白へ抜かない**(素の数字と同色になる)— 濃い金で「確定した金額」を出す。 */
+.rl-window.rl-xs4 {
+  --rl-mult-ink: #ffd24a;
+  --rl-mult-glow: rgba(255, 200, 40, 1);
+}
+/*
+ * 応援(減らす)側は現状の検証が激熱を許さない(validateRouletteHot が
+ * direction:'sub' の hot を落とす)ので実際には出ないが、**色の定義だけは置く** —
+ * 将来解禁したときに `--rl-mult-ink` 未定義で数字の色が落ちるのを防ぐ。
+ * 緑の帯の中でシアンへ振るのは通常版(rl-x2..x5 の help)と同じ理屈。
+ */
+.roulette-panel.help .rl-window.rl-xs1 {
+  --rl-mult-ink: #c9ffe4;
+  --rl-mult-glow: rgba(125, 255, 191, 0.5);
+}
+.roulette-panel.help .rl-window.rl-xs2 {
+  --rl-mult-ink: #8affd8;
+  --rl-mult-glow: rgba(90, 255, 190, 0.6);
+}
+.roulette-panel.help .rl-window.rl-xs3 {
+  --rl-mult-ink: #4fe0ff;
+  --rl-mult-glow: rgba(60, 210, 255, 0.75);
+}
+.roulette-panel.help .rl-window.rl-xs4 {
+  --rl-mult-ink: #22c4ff;
+  --rl-mult-glow: rgba(20, 180, 255, 1);
+}
+
 /* 減らす(応援)は緑の帯の中で熱くする — 金〜朱は「増やす」の意味を持つので使わない。 */
 .roulette-panel.help .rl-window.rl-x2 {
   --rl-mult-ink: #c9ffe4;
@@ -4544,6 +4620,29 @@ body {
 .roulette-panel.help .rl-window.rl-x5 {
   --rl-mult-ink: #22c4ff;
   --rl-mult-glow: rgba(20, 180, 255, 0.9);
+}
+
+/*
+ * 激熱確定(hot)の金色オーラ。トークンは shared の roulette-class.ts が付ける
+ * (向きの help / good / bad とは独立の第4のトークン)。
+ * **暗幕を濃くしすぎない** — 激熱は 43 秒あるので、背景のカウントダウンが
+ * 完全に読めなくなると「何が起きているか分からない時間」が長くなりすぎる。
+ */
+.roulette-screen.hot {
+  background:
+    radial-gradient(circle at 50% 46%, rgba(255, 200, 70, 0.16), transparent 58%),
+    rgba(8, 4, 2, 0.84);
+}
+.roulette-panel.hot {
+  border-color: rgba(255, 205, 90, 0.85);
+  box-shadow:
+    0 0 0 2px rgba(255, 190, 60, 0.35),
+    0 0 46px rgba(255, 170, 40, 0.5);
+}
+/* 確定バナーも同じ金で締める(どのスピンの額かを色で辿れるようにする)。 */
+.float.banner-roulette.hot {
+  border-color: rgba(255, 205, 90, 0.9);
+  box-shadow: 0 0 26px rgba(255, 170, 40, 0.45);
 }
 
 /*

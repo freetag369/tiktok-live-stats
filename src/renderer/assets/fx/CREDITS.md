@@ -489,6 +489,71 @@ ffmpeg -y -i raw.mp4 -filter_complex \
   本リポジトリは AGPL で配布されるため、**再配布前に規約上の再配布可否を必ず確認すること**。
 
 
+## 激熱確定の導入動画3本 — `rl/hot/` ・Higgsfield(Seedance 2.5)製・2026-08-18 追加
+
+激熱確定(hot)ルーレットが**スロットに入る前**に流す 8 秒の全画面動画。
+1本流し切ってから、同じ絵柄の超激アツスピン(既存素材)へつながる。
+
+| ファイル | 絵柄 | 続くスピンのパターン |
+|---|---|---|
+| `rl/hot/lion.mp4` | ライオン → 獅子の激熱 | `lion` |
+| `rl/hot/dragon.mp4` | ドラゴンの炎 → 黄金龍の激熱 | `dragon` |
+| `rl/hot/phoenix.mp4` | フェニックス → 不死鳥の激熱 | `phoenix` |
+
+**置き場所は `rl/` 直下ではなくサブディレクトリ `rl/hot/`。** 直下に置くと
+`test/unit/roulette-clip-catalog.spec.ts` の「id ⇄ ファイルが 1:1」が孤児として弾く
+(あちらは `rl/` を非再帰に読む)。読み込みも専用 glob
+(`renderer/lib/fx.ts` の `rouletteHotIntroUrl`)で分けてある。
+
+| 項目 | 値 |
+|---|---|
+| 解像度 | 1280×720(既存 `rl/*.mp4` と同じ) |
+| フレームレート | **真の 24fps**(`fps=24` フィルタで水増ししない) |
+| 尺 | **192 フレームちょうど = 8.000 秒**(`ROULETTE_HOT_INTRO_MS`) |
+| トリム | `trim=start_frame=` でフレーム指定。**`-ss` は使わない**(キーフレーム丸めで尺がズレる) |
+| 音声 | 素材に焼き込み。loudnorm で −16 LUFS(音量は `rouletteSound.clipVolume`) |
+| エンコード | `-crf 28 -preset slow`、`+faststart` |
+| 構図 | 被写体は中央寄せ(縦ステージでは cover の中央クロップになる) |
+| 終端 | 次のスピンへつながるので、**最後は静止ポーズで終える**(暗転で締めない) |
+
+### 生成の実績(2026-08-18)
+
+| 項目 | 値 |
+|---|---|
+| 生成 | Higgsfield / **Seedance 2.5**(`mode: t2v`・`duration: 8`・`resolution: 720p`・`aspect_ratio: 16:9`・`generate_audio: true`) |
+| 素の出力 | 1280×720 / 24fps / **193 フレーム(8.064秒)** / 音声 AAC 32kHz |
+| 後処理 | 192 フレームへ切り詰め + 音声を 48kHz へリサンプル + loudnorm −16 LUFS + h264 crf28 preset slow + `+faststart` |
+| コスト | 52 クレジット × 4本(dragon は撮り直し1回)= 208 クレジット |
+
+プロンプトは3本とも同じ骨格で、絵柄だけ差し替えてある:
+
+> Cinematic fantasy game intro, **strictly centered symmetrical composition, subject always
+> in the middle of frame.** In darkness, 〈素材ごとの立ち上がり〉. Slow steady push-in.
+> **In the final second the 〈主役〉 FREEZES in a held pose, facing the viewer head-on,
+> filling the center of the frame, and holds perfectly still.** Pure black background with
+> drifting embers. Audio: rising orchestral tension building to one huge brass hit and
+> 〈鳴き声〉. Ultra detailed 3D rendered game cinematic, volumetric god rays, high contrast.
+> **No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI, no people.**
+
+- **「中央・正面・終端で静止」を毎回書くこと。** 縦ステージでは cover の中央クロップに
+  なるので中央から外れると主役が切れ、終端が動いていると直後のリールへの繋ぎが濁る。
+- **文字を明示的に禁止する。** 生成モデルは放っておくと崩れた英字を焼き込む。
+- **終端の静止は「最後の N 秒は完全な静止画」と、動かないものを列挙して書くと効く。**
+  初回の dragon は「FREEZES in a held pose」だけで炎が揺れ続けた(終端フレーム間差分
+  5.99)。撮り直しで
+  「THE LAST THREE SECONDS ARE A COMPLETELY FROZEN STILL IMAGE: absolutely no motion of
+  any kind, the fire stops moving, no flickering, no embers drifting, no camera movement,
+  ... exactly like a paused freeze-frame」
+  と書いたら **0.013** まで落ちた(構図も正面向き・中央寄りに改善した)。
+  実測の終端フレーム間差分(平均輝度)は lion 0.89 / phoenix 0.59 / dragon 0.013。
+
+**尺を変えるときは `ROULETTE_HOT_INTRO_MS` と両方を動かすこと。** モニターの安全弁と
+ホールド番犬の期限がこの定数から出ており、素材のほうが長いとリールが出る前に
+番犬が発火して数字が先漏れする。
+
+**素材を消しても壊れない** — `rouletteHotIntroUrl` が null を返し、`startRoulette` が
+`introMs = 0` で即リールへ入る(値も尺の安全弁もそのぶん正しく短くなる)。
+
 ## ハート系4パターン12本 — Higgsfield 製・2026-08-17 追加
 
 ギフト4種をテーマにした**独立した超激アツ4パターン**。パターンごとに動画が2〜4本で、

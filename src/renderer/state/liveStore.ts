@@ -296,6 +296,12 @@ let logEntries: ChallengeLogEntry[] = [];
 let lastLoggedId: number | null = null;
 let lastStartedMs: number | null | undefined;
 /**
+ * 直近に観測した「ランの開始時刻」(非 null の startedMs)。lastStartedMs は
+ * reset で null に戻るため、reset 後に旧ランのスナップショットが後着したとき
+ * 「どのランまで見たか」を思い出す材料がこちらに要る。
+ */
+let lastRunStartedMs: number | null = null;
+/**
  * 取り込み済みの effect ストリームの世代印と、その中身。
  *
  * **なぜ要るか**: delta は scheduleFlush の rAF(+250ms)コアレスで遅延反映されるが、
@@ -328,6 +334,7 @@ function resetChallengeWatermarks(): void {
   logEntries = [];
   lastLoggedId = null;
   lastStartedMs = undefined;
+  lastRunStartedMs = null;
   seenMaxEffectId = 0;
   seenEffects = null;
   seenFxQueue = undefined;
@@ -338,6 +345,25 @@ function resetChallengeWatermarks(): void {
  * delta 経路と RPC 経路の両方がここを通る(同じ状態を二度受けても冪等)。
  */
 function ingestChallenge(incoming: ChallengeState): Partial<LiveState> {
+  // 旧ランのスナップショットの後着は丸ごと捨てる。境界判定(下)は「前進」だけを
+  // 認める — 「変化した」だけの判定だと、reset(null)直後に旧ランの press 返り値が
+  // 後着したとき境界を再検出して watermark(seenEffects)まで白紙になり、前ランの
+  // ログ全件が一瞬復活し 7セグも前ランの値へ戻っていた。startedMs は worker の
+  // now() 由来でランごとに単調増加するので、過去の開始時刻を名乗るスナップショットは
+  // 旧ランと断定してよい。
+  if (incoming.startedMs != null) {
+    const staleVsCurrent = typeof lastStartedMs === 'number' && incoming.startedMs < lastStartedMs;
+    const staleVsPrevRun =
+      lastStartedMs === null && lastRunStartedMs !== null && incoming.startedMs <= lastRunStartedMs;
+    if (staleVsCurrent || staleVsPrevRun) {
+      console.warn('[fx-skip] 旧ランのチャレンジ状態が後着 — 破棄', {
+        incomingStartedMs: incoming.startedMs,
+        lastStartedMs,
+        lastRunStartedMs,
+      });
+      return {};
+    }
+  }
   // start / reset の検知。worker 側は recentEffects を空にするだけで「消せ」とは
   // 言ってこないので、startedMs の変化(start=新しい時刻 / reset=null)で判断する。
   // status 遷移だけを見ると stop→start の往復を取りこぼす。
@@ -352,6 +378,7 @@ function ingestChallenge(incoming: ChallengeState): Partial<LiveState> {
     seenFxQueue = undefined;
   }
   lastStartedMs = incoming.startedMs;
+  if (incoming.startedMs != null) lastRunStartedMs = incoming.startedMs;
 
   // 後退スナップショットは演出の入力だけ据え置く(上の seenMaxEffectId の解説)。
   let state = incoming;
@@ -388,7 +415,15 @@ function ingestChallenge(incoming: ChallengeState): Partial<LiveState> {
   return { challenge: state, challengeLog: next.log };
 }
 
-/** RPC(challenge.*)の戻り値で即時反映する。delta からの上書きと冪等。 */
+/**
+ * RPC(challenge.*)の戻り値で即時反映する。delta からの上書きと冪等。
+ * setState 直行にはしない — delta は scheduleFlush(rAF+250ms)で遅延反映される
+ * ので、直行すると保留中の古い delta が直後の flush で新しい RPC 返り値を上書きし、
+ * 押下直後の 7セグが押下前の値へ巻き戻っていた。pendingPatch に合流して即時
+ * flush することで適用順を受信順に一本化する(演出入力の後退は従来どおり
+ * ingestChallenge の watermark が守る)。
+ */
 export function setChallenge(state: ChallengeState): void {
-  useLive.setState(ingestChallenge(state));
+  Object.assign(pendingPatch, ingestChallenge(state));
+  flushPending();
 }

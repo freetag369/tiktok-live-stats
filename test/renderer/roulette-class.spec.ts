@@ -115,7 +115,7 @@ describe('isHelpRoulette', () => {
 describe('配線 — コンポーネントが実際に共有ヘルパを呼んでいる', () => {
   it('RouletteFx が roulettePanelClass / rouletteBlockSign を使う(クラス直書きへ戻さない)', () => {
     const src = SRC('RouletteFx.tsx');
-    expect(src).toContain('roulettePanelClass({ direction, amount, hit })');
+    expect(src).toContain('roulettePanelClass({ direction, amount, hit, hot: hotMults != null })');
     expect(src).toContain('rouletteBlockSign(direction)');
     // 旧実装のテンプレートリテラル直書きへ戻していないこと。
     expect(src).not.toContain('`roulette-panel ${');
@@ -142,7 +142,8 @@ describe('配線 — コンポーネントが実際に共有ヘルパを呼ん�
 
   it('MonitorView が暗幕と RouletteFx へ向きを配線している', () => {
     const src = SRC('MonitorView.tsx');
-    expect(src).toContain('rouletteScreenClass(roulette.effect.rouletteDirection)');
+    expect(src).toContain('rouletteScreenClass(');
+    expect(src).toContain('roulette.effect.rouletteDirection,');
     expect(src).toContain("direction={roulette.effect.rouletteDirection ?? 'add'}");
     expect(src).not.toContain('className="roulette-screen"');
   });
@@ -177,8 +178,37 @@ describe('配線 — コンポーネントが実際に共有ヘルパを呼ん�
 
   it('倍率のクラスとバッジが出る(色替えと ×N倍 の表示)', () => {
     const src = SRC('RouletteFx.tsx');
-    expect(src).toContain('rl-x rl-x${mult}');
+    // 通常の超激アツは倍率そのものがクラス(rl-x2..rl-x5)。
+    expect(src).toContain('`rl-x${mult}`');
+    // 激熱確定は**段番号**(rl-xs1..rl-xs4)。倍率をそのままクラスにすると
+    // rl-x50 のような定義の無いクラスが生えて --rl-mult-ink が未定義になる。
+    expect(src).toContain('`rl-xs${rouletteHotStep(hotMults, mult)}`');
     expect(src, 'バッジは key={mult} で作り直す(pop が再生されない)').toContain('key={mult}');
     expect(src).toContain('className="rl-mult"');
+  });
+
+  /**
+   * 激熱確定(hot)の生命線 — **倍率が戻らない**こと。戻すと worker が適用済みの
+   * 値(出目 × 倍率)と画面の数字が食い違い、確定バナーと 7セグだけが倍の数字を出す。
+   */
+  it('激熱確定は finish() で倍率を戻さない(戻すと 7セグと食い違う)', () => {
+    const src = SRC('RouletteFx.tsx');
+    const from = src.indexOf('function finish()');
+    const finish = src.slice(from, src.indexOf('\n  }\n', from));
+    // 素へ戻す枝は hotMults が無いときだけ(onSettle の戻りボイスも同じ枝の中)。
+    expect(finish, '激熱の例外が消えている').toContain('mult !== 1 && !hotMults');
+  });
+
+  it('激熱確定の段は shared の rouletteHotMults から来る(モニターで作らない)', () => {
+    const src = SRC('MonitorView.tsx');
+    expect(src).toContain('rouletteHotMults(rouletteHotMultOf(roulette.effect))');
+  });
+
+  it('激熱確定の導入動画は armVideoPlay を通し、失敗時はスピンへ縮退する', () => {
+    const src = SRC('MonitorView.tsx');
+    expect(src).toContain("armVideoPlay(v, 'rl-hot-intro'");
+    expect(src).toContain('skipRouletteIntro()');
+    // 導入中は不透明 — 粒子や満タン動画を導入の上に生やさない。
+    expect(src).toContain("if (rouletteIntroOn.current) return 'opaque';");
   });
 });

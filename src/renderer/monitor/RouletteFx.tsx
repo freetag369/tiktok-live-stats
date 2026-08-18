@@ -50,6 +50,17 @@ import { num } from '@shared/format';
  *   付けること**(片方だけだと本物と見分けが付いてフェイクが成立しなくなる)。
  */
 
+/**
+ * 激熱確定の CSS クラス用の段番号(1 始まり)。倍率そのものをクラス名にすると
+ * `rl-x50` のような定義の無いクラスが生えて、`.rl-x` が要求する --rl-mult-ink が
+ * 未定義になり数字の色が落ちる(monitor.css の .rl-window.rl-x .rl-block を参照)。
+ * 見つからない倍率は最終段扱い — 色が消えるより熱いほうへ倒す。
+ */
+export function rouletteHotStep(mults: readonly number[], mult: number): number {
+  const i = mults.indexOf(mult);
+  return i >= 0 ? i + 1 : mults.length;
+}
+
 export function RouletteFx({
   segments,
   index,
@@ -64,6 +75,7 @@ export function RouletteFx({
   giftIconUrl,
   clipVolume,
   seEnabled,
+  hotMults,
   onNearStop,
   onKick,
   onStep,
@@ -99,6 +111,17 @@ export function RouletteFx({
   clipVolume: number;
   /** 効果音のマスタースイッチ。false なら動画も無音で流す。 */
   seEnabled: boolean;
+  /**
+   * 激熱確定(hot)の**本物の**倍率の段。ドン i 発目で `hotMults[i]` へ上がり、
+   * **finish() でも戻さない** — 膨らんだ数字がそのまま確定する。
+   * 出所は shared の rouletteHotMults(設定倍率から起こす純関数)。
+   * undefined = 通常の超激アツ = 従来どおり ×2→×3→×4→×5 の見せかけで、
+   * 確定の瞬間に 1 へ戻る(この経路は 1 バイトも変えていない)。
+   *
+   * 値が本物でも**全マスに一律で掛ける**のは変わらないので、当選 index は漏れない
+   * (このファイル冒頭「結果を先に見せないための約束」は崩れていない)。
+   */
+  hotMults?: readonly number[];
   nickname?: string;
   /** 見出しの前置き(設定の label)。effect.rouletteLabel。 */
   rouletteLabel?: string;
@@ -129,10 +152,13 @@ export function RouletteFx({
   onSpinQuiet?: () => void;
   /**
    * 超激アツ(ultra)の「ドン」— 出目の表示倍率が上がった瞬間。
-   * mult は上がったあとの倍率(2→3→4→5)、first は先頭の拍(= 激熱の合図)かどうか。
+   * mult は上がったあとの倍率(通常は 2→3→4→5、激熱確定は hotMults の段)、
+   * first は先頭の拍(= 激熱の合図)、last は最後の拍かどうか。
+   * 激熱確定では last の拍で設定倍率へ到達し、**そのまま確定する**ので、
+   * 呼び出し側はそこを払い出しの山場として鳴らす。
    * 呼び出し側が音と画面揺れを足す(onKick / onStep と同じ分担)。
    */
-  onDon?: (mult: number, first: boolean) => void;
+  onDon?: (mult: number, first: boolean, last: boolean) => void;
   /**
    * 超激アツの締め — 膨らんだ出目が元の数字へ戻る瞬間(= 確定と同時)。
    * finish() から呼ぶので、animationend でも安全弁のアンマウントでも必ず1回。
@@ -211,7 +237,12 @@ export function RouletteFx({
     // 超激アツで膨らませた出目を素へ戻す。**戻すのはここだけ** — タイマーではなく
     // 完了ラッチに置くことで、animationend が先でも安全弁のアンマウントが先でも
     // 「確定した数字が倍のまま」で固まらない。倍率が動いていなければ何も起きない。
-    if (mult !== 1) {
+    //
+    // **激熱確定(hotMults)だけは戻さない。** そこが仕様の本体で、worker も
+    // 倍率込みの値を適用済み — ここで 1 へ戻すと画面の数字だけが 7セグと食い違う。
+    // 戻りボイス(onSettle)も鳴らさない: あれは「膨らんだぶんが消えた」の音なので、
+    // 消えていない場面で鳴らすと逆の意味になる。
+    if (mult !== 1 && !hotMults) {
       setMult(1);
       setDonKey((k) => k + 1);
       onSettle?.();
@@ -296,12 +327,17 @@ export function RouletteFx({
     // 超激アツの「ドン」(ultra の行にだけ donAts がある)。i 番目で倍率が i+2 倍に
     // なる。**動画に覆われていない隙間に置いてある**(ROULETTE_ULTRA_BEATS の
     // leadMs / gapMs)ので、膨らんだ数字は必ず読める。
-    for (const [i, at] of (t.donAts ?? []).entries()) {
+    const dons = t.donAts ?? [];
+    for (const [i, at] of dons.entries()) {
+      // 激熱確定は設定倍率から起こした段(hotMults)、通常は従来どおり i+2。
+      // 段が足りない異常時は最後の段を保つ(数字を下げない)。
+      const to = hotMults ? (hotMults[i] ?? hotMults[hotMults.length - 1] ?? i + 2) : i + 2;
+      const last = i === dons.length - 1;
       timers.current.push(
         window.setTimeout(() => {
-          setMult(i + 2);
+          setMult(to);
           setDonKey((k) => k + 1);
-          onDon?.(i + 2, i === 0);
+          onDon?.(to, i === 0, last);
         }, Math.round(spinMs * at))
       );
     }
@@ -336,7 +372,7 @@ export function RouletteFx({
 
   return (
     <>
-      <div className={roulettePanelClass({ direction, amount, hit })}>
+      <div className={roulettePanelClass({ direction, amount, hit, hot: hotMults != null })}>
       <div className="rl-head">
         {giftIconUrl ? <img src={giftIconUrl} alt="" /> : <span>🎰</span>}
         {/* .rl-head は flex(gap 8px)なので、区切りの空白は CSS 側に任せて trim する。 */}
@@ -352,7 +388,11 @@ export function RouletteFx({
          * 中で段階的に熱くする — 全マス一律なので当選は漏れず、確定の瞬間には
          * mult が 1 に戻って素の白へ帰る。
          */
-        className={`rl-window rl-p-${key}${mult > 1 ? ` rl-x rl-x${mult}` : ''}`}
+        className={`rl-window rl-p-${key}${
+          mult > 1
+            ? ` rl-x ${hotMults ? `rl-xs${rouletteHotStep(hotMults, mult)}` : `rl-x${mult}`}`
+            : ''
+        }`}
         style={
           {
             '--rl-w': `${ROULETTE_BLOCK_W}px`,

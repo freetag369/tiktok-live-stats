@@ -659,7 +659,9 @@ describe('ChallengeEngine — 状態機械', () => {
     const s = e.get();
     expect(s.value).toBe(0);
     expect(s.status).toBe('achieved');
-    expect(s.stats.giftDown).toBe(60);
+    // 統計は名目(-60)ではなく実際に減った量(残量 50)— clampDownAmount の規約。
+    // 名目のままだと「ギフトで減らした数」が初期値を超えて表示される。
+    expect(s.stats.giftDown).toBe(50);
   });
 
   it('同一 msgId のギフトは二重適用しない(手動再接続のバックログ再配信)', () => {
@@ -1096,7 +1098,9 @@ describe('ChallengeEffect.valueAfter — ダッシュボードのログが「い
     e.start();
     e.press();
     const fx = e.get().recentEffects;
-    expect(fx.find((x) => x.kind === 'press')).toMatchObject({ amount: -5, valueAfter: 0 });
+    // amount はクランプ後の実減少量(-2)— 名目 -step を焼くとモニターのラッチ
+    // 開始値(valueAfter - amount)が押下前の値からズレる(flushPressFx と同じ規約)。
+    expect(fx.find((x) => x.kind === 'press')).toMatchObject({ amount: -2, valueAfter: 0 });
     expect(fx.find((x) => x.kind === 'achieved')).toMatchObject({ valueAfter: 0 });
   });
 

@@ -21,6 +21,7 @@ import type {
   GiftFxBand,
   JoinRouletteConfig,
   RouletteCountView,
+  RouletteHotConfig,
   RoulettePattern,
   RouletteSoundConfig,
   RouletteSpinKey,
@@ -243,9 +244,15 @@ export const ROULETTE_REELS_MAX = 20;
  * 尺の予算(既定盤面 30/25/20/15/9/1% での段位分布 light 66.5 / mid 25.3 /
  * heavy 6.6 / ultra 1.6%):
  * - 1本の期待値 ≒ 7.96秒 → **実勢の最悪 ≒ 15×7.96 + 5×1.6 ≒ 2分5秒**
- * - 理論最悪(15本すべて ultra)は 15×24.9 + 5×1.6 = 381.5秒。到達確率は
+ * - 理論最悪(15本すべて ultra)は 15×34.9 + 5×1.6 ≒ 531秒。到達確率は
  *   0.016^15 ≒ 10^-28 なので設計制約として扱わない
- * - **他演出の最大待ちは総尺ではなく「1リールの尺」(最長 34.9秒)** —
+ * - **激熱確定(hot)だけは 100% 発動なので確率の議論が効かない。** 1本は
+ *   導入 8 秒 + スピン 31.9 秒 + 確定見せ 3 秒 ≒ **42.9 秒**で、15本回すと
+ *   ≒ 10分43秒。専用ギフト行でしか出ないうえ本数はユーザー決定(2026-08-18)なので
+ *   ここでは絞らない — **絞るなら ROULETTE_FULL_REELS ではなく激熱専用の定数を足すこと**
+ *   (通常のルーレットの本数まで巻き添えにしないため)
+ * - **他演出の最大待ちは総尺ではなく「1リールの尺」(通常 最長 34.9秒 /
+ *   激熱確定 最長 42.9秒)** —
  *   finishRoulette の §6b(shouldYieldSpinChain)がリール境界ごとに上位序列へ
  *   譲るため。PENDING_BANDS_MAX / BOOST_ARM_MAX_MS の見積りはこちらで読むこと
  *
@@ -261,6 +268,116 @@ export const ROULETTE_FULL_REELS = 15;
  * rouletteAbortMs(パターン別)で張る。
  */
 export const ROULETTE_ABORT_MS = ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_ULTRA_MS + 1500;
+
+// ── 激熱確定(hot)────────────────────────────────────────────────────────────
+//
+// 通常の超激アツは出目を ×2→×3→×4→×5 と膨らませてから**元へ戻して**確定する
+// (RouletteFx.tsx の mult は見せかけ専用)。激熱確定は同じ振り付けのまま
+// **膨らんだ数字がそのまま確定する** — 倍率は worker が値へ適用済みで、
+// effect の rouletteHotMult に焼かれる。設定はギフトルーレット行ごと(cfg.roulettes[].hot)。
+
+/**
+ * 激熱確定の倍率の下限。**5 未満にしないこと** — ドン(donAts)は 4 発あり、
+ * rouletteHotMults は相異なる 4 段の整数を返す必要がある。下限 5 のとき段は
+ * ちょうど ×2→×3→×4→×5 = 従来の超激アツと同じ見た目になり、ここが自然な底になる。
+ */
+export const ROULETTE_HOT_MULT_MIN = 5;
+/** 激熱確定の倍率の上限(ユーザー決定 2026-08-18)。 */
+export const ROULETTE_HOT_MULT_MAX = 50;
+/**
+ * 激熱確定の導入動画の尺(ms)。**スロットに入る前**に全画面で流す(ユーザー指定 8 秒)。
+ * スピン尺(rouletteSpinMs)の外側なので、据え置きの安全弁・ホールド番犬の期限は
+ * rouletteHotIntroMs() を足して張ること — 足さないと導入中に番犬が発火して
+ * リールが回る前に数字が最終値へ飛ぶ(出目の先漏れ)。
+ */
+export const ROULETTE_HOT_INTRO_MS = 8000;
+/**
+ * 激熱確定で使う超激アツパターン(= 導入動画の絵柄)。ユーザー指定の3種:
+ * ❶ライオン→獅子 ❷ドラゴンの炎→黄金龍 ❸フェニックス→不死鳥。
+ * 導入動画は assets/fx/rl/hot/<pattern>.mp4 で、スピン本体は既存の ultra 素材を流用する。
+ * **行の patterns(設定のチェック)は激熱行では見ない** — 3種に固定するのが仕様。
+ */
+export const ROULETTE_HOT_PATTERNS: readonly RoulettePattern[] = ['lion', 'dragon', 'phoenix'];
+/**
+ * 激熱確定の専用キュー(モニターの優先度⑧)の上限。1本が導入 8 秒 + スピン 31.9 秒 +
+ * 確定見せ 3 秒 ≒ 43 秒なので、8 件で約 5.7 分。溢れは捨てず末尾の同一盤面へ
+ * mergeRoulette で連結する(ギフトルーレットと同じ規約)。
+ */
+export const ROULETTE_HOT_QUEUE_MAX = 8;
+
+/** 激熱確定の既定値。**DEFAULT_ROULETTE には載せない**(キー欠損 = 無効が既定)。 */
+export const DEFAULT_ROULETTE_HOT: RouletteHotConfig = { enabled: false, multiplier: 10 };
+
+/**
+ * 激熱倍率の clamp。**倍率に触る全経路がこの1本を通ること。**
+ *
+ * 検証(validateRouletteHot)・worker の適用(rouletteHotMultiplier)・effect からの
+ * 復元(rouletteHotMultOf)・段のはしご(rouletteHotMults)が別々の式を持つと、
+ * 「worker は ×3 を適用したのにリールは ×5 まで上がる」のような食い違いが生まれ、
+ * リールが止まった瞬間に数字が飛ぶ。範囲は ROULETTE_HOT_MULT_MIN..MAX。
+ */
+export function clampRouletteHotMult(m: number): number {
+  const r = Number.isFinite(m) ? Math.round(m) : ROULETTE_HOT_MULT_MIN;
+  return Math.min(ROULETTE_HOT_MULT_MAX, Math.max(ROULETTE_HOT_MULT_MIN, r));
+}
+
+/**
+ * 設定 → 実際に掛ける倍率。無効・未設定は 1(= 通常のルーレット)。
+ * worker の適用点はここだけを使う。
+ */
+export function rouletteHotMultiplier(hot: RouletteHotConfig | undefined): number {
+  return hot?.enabled ? clampRouletteHotMult(hot.multiplier) : 1;
+}
+
+/**
+ * effect → 実際に掛かっている倍率。載っていない/壊れている(0・負・非有限)は 1。
+ * **rouletteDraws と RouletteFx の段が同じ天井を見る**ための唯一の入口。
+ */
+export function rouletteHotMultOf(e: ChallengeEffect): number {
+  const m = e.rouletteHotMult;
+  if (m == null || !Number.isFinite(m) || Math.round(m) <= 1) return 1;
+  return clampRouletteHotMult(m);
+}
+
+/**
+ * 設定倍率 m → ドン4発ぶんの表示倍率(段のはしご)。
+ *
+ * 等比 `round(m ** ((i+1)/4))` に「前の段より必ず 1 以上大きい」単調補正を掛け、
+ * 最後の段は必ず m ちょうどにする。等比にするのは、どの段でも「上がり幅の体感」が
+ * 揃うから — 等差(×13→×25→×38→×50)だと最初の1発で山場が終わってしまう。
+ *
+ *   m=5  → [2, 3, 4, 5]   (= 従来の超激アツと同じ段)
+ *   m=10 → [2, 3, 6, 10]
+ *   m=20 → [2, 4, 9, 20]
+ *   m=50 → [3, 7, 19, 50]
+ *
+ * 段数は donAts の長さ(4)と一致していること。**m ≧ ROULETTE_HOT_MULT_MIN(5)が前提** —
+ * 単調補正は最悪でも 2,3,4 を作るので、m が 5 以上なら末項が必ず途中の段より大きい。
+ */
+export const ROULETTE_HOT_DON_STEPS = 4;
+export function rouletteHotMults(m: number): number[] {
+  const top = clampRouletteHotMult(m);
+  const out: number[] = [];
+  for (let i = 1; i <= ROULETTE_HOT_DON_STEPS; i++) {
+    const prev = out[out.length - 1] ?? 1;
+    // 最終段は設定値ちょうど。途中段は等比 → 単調補正(前段 + 1 を下回らせない)。
+    const v =
+      i === ROULETTE_HOT_DON_STEPS
+        ? top
+        : Math.max(Math.round(top ** (i / ROULETTE_HOT_DON_STEPS)), prev + 1);
+    out.push(v);
+  }
+  return out;
+}
+
+/**
+ * effect 1件 → 導入動画の尺(ms)。激熱でなければ 0。
+ * **モニターの安全弁・番犬・尺見積りは全部この1本から導くこと**(片方だけ足すと
+ * 導入中にホールドが強制解除される)。
+ */
+export function rouletteHotIntroMs(e: ChallengeEffect): number {
+  return e.rouletteHotMult != null ? ROULETTE_HOT_INTRO_MS : 0;
+}
 
 /**
  * スピン1本の実尺と安全弁。fast(キュー消化)と通常で尺が違い、通常は更に段位で
@@ -712,6 +829,13 @@ export const GIFT_FX_FREEZE_MARGIN_MS = 500;
  */
 export const GIFT_FX_PENDING_OPS_MAX = 256;
 /**
+ * 溢れ弁でも即時実行に倒してはいけない「重要 op」(フィーバー発動など、凍結中に
+ * 走ると進行中の演出を強制清算した上で凍結を張り直す op)のための追加ヘッドルーム。
+ * 上限そのものを上げないのは、高頻度イベント(いいね等)にヘッドルームを食い潰さ
+ * せないため。ここも尽きたら重要 op は実行せず破棄する(診断ログに残す)。
+ */
+export const GIFT_FX_PENDING_OPS_CRITICAL_EXTRA = 32;
+/**
  * delta に載せる演出予告(ChallengeState.fxQueue)の上限件数。保留キュー自体は
  * GIFT_FX_PENDING_OPS_MAX まで積めるが、モニターの表示は5行+溢れ表記なので
  * 予告はこの件数で切って 2Hz の delta を太らせない。
@@ -741,7 +865,10 @@ export const CLIP_QUEUE_MAX = 3;
  * 他演出中に届いたカットイン(バンド/全面カット)の持ち越し上限。
  * 連打ルーレットの連鎖そのものは数分に伸びうるが(ROULETTE_FULL_REELS 参照)、
  * カットインは fx-priority で⑦= ルーレット⑧より上位なので **§6b がリール境界で
- * 必ず譲る** — つまり溜まる窓は連鎖の総尺ではなく**1リールの尺**(最長 24.9 秒)。
+ * 必ず譲る** — つまり溜まる窓は連鎖の総尺ではなく**1リールの尺**(最長 34.9 秒)。
+ * **例外は激熱確定(⑥.5)** — あちらはカットインより上位なので譲ってもらえず、
+ * 1本ぶん(導入 8 秒込みで最長 42.9 秒)は丸ごと待つ。4枠はその窓で溜まるぶんを
+ * 飲める見積り(帯カットインは1ギフト1枠)。
  * その裏で溜まるぶんを飲めるだけ確保する — 溢れるとそのギフトの演出が丸ごと消える。
  * **上げたら FX_DRAIN_MAX_STEPS の見積もりも更新すること。**
  */
@@ -767,10 +894,14 @@ export const PENDING_BOOSTS_MAX = 4;
  *  - 別のフィーバーは塞げない(アームが凍結を張るので連打コンボは直列化される)。
  *  - ルーレット連鎖は既に譲る(collectWaitingClasses が 'boost' を積む)。譲りの
  *    粒度は**リール境界**なので、待ちは連鎖の総尺ではなく1リールの尺で有界
- *    (ROULETTE_FULL_REELS の導入で 1.6 秒 → 最長 24.9 秒。到着直後に ultra が
- *    始まった最悪で 24.9 + 確定バナー 1.6 + 間合い 0.5 ≒ 27 秒 < 60 秒。直前が
+ *    (ROULETTE_FULL_REELS の導入で 1.6 秒 → 通常 最長 34.9 秒。到着直後に ultra が
+ *    始まった最悪で 34.9 + 確定バナー 1.6 + 間合い 0.5 ≒ 37 秒 < 60 秒。直前が
  *    フィーバー結果バナーだった場合だけ STAGE_GAP_BOOST_RESULT_MS(2 秒)が
- *    上乗せされて ≒ 29 秒 — **それでも 60 秒には遠いので据え置きでよい**)。
+ *    上乗せされて ≒ 39 秒)。
+ *    **激熱確定(hot)は導入 8 秒ぶん長い** — 42.9 + 1.6 + 0.5 + 2 ≒ **47 秒**。
+ *    60 秒には収まるが余裕は約 13 秒まで縮む(通常時は約 21 秒)。ここを削ると
+ *    「激熱の最中に撃ったフィーバーの起動カットインが飛ぶ」が再発するので、
+ *    **激熱の尺を伸ばすときは必ずこの引き算をやり直すこと**。
  * **短くしてはいけない** — 20〜45 秒だと正当な長尺カットインの最中に期限が切れ、
  * 「起動カットインが飛ばされる」症状がそのまま再発する。
  *
@@ -1527,8 +1658,13 @@ export function rouletteReelCount(cfg: ChallengeConfig, draws: number): number {
  * (fx-drain.ts / appendChallengeLog と同じ流儀)。
  *
  * amount は effect 全体の合計なので符号を引けない — 1回ぶんの増減は
- * `rouletteSegments[index] × (rouletteDirection === 'sub' ? -1 : 1)` で復元する。
- * rouletteIndexes を持たない古い effect(worker 混在)は単発として扱う。
+ * `rouletteSegments[index] × (rouletteDirection === 'sub' ? -1 : 1) × (rouletteHotMult ?? 1)`
+ * で復元する。rouletteIndexes を持たない古い effect(worker 混在)は単発として扱う。
+ *
+ * **激熱確定(rouletteHotMult)の倍率をここで掛けるのが唯一の実装。** worker は既に
+ * 倍率込みの値を適用しているので、ここで掛け忘れるとモニターの据え置き会計
+ * (rouletteRemainingAmount → heldValueFor)が worker とズレて、リールが止まった
+ * 瞬間に数字が飛ぶ/巻き戻る。
  */
 export function rouletteDraws(
   e: ChallengeEffect
@@ -1537,7 +1673,9 @@ export function rouletteDraws(
   if (segs.length === 0) return [];
   const idxs = e.rouletteIndexes ?? (e.rouletteIndex != null ? [e.rouletteIndex] : []);
   const pats = e.roulettePatterns ?? [];
-  const sign = e.rouletteDirection === 'sub' ? -1 : 1;
+  // 激熱確定の実倍率。載っていなければ 1 = 従来と 1 バイトも変わらない。
+  // clamp は worker/検証/段のはしごと**同じ1本**(rouletteHotMultOf → clampRouletteHotMult)。
+  const sign = (e.rouletteDirection === 'sub' ? -1 : 1) * rouletteHotMultOf(e);
   const out: Array<{ index: number; pattern: RoulettePattern; amount: number }> = [];
   for (let i = 0; i < idxs.length; i++) {
     // 盤面外の index は捨てる(盤面を編集した直後の古い effect への保険)。
@@ -1572,9 +1710,15 @@ export function rouletteDraws(
  * 表示名・盤面が全一致しても畳んでしまうと片方のキューへ吸われて他方が消える。
  * label('初見さん')による衝突回避はユーザー編集で破れる(ギフト行に同名を
  * 付けられる)ため、構造で分離する。
+ *
+ * **激熱確定の倍率(rouletteHotMult)も入れる。** rouletteOrigin と同じ理由 —
+ * 倍率が違えば同じ index が別の額を意味するので、表示名・盤面・向きが全一致する
+ * 激熱行と通常行を畳むと rouletteDraws の復元が壊れる(値が 50 倍ズレる)。
+ * worker の finishDrain のグループキーもモニターのキュー連結もこの1本を共有するので、
+ * ここに入れるだけで両方の経路が同時に守られる。
  */
 export function rouletteBoardKey(e: ChallengeEffect): string {
-  return `${e.rouletteOrigin ?? ''}|${e.rouletteLabel ?? ''}|${e.rouletteDirection ?? 'add'}|${(e.rouletteSegments ?? []).join(',')}`;
+  return `${e.rouletteOrigin ?? ''}|${e.rouletteLabel ?? ''}|${e.rouletteDirection ?? 'add'}|${e.rouletteHotMult ?? ''}|${(e.rouletteSegments ?? []).join(',')}`;
 }
 
 /** 同じ盤面か(rouletteBoardKey の等値)。 */
@@ -2903,6 +3047,28 @@ function sanitizeRouletteSegments(raw: unknown): ChallengeRouletteSegment[] | nu
 }
 
 /**
+ * 激熱確定の検証。**無効なら undefined を返してキーごと落とす**(sound の上書きと
+ * 同じ規約 — 保存済み settings.json に無意味な既定値を生やさない)。
+ *
+ * 落とす条件は3つ:
+ *   1. 非オブジェクト(キー欠損の旧 settings.json)= 移行の代わり
+ *   2. enabled が true でない — 既定は無効なので `=== true`(validateJoinRoulette と同じ向き)
+ *   3. direction が 'sub' — 応援側で一気に 50 倍減らすのは別の企画。**UI のチェックが
+ *      残ったまま効かない「死んだコントロール」を作らない**ため、向きを引数で受けて
+ *      ここで構造的に落とす
+ */
+function validateRouletteHot(raw: unknown, direction: 'add' | 'sub'): RouletteHotConfig | undefined {
+  if (direction === 'sub') return undefined;
+  const c = raw as Partial<RouletteHotConfig> | null | undefined;
+  if (!c || typeof c !== 'object' || c.enabled !== true) return undefined;
+  const m = typeof c.multiplier === 'number' && Number.isFinite(c.multiplier) ? c.multiplier : NaN;
+  return {
+    enabled: true,
+    multiplier: Number.isNaN(m) ? DEFAULT_ROULETTE_HOT.multiplier : clampRouletteHotMult(m),
+  };
+}
+
+/**
  * ルーレット1件ぶんの検証。既存流儀どおり throw せずサニタイズする。
  * 有効な出目が 1 件も残らない/全 weight が 0 の盤面は抽選不能なので既定 segments に戻す。
  */
@@ -2913,6 +3079,9 @@ function validateRoulette(raw: unknown, fb: { id: string; label: string }): Chal
 
   const segments = sanitizeRouletteSegments(c.segments);
   const sound = validateRouletteSoundOverride(c.sound);
+  // 向きは下の direction と**同じ式**で先に決める(激熱は 'add' の行だけ)。
+  const direction: 'add' | 'sub' = c.direction === 'sub' ? 'sub' : 'add';
+  const hot = validateRouletteHot(c.hot, direction);
 
   return {
     // 欠損・重複 id は呼び元(validateRoulettes)が振り直すので、ここは fb のまま通す。
@@ -2926,12 +3095,14 @@ function validateRoulette(raw: unknown, fb: { id: string; label: string }): Chal
     giftName: typeof c.giftName === 'string' ? c.giftName.trim().toLowerCase() : d.giftName,
     canonical: typeof c.canonical === 'string' ? c.canonical.trim().toLowerCase() : d.canonical,
     segments: segments ?? structuredClone(d.segments),
-    direction: c.direction === 'sub' ? 'sub' : 'add',
+    direction,
     patterns: sanitizeRoulettePatterns(c.patterns),
     // 上書きが無いときは**キーごと出さない**(direction:'sub' と同じ条件付き
     // スプレッドの流儀)。常に sound を出すと DEFAULT_ROULETTE(キー無し)と形が
     // ずれ、保存済み settings.json の全行に無意味な既定値が生える。
     ...(sound ? { sound } : {}),
+    // 激熱確定も同じ規約 — 無効ならキーごと出さない(欠損が既定 = 移行の代わり)。
+    ...(hot ? { hot } : {}),
   };
 }
 

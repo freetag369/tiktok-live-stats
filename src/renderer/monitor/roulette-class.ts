@@ -31,34 +31,43 @@ export function isHelpRoulette(direction: RouletteDirection | undefined): boolea
  * **`bad`/`good` は従来どおり amount の符号で付ける** — `.hit.good .rl-block.win`
  * (当選マスの緑)が依存している既存契約なので置き換えない。`help` を足すだけ。
  * 出目 >= 1 の clamp があるので sub では amount < 0 が必ず成立し、両者は一致する。
+ *
+ * `hot`(激熱確定)は金色のオーラ。**向きとは独立のトークン** — 激熱は検証が
+ * 'add' の行にしか許さないので実際には常に `bad` と同居するが、`help` と排他だと
+ * 決めてしまうと将来 sub 側を解禁したときに静かに壊れる。
  */
 export function roulettePanelClass(a: {
   direction?: RouletteDirection;
   amount: number;
   hit: boolean;
+  hot?: boolean;
 }): string {
   const bad = a.amount >= 0;
   return `roulette-panel ${bad ? 'bad' : 'good'}${isHelpRoulette(a.direction) ? ' help' : ''}${
-    a.hit ? ' hit' : ''
-  }`;
+    a.hot ? ' hot' : ''
+  }${a.hit ? ' hit' : ''}`;
 }
 
 /**
  * 全面暗幕 `.roulette-screen` のクラス。暗幕中央の後光(--rl-spot)は
  * **パネルの親要素**の背景なので、パネル側の変数では届かない。
  */
-export function rouletteScreenClass(direction?: RouletteDirection): string {
-  return `roulette-screen${isHelpRoulette(direction) ? ' help' : ''}`;
+export function rouletteScreenClass(direction?: RouletteDirection, hot?: boolean): string {
+  return `roulette-screen${isHelpRoulette(direction) ? ' help' : ''}${hot ? ' hot' : ''}`;
 }
 
 /**
  * 確定バナー(±N 浮上)のクラス。pushFloat の cls は空白区切りのトークン列で、
  * `bannerDurationMs` が `gift-card` トークンだけを見る(= `help` を足しても 1600ms)。
  */
-export function rouletteBannerClass(a: { direction?: RouletteDirection; amount: number }): string {
+export function rouletteBannerClass(a: {
+  direction?: RouletteDirection;
+  amount: number;
+  hot?: boolean;
+}): string {
   return `${a.amount < 0 ? 'good' : 'bad'} banner-roulette${
     isHelpRoulette(a.direction) ? ' help' : ''
-  }`;
+  }${a.hot ? ' hot' : ''}`;
 }
 
 /**

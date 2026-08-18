@@ -9,6 +9,8 @@
  * - 21本目以降 = 合算バナー1枚(rouletteReelPlan の rest 側の管轄)
  *
  * 併せて2つ:
+ * - **激熱確定(hot)は本数に関係なく常にフル尺・超焦らしも素通し** — 倍率の段は
+ *   ultra の donAts にしか無いので、短縮も jack への差し替えも倍率を消してしまう。
  * - **リールが2本以上ある effect では超焦らしのカウントを一切通さない** —
  *   worker が抽選したパターンをそのまま再生する(降格も強制発動もしない)。
  *   カウントが進むのはリール1本の単発ルーレットだけ。旧実装が「連打の1本目を
@@ -46,6 +48,17 @@ export interface RouletteSpinInput {
   join: boolean;
   /** e.test === true(パターン別の ▶ 試写)。抽選パターンをそのまま見せる。 */
   test: boolean;
+  /**
+   * e.rouletteHotMult != null(激熱確定)。**短縮も超焦らしの差し替えも免除する。**
+   *
+   * 免除しないと値が壊れる: 倍率の段(ドン)は ROULETTE_PATTERN_TIMING の donAts に
+   * 乗っているが、それを持つのは ultra だけ。超焦らしが lion を jackstop へ差し替えたり
+   * (rouletteTeaseStep)、16本目以降が 'fast' になったりすると donAts が消え、
+   * **リールは素の出目のまま止まるのに worker は 倍率込みの値を適用済み**という
+   * 食い違いになる(確定バナーと 7セグだけが倍の数字を出す)。
+   * 入室ルーレット(join)を丸ごと免除しているのと同じ構造の免除。
+   */
+  hot: boolean;
   /** 設定 challenge.rouletteTease.enabled(cfg 未取得は false)。 */
   teaseEnabled: boolean;
   /**
@@ -79,9 +92,13 @@ function fullReelsFor(coalesced: number): number {
  * 依存させると尺から出目の情報が漏れる経路が増える。
  */
 export function planRouletteSpin(s: RouletteSpinInput): RouletteSpinPlan {
-  const short = !s.join && s.at >= fullReelsFor(s.coalesced);
+  // 激熱確定は本数に関係なく常にフル尺(入室ルーレットと同じ免除)。倍率の段は
+  // ultra の donAts にしか無いので、短縮すると倍率が一度も上がらない。
+  const short = !s.join && !s.hot && s.at >= fullReelsFor(s.coalesced);
   // 素通しの条件。短縮スピンは段が無くてゴーストを出せないので元から対象外。
-  const skip = short || s.reels > 1 || s.join || s.test || !s.teaseEnabled;
+  // 激熱確定も素通し — 超焦らしの差し替え先(jack 3種)は heavy 段位で donAts を
+  // 持たないため、通すと倍率が消える。
+  const skip = short || s.hot || s.reels > 1 || s.join || s.test || !s.teaseEnabled;
   if (skip) return { short, tease: null };
   // ここに来るのは reels === 1 のときだけ = at は常に 0(単発 effect は
   // more が偽なので §6b の unshift を通れず resumeAt > 0 になり得ない)。

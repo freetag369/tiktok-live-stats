@@ -50,6 +50,8 @@ export interface FxDrainQueues<T, R = T> {
   bands: T[];
   /** 初見(入室)ルーレット(JOIN_ROULETTE_QUEUE_MAX は積む側の規約)。 */
   joinRoulettes: R[];
+  /** 激熱確定ルーレット(ROULETTE_HOT_QUEUE_MAX は積む側の規約)。 */
+  hotRoulettes: R[];
   /** ギフトルーレット(ROULETTE_QUEUE_MAX は積む側の規約)。 */
   roulettes: R[];
 }
@@ -59,6 +61,7 @@ export type FxDrainNext<T, R = T> =
   | { kind: 'boost'; effect: T }
   | { kind: 'band'; effect: T }
   | { kind: 'join-roulette'; effect: R }
+  | { kind: 'hot-roulette'; effect: R }
   | { kind: 'roulette'; effect: R };
 
 export interface FxDrainResult<T, R = T> {
@@ -77,6 +80,22 @@ export const FX_DRAIN_SEQ: readonly FxDrainKind[] = [...FX_DRAIN_KINDS].sort(
   (a, b) => fxRank(DRAIN_PRIORITY[a]) - fxRank(DRAIN_PRIORITY[b])
 );
 
+/**
+ * ルーレット系3種(初見・激熱確定・ギフト)のキューを種別から引く。分岐を1箇所に
+ * 閉じるのは、走査(drainFxQueues)・先読み(peekNextDrainKind)・ランク集計
+ * (bestDrainRank)の3つが同じ対応表を使う担保がこれしかないため。
+ */
+function rouletteQueueOf<T, R>(
+  q: FxDrainQueues<T, R>,
+  kind: 'join-roulette' | 'hot-roulette' | 'roulette'
+): R[] {
+  return kind === 'join-roulette'
+    ? q.joinRoulettes
+    : kind === 'hot-roulette'
+      ? q.hotRoulettes
+      : q.roulettes;
+}
+
 export function drainFxQueues<T, R = T>(q: FxDrainQueues<T, R>): FxDrainResult<T, R> {
   const achieved = q.achieved;
   for (const kind of FX_DRAIN_SEQ) {
@@ -92,7 +111,7 @@ export function drainFxQueues<T, R = T>(q: FxDrainQueues<T, R>): FxDrainResult<T
       const e = (kind === 'boost' ? q.boosts : q.bands).shift();
       if (e !== undefined) return { achieved, next: { kind, effect: e } };
     } else {
-      const e = (kind === 'join-roulette' ? q.joinRoulettes : q.roulettes).shift();
+      const e = rouletteQueueOf(q, kind).shift();
       if (e !== undefined) return { achieved, next: { kind, effect: e } };
     }
   }
@@ -106,9 +125,15 @@ export function drainFxQueues<T, R = T>(q: FxDrainQueues<T, R>): FxDrainResult<T
  */
 export function peekNextDrainKind<T, R = T>(q: FxDrainQueues<T, R>): FxDrainKind | null {
   for (const kind of FX_DRAIN_SEQ) {
-    if (kind === 'strike' ? q.strike !== null : kind === 'boost' ? q.boosts.length > 0 : kind === 'band' ? q.bands.length > 0 : kind === 'join-roulette' ? q.joinRoulettes.length > 0 : q.roulettes.length > 0) {
-      return kind;
-    }
+    const has =
+      kind === 'strike'
+        ? q.strike !== null
+        : kind === 'boost'
+          ? q.boosts.length > 0
+          : kind === 'band'
+            ? q.bands.length > 0
+            : rouletteQueueOf(q, kind).length > 0;
+    if (has) return kind;
   }
   return null;
 }
@@ -127,6 +152,7 @@ export function bestDrainRank<T, R = T>(q: FxDrainQueues<T, R>): number | null {
   if (q.boosts.length > 0) consider(fxRank(DRAIN_PRIORITY.boost));
   if (q.bands.length > 0) consider(fxRank(DRAIN_PRIORITY.band));
   if (q.joinRoulettes.length > 0) consider(fxRank(DRAIN_PRIORITY['join-roulette']));
+  if (q.hotRoulettes.length > 0) consider(fxRank(DRAIN_PRIORITY['hot-roulette']));
   if (q.roulettes.length > 0) consider(fxRank(DRAIN_PRIORITY.roulette));
   return best;
 }
@@ -136,7 +162,8 @@ export function bestDrainRank<T, R = T>(q: FxDrainQueues<T, R>): number | null {
  * 将来 start が新たにキューへ積むようになった場合の暴走止め。
  * **各キューの上限を上げたらここも上げること** — 到達可能になると
  * 「まだ残っているのに idle へ倒れる」= 持ち越しが1周ぶん遅れる。
- * 見積: strike(1) + boosts(4) + bands(4) + joinRoulettes(4) + roulettes(24) + 1 = 38 < 64。
+ * 見積: strike(1) + boosts(4) + bands(4) + joinRoulettes(4) + hotRoulettes(8) +
+ * roulettes(24) + 1 = 46 < 64。
  */
 export const FX_DRAIN_MAX_STEPS = 64;
 

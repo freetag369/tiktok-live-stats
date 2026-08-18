@@ -22,7 +22,7 @@ import {
  */
 
 describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 2026-08-18)', () => {
-  it('9ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
+  it('10ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
     expect(FX_PRIORITY_ORDER).toEqual([
       'follow',
       'strike-like',
@@ -31,9 +31,19 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'tap-lock',
       'helper',
       'join-roulette',
+      'hot-roulette',
       'band',
       'other',
     ]);
+  });
+
+  it('激熱確定は band より上・初見ルーレットより下(2026-08-18 ユーザー決定)', () => {
+    // 位置の根拠: 激熱確定は専用ギフトでしか出ない 1 本 43 秒の山場なので、
+    // 通常のギフトルーレット(⑧)と同じ列で待たせると因果が読めなくなる。
+    // カットイン(band)は何度でも出るが激熱確定は出ないので、band より上。
+    expect(fxRank('hot-roulette')).toBeLessThan(fxRank('band'));
+    expect(fxRank('hot-roulette')).toBeGreaterThan(fxRank('join-roulette'));
+    expect(fxRank('hot-roulette')).toBeLessThan(fxRank('other'));
   });
 
   it('お邪魔(タップ封じ)は boost の直後・helper より上(2026-08-18 ユーザー決定)', () => {
@@ -50,7 +60,14 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
   });
 
   it('登録簿の種別一覧も凍結(登録漏れ・無断追加の検出)', () => {
-    expect(FX_DRAIN_KINDS).toEqual(['strike', 'boost', 'join-roulette', 'band', 'roulette']);
+    expect(FX_DRAIN_KINDS).toEqual([
+      'strike',
+      'boost',
+      'join-roulette',
+      'hot-roulette',
+      'band',
+      'roulette',
+    ]);
     expect(FX_BANNER_KINDS).toEqual([
       'follow',
       'helper',
@@ -60,6 +77,8 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'stock-float',
       'roulette-result',
       'roulette-rest',
+      'roulette-result-hot',
+      'roulette-rest-hot',
       'boost-announce',
       'boost-result',
       'tap-lock',
@@ -80,7 +99,19 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
     expect(BANNER_PRIORITY['boost-result']).toBe('boost');
     // お邪魔の告知も同じ理由で effect 側の分類と揃える(⑧のままだと band に永久に負ける)。
     expect(BANNER_PRIORITY['tap-lock']).toBe('tap-lock');
-    const named = new Set(['follow', 'helper', 'boost-announce', 'boost-result', 'tap-lock']);
+    // 激熱確定のバナーも effect 側(fxClassForEffect の 'hot-roulette')と揃える。
+    expect(DRAIN_PRIORITY['hot-roulette']).toBe('hot-roulette');
+    expect(BANNER_PRIORITY['roulette-result-hot']).toBe('hot-roulette');
+    expect(BANNER_PRIORITY['roulette-rest-hot']).toBe('hot-roulette');
+    const named = new Set([
+      'follow',
+      'helper',
+      'boost-announce',
+      'boost-result',
+      'tap-lock',
+      'roulette-result-hot',
+      'roulette-rest-hot',
+    ]);
     for (const k of FX_BANNER_KINDS) {
       if (!named.has(k)) expect(BANNER_PRIORITY[k]).toBe('other');
     }

@@ -21,6 +21,7 @@ import type {
   GiftRepeatFxConfig,
   JoinRouletteConfig,
   RouletteCountView,
+  RouletteHotConfig,
   RoulettePattern,
   RouletteTeaseConfig,
 } from '@shared/dto';
@@ -45,8 +46,11 @@ import {
   DEFAULT_MINI_FX,
   DEFAULT_JOIN_ROULETTE,
   DEFAULT_ROULETTE,
+  DEFAULT_ROULETTE_HOT,
   DEFAULT_SE_VOLUMES,
   ROULETTE_FULL_REELS,
+  ROULETTE_HOT_MULT_MAX,
+  ROULETTE_HOT_MULT_MIN,
   ROULETTE_JACK_PATTERNS,
   ROULETTE_LABEL_MAX,
   ROULETTE_REELS_MAX,
@@ -71,8 +75,11 @@ import {
   rouletteCommonSound,
   rouletteHeadline,
   rouletteSoundOverrideToggle,
+  clampRouletteHotMult,
+  rouletteHotMults,
 } from '@shared/challenge';
 import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
+import { num } from '@shared/format';
 import { fullCutRuleMatches } from '@shared/fx-cut';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { useConfirm } from '../components/ConfirmDialog';
@@ -2400,6 +2407,79 @@ function RouletteSegmentsEditor({
 }
 
 /** ルーレット1件ぶんの設定行。トリガー・出目・確率・行別サウンドをここで完結させる。 */
+/**
+ * 激熱確定(hot)の編集ブロック。**「増やす(妨害)」の行にだけ出す** —
+ * 検証(validateRouletteHot)が direction:'sub' の hot をキーごと落とすので、
+ * sub で出すと「チェックしても保存すると消える」死んだコントロールになる。
+ *
+ * 倍率は 5〜50。下限が 5 なのは、ドンが4発あって相異なる4段が要るため
+ * (5 のときちょうど従来の超激アツと同じ ×2→×3→×4→×5 の段になる)。
+ */
+function RouletteHotEditor({
+  hot,
+  segments,
+  onChange,
+}: {
+  hot: RouletteHotConfig | undefined;
+  /** 段の見本に使う盤面(一番大きい出目で「いくらになるか」を出す)。 */
+  segments: ChallengeRouletteSegment[];
+  onChange: (hot: RouletteHotConfig | undefined) => void;
+}): React.JSX.Element {
+  const on = hot?.enabled === true;
+  const mult = hot?.multiplier ?? DEFAULT_ROULETTE_HOT.multiplier;
+  // 見本は盤面の最大の出目 — 一番効く場所で額を見せる。空盤面は 1000 で代用。
+  const top = segments.reduce((m, sg) => Math.max(m, sg.amount), 0) || 1000;
+  const steps = rouletteHotMults(mult);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <label className="row" style={{ cursor: 'pointer', gap: 4 }}>
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) =>
+            onChange(e.target.checked ? { enabled: true, multiplier: mult } : undefined)
+          }
+        />
+        <span>激熱確定にする(数字が倍になったまま決まる)</span>
+      </label>
+      {on ? (
+        <>
+          <div className="row" style={{ gap: 8, marginTop: 6, alignItems: 'flex-end' }}>
+            <label className="field" style={{ width: 120 }}>
+              倍率(×{ROULETTE_HOT_MULT_MIN}〜{ROULETTE_HOT_MULT_MAX})
+              <input
+                type="number"
+                min={ROULETTE_HOT_MULT_MIN}
+                max={ROULETTE_HOT_MULT_MAX}
+                step={1}
+                value={mult}
+                onChange={(e) =>
+                  onChange({
+                    enabled: true,
+                    multiplier: clampRouletteHotMult(Number(e.target.value)),
+                  })
+                }
+              />
+            </label>
+            <div className="faint" style={{ fontSize: 11, paddingBottom: 6 }}>
+              盤面の最大 {num(top)} が <b>{num(top * mult)}</b> になります。
+              数字は {steps.map((v) => `×${v}`).join(' → ')} と上がって、
+              <b>そのまま確定</b>します。
+            </div>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+            この行のギフトが来ると<b>100%</b>発動します。演出は
+            <b>獅子・黄金龍・不死鳥</b>の3種に固定され(上の演出パターンのチェックは
+            この行では使われません)、スロットに入る前に8秒の全画面動画が流れます。
+            1本あたり約43秒かかるので、連打で届くと回した本数ぶん時間がかかります。
+            他の演出より先に消化されます(ギフトのカットインより優先)。
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function RouletteRow({
   rl,
   commonSound,
@@ -2475,7 +2555,15 @@ function RouletteRow({
         </label>
         <label className="field" style={{ width: 150 }}>
           出目の方向
-          <select value={rl.direction} onChange={(e) => onPatch({ direction: e.target.value as 'add' | 'sub' })}>
+          <select
+            value={rl.direction}
+            onChange={(e) => {
+              const direction = e.target.value as 'add' | 'sub';
+              // 「減らす」へ移すと検証が hot を落とす。保存を待たずにここで消して
+              // おかないと、チェックが付いたまま保存で消える(死んだコントロール)。
+              onPatch(direction === 'sub' ? { direction, hot: undefined } : { direction });
+            }}
+          >
             <option value="add">増やす(妨害)</option>
             <option value="sub">減らす(応援)</option>
           </select>
@@ -2491,6 +2579,14 @@ function RouletteRow({
           ? ' 減らす(応援)の行は、モニターの盤面もバナーも「お助け」と同じ緑になります。'
           : ''}
       </div>
+      {/* 激熱確定は「増やす」の行だけ(検証が sub の hot を落とすので UI も揃える)。 */}
+      {rl.direction === 'add' ? (
+        <RouletteHotEditor
+          hot={rl.hot}
+          segments={rl.segments}
+          onChange={(hot) => onPatch({ hot })}
+        />
+      ) : null}
       <RoulettePatternPicker
         patterns={rl.patterns}
         onChange={(patterns) => onPatch({ patterns })}

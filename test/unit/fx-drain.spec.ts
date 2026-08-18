@@ -27,14 +27,22 @@ function q(over: Partial<Q> = {}): Q {
     boosts: [],
     bands: [],
     joinRoulettes: [],
+    hotRoulettes: [],
     roulettes: [],
     ...over,
   };
 }
 
 describe('FX_DRAIN_SEQ — 走査順は優先度表から導出される', () => {
-  it('strike → boost → join-roulette → band → roulette(序列②③④⑥⑦⑧の写像)', () => {
-    expect(FX_DRAIN_SEQ).toEqual(['strike', 'boost', 'join-roulette', 'band', 'roulette']);
+  it('strike → boost → join → hot → band → roulette(序列②③④⑥⑥.5⑦⑧の写像)', () => {
+    expect(FX_DRAIN_SEQ).toEqual([
+      'strike',
+      'boost',
+      'join-roulette',
+      'hot-roulette',
+      'band',
+      'roulette',
+    ]);
   });
 });
 
@@ -189,6 +197,7 @@ describe('runFxDrain — 「何かが始まるまで」のドライバ', () => {
       boosts: [],
       bands: [],
       joinRoulettes: [],
+      hotRoulettes: [],
       roulettes: [{ e: 'R1', resumeAt: 3 }],
     };
     const seen: FxDrainNext<string, W>[] = [];

@@ -188,6 +188,24 @@ export function rouletteClipUrl(pattern: string, n: number): string | null {
   return rlGlob[`../assets/fx/rl/${pattern}-${n}.mp4`] ?? null;
 }
 
+/**
+ * 激熱確定の導入動画(スロットに入る前の 8 秒)。assets/fx/rl/hot/<pattern>.mp4。
+ *
+ * **サブディレクトリに分けてあるのは意図** — rl/ 直下に置くと
+ * test/unit/roulette-clip-catalog.spec.ts の「id ⇄ ファイルが 1:1」が孤児として弾く
+ * (あちらは rl 直下の *.mp4 だけを非再帰に読む)。glob もそのぶん別に持つ。
+ * 未投入は null — MonitorView は導入を丸ごと飛ばしてスピンから始める(縮退)。
+ */
+const rlHotGlob = import.meta.glob('../assets/fx/rl/hot/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+export function rouletteHotIntroUrl(pattern: string): string | null {
+  return rlHotGlob[`../assets/fx/rl/hot/${pattern}.mp4`] ?? null;
+}
+
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 
 /** クリップ id → URL。未知の id は null(設定が古い/壊れていても落とさない)。 */
