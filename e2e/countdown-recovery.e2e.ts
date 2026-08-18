@@ -39,13 +39,13 @@ test('モニター窓のレンダラをクラッシュさせても自動復旧�
   const recovered = await pendingRecovered;
   await recovered.waitForLoadState('domcontentloaded');
   expect(recovered.url().endsWith('monitor.html'), '復旧したのはモニター窓であること').toBe(true);
-  await expect(recovered.locator('.seg-row')).toBeVisible({ timeout: 20_000 });
+  await expect(recovered.locator('.countdown .seg-row')).toBeVisible({ timeout: 20_000 });
 
   // 復旧後も押下が届き、両側の数字が動く(MessagePort の再ハンドシェイクが効いている)。
   await rpc(main, 'challenge.press', undefined);
   expect((await challengeGet(main)).value).toBe(99);
   await expect
-    .poll(async () => Number(await recovered.locator('.seg-row').getAttribute('aria-label')), {
+    .poll(async () => Number(await recovered.locator('.countdown .seg-row').getAttribute('aria-label')), {
       timeout: 20_000,
     })
     .toBe(99);

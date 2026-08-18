@@ -14,6 +14,7 @@ import type {
   ChallengeTestEffectSpec,
   RoulettePattern,
   TapBoostRule,
+  TapLockRule,
 } from '@shared/dto';
 import {
   CHALLENGE_EFFECTS_MAX,
@@ -42,7 +43,10 @@ import {
   matchRoulette,
   matchStampTriggers,
   matchTapBoost,
+  matchTapLock,
   tapBoostActivationCount,
+  tapLockActivationCount,
+  TAP_LOCK_MAX_MS,
   TAP_BOOST_COUNT_MS,
   TAP_BOOST_INTRO_MS,
 } from '@shared/challenge';
@@ -367,6 +371,28 @@ export class ChallengeEngine {
   private testBoostTapCount = 0;
   private testBoostMultiplier = 1;
   private testBoostPressStep = 1;
+  // ── お邪魔(タップ封じ) ──────────────────────────────────────────────────
+  /**
+   * 封印の期限(絶対 ms)。null = 非封印。boostUntilMs と同じ流儀で専用タイマーは
+   * 持たず、flushFxFreeze(唯一の時計入口)で lazy に解除する。
+   *
+   * **永続化しない** — settings.json にも DB にも書かない(このエンジンの規約)。
+   * 30 秒の罰が再起動をまたいで生き残ったら、それはもう罰ではなく故障になる。
+   */
+  private tapLockUntilMs: number | null = null;
+  /** 封印の開始時刻(モニターの残り割合の分母)。 */
+  private tapLockStartMs = 0;
+  /** 発動時に焼き込んだ総尺(ms)。延長のたびに実尺へ更新する。 */
+  private tapLockTotalMs = 0;
+  /**
+   * 封印中に弾いたタップの累計。press が dirty を立てて配るので、モニターは
+   * この増分で「押したのに効かない」手応えを出せる。発動のたびに 0 から数え直す。
+   */
+  private tapLockBlocked = 0;
+  /** 発動させた視聴者の表示名(告知バナーと PUSH の説明に使う)。 */
+  private tapLockNickname = '';
+  /** 発動した行の表示名(label)。空なら表示側が既定文言を使う。 */
+  private tapLockLabel = '';
   /**
    * 凍結中に届いたイベントの値適用+演出の保留キュー(dedup・ランキング集計は
    * 凍結中も即時に回る — 取りこぼしゼロの肝)。解除時に到着順で実行し、途中で
@@ -472,6 +498,8 @@ export class ChallengeEngine {
     this.fxFreezeUntilMs = null;
     // ブーストも清算せず破棄(pendingOps と同じ判断 — 新ランは素の状態で始める)。
     this.clearBoost();
+    // お邪魔も同じ — 新ランは素の状態で始める(前ランの罰を持ち込まない)。
+    this.clearTapLock();
     this.armFreezeTimer();
     this.dirty = true;
     return this.get();
@@ -511,6 +539,9 @@ export class ChallengeEngine {
     this.pendingPressFx = null;
     this.resetFanStampFx();
     this.clearTestBoost();
+    // 停止は一時停止だが封印は跨がせない — 再開したら見えないボタンが死んでいる、
+    // が最悪の体験(pendingPressFx / testBoost を捨てるのと同じ判断)。
+    this.clearTapLock();
     this.dirty = true;
     return this.get();
   }
@@ -522,6 +553,7 @@ export class ChallengeEngine {
     this.pressDownTotal = 0;
     this.fxFreezeUntilMs = null;
     this.clearBoost();
+    this.clearTapLock();
     this.clearTestBoost();
     this.armFreezeTimer();
     this.status = 'idle';
@@ -625,6 +657,25 @@ export class ChallengeEngine {
       } else {
         this.boostTapCount++;
       }
+      this.dirty = true;
+      return this.get();
+    }
+    // ── お邪魔(タップ封じ) ────────────────────────────────────────────────
+    // **この位置が仕様そのもの**なので動かさないこと:
+    //  - フィーバーのタップ窓(すぐ上の分岐)より**下** = 開いている窓は免除
+    //    (2026-08-18 ユーザー決定)。窓の中のタップは封印中でも通り倍率も乗る。
+    //  - 3・2・1(すぐ下の分岐)より**上** = 封印中のタップを applyOrQueue に積まない。
+    //    下に置くと封印明けに溜まったぶんが一気に落ち、「封印」ではなく「遅延」になる
+    //    (お邪魔が奪ったはずのカウントをそのまま返してしまう)。
+    //  - flushFxFreeze(上)より**下** = 期限切れの解除を必ず先に見る。上に置くと、
+    //    連打している配信者が唯一の呼び出し元なのに解除処理へ到達せず
+    //    **封印が自分自身を閉じ込める**。
+    //  - enabled / status ガード(上)より**下** = チャレンジ OFF を逃げ道として残す。
+    //  - 押下凍結(下)より**上** = 「タップは凍結を素通しする」は演出の遅延の話。
+    //    封印は演出ではなくゲームの状態なので、そちらの契約を意図的に上書きする。
+    // 弾いたタップは**捨てる**(溜めない)。
+    if (this.tapLockUntilMs !== null) {
+      this.tapLockBlocked++;
       this.dirty = true;
       return this.get();
     }
@@ -827,6 +878,26 @@ export class ChallengeEngine {
           ...(resultMs > 0 ? { boostResultMs: resultMs, boostResultClip: tb.resultClip } : {}),
           fxDurationMs: introMs + countMs + durationMs,
           ...(tb.flash ? { flash: true } : {}),
+          nickname: 'テスト',
+        };
+        break;
+      }
+      case 'tapLock': {
+        // 設定中の durationSec/label をそのまま使って告知バナーだけ実演する。
+        // トリガー一致は評価しない(fanStamp / tapBoost と同じ)。**実際には封印
+        // しない** — testEffect は値・統計・状態に触れない契約で、設定画面は配信中にも
+        // 開けるので、ここで本当にラッチすると本番のボタンが死ぬ。
+        const tl =
+          cfg.tapLock.rules.find((r) => r.id === spec.lockId) ?? cfg.tapLock.rules.find((r) => r.enabled);
+        if (!tl) return;
+        const lockMs = tl.durationSec * 1000;
+        e = {
+          kind: 'tap-lock',
+          amount: 0,
+          tapLockMs: lockMs,
+          tapLockUntilMs: atMs + lockMs,
+          ...(tl.label !== '' ? { giftName: tl.label } : {}),
+          ...(tl.flash ? { flash: true } : {}),
           nickname: 'テスト',
         };
         break;
@@ -1240,6 +1311,53 @@ export class ChallengeEngine {
         return changed;
       }
 
+      // お邪魔(タップ封じ)。fanStamp・タップブーストの**次・ルーレットより先**。
+      // 一致したらこのギフトはルーレットも増減規則も全面カットも通らない(先勝ち)。
+      const tl = fs
+        ? null
+        : matchTapLock(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+      if (tl) {
+        // ここで return するのでルーレット/全面カットは評価すらされない。記録が
+        // 無いと giftId の打ち間違いが診断不能になる(タップブーストと同じ理由)。
+        this.giftDiag(
+          `→ お邪魔(タップ封じ)一致 id=${tl.id} ${tl.durationSec}秒(ルーレット/全面カットは評価されません)`
+        );
+        // **期限のラッチは applyOrQueue に通さず即時**。カットイン凍結中にキューへ
+        // 落とすと、封印の開始が最長 45 秒(GIFT_FX_FREEZE_MAX_TOTAL_MS)、アーム中なら
+        // 60 秒(BOOST_ARM_MAX_MS)後ろ倒しになり、しかもその間タップは押下凍結の分岐で
+        // **普通に通る**(投げた視聴者から見て何も起きない)。さらに pendingOps が
+        // 溢れると即時実行へ化けるので、負荷で挙動が変わってしまう。
+        // dedup(seenGiftMsgIds)より後に居るのは必須 — 手動再接続のバックログ再生で
+        // 毎回封印がかかるのを防ぐ。
+        this.activateTapLock(tl, e);
+        // 告知バナー(と amountEach ≠ 0 のときの値適用)だけは通常どおり凍結キューへ。
+        // fx 予告は付けない — 予告(ChallengeFxQueueItem)はカットイン級の「待ち」を
+        // 見せる仕組みで、封印は待たずに即発効している。
+        const lockNick = e.viewer.nickname ?? e.viewer.displayId;
+        const amount = tl.amountEach * e.repeatCount;
+        const lockMs = this.tapLockTotalMs;
+        const lockUntil = this.tapLockUntilMs ?? this.now();
+        this.applyOrQueue(() => {
+          if (amount < 0) this.stats.giftDown += -amount;
+          else if (amount > 0) this.stats.giftUp += amount;
+          this.value = Math.max(0, this.value + amount);
+          const atMs = this.now();
+          this.pushEffect({
+            kind: 'tap-lock',
+            amount,
+            nickname: lockNick,
+            tapLockMs: lockMs,
+            tapLockUntilMs: lockUntil,
+            ...(tl.label !== '' ? { giftName: tl.label } : {}),
+            ...(tl.flash ? { flash: true } : {}),
+            atMs,
+          });
+          this.maybeAchieve(atMs);
+          this.dirty = true;
+        });
+        return true;
+      }
+
       // ギフトルーレット。複数登録できるが、回るのは上から見て最初に一致した1件だけ
       //(matchRoulette の先勝ち)。トリガー一致時は giftRules/giftDefault を評価しない —
       // ルーレットが増減の写像を置き換える(既定の perDiamond +1 との二重適用防止)。
@@ -1323,8 +1441,14 @@ export class ChallengeEngine {
         }, undefined, {
           kind: 'roulette',
           nickname: e.viewer.nickname ?? e.viewer.displayId,
-          // 予告の×N = 実際に回る本数(見た目の clamp 込み)。値は draws ぶん動く。
-          count: rouletteReelCount(cfg, draws),
+          // 予告の ×N は**モニターのキュー行(rouletteStockCount)と同じ規約** —
+          // 抽選回数。ただしリールが1本に絞られる設定(rouletteEnabled=false)では
+          // 本数。ここだけ本数にすると、凍結が明けて予告行がキュー行へ入れ替わる
+          // 瞬間に ×20 → ×47 と数字が跳ねる(値は最初から draws ぶん動いている)。
+          // draws は op 実行前の値なので、direction:'sub' で 0 到達 break した
+          // ときだけ実 effect より多く出る(≤v0.7.8 の rouletteReelCount(cfg, draws)
+          // も同じ draws を見ていたので、新規の劣化ではない)。
+          count: rouletteReelCount(cfg, draws) === 1 ? 1 : draws,
         });
       }
 
@@ -1518,6 +1642,13 @@ export class ChallengeEngine {
     if (this.startedMs === null && this.status === 'idle') {
       this.value = this.getConfig().initialValue;
     }
+    // 機能そのものを OFF にしたら封印も解除する — 「チャレンジを止める」が固着した
+    // 封印からの逃げ道であり続けるため(main のホットキー登録もここで外れる)。
+    // 行ごとの enabled: false では既存の封印を消さない(到着時点で確定の規約)。
+    if (!this.getConfig().enabled && this.tapLockUntilMs !== null) {
+      this.clearTapLock();
+      this.armFreezeTimer();
+    }
     this.dirty = true;
   }
 
@@ -1611,6 +1742,19 @@ export class ChallengeEngine {
               },
             }
           : {}),
+      // お邪魔(タップ封じ)中だけ載せる(boost と同じ規約 — 絶対時刻のみ・非封印時は
+      // キーごと省く)。blocked は「押したのに効かない」手応えの唯一のソース。
+      ...(this.tapLockUntilMs !== null
+        ? {
+            tapLock: {
+              startsAtMs: this.tapLockStartMs,
+              endsAtMs: this.tapLockUntilMs,
+              blocked: this.tapLockBlocked,
+              ...(this.tapLockNickname !== '' ? { nickname: this.tapLockNickname } : {}),
+              ...(this.tapLockLabel !== '' ? { label: this.tapLockLabel } : {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -1648,10 +1792,32 @@ export class ChallengeEngine {
     }
     // アームの期限も**このタイマーが唯一の出口**。配信終了後は 2Hz tick も
     // イベント入口も無いので、ここで見ないと予約が永久に解決しない。
-    if (this.fxFreezeUntilMs === null && this.armedBoost === null) return;
+    if (
+      this.fxFreezeUntilMs === null &&
+      this.armedBoost === null &&
+      this.tapLockUntilMs === null &&
+      this.boostUntilMs === null
+    ) {
+      return;
+    }
     // +25ms: flushFxFreeze の「期限ちょうど」比較を確実に越えてから発火する。
     // 早い方で起こす — 凍結の暫定期限はアーム期限より必ず後(前置き+ウィンドウぶん)。
-    const at = Math.min(this.fxFreezeUntilMs ?? Infinity, this.armedBoost?.deadlineMs ?? Infinity);
+    const at = Math.min(
+      this.fxFreezeUntilMs ?? Infinity,
+      this.armedBoost?.deadlineMs ?? Infinity,
+      // お邪魔(タップ封じ)もこのタイマーが唯一の出口 — 配信終了後は 2Hz tick も
+      // イベント入口も無いので、ここで見ないとボタンが死んだまま次の配信へ行く。
+      this.tapLockUntilMs ?? Infinity,
+      // **タップ窓の期限(= 清算の期限)もこのタイマーが起こす。** 凍結期限は清算より
+      // resultMs + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS(結果カット
+      // シーン込みで最大 ~8.7秒)後ろなので、これが無いと 2Hz tick(drainIfChanged)が
+      // 止まった瞬間 — 配信終了・切断・リプレイ終了 — に boost-end がその尺ぶん
+      // 遅れて出る。モニターの安全弁は窓終了 + BOOST_EXPIRE_MARGIN_MS(3秒)なので
+      // 必ず先に発火し、expireBoostFx が据え置きごと畳んで**清算発表(結果カット
+      // シーン → ロールアップ → 着弾)が丸ごと出ない**。2Hz tick は「最大 500ms
+      // 遅れ」の相乗りであって権威ではない — settleBoost に自前の時計を持たせる。
+      this.boostUntilMs ?? Infinity
+    );
     const delay = Math.max(0, at - this.now()) + 25;
     const t = setTimeout(() => {
       this.freezeTimer = null;
@@ -1665,7 +1831,10 @@ export class ChallengeEngine {
       // 二重張り(= onFreezeExpired が2回飛ぶ)を防ぐ。
       // 張り直しの delay は「残りのズレ + 25ms」なので、時計が追いつけば収束する。
       if (
-        (this.fxFreezeUntilMs !== null || this.armedBoost !== null) &&
+        (this.fxFreezeUntilMs !== null ||
+          this.armedBoost !== null ||
+          this.tapLockUntilMs !== null ||
+          this.boostUntilMs !== null) &&
         this.freezeTimer === null
       ) {
         this.armFreezeTimer();
@@ -1858,6 +2027,9 @@ export class ChallengeEngine {
     // ここを通るので、時計の入口はこの1箇所で足りる。
     this.commitArmedBoostIfExpired(nowMs);
     this.settleBoost(nowMs);
+    // 封印の解除は**この位置**(下の早期 return より上)でなければならない —
+    // 下だと凍結が同時に切れるときにしか解除されず、事実上いつまでも解けない。
+    this.flushTapLock(nowMs);
     if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) return;
     this.fxFreezeUntilMs = null;
     this.dirty = true;
@@ -1989,6 +2161,9 @@ export class ChallengeEngine {
       this.boostResultMs = 0;
       this.boostResultClip = '';
       this.boostPlain = true;
+      // 凍結を張らない枝。窓の期限で清算できるよう時計だけは持たせる
+      // (commitBoost のプレーン枝と同じ理由)。
+      this.armFreezeTimer();
     }
     const effectId = this.pushEffect({
       kind: 'boost-start',
@@ -2081,8 +2256,10 @@ export class ChallengeEngine {
       // 暫定期限(deadlineMs 起点)から**実際の再生に合わせて張り直す** = 必ず短縮。
       this.fxFreezeUntilMs =
         this.boostUntilMs + this.boostResultMs + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS;
-      this.armFreezeTimer();
     }
+    // 凍結の有無に関わらず張り直す — armFreezeTimer は boostUntilMs でも起きるので、
+    // プレーンモード(凍結なし)でも窓の期限で必ず清算される。
+    this.armFreezeTimer();
     this.dirty = true;
   }
 
@@ -2186,6 +2363,94 @@ export class ChallengeEngine {
     this.testBoostUntilMs = null;
     this.testBoostStartMs = 0;
     this.testBoostTapCount = 0;
+  }
+
+  // ── お邪魔(タップ封じ) ──────────────────────────────────────────────────
+
+  /**
+   * 封印を張る/延長する。**呼び出しは applyOrQueue を通さず即時**(凍結中でも
+   * その場でラッチする — 理由は呼び出し側のコメント)。
+   *
+   * 重ねがけは**延長**(2026-08-18 ユーザー決定)。残り時間へ加算するが上限は
+   * TAP_LOCK_MAX_MS — 絶対期限に素朴に += すると 17 連打コンボ1件で 8 分半
+   * ボタンが死ぬ。
+   */
+  private activateTapLock(tl: TapLockRule, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
+    const nowMs = this.now();
+    // 連打コンボは normalize.ts が1メッセージへ畳むので repeatCount を見る。
+    // ただし封印は直列化できない(1本ずつ順に、が成立しない)ので、掛けるのは
+    // 発動回数ではなく**尺**で、そこに上限を課す(tapBoostActivationCount と同じ判断)。
+    const times = tapLockActivationCount(e.repeatCount);
+    if (times < e.repeatCount) {
+      this.giftDiag(`→ お邪魔の連打 ${e.repeatCount}個 — 加算は${times}本ぶんに制限`);
+    }
+    // 尺は**到着時点で焼き込む**(activateBoost と同じ規約)。以降 flushTapLock は
+    // getConfig() を読まない — 読むと途中の設定変更で走行中の封印が伸縮する。
+    const addMs = tl.durationSec * 1000 * times;
+    // 残っていれば延長、切れていれば now から。**絶対期限に += しない。**
+    const base = Math.max(this.tapLockUntilMs ?? 0, nowMs);
+    const capped = Math.min(base + addMs, nowMs + TAP_LOCK_MAX_MS);
+    if (capped < base + addMs) {
+      this.giftDiag(`→ お邪魔の累積が上限(${TAP_LOCK_MAX_MS}ms)に到達 — 延長を打ち切り`);
+    }
+    if (this.tapLockUntilMs === null) {
+      this.tapLockStartMs = nowMs;
+      this.tapLockBlocked = 0;
+    }
+    this.tapLockUntilMs = capped;
+    this.tapLockTotalMs = capped - this.tapLockStartMs;
+    this.tapLockNickname = e.viewer.nickname ?? e.viewer.displayId ?? '';
+    this.tapLockLabel = tl.label;
+    // ▶テスト実演の窓が開いていると press が実演ブロックで先に return してしまい、
+    // 実演が封印の抜け道になる(activateBoost が同じ理由で落としているのと同型)。
+    this.clearTestBoost();
+    this.giftDiag(`→ お邪魔発動 残り${Math.round((capped - nowMs) / 1000)}秒`);
+    this.dirty = true;
+    this.armFreezeTimer();
+  }
+
+  /**
+   * 封印の遅延解除。**flushFxFreeze の早期 return より上**から呼ぶこと — 下だと
+   * 「凍結が同時に切れるときにしか解除されない」= 事実上解除されない。
+   *
+   * 期限は毎回 clampFutureMs で押さえる。fxFreezeUntilMs と違ってここを省けないのは、
+   * あちらの失敗が「バナーが遅れる」なのに対しこちらの失敗は「配信者の物理ボタンが
+   * 死んだまま」だから(shared/fx-stage.ts の「時刻ラッチには必ずクランプ」の規約)。
+   */
+  private flushTapLock(nowMs: number): void {
+    if (this.tapLockUntilMs === null) return;
+    this.tapLockUntilMs = clampFutureMs(this.tapLockUntilMs, nowMs, TAP_LOCK_MAX_MS);
+    if (nowMs < this.tapLockUntilMs) return;
+    this.clearTapLock();
+    // dirty を立てないと armFreezeTimer の onFreezeExpired が通知を出さず、
+    // 配信終了後(2Hz tick が無い)は解除が誰にも届かない。
+    this.dirty = true;
+    this.armFreezeTimer();
+  }
+
+  /** 封印の破棄(start/stop/reset/達成/機能OFF/緊急解除の共通出口)。 */
+  private clearTapLock(): void {
+    this.tapLockUntilMs = null;
+    this.tapLockStartMs = 0;
+    this.tapLockTotalMs = 0;
+    this.tapLockBlocked = 0;
+    this.tapLockNickname = '';
+    this.tapLockLabel = '';
+  }
+
+  /**
+   * 誤爆した封印の緊急解除(challenge.clearTapLock RPC)。停止/リセットと違い
+   * ラン(値・統計・順位)には一切触れない — ボタンを直すために配信中のカウント
+   * ダウンを潰さずに済ませるための逃げ道。
+   * 戻り値 true = 実際に解除した(呼び出し側が delta を配る)。
+   */
+  clearTapLockNow(): boolean {
+    if (this.tapLockUntilMs === null) return false;
+    this.giftDiag('→ お邪魔を手動で解除(配信者操作)');
+    this.clearTapLock();
+    this.dirty = true;
+    this.armFreezeTimer();
+    return true;
   }
 
   /** stop 用の強制適用。保留分を残さず適用する(ドレイン中の再凍結は無視)。 */
@@ -2349,6 +2614,9 @@ export class ChallengeEngine {
     // CLEAR リザルト(同じ TOP5×2)が全画面で出るので、手動のランキング表示は
     // 畳む。両方出すとモニターでオーバーレイが二枚重なる。
     this.rankShown = false;
+    // 達成したら封印も解除する — 押下せずに 0 到達しうる(sub 方向のルーレット等)。
+    // achieved の pushEffect より**前**に置く(すぐ下の「演出を積む前に凍結する」規約)。
+    this.clearTapLock();
     // 演出を積む前に凍結する — pushEffect の時点で state は配られうる。
     this.result = this.buildResult(atMs);
     this.pushEffect({ kind: 'achieved', amount: 0, atMs });

@@ -1006,19 +1006,31 @@ body {
   color: #ff7a7a;
 }
 
-/* 連続ぶんの残数(×N)。消費のたび同じ行の上で減っていく。 */
-.fxs-mult {
-  margin-left: auto; /* 行の右端に寄せて数の変化を追いやすく */
-  font-size: 19px;
-  font-weight: 900;
+/* 種別ラベル。縮ませない — 縮む担当は ellipsis を持つ .fxs-name だけに固定する
+   (「初見ルーレット」は全角7字で、230px 幅では縮むと ×N と重なる)。 */
+.fxs-kind {
+  flex: 0 0 auto;
 }
 
-/* 溢れ行(+N)。 */
+/* 連続ぶんの残数(×N)。消費のたび同じ行の上で減っていく。
+   tabular-nums: 47→46→…と桁が動いても見かけ幅が変わらない — 右寄せなので
+   比例数字だと減るたび .fxs-name の ellipsis 境界が数px揺れて名前がちらつく。 */
+.fxs-mult {
+  margin-left: auto; /* 行の右端に寄せて数の変化を追いやすく */
+  flex: 0 0 auto;
+  font-size: 19px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 溢れ行(「ほか3件 計47回」)。メイン行より一段小さく — 文言が長いうえに主役ではない。 */
 .fxs-more {
   border-left-color: transparent;
   background: rgba(8, 6, 12, 0.5);
   color: var(--fg-dim);
   justify-content: center;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1026,6 +1038,179 @@ body {
     transition: none;
     animation: none;
   }
+}
+
+/* ── ルーレット中のカウント小窓(暗幕の手前に出す) ────────────────────── */
+
+/*
+ * 走行中、7セグ本体(.countdown)は grid の通常フロー・z-index なしなので、
+ * .fx-layer(z-index:50)の中の .roulette-screen(rgba(5,3,10,.8))に必ず沈む
+ * = 実効20%。ultra の .rl-clip(opacity .96)が出ている約31秒は完全に不可視。
+ * かといって .countdown を手前へ上げると、同じ中央帯を取り合う盤面が数字に
+ * 隠れて逆効果 —「手前に出す」ではなく「場所を分ける」で解く。
+ *
+ * 手口は上の .fx-stock と同じ「fx-layer 内・DOM 順で .roulette-screen より
+ * 後ろ」。z-index は付けないこと(fx-backdrop.spec.ts が構造を凍結している)。
+ * 挿入位置は JSX で fx-layer の**最後尾** = 確定バナー・演出ストックより手前
+ * (「残数は一次情報」というユーザー決定。MonitorView の該当コメント参照)。
+ *
+ * 【縦の幅は物理的に断つ】.fx-stock は right:14 / width:230、ステージ幅は 540
+ * なのでストックの左端は x=296。ルーレット中は必ず playing 行が1行以上出る
+ * ので、left だけの shrink-to-fit(4桁で約327px)では必ず重なる。left と right
+ * を両指定して 268px に固定し、桁は flex-shrink で痩せさせる。
+ */
+.count-mirror {
+  position: absolute;
+  left: 14px;
+  bottom: 12px;
+  /* 258 = 右余白14 + .fx-stock の width 230 + クリアランス14。
+     540-258 = 282 で、ストック左端 296 の手前で 14px 空く。
+     .fx-stock の right/width を動かしたらここも直すこと(count-mirror.spec が見張る)。 */
+  right: 258px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px 8px 12px;
+  border-radius: 14px;
+  /* 暗幕(α .8)と ultra の不透明動画の上に乗るので地は濃いめ — .fxs-row と同格。 */
+  background: rgba(8, 6, 12, 0.82);
+  pointer-events: none;
+  /*
+   * 【重要】animation-name のリストを .low 等で差し替えないこと。差し替えると
+   * cm-in が再発火し、残り 10→9 をまたいだまさにその瞬間(押下追従で数字が
+   * 動く瞬間)に小窓が一度消えて滑り込み直す。色はカスタムプロパティだけで振る。
+   */
+  --cm-ring: rgba(255, 214, 90, 0.55);
+  --cm-ring-hot: rgba(255, 214, 90, 0.55);
+  box-shadow:
+    inset 0 0 0 2px var(--cm-ring),
+    0 0 24px rgba(0, 0, 0, 0.6);
+  animation:
+    cm-in 200ms ease-out both,
+    cm-ring 1s steps(2, jump-none) 200ms infinite;
+}
+
+@keyframes cm-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/*
+ * 残数わずかは**枠の色だけ**振る。数字の opacity は絶対に落とさないこと —
+ * 本体の lowblink-row(1↔0.45)が暗幕の 20% と掛かって実効 9% まで落ちるのが
+ * 今回の症状の追い打ちだった。.countdown.low .seg-row は祖先が .countdown
+ * なので小窓には元から効かない。
+ */
+@keyframes cm-ring {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 0 0 2px var(--cm-ring),
+      0 0 24px rgba(0, 0, 0, 0.6);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 2px var(--cm-ring-hot),
+      0 0 30px rgba(0, 0, 0, 0.6);
+  }
+}
+
+.count-mirror.low {
+  --cm-ring-hot: rgba(255, 90, 90, 0.95);
+}
+
+/* CLEAR は本体と同じ金。詳細度 (0,4,0) で .seg.on (0,2,0) に勝つ。点滅はしない。 */
+.count-mirror.clear .seg.on {
+  fill: var(--gold);
+}
+
+/* 「残り」— 盤面の当選額と読み違えないためのラベル。 */
+.cm-label {
+  flex: 0 0 auto;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  color: #ffd7e8;
+}
+
+/*
+ * 【桁の寸法は「枠を定幅にして shrink させる」で作る】
+ * .seg-digit は viewBox だけを持つ SVG で height:auto。**幅が定まらないと
+ * アスペクト比から高さを解けず、桁が 0x0 に潰れる**(実測で踏んだ)。本体側が
+ * 無事なのは .seg-row が width:100% = 定幅だから。小窓でも同じ状況を作る:
+ * .seg-row に flex-basis 0 を与えて残り幅を丸ごと渡し、桁はその中で shrink する。
+ * → 縦 268px 枠で 4桁なら 1桁 ≒43x77px、6桁でも ≒27x48px と比率を保って痩せる。
+ * .count-mirror 側の width が auto(shrink-to-fit)だと flex-basis 0 の分配元が
+ * 無くなって再び潰れるので、**横長でも width を明示する**こと。
+ */
+.count-mirror .seg-row {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  max-height: none;
+  gap: 6px;
+  justify-content: flex-start;
+}
+
+.count-mirror .seg-digit {
+  flex: 0 1 56px;
+  min-width: 0;
+  max-height: none;
+}
+
+/*
+ * 【横長は 0,4,0 で明示上書きすること】.stage-scale.landscape .seg-digit
+ * (max-height:100%)と .seg-row(height:100%)は詳細度 (0,3,0) なので、
+ * .count-mirror .seg-digit (0,2,0) では負けて桁が本体の寸法に引きずられる。
+ * 横はストックの左端が x=1036(1280-14-230)なので幅制限は要らないが、
+ * 上記のとおり shrink の分配元として width は明示する。
+ */
+.stage-scale.landscape .count-mirror {
+  right: auto;
+  width: 460px;
+}
+
+.stage-scale.landscape .count-mirror .seg-row {
+  height: auto;
+}
+
+.stage-scale.landscape .count-mirror .seg-digit {
+  flex: 0 1 84px;
+  max-height: none;
+}
+
+/*
+ * 「大きく」(rouletteCountView: 'large')。
+ * 縦は 268px 枠が上限で桁を増やしても効かないので、ストック帯の上(bottom:150px
+ * = .fxs-row 36px x3 + gap 6 x2 + 余白)へ逃がして全幅を使う。
+ * 横は盤面(y 200..520)の下に収める必要があるので、桁を上げすぎないこと。
+ */
+.count-mirror.lg {
+  right: 14px;
+  bottom: 150px;
+}
+
+.count-mirror.lg .seg-digit {
+  flex: 0 1 96px;
+}
+
+.count-mirror.lg .cm-label {
+  font-size: 28px;
+}
+
+.stage-scale.landscape .count-mirror.lg {
+  width: 560px;
+  bottom: 12px;
+}
+
+.stage-scale.landscape .count-mirror.lg .seg-digit {
+  flex: 0 1 92px;
 }
 
 /* ── ランキング ───────────────────────────────────────────────────────── */
@@ -2109,6 +2294,17 @@ body {
  */
 
 /* フォロー: 赤ランプのバナー */
+/*
+ * お邪魔(タップ封じ)の告知バナー。妨害なので数字は .bad の赤のまま、ランプだけ
+ * 紫にして「増える妨害」(赤・ピンク)と「押せなくなる妨害」を色で区別する。
+ */
+.float.banner-tap-lock {
+  --fl-lamp: #c39bff;
+  --fl-glow: rgba(150, 90, 255, 0.55);
+  --fl-bg-1: rgba(46, 18, 82, 0.96);
+  --fl-bg-2: rgba(14, 4, 30, 0.94);
+}
+
 .float.banner-follow {
   --fl-lamp: #ff7a7a;
   --fl-glow: rgba(255, 59, 59, 0.5);
@@ -4098,22 +4294,22 @@ body {
  * **9パターンとも同じ振り付け**なのでキーフレームは rl-run-ultra の1本だけ。
  * パターンごとに違うのは流す動画の絵(assets/fx/rl/<pattern>-<n>.mp4)だけで、
  * 尺・拍・動画枠は shared/challenge.ts の ROULETTE_ULTRA_BEATS が唯一の権威。
- * ここの百分率はその表から起こした値で、roulette-css.spec が cue マーカーで
- * 機械照合する — **片方だけ動かすとテストが落ちる。**
+ * **この百分率は手で書かない** — 拍から起こした生成物で、roulette-css.spec が
+ * cue マーカーで機械照合する。ROULETTE_ULTRA_BEATS を触ったら引き直すこと。
  *
- * 流れ(百分率は spinMs = 30,897ms に対する割合):
- *   0 → 18.64%   走り込み。ここは他段位と同じ初速で入り、末尾は**crawl まで落とす**
+ * 流れ(百分率は spinMs = 31,897ms に対する割合):
+ *   0 → 18.0581%   走り込み。ここは他段位と同じ初速で入り、末尾は**crawl まで落とす**
  *                 (落とし切らないと次の再加速が「速くなった」と読めない)。
- *   18.64 → 28.35% ★再加速。3秒かけて速度が走り込み末速の約2倍まで上がり、
+ *   18.0581 → 27.4634% ★再加速。3秒かけて速度が走り込み末速の約2倍まで上がり、
  *                 制動して当選の5マス手前(k=5)で止まる。**走行距離は増やさない** —
  *                 走り込み側を緩めて距離を残し、それをここで取り返す配分にしてある
  *                 (増やすと盤面が伸びて OBS でコマ落ちする。roulette-fx.ts の RUN_BASE)。
- *   28.35%       cue:don — 効果音①と同時に出目の表示が ×2 へ膨らむ(数字は JS 側)。
- *   31.27%       cue:quiet + cue:clip — 動画1。以降は
+ *   27.4634%       cue:don — 効果音①と同時に出目の表示が ×2 へ膨らむ(数字は JS 側)。
+ *   30.285%       cue:quiet + cue:clip — 動画1。以降は
  *                 「動画 → 終端の一撃 → 溶暗(480ms)→ マス移動 → 間 → ドン → 間」の反復。
  *   マス移動は5回(k=5→4→3→2→1→当選)。前半3回が cue:step、4回目が cue:near
  *   (当選の1つ手前へ入る = 他段位と同じ「止まりそう」)、5回目が cue:kick(着地)。
- *   93.53 → 100% 完全ホールド(2秒の溜め)。終端で JS が倍率を素へ戻して確定する。
+ *   90.5947 → 100%  完全ホールド(3秒の溜め)。終端で JS が倍率を素へ戻して確定する。
  *
  * 動画が画面を覆っている間リールは同値ホールド — マス移動は必ず**見える隙間**で
  * 起こす(動画の一撃がリールを押した、という因果を作るのが眼目)。
@@ -4131,99 +4327,124 @@ body {
     animation-timing-function: cubic-bezier(0.15, 0.62, 0.34, 0.94);
   }
   /*
-   * 走り込み終了 = k=9。**末速をここまで落とし切るのが肝**(出口の傾きは上の
-   * ベジェの (1-y2)/(1-x2) ≒ 0.09)。次の区間が同じ距離感で加速するので、
-   * 「止まりかけたのに速くなった」が成立する。速度比は控制点で調整する。
+   * 走り込み終了 = k=9。**末速をここまで落とし切るのが肝**(出口の傾きは上のベジェの
+   * (1-y2)/(1-x2) ≒ 0.09)。次の区間が同じ距離感で加速するので、「止まりかけたのに
+   * 速くなった」が成立する。速度比は控制点で調整する。
    */
-  18.6425% {
+  18.0581% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 9));
     animation-timing-function: cubic-bezier(0.35, 0.28, 0.62, 1);
   }
   /*
-   * cue:don — 再加速の終わり。効果音①(roulette-hype)と同時に出目が ×2 へ。
+   * 再加速の終わり。効果音①(roulette-hype)と同時に出目が ×2 へ。
    * ここから先は当選の5マス手前でホールドし、動画とマス移動の反復に入る。
    */
-  28.3523% {
+  27.4634% {
     /* cue:don */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5));
     animation-timing-function: linear;
   }
-  /* 動画1。回転ループ音もここで閉じる(cue:quiet)。 */
-  31.2652% {
+  /*
+   * 動画1。回転ループ音もここで閉じる(cue:quiet)。
+   */
+  30.285% {
     /* cue:quiet */
     /* cue:clip */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5));
     animation-timing-function: linear;
   }
-  /* 動画1の一撃 → 溶暗が明けて1マス叩き込み(k5→k4)。行き過ぎ 0.08 → 据え。 */
-  45.3604% {
+  /*
+   * 動画1の一撃 → 溶暗が明けて1マス叩き込み(k5→k4)。行き過ぎ 0.08 → 据え。
+   */
+  43.9383% {
     /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 5));
     animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
   }
-  46.1% {
+  44.6594% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3.92));
     animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
-  46.9139% {
+  45.4431% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
     animation-timing-function: linear;
   }
-  /* ドン ×3。数字だけが動く(リールはホールド)。 */
-  48.5322% {
+  /*
+   * ドン ×3。数字だけが動く(リールはホールド)。
+   */
+  47.0107% {
     /* cue:don */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
     animation-timing-function: linear;
   }
-  50.1505% {
+  /*
+   * 動画2。
+   */
+  48.5782% {
     /* cue:clip */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
     animation-timing-function: linear;
   }
-  61.4137% {
+  /*
+   * 動画2の一撃 → 溶暗が明けて1マス叩き込み(k4→k3)。行き過ぎ 0.08 → 据え。
+   */
+  59.4884% {
     /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 4));
     animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
   }
-  62.15% {
+  60.2094% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2.92));
     animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
-  62.9673% {
+  60.9932% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: linear;
   }
-  /* ドン ×4。 */
-  64.5856% {
+  /*
+   * ドン ×4。数字だけが動く(リールはホールド)。
+   */
+  62.5607% {
     /* cue:don */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: linear;
   }
-  66.2039% {
+  /*
+   * 動画3。
+   */
+  64.1283% {
     /* cue:clip */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: linear;
   }
-  75.4442% {
+  /*
+   * 動画3の一撃 → 溶暗が明けて1マス叩き込み(k3→k2)。行き過ぎ 0.08 → 据え。
+   */
+  73.079% {
     /* cue:step */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 3));
     animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
   }
-  76.18% {
+  73.8% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1.92));
     animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
-  76.9977% {
+  74.5838% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
   }
-  /* ドン ×5。最後の倍率。 */
-  78.6161% {
+  /*
+   * ドン ×5。数字だけが動く(リールはホールド)。
+   */
+  76.1514% {
     /* cue:don */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
   }
-  80.2343% {
+  /*
+   * 動画4。
+   */
+  77.7189% {
     /* cue:clip */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: linear;
@@ -4232,34 +4453,36 @@ body {
    * 動画4の一撃 → 当選の1つ手前へ(cue:near)。ここから先は他段位の終盤と同じ
    * 「止まりそう → 締めの一撃」で、音も既存スロットがそのまま乗る。
    */
-  88.8015% {
+  86.0175% {
     /* cue:near */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 2));
     animation-timing-function: cubic-bezier(0.2, 0, 0.3, 1);
   }
-  89.55% {
-    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.94));
+  86.7386% {
+    transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 0.92));
     animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
-  90.355% {
+  87.5223% {
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
     animation-timing-function: cubic-bezier(0.1, 0.88, 0.2, 1);
   }
-  /* 締めの一撃。当選を 0.08 行き過ぎてから叩き直して着地する。 */
-  91.9733% {
+  /*
+   * 締めの一撃。当選を 0.08 行き過ぎてから叩き直して着地する。
+   */
+  89.0899% {
     /* cue:kick */
     transform: translateX(calc(var(--rl-shift) + var(--rl-w) * 1));
     animation-timing-function: cubic-bezier(0.33, 0, 0.15, 1);
   }
-  92.75% {
+  89.811% {
     transform: translateX(calc(var(--rl-shift) - var(--rl-w) * 0.08));
     animation-timing-function: cubic-bezier(0.25, 0.8, 0.3, 1);
   }
   /*
-   * 着地。ここから 100% までは完全ホールド(ROULETTE_ULTRA_BEATS.tailMs = 2秒)。
+   * 着地。ここから 100% までは完全ホールド(ROULETTE_ULTRA_BEATS.tailMs = 3秒)。
    * **無音で引っぱる溜め** — 終端で JS が倍率を素へ戻し、戻りボイスと確定発光が来る。
    */
-  93.5269% {
+  90.5947% {
     transform: translateX(var(--rl-shift));
     animation-timing-function: linear;
   }
@@ -5443,11 +5666,104 @@ body {
   padding: 22px 56px 26px;
 }
 
+/*
+ * お邪魔(タップ封じ)の残り秒。fx-layer(z-index:50)の中なので不透明カットイン
+ * より手前に出る。**画面中央は取らない** — 封印中も 7 セグと演出は動き続けるので、
+ * 上寄せの帯にして盤面を隠さない(.boost-overlay は中央=タップ窓が主役の別物)。
+ * reduced-motion でも消さない: これは演出ではなく「なぜ押せないのか」の説明で、
+ * 消すと配信者にも視聴者にも理由が伝わらなくなる(下のブロックに入れない理由)。
+ */
+.tap-lock-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 6%;
+  pointer-events: none;
+  animation: tap-lock-in 240ms ease-out both;
+}
+
+@keyframes tap-lock-in {
+  from {
+    opacity: 0;
+    transform: translateY(-14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.tap-lock-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 14px 44px 18px;
+  border-radius: 22px;
+  background: rgba(20, 6, 34, 0.62);
+  box-shadow:
+    inset 0 0 0 3px rgba(195, 155, 255, 0.75),
+    0 0 40px rgba(150, 90, 255, 0.45),
+    0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+.tap-lock-title {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #e3d1ff;
+  text-shadow: 0 0 16px rgba(150, 90, 255, 0.8);
+}
+
+/* 残り秒。key=秒 の再マウントで毎秒パンチが走る(.boost-count と同じ手口)。 */
+.tap-lock-count {
+  font-family: var(--num);
+  font-size: 104px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #f0e6ff;
+  text-shadow:
+    0 0 18px rgba(195, 155, 255, 0.9),
+    0 0 56px rgba(130, 70, 255, 0.6),
+    0 4px 0 rgba(40, 10, 80, 0.8);
+  animation: tap-lock-punch 280ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+@keyframes tap-lock-punch {
+  0% {
+    transform: scale(1.22, 0.86);
+  }
+  40% {
+    transform: scale(0.96, 1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.tap-lock-label {
+  font-size: 22px;
+  color: #cbb6ee;
+}
+
+.landscape .tap-lock-count {
+  font-size: 92px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   /* MonitorView 側も boostWillStart が false になり演出ごとスキップされる。 */
   .boost-overlay,
   .boost-settle,
   .boost-screen {
     display: none;
+  }
+
+  /* 封じの帯は残す(理由は .tap-lock-overlay のコメント)。動きだけ止める。 */
+  .tap-lock-overlay,
+  .tap-lock-count {
+    animation: none;
   }
 }

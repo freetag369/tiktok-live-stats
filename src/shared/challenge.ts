@@ -13,18 +13,21 @@ import type {
   StampTriggerRule,
   TapBoostConfig,
   TapBoostRule,
+  TapLockConfig,
+  TapLockRule,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
   GiftFxBand,
   JoinRouletteConfig,
+  RouletteCountView,
   RoulettePattern,
   RouletteSoundConfig,
   RouletteSpinKey,
   RouletteTeaseConfig,
   GiftRepeatFxConfig,
 } from './dto';
-import { ROULETTE_PATTERNS, ROULETTE_PATTERN_TIER } from './dto';
+import { ROULETTE_COUNT_VIEWS, ROULETTE_PATTERNS, ROULETTE_PATTERN_TIER } from './dto';
 import { WAKE_TIME_RE } from './time';
 import {
   FULL_CUT_CLIPS,
@@ -138,8 +141,11 @@ export const ROULETTE_ULTRA_BEATS = {
   stepMs: 480,
   /** 「間」。ドンの前後に等しく置く(ユーザー仕様の 0.5 秒)。 */
   gapMs: 500,
-  /** 着地してから確定までの溜め(ユーザー仕様の 2 秒)。ここだけ無音で引っぱる。 */
-  tailMs: 2000,
+  /**
+   * 着地してから**最後の数字変化(倍率が素へ戻る = 確定)**までの溜め。
+   * ここだけ無音で引っぱる。2 秒では戻りが早すぎたのでユーザー指定で 3 秒。
+   */
+  tailMs: 3000,
 } as const;
 
 /**
@@ -163,8 +169,8 @@ function ultraSpinMs(b: typeof ROULETTE_ULTRA_BEATS): number {
 
 /**
  * ultra(超激アツ)の尺。全画面動画4本とマス移動5回、出目の倍率フェイクで構成される
- * 一本道で、値は ROULETTE_ULTRA_BEATS の総和(= 30,897ms)。他段位のような倍率設計
- * ではない。JOIN_ROULETTE_MIN_GAP_MS はこの値 + 確定見せより長いこと。
+ * 一本道で、値は ROULETTE_ULTRA_BEATS の総和(= 31,897ms)。他段位のような倍率設計
+ * ではない。JOIN_ROULETTE_MIN_GAP_MS はこの値 + 確定見せ(ultra 用)より長いこと。
  */
 export const ROULETTE_SPIN_ULTRA_MS = ultraSpinMs(ROULETTE_ULTRA_BEATS);
 /**
@@ -172,6 +178,12 @@ export const ROULETTE_SPIN_ULTRA_MS = ultraSpinMs(ROULETTE_ULTRA_BEATS);
  * 色・符号・発光・確定音の全部がこの窓に入るので 600ms では山場が一瞬で終わる。
  */
 export const ROULETTE_REVEAL_MS = 900;
+/**
+ * 超激アツ(ultra)の確定見せ。**膨らんだ出目が素へ戻った直後**という一番の山場なので、
+ * 他段位の 900ms では ±N バナーが被さるのが早すぎる(ユーザー指定で 3 秒)。
+ * ここを伸ばしても止まっているのは ultra だけ — 他段位の間合いには一切触れない。
+ */
+export const ROULETTE_REVEAL_ULTRA_MS = 3000;
 /** 短縮スピンの確定見せ。短縮する場面では総尺を詰めたいので通常より短くする。 */
 export const ROULETTE_REVEAL_FAST_MS = 450;
 /**
@@ -233,7 +245,7 @@ export const ROULETTE_REELS_MAX = 20;
  * - 1本の期待値 ≒ 7.96秒 → **実勢の最悪 ≒ 15×7.96 + 5×1.6 ≒ 2分5秒**
  * - 理論最悪(15本すべて ultra)は 15×24.9 + 5×1.6 = 381.5秒。到達確率は
  *   0.016^15 ≒ 10^-28 なので設計制約として扱わない
- * - **他演出の最大待ちは総尺ではなく「1リールの尺」(最長 24.9秒)** —
+ * - **他演出の最大待ちは総尺ではなく「1リールの尺」(最長 34.9秒)** —
  *   finishRoulette の §6b(shouldYieldSpinChain)がリール境界ごとに上位序列へ
  *   譲るため。PENDING_BANDS_MAX / BOOST_ARM_MAX_MS の見積りはこちらで読むこと
  *
@@ -248,7 +260,7 @@ export const ROULETTE_FULL_REELS = 15;
  * 尺は段位で変わるので、定数としては最長(ultra)の最悪値。実際の解除タイマーは
  * rouletteAbortMs(パターン別)で張る。
  */
-export const ROULETTE_ABORT_MS = ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS + 1500;
+export const ROULETTE_ABORT_MS = ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_ULTRA_MS + 1500;
 
 /**
  * スピン1本の実尺と安全弁。fast(キュー消化)と通常で尺が違い、通常は更に段位で
@@ -267,7 +279,9 @@ export function rouletteSpinMs(key: RouletteSpinKey): number {
 }
 /** 確定見せは段位で変えない(尺の緩急は焦らし側で付ける)。fast だけ短縮。 */
 export function rouletteRevealMs(key: RouletteSpinKey): number {
-  return key === 'fast' ? ROULETTE_REVEAL_FAST_MS : ROULETTE_REVEAL_MS;
+  if (key === 'fast') return ROULETTE_REVEAL_FAST_MS;
+  // ultra だけ長い — 倍率が素へ戻った直後が山場なので、±N バナーをすぐ被せない。
+  return ROULETTE_PATTERN_TIER[key] === 'ultra' ? ROULETTE_REVEAL_ULTRA_MS : ROULETTE_REVEAL_MS;
 }
 /** 据え置きの安全弁(ms)。実尺 + 確定見せ + 余裕。どのキーでも必ずアニメより後。 */
 export function rouletteAbortMs(key: RouletteSpinKey): number {
@@ -350,6 +364,8 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     // (表示時に cfg を読むと、設定変更で過去の行が書き換わる — 上と同じ規約)。
     ...(e.boostMultiplier != null ? { boostMultiplier: e.boostMultiplier } : {}),
     ...(e.boostTapCount != null ? { boostTapCount: e.boostTapCount } : {}),
+    // お邪魔の尺も同じ規約で焼き込み値を引き継ぐ(設定を変えても過去の行は不変)。
+    ...(e.tapLockMs != null ? { tapLockMs: e.tapLockMs } : {}),
     // 凍結ドレインの合算件数 → 履歴の「×N」表示(press 畳み込みと同じ概念)。
     ...(e.coalesced != null && e.coalesced > 1 ? { count: e.coalesced } : {}),
   };
@@ -632,15 +648,15 @@ export const DEFAULT_JOIN_ROULETTE: JoinRouletteConfig = {
 
 /**
  * 入室ルーレットの連続発火を抑えるクールダウン(ms)。最長の1スピンの演出尺
- * (ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS ≒ 31.8秒)より長め — レイドや
+ * (ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_ULTRA_MS ≒ 34.9秒)より長め — レイドや
  * target:'all' の高頻度入室でモニターのキュー(ROULETTE_QUEUE_MAX)と
  * リングバッファを初見ルーレットだけで食い潰さないための安全弁。
  * (heavy 12秒化で 10→15秒、ultra 24秒化で 15→30秒、ultra のカウントダウン式
- *  激アツ化(30.9秒)で 30→35秒。test/unit が不等式を固定。)
+ *  激アツ化で 30→35秒、確定見せを 3 秒へ伸ばして(34.9秒)35→38秒。test/unit が不等式を固定。)
  * 窓内の入室は値ごと黙って捨てる(演出起点の機能なので値の完全性は要らない)。
  * 設定項目にはしない — UI を増やさず定数で持つ。
  */
-export const JOIN_ROULETTE_MIN_GAP_MS = 35_000;
+export const JOIN_ROULETTE_MIN_GAP_MS = 38_000;
 
 /**
  * 入室ルーレット専用キュー(モニターの優先度⑥)の上限。入室ルーレットは単一設定 =
@@ -1101,18 +1117,21 @@ export interface TapBoostClipDef {
 export const TAP_BOOST_INTRO_CLIPS: readonly TapBoostClipDef[] = [
   { id: 'intro-panther', label: '黒豹の咆哮(宇宙)' },
   { id: 'intro-corgi', label: 'コーギーの登場(ピンク宇宙)' },
+  { id: 'intro-nebaaru', label: 'ねば〜る君の登場(琥珀の宇宙)' },
 ];
 export const TAP_BOOST_COUNT_CLIPS: readonly TapBoostClipDef[] = [
   // 数字はフレーム精度で焼き込み(ジャスト1.000秒刻み — タップ開始と正確に同期)。
   { id: 'count-321', label: '3・2・1(黒豹・ジャスト1秒刻み)' },
   { id: 'count-corgi', label: '3・2・1(コーギー・ジャスト1秒刻み)' },
+  { id: 'count-nebaaru', label: '3・2・1(ねば〜る君・ジャスト1秒刻み)' },
 ];
 export const TAP_BOOST_LOOP_CLIPS: readonly TapBoostClipDef[] = [
-  // 既定はコイン・スロットを含まない黒豹版(配信規約への配慮 — ユーザー要件)。
-  // intro/count/loop-panther は横 16:9(Dreamina 生成)。loop-pachinko だけ
-  // 初代の縦 9:16 素材で、横モニターでは大きくクロップされる。
+  // どれもコイン・スロットを含まない(配信規約への配慮 — ユーザー要件)。
+  // panther / corgi は横 16:9(Dreamina 生成)、nebaaru は横 16:9(Higgsfield 生成)。
+  // loop-pachinko だけ初代の縦 9:16 素材で、横モニターでは大きくクロップされる。
   { id: 'loop-panther', label: '黒豹コズミックFEVER(15秒・コインなし)' },
   { id: 'loop-corgi', label: 'コーギーFEVER(15秒・ピンク宇宙)' },
+  { id: 'loop-nebaaru', label: 'ねば〜る君FEVER(16秒・琥珀の宇宙)' },
   { id: 'loop-pachinko', label: 'ゴールドFEVER(初代・縦動画)' },
 ];
 export const TAP_BOOST_RESULT_CLIPS: readonly TapBoostClipDef[] = [
@@ -1121,6 +1140,7 @@ export const TAP_BOOST_RESULT_CLIPS: readonly TapBoostClipDef[] = [
   // mp4 が未投入でも boostClipUrl は 0 件許容 glob なので暗幕で同じ尺を待つ。
   { id: 'result-panther', label: '結果発表(黒豹・素材未同梱)' },
   { id: 'result-corgi', label: '結果発表(コーギー)' },
+  { id: 'result-nebaaru', label: '結果発表(ねば〜る君)' },
 ];
 
 /**
@@ -1131,10 +1151,13 @@ export const TAP_BOOST_RESULT_CLIPS: readonly TapBoostClipDef[] = [
 export const TAP_BOOST_RULES_MAX = 8;
 
 /**
- * ブースト1行の既定。giftId は空 — クリエイター固有の値なので既定を置きようが
- * ない(fanStamp と同じ判断)。トリガーが3つとも空の行は**どのギフトにも一致
- * しない**(matchGiftTrigger)ので、enabled: true で配っても既存の settings.json の
- * 挙動は変わらない。
+ * ブースト1行の**空行テンプレ**。giftId は空 — これは UI の「ブーストを追加」が
+ * structuredClone して増やす雛形で、トリガーが3つとも空の行は**どのギフトにも
+ * 一致しない**(matchGiftTrigger)。ここに giftId を焼くと、行を1つ足しただけで
+ * 既定行と二重一致して上の行が黙って勝つ。
+ *
+ * **出荷される既定の1行目はこれではなく NEBAARU_TAP_BOOST_RULE**
+ * (= DEFAULT_TAP_BOOST.rules[0])。クリップだけは標準テーマを共有している。
  *
  * DEFAULT_TAP_BOOST.rules[0] とは別に export しているのは、tsconfig の
  * noUncheckedIndexedAccess: true のせいで `DEFAULT_TAP_BOOST.rules[0]` の型が
@@ -1150,20 +1173,113 @@ export const DEFAULT_TAP_BOOST_RULE: TapBoostRule = {
   exactName: false,
   multiplier: 5,
   durationSec: 5,
-  introClip: 'intro-panther',
-  countClip: 'count-321',
-  loopClip: 'loop-panther',
-  // 既定 'off' — 黒豹の result-* は素材未同梱で、catalog id を既定にすると
-  // 全ユーザーが4秒の暗幕を見る(コーギー行だけは result-corgi を指す)。
-  // ロールアップ発表('-N' の桁回転→着弾)自体は 'off' でも常に出る。
-  resultClip: 'off',
+  // 標準テーマはねば〜る君 — 4段すべて素材が同梱されているので、UI の
+  // 「ブーストを追加」で複製された素の1行がそのまま満尺で再生できる
+  // (黒豹は result-* が未同梱で resultClip: 'off' を強いられていた)。
+  introClip: 'intro-nebaaru',
+  countClip: 'count-nebaaru',
+  loopClip: 'loop-nebaaru',
+  resultClip: 'result-nebaaru',
   flash: true,
 };
 
-/** タップブースト(フィーバー)の既定。空トリガーの1行だけを配る。 */
+/**
+ * ねば〜る君(gift 14463 / 10💎)のブースト行。**同梱既定の1行目**で、
+ * settingsVersion 9 の移行が「旧既定の黒豹行のまま」の設定を1回だけこの内容へ
+ * 寄せ替える実体でもある。黒豹(723500)を既定から降ろしたのは限定ギフトで
+ * 実質受け取れず、既定の1行目としては死に枠だったため(ユーザー要件)。
+ * 黒豹のクリップはカタログに残るので、設定画面から選び直せば従来どおり使える。
+ *
+ * 名前一致は使わない(giftId が本線)。実配信の giftName は `nebaarukun` という
+ * **ローマ字**で届くので、全面カット側の 'cut-nebaaru' が使っている 'ねば' の
+ * 日本語部分一致はそもそも当たらない(diag.log で確認済み)。
+ * 倍率・尺は差し替え前の黒豹既定と同じ ×3 / 10秒 から始める。
+ */
+export const NEBAARU_TAP_BOOST_RULE: TapBoostRule = {
+  ...structuredClone(DEFAULT_TAP_BOOST_RULE),
+  id: 'boost-1',
+  label: 'ねば〜る君',
+  giftId: '14463',
+  multiplier: 3,
+  durationSec: 10,
+};
+
+/** タップブースト(フィーバー)の既定。ねば〜る君の1行だけを配る。 */
 export const DEFAULT_TAP_BOOST: TapBoostConfig = {
   enabled: true,
-  rules: [structuredClone(DEFAULT_TAP_BOOST_RULE)],
+  rules: [structuredClone(NEBAARU_TAP_BOOST_RULE)],
+};
+
+// ── お邪魔(タップ封じ) ────────────────────────────────────────────────────
+
+/**
+ * 封印の長さ(秒)の clamp。既定は 30(ユーザー要件)。
+ *
+ * 上限 60 は「1本で配信が壊れない」線。累積の天井は別に TAP_LOCK_MAX_MS があり、
+ * そちらが安全弁(設定ミス・重ねがけ・時計飛びに耐える最後の壁)で、こちらは設定値
+ * そのものの妥当性 — GIFT_FX_FREEZE_MAX_MS と durationSec の関係と同じ二段構え。
+ */
+export const TAP_LOCK_DURATION_MIN_SEC = 5;
+export const TAP_LOCK_DURATION_MAX_SEC = 60;
+
+/**
+ * 封印の残り時間のハード上限(ms)。ユーザー決定(2026-08-18)で 120 秒。
+ *
+ * **これは演出方針ではなく安全弁。** 重ねがけの方針は「延長」なので、天井が無いと
+ * 17連打コンボ1件で 8 分半ボタンが死ぬ。ラッチ時にも読み出し時にも効かせる —
+ * NTP 巻き戻しやサスペンドで期限が未来に取り残される事故もここで潰す
+ * (shared/fx-stage.ts の「時刻ラッチには必ずクランプを付ける」の規約)。
+ */
+export const TAP_LOCK_MAX_MS = 120_000;
+
+/**
+ * トリガーギフト1メッセージ(連打コンボ)あたりの発動回数の上限。
+ * tapBoostActivationCount と同じ問題への同じ答え — 連打可能ギフト(giftType 1)は
+ * normalize.ts が repeatCount へ畳んでくるので、素直に掛けると1件で天井へ張り付く。
+ * 封印は2本ぶんまで(既定 30 秒 × 2 = 60 秒)。切り捨ては giftDiag に必ず記録する。
+ */
+export const TAP_LOCK_ACTIVATIONS_MAX = 2;
+
+/** このトリガーギフト1メッセージで封印を何本ぶん重ねるか(tapBoostActivationCount と同型)。 */
+export function tapLockActivationCount(repeatCount: number): number {
+  return Math.min(TAP_LOCK_ACTIVATIONS_MAX, Math.max(1, Math.round(repeatCount)));
+}
+
+/** 登録できるお邪魔行の上限。TAP_BOOST_RULES_MAX と同じ 8。 */
+export const TAP_LOCK_RULES_MAX = 8;
+
+/**
+ * お邪魔1行の既定。giftId は空 — クリエイター固有の値なので既定を置きようがない
+ * (fanStamp / tapBoost と同じ判断)。トリガーが3つとも空の行は**どのギフトにも
+ * 一致しない**(matchGiftTrigger)ので、enabled: true で配っても既存の settings.json の
+ * 挙動は変わらない。
+ *
+ * DEFAULT_TAP_LOCK.rules[0] とは別に export しているのは DEFAULT_TAP_BOOST_RULE と
+ * 同じ理由(noUncheckedIndexedAccess)。
+ */
+export const DEFAULT_TAP_LOCK_RULE: TapLockRule = {
+  id: 'lock-1',
+  label: '',
+  enabled: true,
+  giftId: '',
+  giftName: '',
+  canonical: '',
+  exactName: false,
+  durationSec: 30,
+  // トリガーギフト自体は値を動かさない(tapBoost と同じ規約)。カウントも増やしたい
+  // 配信者は設定画面で正の数を入れる。
+  amountEach: 0,
+  flash: true,
+};
+
+/**
+ * お邪魔(タップ封じ)の既定。**機能そのものは既定で OFF** — 配信者の主操作を止める
+ * 機能なので、キー欠損のフォールバックで勝手に有効化されてはならない。行は空トリガーの
+ * 1行だけ配る(どのギフトにも一致しない)。
+ */
+export const DEFAULT_TAP_LOCK: TapLockConfig = {
+  enabled: false,
+  rules: [structuredClone(DEFAULT_TAP_LOCK_RULE)],
 };
 
 /**
@@ -1239,6 +1355,9 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   wakeEnabled: false,
   wakeTime: null,
   lowThreshold: 10,
+  // ルーレット中の「残り」小窓。既定は 'small' — 暗幕と ultra の全画面動画で
+  // 最長 31 秒ほど7セグが読めなくなるので、出すほうを既定に倒す。
+  rouletteCountView: 'small',
   seEnabled: true,
   seVolume: 70,
   seSounds: { ...DEFAULT_SE_SOUNDS },
@@ -1252,6 +1371,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   fanStamp: structuredClone(DEFAULT_FAN_STAMP),
   stampTriggers: structuredClone(DEFAULT_STAMP_TRIGGERS),
   tapBoost: structuredClone(DEFAULT_TAP_BOOST),
+  tapLock: structuredClone(DEFAULT_TAP_LOCK),
 };
 
 /**
@@ -1618,6 +1738,47 @@ export function rouletteRemainingAmount(e: ChallengeEffect, resumeAt: number): n
 }
 
 /**
+ * resumeAt 本目以降の「まだ見せていない**回数**」(回さない rest ぶん込み)。
+ * rouletteRemainingAmount の対称形で、スライス位置の規約は完全に同じ —
+ * 額と回数を別々の式で書くと片方だけ rest を数え忘れる(演出ストックの ×N が
+ * ROULETTE_REELS_MAX(20) で頭打ちになっていたのがまさにそれ)。
+ *
+ * `rouletteRemainingCount(e, 0) === rouletteDraws(e).length` = **実際の抽選回数**。
+ * ROULETTE_REELS_MAX は「回すリールの本数」の上限であって回数の上限ではない
+ * (回数の上限は ROULETTE_DRAWS_MAX)。
+ */
+export function rouletteRemainingCount(e: ChallengeEffect, resumeAt: number): number {
+  const plan = rouletteReelPlan(e);
+  return Math.max(0, plan.reels.length - resumeAt) + plan.restCount;
+}
+
+/**
+ * 演出ストック表示(モニター右下の縦リスト)の ×N。at 本目以降の残数。
+ *
+ * **ギフトルーレットは実際の抽選回数**(rest 込み)。47連打なら ×47 から始まり、
+ * リールが止まるたび1ずつ減って、最後は rest ぶん(= 合算バナー「残りN回ぶん」の
+ * N + 1)へ着地する。ストックの数字と締めのバナーの数字が地続きなのは、両方が
+ * rouletteRemainingCount から出ているから。
+ *
+ * **rest を数えるのは「連打を連打として回す」effect だけ**(ユーザー決定)。
+ * reels === 1 になるのは (a) 入室ルーレット (b)「連打でもリールは1本」設定
+ * (giftRepeatFx.rouletteEnabled = false) (c) 単発ギフト の3つで、(a)(b) は
+ * 「あと何本の演出が舞台を占有するか」の指標として本数のままにする — 設定画面が
+ * 「変えるのはリールを何本見せるかだけ」と約束しているため。(c) は rest が無いので
+ * どちらの式でも同値。**cfg は見ない** — effect 自己完結(rouletteSegments と同じ理由。
+ * モニターの cfg は CFG_POLL_MS の 120秒ポーリングで古くなりうる)。
+ *
+ * 入室の判定を reels === 1 に任せず rouletteOrigin も見るのは、キュー満杯の
+ * 末尾連結(mergeRoulette)で入室が2件以上畳まれると reels が 1 を超えうるため。
+ */
+export function rouletteStockCount(e: ChallengeEffect, at: number): number {
+  const plan = rouletteReelPlan(e);
+  const spins = Math.max(0, plan.reels.length - at);
+  if (e.rouletteOrigin === 'join' || plan.reels.length === 1) return spins;
+  return spins + plan.restCount;
+}
+
+/**
  * effect から反復の再生パラメータを取り出す。renderer 側の唯一の clamp 点。
  * **MonitorView と useChallengeSe の両方がこれを呼ぶこと** — 音と映像の回数が
  * ずれない担保はこの関数を共有していることだけ。
@@ -1907,11 +2068,14 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeStampTriggers(
-    migrateChallengeTapBoostCorgi(
-      migrateChallengeGiftFullCutTriggersV5(
-        migrateChallengeGiftFullCutTriggers(
-          migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+  return migrateChallengeTapBoostNebaaru(
+    migrateChallengeStampTriggers(
+      migrateChallengeTapBoostCorgi(
+        migrateChallengeGiftFullCutTriggersV5(
+          migrateChallengeGiftFullCutTriggers(
+            migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+            fromVersion
+          ),
           fromVersion
         ),
         fromVersion
@@ -1946,6 +2110,86 @@ export function migrateChallengeTapBoostCorgi(
     ...cfg,
     tapBoost: { ...cfg.tapBoost, rules: [...rules, structuredClone(CORGI_TAP_BOOST_RULE)] },
   };
+}
+
+/**
+ * v9 の照合に使う**旧・既定の黒豹ブースト行の指紋**。「今の既定」ではなく
+ * 「v0.7.8 までが配っていた値」なので、⚠ この表は凍結する
+ * (OLD_FULL_CUT_TRIGGERS_V3 と同じ理由 — 今の定数から作り直すと新旧が同値になり
+ * 判定が空振る)。
+ *
+ * giftName を指紋に入れないのは、同じ「出荷されたままの行」でも経路で2値を取るため:
+ * 同梱の公開デフォ経由は '黒豹(限定ギフト)'、旧・単一設定の包み直し経由は ''。
+ * multiplier / durationSec も入れない(現場で詰める値で、既定のままとは限らない)。
+ */
+const OLD_PANTHER_BOOST_ROW_V8 = {
+  id: 'boost-1',
+  giftId: '723500',
+  introClip: 'intro-panther',
+  countClip: 'count-321',
+  loopClip: 'loop-panther',
+} as const;
+
+/**
+ * v9: 既定のブースト行を黒豹 → ねば〜る君へ**置き換える**(足す移行ではない)。
+ *
+ * ⚠ validateTapBoost の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
+ * ユーザーが黒豹を選び直した瞬間に上書きし返してしまう
+ * (migrateChallengeTapBoostCorgi / migrateChallengeGiftFullCut と同じ理由)。
+ *
+ * **旧既定と完全に同じ行だけ**を寄せ替える(migrateChallengeGiftFullCutTriggers の
+ * 方針)。クリップを選び直した人・自分で別 id の黒豹行を作った人の設定には触らない。
+ * 行を消した人には何も配らない(足す移行ではないので、消えたものは復活しない)。
+ *
+ * 書き換えるのは**判定に使う4つ + 4段のクリップ + label** だけ。
+ * enabled / multiplier / durationSec / flash / 並び順には触れない — 倍率と
+ * ウィンドウ秒は現場で詰める値なので、テーマ差し替えで巻き戻してはいけない。
+ * giftName を空にするのは必須 — 残すと '黒豹(限定ギフト)' が部分一致トリガー
+ * として生き残る(同梱の公開デフォ経由の行が実際にこれを持つ)。
+ *
+ * この1段で3経路すべてに効く:
+ *  (1) settings.json(保存済み)
+ *  (2) ユーザーのデフォ保存 config/challenge-default.json(loadChallengeDefault も
+ *      migrateChallengeConfig を通す。こちらが同梱より優先されるので、
+ *      resources/ を直すだけでは絶対に届かない)
+ *  (3) 同梱の公開デフォ resources/challenge-default.json
+ */
+export function migrateChallengeTapBoostNebaaru(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 9) return cfg;
+  const o = OLD_PANTHER_BOOST_ROW_V8;
+  const n = NEBAARU_TAP_BOOST_RULE;
+  // 自分で 14463 の行を作っている人には触らない(二重一致を作らない)。
+  if (cfg.tapBoost.rules.some((r) => r.giftId === n.giftId)) return cfg;
+  let touched = 0;
+  const rules = cfg.tapBoost.rules.map((r) => {
+    if (
+      r.id !== o.id ||
+      r.giftId !== o.giftId ||
+      r.introClip !== o.introClip ||
+      r.countClip !== o.countClip ||
+      r.loopClip !== o.loopClip
+    ) {
+      return r; // 手を入れてある行 / 別の行 — 尊重する
+    }
+    touched++;
+    return {
+      ...r,
+      label: n.label,
+      giftId: n.giftId,
+      giftName: n.giftName,
+      canonical: n.canonical,
+      exactName: n.exactName,
+      introClip: n.introClip,
+      countClip: n.countClip,
+      loopClip: n.loopClip,
+      resultClip: n.resultClip,
+    };
+  });
+  if (touched === 0) return cfg;
+  return { ...cfg, tapBoost: { ...cfg.tapBoost, rules } };
 }
 
 /**
@@ -2141,6 +2385,11 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     // 書式が崩れた値は null(未設定)へ倒す — 表示側で NaN 時刻を作らせない。
     wakeTime: typeof c.wakeTime === 'string' && WAKE_TIME_RE.test(c.wakeTime) ? c.wakeTime : null,
     lowThreshold: num(c.lowThreshold, d.lowThreshold, 0, 9_999_999),
+    // 保存済み settings.json にはこのキーが無い。既定値を直しても届かないので、
+    // **この欠損フォールバックが移行そのもの**(fxClipsEnabled と同じ流儀)。
+    rouletteCountView: ROULETTE_COUNT_VIEWS.includes(c.rouletteCountView as RouletteCountView)
+      ? (c.rouletteCountView as RouletteCountView)
+      : d.rouletteCountView,
     // 既定 true なので `!== false`(enabled/monitorWindowed の `=== true` とは逆向き)。
     seEnabled: c.seEnabled !== false,
     seVolume: num(c.seVolume, d.seVolume, 0, 100),
@@ -2155,6 +2404,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     fanStamp: validateFanStamp(c.fanStamp),
     stampTriggers: validateStampTriggers(c.stampTriggers),
     tapBoost: validateTapBoost(c.tapBoost),
+    tapLock: validateTapLock(c.tapLock),
   };
 }
 
@@ -2511,6 +2761,57 @@ function validateTapBoostRule(raw: unknown, legacy: boolean): TapBoostRule {
     countClip: clip(r.countClip, TAP_BOOST_COUNT_CLIPS, dr.countClip),
     loopClip: clip(r.loopClip, TAP_BOOST_LOOP_CLIPS, dr.loopClip),
     resultClip: clip(r.resultClip, TAP_BOOST_RESULT_CLIPS, dr.resultClip),
+    flash: r.flash !== false,
+  };
+}
+
+/**
+ * お邪魔(タップ封じ)の検証。validateTapBoost の複製から旧形式(LegacyTapBoost)の
+ * 展開とクリップ検証を落としたもの — この機能には出荷済みの旧形式が存在しない。
+ *
+ * **キー欠損は既定へ倒れるだけで移行(migrate*)は要らない。** 既定の行は空トリガーで
+ * どのギフトにも一致せず、機能 enabled も false なので、既存の settings.json へ何も
+ * 配らなくても挙動は 1 ミリも変わらない(stockCutinVolume と同じ前例)。
+ */
+function validateTapLock(raw: unknown): TapLockConfig {
+  const d = DEFAULT_TAP_LOCK;
+  const c = raw as Partial<TapLockConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  // 既定が false の真偽値なので `=== true` で読む(既定 true の `!== false` の逆)。
+  const enabled = c.enabled === true;
+  if (!Array.isArray(c.rules)) return { enabled, rules: structuredClone(d.rules) };
+
+  const out: TapLockRule[] = [];
+  const seen = new Set<string>();
+  for (const r of c.rules.slice(0, TAP_LOCK_RULES_MAX)) {
+    const v = validateTapLockRule(r);
+    // 重複・欠損 id は振り直す(validateTapBoost と同じ理由・同じ式)。
+    const id =
+      v.id !== '' && !seen.has(v.id) ? v.id : v.id !== '' ? `${v.id}-${out.length}` : `lock-${out.length}`;
+    seen.add(id);
+    out.push({ ...v, id });
+  }
+  // 明示的な空配列は空のまま通す(全行消したユーザーの意思を尊重する)。
+  return { enabled, rules: out };
+}
+
+/** お邪魔1行の検証。秒数は clamp、増減量は既存の amountEach 系と同じ整数丸め。 */
+function validateTapLockRule(raw: unknown): TapLockRule {
+  const dr = DEFAULT_TAP_LOCK_RULE;
+  const r = raw as Partial<TapLockRule> | null | undefined;
+  if (!r || typeof r !== 'object') return structuredClone(dr);
+  const n = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  return {
+    id: typeof r.id === 'string' ? r.id.trim() : '',
+    label: typeof r.label === 'string' ? r.label.trim() : '',
+    enabled: r.enabled !== false,
+    giftId: typeof r.giftId === 'string' ? r.giftId.trim() : dr.giftId,
+    giftName: typeof r.giftName === 'string' ? r.giftName.trim().toLowerCase() : dr.giftName,
+    canonical: typeof r.canonical === 'string' ? r.canonical.trim().toLowerCase() : dr.canonical,
+    exactName: typeof r.exactName === 'boolean' ? r.exactName : false,
+    durationSec: n(r.durationSec, dr.durationSec, TAP_LOCK_DURATION_MIN_SEC, TAP_LOCK_DURATION_MAX_SEC),
+    amountEach: n(r.amountEach, dr.amountEach, -999_999, 999_999),
     flash: r.flash !== false,
   };
 }
@@ -2876,6 +3177,30 @@ export function matchTapBoost(
   const tb = cfg.tapBoost;
   if (!tb.enabled) return null;
   for (const r of tb.rules) {
+    if (!r.enabled) continue;
+    if (matchGiftTrigger(r, g)) return r;
+  }
+  return null;
+}
+
+/**
+ * ギフト → お邪魔(タップ封じ)行の写像。**上から順に評価し、最初に一致した1行だけ**を
+ * 返す(tapBoost / giftFullCut / roulettes と同じ先勝ち)。**fanStamp・tapBoost の次・
+ * ルーレットより先**に評価し、一致したら増減規則(roulettes/giftRules/giftDefault)を
+ * 一切評価しない。
+ *
+ * tapBoost より後ろなのは意図的 — 同じ giftId を両方に登録した誤設定では「ブーストが
+ * 勝つ」ほうが安全側だから(封印が勝つと配信者のボタンが死ぬ)。
+ *
+ * 無効な行は飛ばすだけで**下の行の評価は続ける**(matchTapBoost と同じ)。
+ */
+export function matchTapLock(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): TapLockRule | null {
+  const tl = cfg.tapLock;
+  if (!tl.enabled) return null;
+  for (const r of tl.rules) {
     if (!r.enabled) continue;
     if (matchGiftTrigger(r, g)) return r;
   }

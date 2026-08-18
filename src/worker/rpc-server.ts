@@ -117,6 +117,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       session.nudgeChallenge();
       return s;
     },
+    'challenge.clearTapLock': async () => {
+      // 解除できたときだけ配る(封印中でなければ状態は動いていない)。
+      if (challenge.clearTapLockNow()) session.nudgeChallenge();
+      return challenge.get();
+    },
     'challenge.testEffect': async (p) => {
       challenge.testEffect(p);
       // 未接続でも challenge-only の delta が出る(pushDelta の許可規約)。
@@ -229,6 +234,7 @@ type HandlerMap = {
   'challenge.reset': () => Promise<D.ChallengeState>;
   'challenge.press': () => Promise<D.ChallengeState>;
   'challenge.toggleRank': () => Promise<D.ChallengeState>;
+  'challenge.clearTapLock': () => Promise<D.ChallengeState>;
   'challenge.testEffect': (p: D.ChallengeTestEffectSpec) => Promise<void>;
   'challenge.fxCaps': (p: { bandFx: boolean }) => Promise<void>;
   'challenge.boostCue': (p: D.ChallengeBoostCue) => Promise<void>;

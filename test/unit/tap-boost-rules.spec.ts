@@ -9,6 +9,8 @@ import {
   matchTapBoost,
   migrateChallengeConfig,
   migrateChallengeTapBoostCorgi,
+  migrateChallengeTapBoostNebaaru,
+  NEBAARU_TAP_BOOST_RULE,
   TAP_BOOST_COUNT_CLIPS,
   TAP_BOOST_INTRO_CLIPS,
   TAP_BOOST_INTRO_MS,
@@ -335,7 +337,7 @@ describe('ブースト素材のカタログと実ファイル', () => {
   });
 
   it('既定が指すクリップは必ず実ファイルがある(全ユーザーが暗幕を見ないための担保)', () => {
-    for (const r of [DEFAULT_TAP_BOOST_RULE, CORGI_TAP_BOOST_RULE]) {
+    for (const r of [DEFAULT_TAP_BOOST_RULE, NEBAARU_TAP_BOOST_RULE, CORGI_TAP_BOOST_RULE]) {
       for (const id of [r.introClip, r.countClip, r.loopClip, r.resultClip]) {
         if (id === 'off') continue;
         expect({ id, exists: existsSync(join(dir, `${id}.mp4`)) }).toEqual({ id, exists: true });
@@ -345,5 +347,100 @@ describe('ブースト素材のカタログと実ファイル', () => {
 
   it('id はカタログ内で重複しない', () => {
     expect(new Set(all.map((c) => c.id)).size).toBe(all.length);
+  });
+});
+
+describe('タップブーストの既定行の差し替え(v9・黒豹 → ねば〜る君)', () => {
+  /** v0.7.8 までが配っていた黒豹の既定行(実機の settings.json / デフォ保存と同じ形)。 */
+  const pantherRow = (): Partial<TapBoostRule> => ({
+    id: 'boost-1',
+    label: '',
+    giftId: '723500',
+    giftName: '黒豹(限定ギフト)',
+    multiplier: 3,
+    durationSec: 10,
+    introClip: 'intro-panther',
+    countClip: 'count-321',
+    loopClip: 'loop-panther',
+    resultClip: 'off',
+  });
+
+  it('旧既定のままの黒豹行はねば〜る君へ寄せ替わる', () => {
+    const out = migrateChallengeTapBoostNebaaru(rules([pantherRow()]), 8);
+    // 足す移行ではないので行数は増えない。
+    expect(out.tapBoost.rules).toHaveLength(1);
+    expect(out.tapBoost.rules[0]).toMatchObject({
+      id: 'boost-1',
+      label: 'ねば〜る君',
+      giftId: '14463',
+      introClip: 'intro-nebaaru',
+      countClip: 'count-nebaaru',
+      loopClip: 'loop-nebaaru',
+      resultClip: 'result-nebaaru',
+    });
+  });
+
+  it("giftName を空にする — '黒豹(限定ギフト)' が部分一致トリガーとして残らない", () => {
+    const out = migrateChallengeTapBoostNebaaru(rules([pantherRow()]), 8);
+    expect(out.tapBoost.rules[0]?.giftName).toBe('');
+    // 名前で黒豹を撃っても、もう当たらない。
+    expect(matchTapBoost(out, { giftId: '999', giftName: '黒豹(限定ギフト)' })).toBeNull();
+    // ねば〜る君の giftId では当たる。
+    expect(matchTapBoost(out, { giftId: '14463' })?.loopClip).toBe('loop-nebaaru');
+  });
+
+  it('倍率・ウィンドウ秒・enabled は現場の値を残す(テーマ差し替えで巻き戻さない)', () => {
+    const tuned = rules([{ ...pantherRow(), multiplier: 7, durationSec: 15, enabled: false }]);
+    const out = migrateChallengeTapBoostNebaaru(tuned, 8);
+    expect(out.tapBoost.rules[0]).toMatchObject({
+      giftId: '14463',
+      multiplier: 7,
+      durationSec: 15,
+      enabled: false,
+    });
+  });
+
+  it('クリップを選び直してある行は触らない', () => {
+    const kept = rules([{ ...pantherRow(), introClip: 'intro-corgi' }]);
+    expect(migrateChallengeTapBoostNebaaru(kept, 8)).toBe(kept);
+  });
+
+  it('自分で作った別 id の黒豹行は触らない', () => {
+    const mine = rules([{ ...pantherRow(), id: 'mine' }]);
+    expect(migrateChallengeTapBoostNebaaru(mine, 8).tapBoost.rules[0]?.giftId).toBe('723500');
+  });
+
+  it('既に 14463 の行を持っている設定には何もしない(二重一致を作らない)', () => {
+    const already = rules([pantherRow(), { id: 'mine', giftId: '14463' }]);
+    expect(migrateChallengeTapBoostNebaaru(already, 8)).toBe(already);
+  });
+
+  it('v9 以降には流れない(黒豹に戻した人へ配り直さない)', () => {
+    const c = rules([pantherRow()]);
+    expect(migrateChallengeTapBoostNebaaru(c, 9)).toBe(c);
+  });
+
+  it('冪等 — 2回流しても変わらない', () => {
+    const once = migrateChallengeTapBoostNebaaru(rules([pantherRow()]), 8);
+    expect(migrateChallengeTapBoostNebaaru(once, 8)).toEqual(once);
+  });
+
+  it('コーギー行(v7)は無傷のまま、黒豹行だけが差し替わる', () => {
+    const both = rules([pantherRow(), { ...CORGI_TAP_BOOST_RULE, multiplier: 10 }]);
+    const out = migrateChallengeTapBoostNebaaru(both, 8);
+    expect(out.tapBoost.rules.map((r) => r.giftId)).toEqual(['14463', '6267']);
+    // 利用者が ×10 に詰めたコーギーの倍率は残る。
+    expect(out.tapBoost.rules[1]?.multiplier).toBe(10);
+  });
+
+  it('v7 のコーギー追加と同時に走っても、黒豹が差し替わりコーギーが足される', () => {
+    const out = migrateChallengeConfig(rules([pantherRow()]), 6);
+    expect(out.tapBoost.rules.map((r) => r.giftId)).toEqual(['14463', '6267']);
+  });
+
+  it('寄せ替え先はカタログに実在するクリップだけを指す(validate で落ちない)', () => {
+    // ここが綴りのタイポを機械検出する要。未知 id なら validate が既定へ倒して差分が出る。
+    const out = migrateChallengeTapBoostNebaaru(rules([pantherRow()]), 8);
+    expect(validateChallengeConfig(out).tapBoost.rules[0]).toEqual(out.tapBoost.rules[0]);
   });
 });

@@ -128,3 +128,41 @@ describe('challengeCardView — 進捗とランキング', () => {
     expect(v.done).toBe(300);
   });
 });
+
+describe('challengeCardView — お邪魔(タップ封じ)', () => {
+  const locked = (endsAtMs: number, nickname?: string): Partial<ChallengeState> => ({
+    status: 'running',
+    startedMs: NOW - 1000,
+    tapLock: { startsAtMs: NOW, endsAtMs, blocked: 0, ...(nickname ? { nickname } : {}) },
+  });
+
+  it('封印中は PUSH を押せない — 残り秒と発動者を出す', () => {
+    const v = challengeCardView(state(locked(NOW + 30_000, 'なまえ')), CFG, true, NOW);
+    expect(v.pushEnabled).toBe(false);
+    expect(v.tapLocked).toBe(true);
+    expect(v.tapLockRemainingMs).toBe(30_000);
+    expect(v.tapLockNickname).toBe('なまえ');
+  });
+
+  it('期限を過ぎたスナップショットが残っていても押せる(灰色固着を作らない)', () => {
+    // worker の delta は最大 500ms 遅れる。キーの有無だけを見て判定すると、
+    // 解除済みなのにボタンが灰色のまま = この層が担当する事故そのもの。
+    const v = challengeCardView(state(locked(NOW - 1)), CFG, true, NOW);
+    expect(v.tapLocked).toBe(false);
+    expect(v.pushEnabled).toBe(true);
+    expect(v.tapLockRemainingMs).toBe(0);
+  });
+
+  it('非封印ならキーは null(残り時間も持たない)', () => {
+    const v = challengeCardView(state({ status: 'running', startedMs: NOW - 1000 }), CFG, true, NOW);
+    expect(v.tapLocked).toBe(false);
+    expect(v.tapLockRemainingMs).toBeNull();
+    expect(v.tapLockNickname).toBeNull();
+    expect(v.pushEnabled).toBe(true);
+  });
+
+  it('停止中は封印の有無に関わらず押せない(running が先に効く)', () => {
+    const v = challengeCardView(state({ ...locked(NOW + 30_000), status: 'idle' }), CFG, true, NOW);
+    expect(v.pushEnabled).toBe(false);
+  });
+});

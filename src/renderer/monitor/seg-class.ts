@@ -36,3 +36,14 @@ export function countdownClass(a: {
 export function segDigits(initialValue: number): number {
   return Math.max(4, String(initialValue).length);
 }
+
+/**
+ * ルーレット走行中に暗幕の手前へ出す「カウント小窓」のクラス。
+ *
+ * 規則(low / clear)は countdownClass ただ1本を共有し、先頭のクラス名だけ
+ * 差し替える — 本体と小窓で条件を二重管理すると「本体だけ CLEAR で小窓は赤」
+ * のような食い違いが黙って出る。punch-* を含めないのも countdownClass と同じ理由。
+ */
+export function countMirrorClass(a: Parameters<typeof countdownClass>[0]): string {
+  return countdownClass(a).replace(/^countdown/, 'count-mirror');
+}

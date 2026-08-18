@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   JOIN_ROULETTE_MIN_GAP_MS,
-  ROULETTE_REVEAL_MS,
   ROULETTE_SEGMENTS_MAX,
   ROULETTE_SPIN_FAST_MS,
   ROULETTE_SPIN_HEAVY_MS,
@@ -223,7 +222,7 @@ describe('段位(tier)と尺 — 信頼度方式の骨格', () => {
   });
 
   it('入室ルーレットの最短間隔は最長スピン+確定見せより長い(キュー食い潰し防止の根拠)', () => {
-    expect(JOIN_ROULETTE_MIN_GAP_MS).toBeGreaterThan(ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS);
+    expect(JOIN_ROULETTE_MIN_GAP_MS).toBeGreaterThan(ROULETTE_SPIN_ULTRA_MS + rouletteRevealMs('dragon'));
   });
 });
 

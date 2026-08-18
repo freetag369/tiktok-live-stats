@@ -8,11 +8,17 @@
  *
  * 序列はユーザー決定(2026-08-16 確定):
  *   ①follow ②strike-like(いいね満タン) ③strike-stock(ストック満タン)
- *   ④boost ⑤helper(お助け) ⑥join-roulette(初見) ⑦band(カットイン)
+ *   ④boost ④.5 tap-lock(お邪魔) ⑤helper(お助け) ⑥join-roulette(初見)
+ *   ⑦band(カットイン)
  *   ⑧other(ギフトルーレット・コメント等リスト外全部)
  * boost が④なのはリアルタイム性の例外(原案は⑦) — フィーバーは worker 絶対時刻で
  * 走り(worker はルーレットでは凍結しない)、下位に回すと planBoostStart の期限切れ
  * で映像演出ごと消えるため、短尺の満タン系にだけ道を譲る位置をユーザーが選んだ。
+ * ④.5 tap-lock(お邪魔・タップ封じ)は 2026-08-18 にユーザーが boost の直後を選択。
+ * 理由は boost が④に居るのと同じ — 封印は worker の絶対時刻で走り、モニターが何を
+ * 再生していようが時間は減る。band(⑦)の後ろに並べると、band のドレインが数本
+ * 詰まっただけで「残り数秒」になってから告知バナーが出る(= 何が起きたか分からない
+ * まま復帰する)。boost より下なのはフィーバーのほうが大きな山場だから。
  *
  * 序列と**遮蔽(shared/fx-occlusion.ts)は別軸**。序列は「いつ出すか」、遮蔽は
  * 「被さっている幕の下で何を出すか」。満タン系②③は舞台キューを迂回して常時実行
@@ -36,6 +42,7 @@ export const FX_PRIORITY_ORDER = [
   'strike-like',
   'strike-stock',
   'boost',
+  'tap-lock',
   'helper',
   'join-roulette',
   'band',
@@ -86,6 +93,7 @@ export const FX_BANNER_KINDS = [
   'roulette-rest',
   'boost-announce',
   'boost-result',
+  'tap-lock',
 ] as const;
 export type FxBannerKind = (typeof FX_BANNER_KINDS)[number];
 
@@ -104,6 +112,9 @@ export const BANNER_PRIORITY = {
   // 勝てず**、フィーバー結果が出ないまま順番待ちの底に沈む(2026-08-17 修正)。
   'boost-announce': 'boost',
   'boost-result': 'boost',
+  // お邪魔の告知バナーは effect 側の分類(fxClassForEffect の tap-lock)と揃える —
+  // 揃えないと bannerWinsByRank の厳密 < 判定で band のドレインに永久に負ける。
+  'tap-lock': 'tap-lock',
 } as const satisfies Record<FxBannerKind, FxPriorityClass>;
 
 export function bannerRank(kind: FxBannerKind): number {
@@ -127,6 +138,8 @@ export function fxClassForEffect(e: ChallengeEffect): FxPriorityClass | 'paralle
       return 'strike-like';
     case 'stock-full':
       return 'strike-stock';
+    case 'tap-lock':
+      return 'tap-lock';
     case 'boost-start':
     case 'boost-end':
       return 'boost';

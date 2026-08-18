@@ -11,6 +11,7 @@ import {
   DEFAULT_CHALLENGE,
   DEFAULT_FAN_STAMP,
   DEFAULT_GIFT_BAND_FX,
+  DEFAULT_TAP_BOOST,
   GIFT_FX_FREEZE_MARGIN_MS,
   LIKE_FX_WINDOW_MS,
   TAP_BOOST_COUNT_MS,
@@ -132,16 +133,19 @@ describe('▶テスト実演(tapBoost)の期限切れ', () => {
   it('press が来なくても 2Hz tick(drainIfChanged)が期限切れを配信する', () => {
     let t = NOW;
     const e = engine(cfg(), () => t);
-    e.testEffect({ kind: 'tapBoost' }); // 既定行: 起動5s + カウント3s + ウィンドウ5s
+    // 既定行: 起動 5s + カウント 3s + ウィンドウ(既定の durationSec)。
+    // ウィンドウ秒は既定を差し替えるたびに動くので**ハードコードしない**。
+    e.testEffect({ kind: 'tapBoost' });
+    const WINDOW_MS = DEFAULT_TAP_BOOST.rules[0]!.durationSec * 1000;
     const startMs = NOW + TAP_BOOST_INTRO_MS + TAP_BOOST_COUNT_MS;
     e.drainIfChanged(); // testEffect の dirty を消費
     // ウィンドウ内のタップはカウントされ、state に boost が載る
     t = startMs + 1;
     const pressed = e.press();
-    expect(pressed.boost).toMatchObject({ tapCount: 1, endsAtMs: startMs + 5000 });
+    expect(pressed.boost).toMatchObject({ tapCount: 1, endsAtMs: startMs + WINDOW_MS });
     e.drainIfChanged();
     // 期限到来 — press 無しでも tick が dirty を立て、boost 無しの state を配る
-    t = startMs + 5000;
+    t = startMs + WINDOW_MS;
     const drained = e.drainIfChanged();
     expect(drained).not.toBeNull();
     expect(drained!.boost).toBeUndefined();

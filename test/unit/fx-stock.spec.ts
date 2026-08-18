@@ -7,6 +7,7 @@ import {
   STOCK_SECTION_ORDER,
   buildFxStock,
   fxStockKey,
+  fxStockMoreLabel,
   type FxStockSnapshot,
 } from '@shared/fx-stock';
 
@@ -15,9 +16,11 @@ import {
  *
  * 契約:
  * - 並び順は playing(再生中・先頭) → clear → boost → band → roulette → workerQueue
- * - メイン行は FX_STOCK_DISPLAY_MAX(5)まで(playing 込み)、溢れは overflow(+N)
+ * - メイン行は FX_STOCK_DISPLAY_MAX(5)まで(playing 込み)、溢れは overflow(「ほか N 件」)
+ *   と overflowRouletteTotal(「計 N 回」— 溢れ行のルーレットの回数だけを数える)
  * - 連続ぶんは count(×N)。再生中は remaining がそのまま count になり、
- *   スピン/ショットを消費するたび同じ key の行の上で減っていく
+ *   消費するたび同じ key の行の上で減っていく。**単位は種別で違う** —
+ *   ルーレットは回数(rouletteStockCount)、ギフトカットインは反復数
  * - item.key は effect.id ベースで**キュー→再生中を跨いで安定** — FxStockRow の
  *   スライド(FLIP)と「同じ行のまま ×N が減る」見え方はこの安定性が前提
  * - 満杯系(pendingStrike)は表示しない(ユーザー指定 — スナップショットにも無い)
@@ -38,7 +41,7 @@ function snap(over: Partial<FxStockSnapshot> = {}): FxStockSnapshot {
 
 describe('buildFxStock', () => {
   it('空スナップショット → 空ビュー(共有インスタンス)', () => {
-    expect(buildFxStock(snap())).toEqual({ items: [], overflow: 0 });
+    expect(buildFxStock(snap())).toEqual({ items: [], overflow: 0, overflowRouletteTotal: 0 });
     expect(buildFxStock(snap())).toBe(EMPTY_FX_STOCK);
   });
 
@@ -49,7 +52,7 @@ describe('buildFxStock', () => {
         achievedPending: true,
         boosts: [{ id: 10, nickname: 'ぶ' }],
         bands: [{ id: 11, nickname: 'か', rep: 1 }],
-        roulettes: [{ id: 12, nickname: 'る', spins: 1 }],
+        roulettes: [{ id: 12, nickname: 'る', count: 1 }],
         workerQueue: [{ id: 3, kind: 'band', nickname: 'よこく' }],
       })
     );
@@ -72,7 +75,7 @@ describe('buildFxStock', () => {
   });
 
   it('キー契約(FLIP の前提): キュー→再生中で key が変わらず、count = remaining に置き換わる', () => {
-    const queued = buildFxStock(snap({ roulettes: [{ id: 7, nickname: 'A', spins: 4 }] }));
+    const queued = buildFxStock(snap({ roulettes: [{ id: 7, nickname: 'A', count: 4 }] }));
     expect(queued.items).toEqual([
       { key: 'roulette:7', kind: 'roulette', name: 'A', count: 4, playing: false },
     ]);
@@ -97,9 +100,9 @@ describe('buildFxStock', () => {
 
   it('先頭を消費しても残った行の key は不変', () => {
     const before = buildFxStock(
-      snap({ boosts: [{ id: 1 }, { id: 2 }], roulettes: [{ id: 5, spins: 1 }] })
+      snap({ boosts: [{ id: 1 }, { id: 2 }], roulettes: [{ id: 5, count: 1 }] })
     );
-    const after = buildFxStock(snap({ boosts: [{ id: 2 }], roulettes: [{ id: 5, spins: 1 }] }));
+    const after = buildFxStock(snap({ boosts: [{ id: 2 }], roulettes: [{ id: 5, count: 1 }] }));
     expect(before.items.map((it) => it.key)).toEqual(['boost:1', 'boost:2', 'roulette:5']);
     expect(after.items.map((it) => it.key)).toEqual(['boost:2', 'roulette:5']);
   });
@@ -119,11 +122,58 @@ describe('buildFxStock', () => {
     expect(after.overflow).toBe(0);
   });
 
-  it('count: ルーレット=スピン数・ギフト=反復数・wq=count(欠損/0 は 1 に底上げ)', () => {
+  it('overflowRouletteTotal: 溢れ行の回数だけを合計する(表示中の5行は数えない)', () => {
+    const v = buildFxStock(
+      snap({
+        roulettes: [
+          // 表示される5行。先頭の ×47 は溢れではないので合計に入らない。
+          { id: 1, count: 47 },
+          { id: 2, count: 3 },
+          { id: 3, count: 1 },
+          { id: 4, count: 1 },
+          { id: 5, count: 1 },
+          // 溢れ: 30 + 12 = 42
+          { id: 6, count: 30 },
+          { id: 7, count: 12 },
+        ],
+      })
+    );
+    expect(v.items.map((it) => it.key)).toEqual([
+      'roulette:1',
+      'roulette:2',
+      'roulette:3',
+      'roulette:4',
+      'roulette:5',
+    ]);
+    expect(v.overflow).toBe(2);
+    expect(v.overflowRouletteTotal).toBe(42);
+  });
+
+  it('overflowRouletteTotal: ルーレット以外の溢れは件数にだけ数える', () => {
+    // ブースト(序列①)で5行を埋め、band(③)と join-roulette(②)を溢れさせる。
+    const v = buildFxStock(
+      snap({
+        boosts: [1, 2, 3, 4, 5].map((id) => ({ id })),
+        joinRoulettes: [{ id: 6, count: 2 }],
+        bands: [{ id: 7, rep: 9 }],
+      })
+    );
+    expect(v.overflow).toBe(2);
+    // band の反復 9 は「回」の単位が違うので入らない。入室ルーレットの 2 だけ。
+    expect(v.overflowRouletteTotal).toBe(2);
+  });
+
+  it('overflowRouletteTotal: 溢れにルーレットが無ければ 0', () => {
+    const v = buildFxStock(snap({ bands: [1, 2, 3, 4, 5, 6, 7].map((id) => ({ id, rep: 4 })) }));
+    expect(v.overflow).toBe(2);
+    expect(v.overflowRouletteTotal).toBe(0);
+  });
+
+  it('count: ルーレット=回数・ギフト=反復数・wq=count(欠損/0 は 1 に底上げ)', () => {
     const v = buildFxStock(
       snap({
         bands: [{ id: 1, nickname: 'ば', rep: 3 }],
-        roulettes: [{ id: 2, spins: 11 }, { id: 3, spins: 0 }],
+        roulettes: [{ id: 2, count: 11 }, { id: 3, count: 0 }],
         workerQueue: [
           { id: 4, kind: 'roulette', count: 5 },
           { id: 5, kind: 'band' },
@@ -157,7 +207,7 @@ describe('buildFxStock', () => {
   it('ワーカー凍結キューの予告はレンダラーのキューの後に wq: キーで並ぶ', () => {
     const v = buildFxStock(
       snap({
-        roulettes: [{ id: 9, nickname: 'るれ', spins: 1 }],
+        roulettes: [{ id: 9, nickname: 'るれ', count: 1 }],
         workerQueue: [
           { id: 3, kind: 'band', nickname: 'ばんど' },
           { id: 4, kind: 'roulette' },
@@ -200,15 +250,54 @@ describe('fxStockKey: setState 等値ガードの合成キー', () => {
       fxStockKey(buildFxStock(snap({ playing: { kind: 'roulette', id: 1, remaining: 2 } })))
     ).not.toBe(base);
     // 同じ id がキュー(playing:false)にある状態ともキーは違う
-    expect(fxStockKey(buildFxStock(snap({ roulettes: [{ id: 1, spins: 3 }] })))).not.toBe(base);
+    expect(fxStockKey(buildFxStock(snap({ roulettes: [{ id: 1, count: 3 }] })))).not.toBe(base);
     const six = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, rep: 1 }));
     expect(fxStockKey(buildFxStock(snap({ bands: six })))).not.toBe(
       fxStockKey(buildFxStock(snap({ bands: six.slice(0, 5) })))
     );
   });
 
+  it('表示中の5行も溢れ件数も同じで、溢れの回数だけ違うビューはキーが違う', () => {
+    // これが無いと「ほか3件 計42回」→「計90回」の変化で再レンダーが起きない。
+    const rows = (tail: number) => [
+      { id: 1, count: 1 },
+      { id: 2, count: 1 },
+      { id: 3, count: 1 },
+      { id: 4, count: 1 },
+      { id: 5, count: 1 },
+      { id: 6, count: tail },
+    ];
+    const a = buildFxStock(snap({ roulettes: rows(42) }));
+    const b = buildFxStock(snap({ roulettes: rows(90) }));
+    expect(a.overflow).toBe(b.overflow);
+    expect(a.items.map((it) => it.key)).toEqual(b.items.map((it) => it.key));
+    expect(fxStockKey(a)).not.toBe(fxStockKey(b));
+  });
+
   it('空は空文字(初期 ref 値と一致し、初回の空 → 空で setState しない)', () => {
     expect(fxStockKey(EMPTY_FX_STOCK)).toBe('');
+  });
+});
+
+describe('fxStockMoreLabel: 溢れ行の文言', () => {
+  it('溢れに連打が沈んでいるとき「計N回」を出す', () => {
+    const v = buildFxStock(
+      snap({
+        roulettes: [1, 2, 3, 4, 5].map((id) => ({ id, count: 1 })),
+        // 溢れ: roulette:6(×47) と band:7 の2件。
+        bands: [{ id: 7, rep: 2 }],
+      })
+    );
+    const withCombo = { ...v, overflow: 2, overflowRouletteTotal: 47 };
+    expect(fxStockMoreLabel(withCombo)).toBe('ほか2件 計47回');
+  });
+
+  it('溢れが全部単発(回数 === 件数)なら「計N回」は出さない — 二度言わない', () => {
+    expect(fxStockMoreLabel({ items: [], overflow: 3, overflowRouletteTotal: 3 })).toBe('ほか3件');
+  });
+
+  it('溢れにルーレットが無い(0)ときも件数だけ', () => {
+    expect(fxStockMoreLabel({ items: [], overflow: 3, overflowRouletteTotal: 0 })).toBe('ほか3件');
   });
 });
 
@@ -240,6 +329,22 @@ describe('monitor.css との整合(テキスト検査)', () => {
     }
   });
 
+  it('.fxs-mult は tabular-nums で縮まない(桁が動いても名前の ellipsis 境界が揺れない)', () => {
+    const rule = /\.fxs-mult\s*{[^}]*}/.exec(css)?.[0] ?? '';
+    expect(rule).toMatch(/font-variant-numeric:\s*tabular-nums/);
+    expect(rule).toMatch(/flex:\s*0 0 auto/);
+  });
+
+  it('.fxs-kind も縮まない(縮む担当は ellipsis を持つ .fxs-name だけ)', () => {
+    const rule = /\.fxs-kind\s*{[^}]*}/.exec(css)?.[0] ?? '';
+    expect(rule).toMatch(/flex:\s*0 0 auto/);
+  });
+
+  it('.fxs-more は文言が長いぶんメイン行より小さい', () => {
+    const rule = /\.fxs-more\s*{[^}]*}/.exec(css)?.[0] ?? '';
+    expect(rule).toMatch(/font-size:/);
+  });
+
   it('廃止済みスタイル(.fxs-strike* / .fxs-subdot)が残っていない', () => {
     expect(css).not.toMatch(/\.fxs-strike/);
     expect(css).not.toMatch(/\.fxs-subdot/);
@@ -256,8 +361,8 @@ describe('fx-priority 序列との整合(v0.8.0)', () => {
       snap({
         boosts: [{ id: 1, nickname: 'ぶ' }],
         bands: [{ id: 2, nickname: 'か', rep: 1 }],
-        joinRoulettes: [{ id: 3, nickname: 'しょ', spins: 1 }],
-        roulettes: [{ id: 4, nickname: 'る', spins: 2 }],
+        joinRoulettes: [{ id: 3, nickname: 'しょ', count: 1 }],
+        roulettes: [{ id: 4, nickname: 'る', count: 2 }],
       })
     );
     expect(v.items.map((i) => i.kind)).toEqual(['boost', 'join-roulette', 'band', 'roulette']);

@@ -70,6 +70,24 @@ const BOOST_SETTINGS = {
   },
 };
 
+/**
+ * 清算発表(4段目)まで見る版。BOOST_SETTINGS は resultClip: 'off' なので
+ * 結果カットシーンの段が丸ごとスキップされる — この経路を踏むために既定と同じ
+ * ねば〜る君を指定する(素材は同梱済み)。
+ */
+const RESULT_SETTINGS = {
+  challenge: {
+    ...BOOST_SETTINGS.challenge,
+    tapBoost: {
+      ...BOOST_SETTINGS.challenge.tapBoost,
+      rules: BOOST_SETTINGS.challenge.tapBoost.rules.map((r) => ({
+        ...r,
+        resultClip: 'result-nebaaru',
+      })),
+    },
+  },
+};
+
 const FIXTURE = resolve('fixtures/e2e-boost-trigger.ndjson').replaceAll('\\', '/');
 
 test.describe('シネマティック(モニター表示・reduced-motion なし)', () => {
@@ -142,6 +160,63 @@ test.describe('シネマティック(モニター表示・reduced-motion なし)
     await expect(monitor.locator('.boost-overlay')).toHaveCount(0);
     await expect(monitor.locator('.boost-overlay')).toHaveCount(1, { timeout: 30_000 });
     await expect(clip).toHaveAttribute('src', /loop-panther/);
+  });
+});
+
+test.describe('清算発表(結果カットシーン → ロールアップ → 着弾)', () => {
+  test.use({ reducedMotion: false, settingsPatch: RESULT_SETTINGS });
+
+  /**
+   * 4段目(result)が実際に再生されることの唯一の担保。
+   *
+   * v0.7.8 まで**この経路は誰も踏んでいなかった**(既定が resultClip: 'off'
+   * だった名残で、上の3本はどれも result 段を持たない設定で回る)。そこに隠れて
+   * いた壊れ方は worker 側の時計:
+   *   - settleBoost(= boost-end を積む)は「イベント入口」と「2Hz tick」の
+   *     lazy 呼び出しに相乗りするだけで、**タップ窓の期限に自前のタイマーが無い**。
+   *   - 唯一のワンショット(armFreezeTimer)は fxFreezeUntilMs =
+   *     窓終了 + resultMs + BOOST_SETTLE_BUDGET_MS + margin を見ていた。
+   *   - 一方モニターの安全弁 expireBoostFx は窓終了 + BOOST_EXPIRE_MARGIN_MS(3秒)。
+   * 配信が切れる/リプレイが終わって 2Hz tick が止まると、安全弁のほうが必ず先に
+   * 発火して据え置きごと畳むため、boost-end は「hold 無し」のモニターに届き、
+   * 結果カットシーンもロールアップも丸ごと出なかった。E2E はリプレイ終了で必ず
+   * tick が止まるので、このテストは修正の有無を直接判別する。
+   *
+   * ⚠️ この窓は結果カットシーンが 4 秒しかない。`monitor.evaluate()` で DOM を
+   * ポーリングすると計測自体が遅すぎて窓を跨ぐので、必ず toHaveAttribute /
+   * toHaveText で直接待つこと。
+   */
+  test('タップ後に result 段 → 「-N」ロールアップ → 7セグ着弾 が順に出る', async ({ app, main }) => {
+    await rpc(main, 'challenge.start', undefined);
+    const monitor = await openMonitor(app, main);
+    const before = await segValue(monitor);
+
+    await rpc(main, 'conn.startReplay', { file: FIXTURE, speed: 0 });
+
+    const clip = monitor.locator('video.fx-clip-opaque');
+    await expect(clip).toHaveAttribute('src', /loop-panther/, { timeout: 30_000 });
+
+    // ★ タップ 0 は「発表するものが無い」で result 段ごと畳むのが**正しい仕様**
+    //   (planBoostSettle が tapCount<=0 で全段 0 を返す)。必ず押してから待つ。
+    await monitor.locator('.stage-viewport').click({ position: { x: 10, y: 10 } });
+    await monitor.locator('.stage-viewport').click({ position: { x: 10, y: 10 } });
+    await expect(monitor.locator('.boost-count')).toHaveText('2', { timeout: 10_000 });
+
+    // ① 窓が閉じたら結果カットシーン(4秒・1回再生)へ差し替わる。
+    await expect(clip).toHaveAttribute('src', /result-nebaaru/, { timeout: 30_000 });
+
+    // ② カットシーンが明けたら暗幕を畳んで「-N」ロールアップ(桁回転 → 確定)。
+    //    確定値はタップ2回 × pressStep 1 × 倍率 5 = 10。
+    const settle = monitor.locator('.boost-settle');
+    await expect(settle).toHaveCount(1, { timeout: 20_000 });
+    await expect(monitor.locator('.boost-settle-amt')).toHaveText('-10', { timeout: 20_000 });
+
+    // ③ 溜め明けに7セグへ発射 → 着弾で据え置き解除。数字はここで初めて動く。
+    await expect(settle).toHaveCount(0, { timeout: 20_000 });
+    await expect.poll(() => segValue(monitor), { timeout: 20_000 }).toBe(before - 10);
+
+    const state = await challengeGet(main);
+    expect(state.value).toBe(before - 10);
   });
 });
 

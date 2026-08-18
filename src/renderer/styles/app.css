@@ -1205,6 +1205,23 @@ pre.doc {
   filter: grayscale(0.7) brightness(0.6);
   cursor: not-allowed;
 }
+/*
+ * お邪魔(タップ封じ)中の PUSH。灰色(:disabled)のままだと「停止中」と区別が
+ * つかないので、モニターの封じ演出と同じ紫のリングを足して理由を色で示す。
+ * grayscale は殺さない — 押せないことが第一情報。
+ */
+.challenge-btn.tap-locked:disabled {
+  filter: none;
+  background: radial-gradient(circle at 50% 30%, #6b4a9e, #3a2160 75%);
+  box-shadow:
+    inset 0 0 0 2px rgba(195, 155, 255, 0.85),
+    0 5px 0 #241041,
+    0 8px 18px rgba(120, 70, 200, 0.4);
+}
+.challenge-btn.tap-locked:disabled .sub {
+  opacity: 1;
+  color: #e3d1ff;
+}
 .challenge-rule {
   display: grid;
   grid-template-columns: 1fr 1fr auto;

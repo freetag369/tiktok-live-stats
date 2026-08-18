@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
+import { fxStockMoreLabel } from '@shared/fx-stock';
 import type { FxStockItem, FxStockKind, FxStockView } from '@shared/fx-stock';
 
 /**
@@ -7,8 +8,10 @@ import type { FxStockItem, FxStockKind, FxStockView } from '@shared/fx-stock';
  * 動画・不透明カットインの上にも常に見える(ユーザー要件)。
  *
  * 各行は buildFxStock(@shared/fx-stock)が組んだ「種別 + 行為者名 + ×N」。
- * 先頭は再生中の演出(playing)で、連続ルーレットのスピン/連続ギフトの
- * ショットを消費するたび ×N が同じ行の上で減っていく。key は effect.id ベース
+ * 先頭は再生中の演出(playing)で、連続ルーレットの抽選/連続ギフトの
+ * ショットを消費するたび ×N が同じ行の上で減っていく(ギフトルーレットの ×N は
+ * 抽選回数なので、21回目以降を合算バナーへ回す連打では 1 まで落ちずに消える —
+ * 単位の定義は fx-stock.ts の FxStockItem.count)。key は effect.id ベース
  * (item.key)で安定しているので、先頭が消えると残った行が同じ DOM のまま
  * 上の座席へ移る — その移動を FLIP(旧位置との差分を transform に入れてから
  * 0 へ transition)でスライドとして見せる。
@@ -90,7 +93,7 @@ export function FxStockRow({ stock }: { stock: FxStockView }): React.JSX.Element
       ))}
       {stock.overflow > 0 ? (
         <div className="fxs-row fxs-more" data-k="more">
-          +{stock.overflow}
+          {fxStockMoreLabel(stock)}
         </div>
       ) : null}
     </div>

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { countdownClass, segDigits } from '../../src/renderer/monitor/seg-class';
+import { countMirrorClass, countdownClass, segDigits } from '../../src/renderer/monitor/seg-class';
 
 /**
  * 7セグの見た目を決める規則。
@@ -79,5 +79,35 @@ describe('MonitorView の配線(規則を自前で書き直していないこと
     // 抽出前の式がコピーで戻ってきたら落とす。
     expect(SRC).not.toMatch(/shownValue <= lowThreshold \? 'low'/);
     expect(SRC).not.toMatch(/Math\.max\(4, String\(challenge\.initialValue\)\.length\)/);
+  });
+});
+
+/**
+ * ルーレット中に暗幕の手前へ出す小窓のクラス。**規則は countdownClass と共有**
+ * (先頭のクラス名だけ差し替え)なので、ここで見るのは「共有できているか」だけ。
+ * 本体側の toBe('countdown  ') のような完全一致は使わない — 末尾の空白は
+ * countdownClass の join の副産物で、小窓の契約ではない。
+ */
+describe('countMirrorClass — 本体と同じ規則で小窓のクラスを作る', () => {
+  it('先頭は count-mirror で、countdown は残らない', () => {
+    const cls = countMirrorClass({ status: 'running', shownValue: 500, lowThreshold: 10 });
+    expect(cls.startsWith('count-mirror')).toBe(true);
+    expect(cls).not.toContain('countdown');
+  });
+
+  it('low / clear は本体と同じ条件で付く', () => {
+    expect(countMirrorClass({ status: 'running', shownValue: 10, lowThreshold: 10 })).toContain('low');
+    expect(countMirrorClass({ status: 'running', shownValue: 11, lowThreshold: 10 })).not.toContain('low');
+    expect(countMirrorClass({ status: 'achieved', shownValue: 0, lowThreshold: 10 })).toContain('clear');
+  });
+
+  it('一時停止(idle)では低い値でも low は付かない(本体と排他条件を共有)', () => {
+    expect(countMirrorClass({ status: 'idle', shownValue: 3, lowThreshold: 10 })).not.toContain('low');
+  });
+
+  it('punch-* は含めない', () => {
+    for (const status of ['idle', 'running', 'achieved'] as const) {
+      expect(countMirrorClass({ status, shownValue: 1, lowThreshold: 10 })).not.toContain('punch');
+    }
   });
 });

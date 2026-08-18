@@ -21,18 +21,26 @@ import {
  * 型レベル(satisfies / 網羅 switch)は typecheck が担うので、ここは値だけ見る。
  */
 
-describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16)', () => {
-  it('8ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
+describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 2026-08-18)', () => {
+  it('9ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
     expect(FX_PRIORITY_ORDER).toEqual([
       'follow',
       'strike-like',
       'strike-stock',
       'boost',
+      'tap-lock',
       'helper',
       'join-roulette',
       'band',
       'other',
     ]);
+  });
+
+  it('お邪魔(タップ封じ)は boost の直後・helper より上(2026-08-18 ユーザー決定)', () => {
+    // 位置の根拠は boost が④に居るのと同じ — 封印は worker の絶対時刻で走るので、
+    // band(⑦)の後ろに並べると渋滞中に「残り数秒」で告知が出る。
+    expect(fxRank('tap-lock')).toBe(fxRank('boost') + 1);
+    expect(fxRank('tap-lock')).toBeLessThan(fxRank('helper'));
   });
 
   it('strike-like と strike-stock は隣接する(pendingStrike を合算1件で扱える根拠)', () => {
@@ -54,6 +62,7 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16)',
       'roulette-rest',
       'boost-announce',
       'boost-result',
+      'tap-lock',
     ]);
     // 全登録が有効なクラスを指す(satisfies の値レベル二重化)。
     for (const k of FX_DRAIN_KINDS) expect(FX_PRIORITY_ORDER).toContain(DRAIN_PRIORITY[k]);
@@ -69,7 +78,9 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16)',
     // **構造的に永久に負け**、結果バナーが順番待ちの底に沈む(2026-08-17 修正)。
     expect(BANNER_PRIORITY['boost-announce']).toBe('boost');
     expect(BANNER_PRIORITY['boost-result']).toBe('boost');
-    const named = new Set(['follow', 'helper', 'boost-announce', 'boost-result']);
+    // お邪魔の告知も同じ理由で effect 側の分類と揃える(⑧のままだと band に永久に負ける)。
+    expect(BANNER_PRIORITY['tap-lock']).toBe('tap-lock');
+    const named = new Set(['follow', 'helper', 'boost-announce', 'boost-result', 'tap-lock']);
     for (const k of FX_BANNER_KINDS) {
       if (!named.has(k)) expect(BANNER_PRIORITY[k]).toBe('other');
     }
@@ -79,6 +90,12 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16)',
     // 「勝てない」= 渋滞中にフィーバー結果が一度も出ない、という実害の回帰検知。
     expect(bannerRank('boost-result')).toBeLessThan(fxRank(DRAIN_PRIORITY.band));
     expect(bannerRank('boost-result')).toBeLessThan(fxRank(DRAIN_PRIORITY.roulette));
+  });
+
+  it('お邪魔のバナーも band / ギフトルーレットのドレインに勝てる', () => {
+    // 実害は「押せない理由が渋滞明けまで出ない」= 配信者も視聴者も理由が分からない。
+    expect(bannerRank('tap-lock')).toBeLessThan(fxRank(DRAIN_PRIORITY.band));
+    expect(bannerRank('tap-lock')).toBeLessThan(fxRank(DRAIN_PRIORITY.roulette));
   });
 });
 
@@ -94,6 +111,7 @@ describe('fxClassForEffect — effect kind の網羅分類', () => {
     [eff({ kind: 'stock-full' }), 'strike-stock'],
     [eff({ kind: 'boost-start' }), 'boost'],
     [eff({ kind: 'boost-end' }), 'boost'],
+    [eff({ kind: 'tap-lock' }), 'tap-lock'],
     [eff({ kind: 'roulette', rouletteOrigin: 'join' }), 'join-roulette'],
     [eff({ kind: 'roulette' }), 'other'],
     [eff({ kind: 'gift', fanStamp: true }), 'helper'],

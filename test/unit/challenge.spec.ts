@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { BOOST_ARM_MAX_MS, CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_PATTERNS, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { BOOST_ARM_MAX_MS, CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_PATTERNS, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, rouletteRemainingCount, rouletteStockCount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type {
   ChallengeConfig,
   ChallengeEffect,
@@ -1845,6 +1845,70 @@ describe('rouletteDraws / rouletteReelPlan — effect からの再生計画', ()
 
     it('sub 方向は負のまま合算する(符号は据え置き側で clamp する契約)', () => {
       expect(rouletteRemainingAmount(rlEffect({ rouletteDirection: 'sub' }), 1)).toBe(-1010);
+    });
+  });
+
+  /** n 連打の effect。rouletteReels は worker(rouletteReelCount)と同じ clamp を掛ける。 */
+  function combo(n: number): ChallengeEffect {
+    return rlEffect({
+      rouletteIndexes: Array.from({ length: n }, (_, i) => i % 3),
+      roulettePatterns: Array.from({ length: n }, () => 'slow' as const),
+      rouletteReels: Math.min(ROULETTE_REELS_MAX, n),
+    });
+  }
+
+  describe('rouletteRemainingCount — 残り「回数」のスライス権威(額の対称形)', () => {
+    it('resumeAt=0 は実際の抽選回数(rouletteDraws の件数と一致)', () => {
+      expect(rouletteRemainingCount(rlEffect(), 0)).toBe(3);
+      expect(rouletteRemainingCount(rlEffect(), 0)).toBe(rouletteDraws(rlEffect()).length);
+    });
+
+    it('中間の resumeAt は消化済みリールを数えない', () => {
+      expect(rouletteRemainingCount(rlEffect(), 1)).toBe(2);
+      expect(rouletteRemainingCount(rlEffect(), 2)).toBe(1);
+    });
+
+    it('最終リール後は rest のみ — rest 無しなら 0', () => {
+      expect(rouletteRemainingCount(rlEffect(), 3)).toBe(0);
+      // rouletteReels=1 → reels=[5]・rest=2件。リールを回し切っても rest は残る。
+      expect(rouletteRemainingCount(rlEffect({ rouletteReels: 1 }), 1)).toBe(2);
+    });
+
+    it('回さない rest も数える — 額(rouletteRemainingAmount)と同じスライス位置', () => {
+      const e = rlEffect({ rouletteReels: 2 }); // reels=[5, 1000]・rest=[10]
+      expect([0, 1, 2].map((k) => rouletteRemainingCount(e, k))).toEqual([3, 2, 1]);
+      expect([0, 1, 2].map((k) => rouletteRemainingAmount(e, k))).toEqual([1015, 1010, 10]);
+    });
+
+    it('ROULETTE_REELS_MAX を超える連打でも実回数を返す(20 で頭打ちにしない)', () => {
+      const e = combo(47);
+      expect(rouletteReelPlan(e).reels).toHaveLength(ROULETTE_REELS_MAX);
+      expect(rouletteRemainingCount(e, 0)).toBe(47);
+    });
+  });
+
+  describe('rouletteStockCount — 演出ストック表示の ×N', () => {
+    it('ギフトルーレットは rest 込みの実回数(消費のたび1ずつ減る)', () => {
+      expect(rouletteStockCount(combo(47), 0)).toBe(47);
+      expect(rouletteStockCount(combo(47), 1)).toBe(46);
+      // 最終リール(20本目 = at 19)の時点で rest 27 + 回転中の1本。
+      expect(rouletteStockCount(combo(47), 19)).toBe(28);
+    });
+
+    it('「連打でもリールは1本」設定(reels=1)は従来どおり本数 — ×N を出さない', () => {
+      // worker が rouletteReelCount で 1 に絞った effect。値は3回ぶん適用済みだが、
+      // 舞台を占有するのは1本だけなので ×N は 1(FxStockRow の count>=2 ゲートで非表示)。
+      expect(rouletteStockCount(rlEffect({ rouletteReels: 1 }), 0)).toBe(1);
+    });
+
+    it('入室ルーレットは rest を数えない(連結で reels が伸びても本数)', () => {
+      expect(rouletteStockCount(rlEffect({ rouletteOrigin: 'join', rouletteReels: 2 }), 0)).toBe(2);
+    });
+
+    it('単発ギフトは rest が無いので額の式と同値(分岐しても変わらない)', () => {
+      const e = rlEffect({ rouletteIndexes: [0], roulettePatterns: ['slow'] });
+      expect(rouletteStockCount(e, 0)).toBe(1);
+      expect(rouletteStockCount(e, 1)).toBe(0);
     });
   });
 });
@@ -4264,10 +4328,30 @@ describe('ChallengeEngine — get() の recentEffects キャッシュ', () => {
 
 describe('ChallengeEngine — タップブースト(フィーバー)', () => {
   const BOOST_GIFT = '9999';
-  /** 新形式(rules[])のブースト設定。BOOST_GIFT の1行だけを持つ。 */
+  /**
+   * 新形式(rules[])のブースト設定。BOOST_GIFT の1行だけを持つ。
+   *
+   * ★ クリップは**あえて非既定(黒豹)を明示指定する**。この describe が見ている
+   *   のは段の尺・凍結・アーム/コミットという**エンジンの時間の挙動**であって、
+   *   同梱既定がどのテーマを指しているかではない。既定を差し替えるたびに
+   *   タイムラインの期待値が動くのは検査能力の低下でしかない
+   *   (e2e/countdown-boost.e2e.ts も同じ理由で黒豹を明示指定している)。
+   *   resultClip: 'off' も同様 — 結果カットシーン込みの経路は下の
+   *   tbCfg({ resultClip: 'result-panther' }) が別に覆っている。
+   */
   const tbCfg = (over: Partial<TapBoostRule> = {}): TapBoostConfig => ({
     ...DEFAULT_TAP_BOOST,
-    rules: [{ ...DEFAULT_TAP_BOOST_RULE, giftId: BOOST_GIFT, ...over }],
+    rules: [
+      {
+        ...DEFAULT_TAP_BOOST_RULE,
+        giftId: BOOST_GIFT,
+        introClip: 'intro-panther',
+        countClip: 'count-321',
+        loopClip: 'loop-panther',
+        resultClip: 'off',
+        ...over,
+      },
+    ],
   });
   /** ブーストを giftId で有効化した設定(ウィンドウ5秒・倍率5の既定)。 */
   function boostCfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
@@ -4316,7 +4400,7 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       fxDurationMs: PRE + WINDOW,
       valueAfter: 1000,
     });
-    // 既定は resultClip 'off' — 結果カットシーンのフィールドは載らない。
+    // この行は resultClip 'off' — 結果カットシーンのフィールドは載らない。
     expect(s.recentEffects[0]).not.toHaveProperty('boostResultMs');
     expect(s.recentEffects[0]).not.toHaveProperty('boostResultClip');
     // 凍結は清算発表(ロールアップ→着弾)の予算ぶん先まで(resultClip 'off' でも
@@ -4551,6 +4635,47 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       boostResultMs: TAP_BOOST_RESULT_MS,
       boostResultClip: 'result-panther',
     });
+  });
+
+  it('2Hz tick もイベントも無くても、窓の期限タイマーが清算して boost-end を積む', () => {
+    // 清算(settleBoost)は長らく「イベント入口 + 2Hz tick(drainIfChanged)」の
+    // lazy 呼び出しにしか乗っておらず、**タップ窓の期限に自前の時計が無かった**。
+    // 唯一のワンショット(armFreezeTimer)が見ていたのは fxFreezeUntilMs =
+    // 窓終端 + resultMs + BOOST_SETTLE_BUDGET_MS + margin で、清算より最大 8.7 秒
+    // 後ろ。配信終了・切断・リプレイ終了で tick が止まると boost-end がその尺ぶん
+    // 遅れ、モニターの安全弁(窓終端 + BOOST_EXPIRE_MARGIN_MS = 3秒)が先に発火して
+    // 据え置きごと畳むため、清算発表(結果カットシーン → ロールアップ → 着弾)が
+    // 丸ごと出なくなっていた。適用側の担保は e2e/countdown-boost.e2e.ts。
+    vi.useFakeTimers();
+    try {
+      let t = NOW;
+      const e = engine(boostCfg({ tapBoost: tbCfg({ resultClip: 'result-panther' }) }), () => t);
+      let nudged = 0;
+      e.setOnFreezeExpired(() => nudged++);
+      e.start();
+      e.handleEvent(boostGift());
+      cue(e, NOW);
+      t = NOW + PRE + 1000;
+      e.press();
+      // ここから先は drainIfChanged もイベントも一切呼ばない(配信が切れた状況)。
+      t = NOW + PRE + WINDOW + 25;
+      vi.advanceTimersByTime(PRE + WINDOW + 25);
+      const be = e.get().recentEffects.find((x) => x.kind === 'boost-end');
+      expect(be).toMatchObject({
+        amount: -5,
+        boostTapCount: 1,
+        boostResultMs: TAP_BOOST_RESULT_MS,
+        boostResultClip: 'result-panther',
+      });
+      // 清算しただけで凍結はまだ生きている(発表シーケンスの尺ぶん先)。
+      expect(e.get().fxFreezeUntilMs).toBe(
+        NOW + PRE + WINDOW + TAP_BOOST_RESULT_MS + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
+      );
+      // 配信終了後もモニターへ届くよう nudge が飛ぶ(delta の唯一の起点)。
+      expect(nudged).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("testEffect('tapBoost') にも結果段が焼き込まれる(▶実演で結果発表まで試写できる)", () => {
@@ -4913,19 +5038,21 @@ describe('ChallengeEngine — タップブースト(フィーバー)', () => {
       exactName: false,
       multiplier: 1,
       durationSec: 15, // 30 → 上限 15 に clamp
-      introClip: 'intro-panther',
+      // introClip は旧・単一設定に無いキー = 既定へ倒れる(今の既定はねば〜る君)。
+      introClip: 'intro-nebaaru',
       countClip: 'off',
       loopClip: 'loop-panther',
       resultClip: 'result-panther',
       flash: true,
     });
-    // resultClip の未知 id・キー欠損は既定('off')へ
+    // resultClip の未知 id・キー欠損は既定へ。既定値は**導出する** —
+    // ここで見たいのは「未知 id が既定へ倒れる」ことであって、既定が何かではない。
     expect(
       validateChallengeConfig({
         ...structuredClone(DEFAULT_CHALLENGE),
         tapBoost: { ...DEFAULT_TAP_BOOST, resultClip: 'unknown-clip' },
       }).tapBoost.rules[0]?.resultClip
-    ).toBe('off');
+    ).toBe(DEFAULT_TAP_BOOST_RULE.resultClip);
     // キーごと無い旧 settings.json は既定へ
     const legacy = structuredClone(DEFAULT_CHALLENGE) as unknown as Record<string, unknown>;
     delete legacy.tapBoost;

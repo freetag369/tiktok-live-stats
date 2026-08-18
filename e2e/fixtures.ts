@@ -50,7 +50,7 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
   const body = {
     // 無いと from=0 とみなされ migrateChallengeConfig が設定を書き換える。
     // SETTINGS_VERSION と同値にしておくこと(古いままだと移行段が走る)。
-    settingsVersion: 8,
+    settingsVersion: 9,
     eulerApiKey: '',
     hostUniqueId: 'e2e-host',
     waitUntilLive: false,
@@ -228,7 +228,7 @@ export async function openMonitor(app: ElectronApplication, main: Page): Promise
 
 /** モニターの7セグが表示している値。SevenSeg の aria-label が生の数字。 */
 export async function segValue(monitor: Page): Promise<number> {
-  const label = await monitor.locator('.seg-row').getAttribute('aria-label');
+  const label = await monitor.locator('.countdown .seg-row').getAttribute('aria-label');
   return Number(label);
 }
 

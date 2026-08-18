@@ -93,10 +93,40 @@ describe('ChallengeState.fxQueue — 凍結中の演出予告', () => {
     expect(q![0]).toMatchObject({ kind: 'band', nickname: 'gifter' });
     expect(q![1]).toMatchObject({ kind: 'follow', nickname: 'viewer-f1' });
     expect(q![1]!.count).toBeUndefined();
-    // count はモニターの ×N(実際に回る本数 = rouletteReelCount)。
+    // count はモニターの ×N(= 抽選回数。5連なので本数と一致するケース)。
     expect(q![2]).toMatchObject({ kind: 'roulette', nickname: 'まわす人', count: 5 });
     // id は採番済みで相異なる(モニターの行キー = スライドアニメの同一性)。
     expect(new Set(q!.map((w) => w.id)).size).toBe(3);
+  });
+
+  /** 凍結を張ってから連打ルーレットを保留させ、その予告1件を返す。 */
+  function pendingRouletteCue(c: ChallengeConfig, repeatCount: number) {
+    let t = NOW;
+    const e = engine(c, () => t);
+    e.start();
+    e.handleEvent(gift({ diamonds: 30 })); // band 一致 → 凍結
+    t += 1000;
+    e.handleEvent(
+      gift({
+        giftId: '7934',
+        giftName: 'Heart Me',
+        repeatCount,
+        viewer: { userId: 'g2', nickname: 'まわす人' },
+      })
+    );
+    return e.get().fxQueue!.find((w) => w.kind === 'roulette');
+  }
+
+  it('予告の count は ROULETTE_REELS_MAX(20)で頭打ちにしない = 抽選回数', () => {
+    // 47連打はリール20本 + 合算バナーだが、値は47回ぶん動く。予告もそれに揃える —
+    // ここを本数にすると、凍結明けにキュー行へ変わる瞬間に ×20 → ×47 と跳ねる。
+    expect(pendingRouletteCue(cfg({ initialValue: 1000 }), 47)).toMatchObject({ count: 47 });
+  });
+
+  it('「連打でもリールは1本」設定では予告も 1(モニターの ×N と同じ規約)', () => {
+    const c = cfg({ initialValue: 1000 });
+    c.giftRepeatFx = { ...c.giftRepeatFx, rouletteEnabled: false };
+    expect(pendingRouletteCue(c, 47)).toMatchObject({ count: 1 });
   });
 
   it('予告だけの変化でも delta が出る(dirty が立つ)', () => {

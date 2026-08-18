@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Store } from '../../src/worker/store/index';
 import { ReplayAdapter } from '../../src/worker/tiktok/replay-adapter';
 import { ChallengeEngine } from '../../src/worker/challenge';
-import { DEFAULT_CHALLENGE } from '@shared/challenge';
+import { DEFAULT_CHALLENGE, ROULETTE_REELS_MAX, rouletteRemainingCount, rouletteStockCount } from '@shared/challenge';
 import type { NormalizedEvent } from '@shared/events';
 
 /**
@@ -213,6 +213,45 @@ describe('replay — ハートミー', () => {
     expect(rl[0]!.rouletteIndexes).toHaveLength(17);
     expect(rl[0]!.rouletteReels).toBe(17); // 17本とも回る(ROULETTE_REELS_MAX=20 以内)
     expect(rl[0]!.giftCount).toBe(17);
+  });
+
+  it('20本を超える連打でも、演出ストックの ×N は実際の抽選回数を出す', async () => {
+    // モニター右下の ×N が ROULETTE_REELS_MAX(20)で頭打ちになっていた回帰テスト。
+    // 回すリールは20本のままだが、値も ×N も47回ぶん — 残り27回は合算バナーが締める。
+    const sid = newSession();
+    const events = await replay('synth-rose-combo47.ndjson', sid);
+    expect(events.filter((e) => e.kind === 'gift')).toHaveLength(1);
+
+    const base = structuredClone(DEFAULT_CHALLENGE);
+    const engine = new ChallengeEngine(
+      () => ({
+        ...base,
+        enabled: true,
+        roulettes: [
+          ...base.roulettes,
+          { ...base.roulettes[0]!, id: 'rl-rose', label: 'バラ', giftId: '5655', giftName: 'rose', canonical: '' },
+        ],
+      }),
+      () => Date.UTC(2026, 6, 28, 12, 0, 0),
+      () => 0, // 盤面の先頭 = +5
+      Math.random,
+      () => undefined
+    );
+    engine.start();
+    for (const e of events) engine.handleEvent(e);
+
+    const s = engine.get();
+    expect(s.stats.rouletteSpins).toBe(47);
+    expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 235); // +5 ×47
+    const rl = s.recentEffects.filter((e) => e.kind === 'roulette');
+    expect(rl).toHaveLength(1);
+    expect(rl[0]!.rouletteIndexes).toHaveLength(47);
+    expect(rl[0]!.rouletteReels).toBe(ROULETTE_REELS_MAX); // 回るのは20本だけ
+    // 演出ストックの ×N: 1本目は 47、最終リール(at=19)で 28(回転中の1本 + rest 27)。
+    expect(rouletteStockCount(rl[0]!, 0)).toBe(47);
+    expect(rouletteStockCount(rl[0]!, 19)).toBe(28);
+    // 行が消えた直後の合算バナーは「残り27回ぶん」= ×28 との差はちょうど1本。
+    expect(rouletteRemainingCount(rl[0]!, 20)).toBe(27);
   });
 
   it('still draws once per gift when giftRepeatFx.rouletteEnabled is off', async () => {

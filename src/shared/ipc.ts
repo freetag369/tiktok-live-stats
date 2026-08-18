@@ -32,6 +32,12 @@ export type RpcMap = {
    * 表示状態は ChallengeState.rankBoard の有無がそのまま表す。
    */
   'challenge.toggleRank': { p: void; r: D.ChallengeState };
+  /**
+   * お邪魔(タップ封じ)の緊急解除。誤爆した封印を、ランの値・統計・順位を
+   * 一切壊さずに解くための逃げ道 — 停止/リセットを強いると「ボタンを直すために
+   * 配信中のカウントダウンを潰す」ことになる。封印中でなければ何もしない。
+   */
+  'challenge.clearTapLock': { p: void; r: D.ChallengeState };
   /** モニター演出のテスト再生(値・統計は変えない)。設定画面の「▶ モニター」用。 */
   'challenge.testEffect': { p: D.ChallengeTestEffectSpec; r: void };
   /**
@@ -173,6 +179,7 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'challenge.reset': 'worker',
   'challenge.press': 'worker',
   'challenge.toggleRank': 'worker',
+  'challenge.clearTapLock': 'worker',
   'challenge.testEffect': 'worker',
   'challenge.fxCaps': 'worker',
   'challenge.boostCue': 'worker',

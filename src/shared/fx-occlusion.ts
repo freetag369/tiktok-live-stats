@@ -46,7 +46,13 @@ export function maxOcclusion(a: FxOcclusion, b: FxOcclusion): FxOcclusion {
   return OCCLUSION_ORDER.indexOf(a) >= OCCLUSION_ORDER.indexOf(b) ? a : b;
 }
 
-/** 据え置きを持つカットインの種別(MonitorView の 4 ホールドと 1 対 1)。 */
+/**
+ * 据え置きを持つカットインの種別(MonitorView の 4 ホールドと 1 対 1)。
+ *
+ * お邪魔(タップ封じ)は**ここに登録しない**のが意図的な判断 — 封印の見た目は
+ * ChallengeState.tapLock から引く常設 HUD で、幕を張らないしホールドも取らない。
+ * 幕を持たないものを足すとこの 1 対 1 の対応が崩れる。
+ */
 export type FxCutinKind = 'roulette' | 'band' | 'stock-cutin' | 'boost';
 
 /**

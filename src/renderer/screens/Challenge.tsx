@@ -12,12 +12,15 @@ import type {
   StampTriggerConfig,
   TapBoostConfig,
   TapBoostRule,
+  TapLockConfig,
+  TapLockRule,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
   GiftFxBand,
   GiftRepeatFxConfig,
   JoinRouletteConfig,
+  RouletteCountView,
   RoulettePattern,
   RouletteTeaseConfig,
 } from '@shared/dto';
@@ -30,6 +33,8 @@ import {
   STAMP_TRIGGER_RULES_MAX,
   DEFAULT_TAP_BOOST,
   DEFAULT_TAP_BOOST_RULE,
+  DEFAULT_TAP_LOCK,
+  DEFAULT_TAP_LOCK_RULE,
   DEFAULT_GIFT_BAND_FX,
   DEFAULT_GIFT_FULL_CUT,
   DEFAULT_GIFT_REPEAT_FX,
@@ -56,6 +61,10 @@ import {
   TAP_BOOST_LOOP_CLIPS,
   TAP_BOOST_MULT_MAX,
   TAP_BOOST_RULES_MAX,
+  TAP_LOCK_DURATION_MAX_SEC,
+  TAP_LOCK_DURATION_MIN_SEC,
+  TAP_LOCK_MAX_MS,
+  TAP_LOCK_RULES_MAX,
   TAP_BOOST_MULT_MIN,
   TAP_BOOST_RESULT_CLIPS,
   effectiveSeVolume,
@@ -291,7 +300,7 @@ function MonitorTestBtn({
   );
 }
 
-type Tab = 'basic' | 'se' | 'fx' | 'roulette' | 'gifts' | 'comment' | 'helper' | 'boost';
+type Tab = 'basic' | 'se' | 'fx' | 'roulette' | 'gifts' | 'comment' | 'helper' | 'boost' | 'taplock';
 
 const TABS: Array<[Tab, string]> = [
   ['basic', '基本設定'],
@@ -302,6 +311,7 @@ const TABS: Array<[Tab, string]> = [
   ['comment', 'コメント'],
   ['helper', 'お助け'],
   ['boost', 'ブースト'],
+  ['taplock', 'お邪魔'],
 ];
 
 /**
@@ -545,6 +555,9 @@ export function Challenge(): React.JSX.Element {
         {tab === 'boost' ? (
           <BoostSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
         ) : null}
+        {tab === 'taplock' ? (
+          <TapLockSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+        ) : null}
       </div>
     </div>
   );
@@ -641,6 +654,17 @@ function BasicSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
           />
         </label>
         <label className="field">
+          ルーレット中の残り表示
+          <select
+            value={cfg.rouletteCountView}
+            onChange={(e) => onPatch({ rouletteCountView: e.target.value as RouletteCountView })}
+          >
+            <option value="off">出さない</option>
+            <option value="small">小さく(既定)</option>
+            <option value="large">大きく</option>
+          </select>
+        </label>
+        <label className="field">
           照明フラッシュのダイヤ閾値
           <input
             type="number"
@@ -686,6 +710,10 @@ function BasicSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
             ))}
           </select>
         </label>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+        「ルーレット中の残り表示」— ルーレットは画面全体に暗幕を張るので、その間カウントの数字がほとんど読めません。
+        暗幕の手前に残り数を小さく出して読めるようにします(超激アツの全画面動画の間も出ます)。盤面の大きさや演出は変わりません。
       </div>
       <label className="row" style={{ marginTop: 8, cursor: 'pointer' }}>
         <input
@@ -3313,6 +3341,195 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn small" onClick={() => onPatch({ tapBoost: structuredClone(DEFAULT_TAP_BOOST) })}>
           ブースト設定を既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * お邪魔(タップ封じ)。BoostSection の鏡像から映像クリップの選択を落とした形。
+ * **機能スイッチの既定は OFF** — 配信者の主操作そのものを止めるので、うっかり
+ * 有効な状態で配ることはしない(DEFAULT_TAP_LOCK / validateTapLock も同じ向き)。
+ */
+function TapLockSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const tl = cfg.tapLock;
+  const patchTl = (p: Partial<TapLockConfig>): void => {
+    onPatch({ tapLock: { ...tl, ...p } });
+  };
+  const patchRule = (i: number, p: Partial<TapLockRule>): void => {
+    patchTl({ rules: tl.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+  const capSec = Math.round(TAP_LOCK_MAX_MS / 1000);
+
+  return (
+    <>
+      <h3>お邪魔(タップ封じ)</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={tl.enabled} onChange={(e) => patchTl({ enabled: e.target.checked })} />
+        <span>指定ギフトで PUSH を一定時間押せなくする</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        ギフトが届くと、その秒数のあいだ <b>PUSH(クリック / Space / ホットキー / モニターのタップ)が
+        すべて効かなくなります</b>。この間のタップは<b>溜まらずに捨てられます</b>(解除後にまとめて
+        減ることはありません)。<b>お助け・ブーストの次・ルーレットより先</b>に判定され、一致した
+        ギフトは増減規則もカットインも通りません。
+        <b>すでに開いているフィーバーのタップ窓だけは免除</b>され、その窓のタップは通常どおり
+        数えられます(封じの時計は止まりません)。
+        誤爆したときはライブ画面の <b>「お邪魔を解除」</b>ボタンですぐ戻せます(値・統計・順位は
+        そのまま)。停止・リセット・達成・この機能を OFF にしても必ず解除されます。
+      </div>
+
+      {tl.enabled ? (
+        <>
+          {tl.rules.map((r, i) => (
+            <div className="challenge-rule" key={r.id}>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 60 }}
+                title="この行だけ一時的に止めます(下の行の判定は続きます)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.enabled}
+                  onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  有効
+                </span>
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="お邪魔ギフト"
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                対象 giftId
+                <input
+                  type="text"
+                  placeholder="例: 6267"
+                  value={r.giftId}
+                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
+                />
+              </label>
+              <div style={{ width: 150 }}>
+                <label className="field">
+                  ギフト名(IDの保険)
+                  <input
+                    type="text"
+                    value={r.giftName}
+                    placeholder="corgi"
+                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                  />
+                </label>
+                <label
+                  className="row"
+                  style={{ cursor: 'pointer', marginTop: 2 }}
+                  title="オンにするとギフト名が完全に一致したときだけ発動します。オフ(既定)は部分一致です。お邪魔は一致すると配信者がタップできなくなるので、短い名前を使うときは必ずオンにしてください。"
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.exactName}
+                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    完全一致
+                  </span>
+                </label>
+              </div>
+              <label className="field" style={{ width: 110 }}>
+                封じる長さ(秒)
+                <input
+                  type="number"
+                  min={TAP_LOCK_DURATION_MIN_SEC}
+                  max={TAP_LOCK_DURATION_MAX_SEC}
+                  value={r.durationSec}
+                  onChange={(e) => patchRule(i, { durationSec: Number(e.target.value) })}
+                />
+              </label>
+              <label
+                className="field"
+                style={{ width: 110 }}
+                title="0 なら数字は動きません(封じるだけ)。正の数にするとカウントも増えます(妨害)。"
+              >
+                カウント増減
+                <input
+                  type="number"
+                  value={r.amountEach}
+                  onChange={(e) => patchRule(i, { amountEach: Number(e.target.value) })}
+                />
+              </label>
+              <label className="row" style={{ cursor: 'pointer', width: 76 }}>
+                <input
+                  type="checkbox"
+                  checked={r.flash}
+                  onChange={(e) => patchRule(i, { flash: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  フラッシュ
+                </span>
+              </label>
+              <MonitorTestBtn
+                spec={{ kind: 'tapLock', lockId: r.id }}
+                onTest={onTest}
+                busy={testBusy}
+                label="▶ この行"
+                title="モニターウィンドウで、この行の告知バナーだけを実演再生します(giftId 未設定でも確認できます)。実際には封じません・カウント値も変わりません"
+              />
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchTl({ rules: tl.rules.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={tl.rules.length >= TAP_LOCK_RULES_MAX}
+              onClick={() =>
+                patchTl({
+                  rules: [
+                    ...tl.rules,
+                    {
+                      ...structuredClone(DEFAULT_TAP_LOCK_RULE),
+                      id: `lock-${Date.now().toString(36)}-${clipSeq++}`,
+                    },
+                  ],
+                })
+              }
+            >
+              お邪魔を追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {TAP_LOCK_RULES_MAX} 件(現在 {tl.rules.length} 件)
+            </span>
+          </div>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。giftId で当てるのが最も確実です。
+            トリガーが3つとも空の行は何にも一致しません(その行はオフと同じ)。
+            封じ中に同じギフトがもう一度届くと<b>残り時間に加算</b>されますが、
+            <b>合計は最大 {capSec} 秒</b>で頭打ちになります(連打コンボは2本ぶんまで)。
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            モニターには<b>上部に残り秒</b>が出ます。モニターを閉じていても封じは効きます —
+            そのときはライブ画面の PUSH ボタンが紫になり、残り秒とお邪魔した人の名前が出ます。
+            効果音は「効果音」タブの<b>コメント妨害</b>スロットを共用します。
+          </div>
+        </>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn small" onClick={() => onPatch({ tapLock: structuredClone(DEFAULT_TAP_LOCK) })}>
+          お邪魔設定を既定に戻す
         </button>
       </div>
     </>

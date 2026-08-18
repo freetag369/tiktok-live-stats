@@ -63,6 +63,12 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
     // 'boost-end' スロットは着弾の瞬間(stock-full と同型)。ここで鳴らすと
     // 動画音声と二重になる。モニター閉時(プレーンモード)は press 音が個々に
     // 鳴るので無音で整合する。
+    // お邪魔(タップ封じ)の告知は妨害系の専用音を使う。新しい ChallengeSeSlot は
+    // 作らない — スロットを増やすと DEFAULT_SE_SOUNDS / 音量 / miniFx / 設定画面の
+    // 音グリッドまで波及するのに対し、既存の妨害音('comment' = コメント妨害)で
+    // 十分に「やられた」音になる。舞台の直列化中はバナーが出る瞬間にモニターが鳴らす。
+    case 'tap-lock':
+      return stageSynced ? null : 'comment';
     case 'boost-start':
       return null;
     case 'boost-end':

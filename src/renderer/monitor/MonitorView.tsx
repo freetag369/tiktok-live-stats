@@ -35,6 +35,8 @@ import {
   rouletteHeadline,
   rouletteReelPlan,
   rouletteRemainingAmount,
+  rouletteRemainingCount,
+  rouletteStockCount,
   sameRouletteBoard,
   tierForDiamonds,
 } from '@shared/challenge';
@@ -116,7 +118,7 @@ import { playBandBgm, type BgmHandle } from '../lib/bgm';
 import { MiniFx } from './MiniFx';
 import { RouletteFx } from './RouletteFx';
 import { SevenSeg } from './SevenSeg';
-import { countdownClass, segDigits } from './seg-class';
+import { countdownClass, countMirrorClass, segDigits } from './seg-class';
 import { rouletteBannerClass, rouletteScreenClass } from './roulette-class';
 import { LikeGauge } from './LikeGauge';
 import { WakeRow } from './WakeRow';
@@ -1370,6 +1372,41 @@ export function MonitorView(): React.JSX.Element {
   // challenge.boost.tapCount が権威(実演中も worker がウィンドウを持って数える)。
   const shownBoostTap = challenge?.boost?.tapCount ?? 0;
 
+  // ── お邪魔(タップ封じ) ────────────────────────────────────────────────
+  // worker が配るのは**絶対期限だけ**(boost と同じ規約)。残り秒はここで数える。
+  // ホールド(fxHoldDeadlines)は取らない — 幕を張らない常設 HUD なので、舞台にも
+  // anyCutinHold にも一切参加しない(孤児ホールドで pumpStage が固まる事故を作らない)。
+  const tapLock = challenge?.tapLock ?? null;
+  // 依存配列は「封印中か」の真偽値だけ(tapLock そのものは毎 delta で別オブジェクトに
+  // なるので、入れるとタイマーを 2Hz で張り直してしまう)。中身も lockActive しか
+  // 読まないので、これで exhaustive-deps を満たしたまま張り直しは開始/終了の2回だけ。
+  const lockActive = tapLock != null;
+  const [lockNowMs, setLockNowMs] = useState(0);
+  useEffect(() => {
+    if (!lockActive) return;
+    setLockNowMs(Date.now());
+    const t = setInterval(() => setLockNowMs(Date.now()), 250);
+    return () => clearInterval(t);
+  }, [lockActive]);
+  // 期限切れの表示落ちは worker の delta を待たずに済ませる(最大 500ms のズレでも
+  // 「0秒」が居座ると復帰したのに封印中に見える)。倒す向きは常に安全側 =
+  // 「表示が遅れて残る」ことはあっても「解けていないのに解けて見える」ことはない。
+  const lockLeftMs = tapLock != null ? Math.max(0, tapLock.endsAtMs - Math.max(lockNowMs, 0)) : 0;
+  const lockSecs = Math.ceil(lockLeftMs / 1000);
+  const lockShown = tapLock != null && lockLeftMs > 0;
+
+  // 封印中に弾かれたタップの手応え。worker は press を捨てるので effect は積まれず、
+  // 増分を見るこの経路だけが「押したのに効かない」を視聴者と配信者へ伝える。
+  const prevBlocked = useRef(0);
+  const blockedCount = tapLock?.blocked ?? 0;
+  useEffect(() => {
+    const prev = prevBlocked.current;
+    prevBlocked.current = blockedCount;
+    // 減る方向(封印が明けて次の封印が 0 から始まる)では鳴らさない。
+    if (blockedCount <= prev) return;
+    pushShake('shake');
+  }, [blockedCount]);
+
   // ブースト中のタップ検知。press effect はブースト中は積まれない(worker は
   // 数えるだけ)ので、タップの手応えはここが受け持つ — カウンタのパンチは
   // key 再マウント(render 側)、音はこの effect が press スロットで鳴らす。
@@ -1663,9 +1700,10 @@ export function MonitorView(): React.JSX.Element {
   function refreshFxStock(): void {
     // ドレイン側飢餓弁の時刻ラッチはここに相乗りする(全チョークポイントが通る)。
     noteDrainQueues();
-    // ルーレット2キューの spins は resumeAt 起点の残数 — §6b でキューへ戻した
-    // 連鎖の「×N」が、消化済みリールぶんを二重に数えない。
-    const spinsOf = (w: QueuedRoulette): number => rouletteReelPlan(w.e).reels.length - w.resumeAt;
+    // ルーレット2キューの ×N は resumeAt 起点の残数 — §6b でキューへ戻した連鎖が
+    // 消化済みぶんを二重に数えない。ギフトは**抽選回数**(尺の都合で回さない rest 込み)、
+    // 入室と「連打でもリールは1本」設定はリール本数 — 分岐は rouletteStockCount が持つ。
+    const spinsOf = (w: QueuedRoulette): number => rouletteStockCount(w.e, w.resumeAt);
     const v = buildFxStock({
       playing: playingFx.current,
       achievedPending: pendingAchieved.current !== null,
@@ -1678,12 +1716,12 @@ export function MonitorView(): React.JSX.Element {
       joinRoulettes: joinRouletteQueue.current.map((w) => ({
         id: w.e.id,
         nickname: w.e.nickname,
-        spins: spinsOf(w),
+        count: spinsOf(w),
       })),
       roulettes: rouletteQueue.current.map((w) => ({
         id: w.e.id,
         nickname: w.e.nickname,
-        spins: spinsOf(w),
+        count: spinsOf(w),
       })),
       workerQueue: fxQueueRef.current,
     });
@@ -2587,7 +2625,9 @@ export function MonitorView(): React.JSX.Element {
       kind: e.rouletteOrigin === 'join' ? 'join-roulette' : 'roulette',
       id: e.id,
       nickname: e.nickname,
-      remaining: plan.reels.length - at,
+      // キュー行の spinsOf と同じ1本の式(rouletteStockCount)。キュー行 → 先頭行の
+      // 遷移で数字が飛ばない担保はこれだけなので、片方だけ変えないこと。
+      remaining: rouletteStockCount(e, at),
     };
     refreshFxStock();
     // 安全弁: バックグラウンドで onAnimationEnd が来なくても必ず解除して収束させる。
@@ -2844,7 +2884,10 @@ export function MonitorView(): React.JSX.Element {
     // ≤v0.7.7 と完全に同じ値になる。
     const restFrom = cutForAchieved ? at + 1 : plan.reels.length;
     const restAmount = rouletteRemainingAmount(e, restFrom);
-    const restCount = plan.reels.length - restFrom + plan.restCount;
+    // 額と同じスライス権威で数える(手書きの式と完全に同値)。ストックの ×N も
+    // 同じ rouletteRemainingCount 由来なので、行が消える直前の ×N とこの N の差は
+    // 常に「いま回り終えた1本」だけになる。
+    const restCount = rouletteRemainingCount(e, restFrom);
     if (restCount > 0) {
       pushFloat(
         rouletteRestBanner(e, restAmount, restCount),
@@ -3938,6 +3981,32 @@ export function MonitorView(): React.JSX.Element {
         if (cfg) playMini(miniForSlot(cfg.challenge, 'press'), e.amount);
         return;
       }
+      case 'tap-lock': {
+        // お邪魔の告知バナー。**残り秒の HUD 本体は別**(常設オーバーレイ)で、
+        // ここは「誰が何秒ぶん封じたか」を1枚出すだけ。秒数は effect の焼き込み
+        // (tapLockMs)から読む — cfg はモニターでは 120 秒ポーリングで古くなりうる。
+        const secs = Math.max(1, Math.round((e.tapLockMs ?? 0) / 1000));
+        pushFloat(
+          <>
+            <span className="f-amt">{secs}秒</span>
+            {nameLines({
+              ...(e.giftName ? { gift: e.giftName } : {}),
+              who: e.nickname ?? '',
+              act: 'のお邪魔! タップ封じ',
+            })}
+          </>,
+          'bad banner-tap-lock',
+          'tap-lock',
+          {
+            se: 'comment',
+            onShow: () => {
+              if (e.flash) pushFlash('follow');
+              pushShake('shake-strong');
+            },
+          }
+        );
+        return;
+      }
       case 'follow': {
         // フラッシュ・シェイク・粒子・簡易演出・効果音は**バナーと同時**に出す。
         // 連続フォローではバナーが順番待ちに回るので、ここで撃つと光と揺れだけが
@@ -4318,6 +4387,13 @@ export function MonitorView(): React.JSX.Element {
   // useLayoutEffect(classList リプレイ)が担う。ここに足すと二重管理になり、
   // 同方向の連続パンチでアニメーションが再スタートしなくなる。
   const segCls = countdownClass({ status: challenge.status, shownValue, lowThreshold });
+  // ルーレット中の「残り」小窓(.count-mirror)。規則は countdownClass と共有し、
+  // 先頭のクラス名だけ差し替える。**この行は segCls の後ろに置くこと** —
+  // seg-class.spec.ts の配線検査が `const segCls = countdownClass(...);` を
+  // 非貪欲で切り出すので、間に挟むと抽出範囲が変わる。
+  const mirrorCls = countMirrorClass({ status: challenge.status, shownValue, lowThreshold });
+  // cfg 未取得(モニターを開いた直後)は出す方に倒す — 読めないより出しすぎが安全。
+  const countView = cfg?.challenge.rouletteCountView ?? 'small';
 
   return (
     // stage-viewport がウィンドウ全面、stage-scale が 540×960 の固定ステージを
@@ -4791,6 +4867,28 @@ export function MonitorView(): React.JSX.Element {
           </div>
         ) : null}
         {/*
+          お邪魔(タップ封じ)の残り秒。fx-layer 内(z-index:50)なので不透明カット
+          イン動画より必ず手前 — .boost-overlay と同じ手口(monitor.css の .fx-stock
+          節のコメント参照)。z-index は付けない(.monitor-root 直下の mix-blend が
+          壊れる)。ソースは challenge.tapLock(worker 権威)の**絶対期限**だけで、
+          残り秒はこちらで数える。key=lockSecs で毎秒パンチを再生する。
+          reduced-motion でも出す — これは演出ではなく「なぜ数字が動かないのか」の
+          説明であり、消すと配信者も視聴者も理由が分からなくなる。
+        */}
+        {lockShown ? (
+          <div className="tap-lock-overlay">
+            <div className="tap-lock-box">
+              <div className="tap-lock-title">タップ封じ</div>
+              <div className="tap-lock-count" key={lockSecs}>
+                {num(lockSecs)}
+              </div>
+              <div className="tap-lock-label">
+                {tapLock?.nickname ? `${tapLock.nickname} さんのお邪魔` : 'お邪魔中'}
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {/*
           清算発表(パチンコ風「-N」)。roll 中の桁は finishBoostFx の rAF が
           boostSettleAmtRef.textContent へ直書きする — stage が変わると key で
           再マウントされ、React 描画(確定値)に戻る。fly の弾本体は fx.strike の
@@ -4844,6 +4942,32 @@ export function MonitorView(): React.JSX.Element {
             </div>
           ))}
         </div>
+        {/*
+          ルーレット走行中のカウント小窓。**暗幕の手前に出す唯一の手口**は
+          「fx-layer 内・DOM 順で .roulette-screen より後ろ」— 上の FxStockRow /
+          .boost-overlay と同じ(monitor.css の .fx-stock 節のコメント参照)。
+          z-index は付けない(.monitor-root 直下の mix-blend 要素が壊れる。
+          monitor.css の .monitor-root 注意書き・test/unit/fx-backdrop.spec.ts)。
+
+          【序列】fx-layer の**最後尾** = 確定バナー(.floats)・演出ストックより
+          手前。「残数は一次情報なので何があっても読める」というユーザー決定
+          (2026-08-18)。演出ストックが常に最前という従来要件より上に置く。
+
+          7セグ本体(.countdown)は一切触らない — 手前に上げると盤面が数字に
+          隠れて逆効果になり、display:none は fxRef.pointFor(countdownRef) の
+          矩形を潰す。値は本体と同じ shownValue(= heldValue ?? challenge.value)
+          なので、据え置き中も押下追従ぶんは動く =「走行中のタップは演出より
+          優先」がここで初めて視聴者に見える。
+
+          reduced-motion の分岐は要らない — rouletteWillSpin が
+          !prefersReducedMotion() を含むので、そもそも setRoulette されない。
+        */}
+        {roulette && countView !== 'off' ? (
+          <div className={`${mirrorCls}${countView === 'large' ? ' lg' : ''}`}>
+            <span className="cm-label">残り</span>
+            <SevenSeg value={shownValue} digits={digits} />
+          </div>
+        ) : null}
       </div>
     </div>
     </div>

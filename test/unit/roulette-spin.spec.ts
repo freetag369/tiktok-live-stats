@@ -6,7 +6,7 @@ import {
   ROULETTE_FULL_REELS,
   ROULETTE_REELS_MAX,
   ROULETTE_REVEAL_FAST_MS,
-  ROULETTE_REVEAL_MS,
+  ROULETTE_REVEAL_ULTRA_MS,
   ROULETTE_SPIN_FAST_MS,
   ROULETTE_SPIN_ULTRA_MS,
 } from '@shared/challenge';
@@ -40,17 +40,17 @@ describe('ROULETTE_FULL_REELS — フル尺の本数予算', () => {
     expect(ROULETTE_FULL_REELS).toBeLessThanOrEqual(ROULETTE_REELS_MAX);
   });
 
-  it('理論最悪の総尺(15本すべて ultra + 残り5本短縮)は 484_955ms', () => {
+  it('理論最悪の総尺(15本すべて ultra + 残り5本短縮)は 531_455ms', () => {
     // ROULETTE_REELS_MAX の doc に書いた見積りと 1:1。片方だけ動かせないように
     // 数式ごと凍結する(定数を触ったらコメントも直る)。
     // 2026-08-17: 短縮スピン1周期をバナー尺(1600ms)へ揃えたぶん +1.25 秒。
-    // 2026-08-18: ultra をカウントダウン式の激熱(24秒 → 30.897秒)にしたぶん +103.5 秒。
+    // 2026-08-18: ultra をカウントダウン式の激熱(24秒 → 31.897秒)+ 確定見せ 3 秒で +150 秒。
     //   実勢はこれより遥かに短い(ultra は 1.6%/スピン)が、**理論最悪が 8 分を超えた**
     //   ことは覚えておくこと — 達成(CLEAR)の打ち切りが効かない経路を作ると刺さる。
-    const full = ROULETTE_FULL_REELS * (ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_MS);
+    const full = ROULETTE_FULL_REELS * (ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_ULTRA_MS);
     const fast =
       (ROULETTE_REELS_MAX - ROULETTE_FULL_REELS) * (ROULETTE_SPIN_FAST_MS + ROULETTE_REVEAL_FAST_MS);
-    expect(full + fast).toBe(484_955);
+    expect(full + fast).toBe(531_455);
   });
 });
 

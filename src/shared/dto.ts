@@ -937,6 +937,63 @@ export interface TapBoostConfig {
   rules: TapBoostRule[];
 }
 
+/**
+ * お邪魔(タップ封じ)の1行。tapBoost の**鏡像** — あちらが「押すほど効く」なら
+ * こちらは「押させない」。トリガーの3フィールドと exactName の規約は TapBoostRule と
+ * 同じなので、matchTapLock は matchTapBoost の複製でよい。
+ */
+export interface TapLockRule {
+  /** 行の識別子。UI の key と行ごとの実演(ChallengeTestEffectSpec.lockId)の対象特定に使う。 */
+  id: string;
+  /** 設定画面の行見出し。表示専用でマッチには使わない。 */
+  label: string;
+  enabled: boolean;
+  /** トリガーギフトの giftId 直接一致。ライブ経路の本線(TapBoostRule と同じ理由)。 */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  /**
+   * giftName の照合を**完全一致**にする(既定 false = 部分一致)。**誤爆の代償は
+   * ブーストより更に大きい** — 一致すると配信者のタップそのものが止まる。短い
+   * ギフト名を使うときは必ず立てるか、giftId で当てること。
+   */
+  exactName: boolean;
+  /** 封印の長さ(秒)。既定 30・clamp は TAP_LOCK_DURATION_MIN_SEC〜MAX_SEC。 */
+  durationSec: number;
+  /**
+   * トリガーギフト1個あたりのカウント増減量。既定 0 = **値は動かさない**
+   * (tapBoost のトリガーギフト規約と同じ)。正 = 妨害(増える)。
+   */
+  amountEach: number;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+}
+
+/**
+ * お邪魔(タップ封じ)の設定。**上から順に評価し、最初に一致した1行だけ**を使う
+ * (tapBoost / giftFullCut / roulettes と同じ先勝ち)。
+ *
+ * 機能 enabled の既定は **false**(周辺機能の「既定 true」とは逆)。アプリの主操作
+ * そのものを殺す機能なので、キー欠損の既定フォールバックで勝手に有効化されては
+ * ならない — validate 側も `=== true` で読む(challenge.ts の真偽値の向きの規約)。
+ */
+export interface TapLockConfig {
+  /** 機能全体のスイッチ。false で全行が止まる(行ごとの enabled とは別)。 */
+  enabled: boolean;
+  rules: TapLockRule[];
+}
+
+/**
+ * ルーレット走行中の「残り」小窓の出し方。既定は 'small'。
+ * 見え方の実装は monitor.css の .count-mirror 節を参照。
+ */
+export type RouletteCountView = 'off' | 'small' | 'large';
+
+/** 設定 UI と欠損フォールバックが共有する候補一覧(順序はそのまま選択肢の並び)。 */
+export const ROULETTE_COUNT_VIEWS: readonly RouletteCountView[] = ['off', 'small', 'large'];
+
 export interface ChallengeConfig {
   enabled: boolean;
   /** モニターの見出し。例「0まで寝ない」。 */
@@ -1033,6 +1090,13 @@ export interface ChallengeConfig {
   wakeTime: string | null;
   /** 残数がこの値以下になるとモニターの数字が点滅する。 */
   lowThreshold: number;
+  /**
+   * ルーレット走行中にモニターへ出す「残り」の小窓。ルーレットは全面の暗幕
+   * (rgba(5,3,10,.8))と ultra の全画面動画で7セグを覆うので、暗幕の手前に
+   * 数字のコピーを出さないと最長 31 秒ほど残数が読めなくなる。
+   * 'off' = 出さない / 'small' = 隅に小さく(既定)/ 'large' = 大きく。
+   */
+  rouletteCountView: RouletteCountView;
   /** 演出(press/follow/like/gift/achieved)の効果音を鳴らす。 */
   seEnabled: boolean;
   /** 効果音の音量 0-100。 */
@@ -1084,6 +1148,13 @@ export interface ChallengeConfig {
    * 一致したギフトは増減規則を通らない(matchTapBoost — fanStamp と同じ先勝ち規約)。
    */
   tapBoost: TapBoostConfig;
+  /**
+   * お邪魔(タップ封じ)。fanStamp・tapBoost の**次・ルーレットより先**に評価され、
+   * 一致したギフトは増減規則を通らない(matchTapLock — tapBoost と同じ先勝ち規約)。
+   * tapBoost より後ろなのは、同じ giftId を両方に登録してしまったときに
+   * 「ブーストが勝つ」ほうが安全側だから(封印が勝つと配信者のボタンが死ぬ)。
+   */
+  tapLock: TapLockConfig;
 }
 
 /** 指定コメント妨害の1規則。keyword はコメント本文への部分一致(大文字小文字無視)。 */
@@ -1148,6 +1219,7 @@ export interface ChallengeEffect {
     | 'roulette'
     | 'boost-start'
     | 'boost-end'
+    | 'tap-lock'
     | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
@@ -1181,6 +1253,18 @@ export interface ChallengeEffect {
    * 「effect 1件で自己完結」の流儀で worker が焼き込む。
    */
   fanStamp?: true;
+  /**
+   * kind='tap-lock': 焼き込んだ封印の総尺(ms)。rouletteSegments と同じ
+   * 「effect 1件で自己完結」の流儀 — モニターの cfg は 120 秒ポーリング(CFG_POLL_MS)で
+   * 古くなりうるので、発動時点の設定を worker が焼き込む。
+   */
+  tapLockMs?: number;
+  /**
+   * kind='tap-lock': 封印の絶対期限(ms)。凍結ドレインで遅れて再生されても残り秒が
+   * 正しくなるよう、尺ではなく期限も載せる。**権威は ChallengeState.tapLock** で、
+   * こちらは告知バナー1枚を自己完結させるための焼き込み。
+   */
+  tapLockUntilMs?: Ms;
   /**
    * kind='roulette': 盤面(表示順の出目の絶対値リスト)。モニターの設定取得は
    * 120秒ポーリング(CFG_POLL_MS)で古くなりうるため、演出は cfg からではなくここから盤面を
@@ -1444,6 +1528,16 @@ export type ChallengeTestEffectSpec =
    * join は入室ルーレット(cfg.joinRoulette)の試写 — rouletteId より優先。
    */
   | { kind: 'roulette'; rouletteId?: string; pattern?: RoulettePattern; join?: true }
+  /**
+   * お邪魔(タップ封じ)。設定中の durationSec/flash をそのまま使って告知バナーを
+   * 実演する — fanStamp / tapBoost と同じくトリガー一致は評価しない。
+   * **実際には封印しない**(testEffect の規約どおり値・統計・状態には触れない)。
+   */
+  | {
+      kind: 'tapLock';
+      /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
+      lockId?: string;
+    }
   | { kind: 'achieved' };
 
 /**
@@ -1669,6 +1763,15 @@ export interface ChallengeState {
    * 空のときはキーごと省く(2Hz の delta を太らせない)。
    */
   fxQueue?: ChallengeFxQueueItem[];
+  /**
+   * お邪魔(タップ封じ)中だけ載る。boost と同じ規約で**絶対時刻のみ**を配り、
+   * 非封印時はキーごと省く(残り秒は受け手が endsAtMs から計算する)。
+   *
+   * blocked は弾いたタップの累計。press RPC は session.nudgeChallengeCoalesced を
+   * 通るので、押すたびに即時 delta で配られる — 「押したのに効かない」手応えを
+   * モニターへ届ける唯一の経路。
+   */
+  tapLock?: { startsAtMs: Ms; endsAtMs: Ms; blocked: number; nickname?: string; label?: string };
 }
 
 /**
@@ -1682,7 +1785,15 @@ export interface ChallengeFxQueueItem {
   kind: 'band' | 'boost' | 'roulette' | 'follow';
   /** 行為者(viewer.nickname ?? displayId)。 */
   nickname?: string;
-  /** 連続ぶんの総回数(ルーレットのスピン数/カットインの反復数)。省略 = 1。 */
+  /**
+   * 連続ぶんの総回数。省略 = 1。**種別で単位が違う**(FxStockItem.count と同じ規約):
+   * - roulette: **抽選回数**(実際に回るリール本数ではない)。ただし
+   *   giftRepeatFx.rouletteEnabled = false で本数が1に絞られる設定では 1。
+   *   凍結明けにこの予告行がモニターのキュー行へ入れ替わっても ×N が飛ばないよう、
+   *   rouletteStockCount と同じ規約に揃えてある。入室ルーレットは常に1抽選なので載らない
+   * - band: カットインの反復回数
+   * - follow: 1 effect = 1人なので載らない
+   */
   count?: number;
 }
 
@@ -1726,6 +1837,11 @@ export interface ChallengeLogEntry {
   boostMultiplier?: number;
   /** kind='boost-end': 溜めたタップ回数(effect からそのまま引き継ぐ)。 */
   boostTapCount?: number;
+  /**
+   * kind='tap-lock': 封印の尺(ms)。likeEvery/likeStep と同じ理由で effect から
+   * 引き継ぐ — 表示時に設定を読み直すと、秒数を変えた瞬間に過去のログまで書き換わる。
+   */
+  tapLockMs?: number;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────
@@ -1762,8 +1878,13 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  * 8: お助けのスタンプトリガーの既定行15件を追加(migrateChallengeStampTriggers)。
  *    v0.7.7 までの既定は空配列だったので、stampTriggers キーを既に持っている
  *    保存済み設定には既定の変更が届かない。配るのは STAMP_TRIGGER_RULES_V8 だけ。
+ * 9: タップブーストの既定行を黒豹(723500・限定ギフトで実質受け取れない)から
+ *    ねば〜る君(14463)へ**差し替え**(migrateChallengeTapBoostNebaaru)。
+ *    足す移行ではなく寄せ替えなので、旧既定と完全に同じ boost-1 行だけを触り、
+ *    倍率・ウィンドウ秒・並び順・ユーザーが編集した行には一切触れない。
+ *    黒豹のクリップはカタログに残るので設定画面から選び直せる。
  */
-export const SETTINGS_VERSION = 8;
+export const SETTINGS_VERSION = 9;
 
 export interface AppSettings {
   eulerApiKey: string;

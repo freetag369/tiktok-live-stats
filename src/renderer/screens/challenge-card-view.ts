@@ -21,8 +21,18 @@ export interface ChallengeCardView {
   hasRun: boolean;
   /** モニターに全画面ランキングが出ているか(rankBoard の有無がそのまま表示状態)。 */
   rankShown: boolean;
-  /** PUSH を押せるか。 */
+  /** PUSH を押せるか。**お邪魔(タップ封じ)中は false**(worker も弾く)。 */
   pushEnabled: boolean;
+  /**
+   * お邪魔(タップ封じ)中か。判定は絶対期限と nowMs の比較で、worker の
+   * tapLock キーの有無だけを見ない — 期限切れの古いスナップショットが後着しても
+   * ボタンが灰色に固着しないようにするため(この層が担当する事故そのもの)。
+   */
+  tapLocked: boolean;
+  /** お邪魔の残り(ms)。非封印なら null。負にはしない。 */
+  tapLockRemainingMs: number | null;
+  /** お邪魔を発動させた視聴者の表示名(分かれば)。 */
+  tapLockNickname: string | null;
   /** 「モニター未表示 — 演出が出ていません」を出すか。 */
   warnMonitorClosed: boolean;
   title: string;
@@ -48,6 +58,12 @@ export function challengeCardView(
   const hasRun = challenge?.startedMs != null;
   const value = challenge?.value ?? cfg.initialValue;
   const initial = challenge?.initialValue ?? cfg.initialValue;
+  // お邪魔(タップ封じ)。worker が唯一の判定者だが、PUSH を灰色にして残り秒を
+  // 出すのはここ — モニターを閉じている配信者にとっては**これが唯一の説明**になる
+  // (封印は演出ではなくゲームのルールなので、モニターの有無に関わらず効く)。
+  const lock = challenge?.tapLock ?? null;
+  const tapLockRemainingMs = lock != null ? Math.max(0, lock.endsAtMs - nowMs) : null;
+  const tapLocked = tapLockRemainingMs != null && tapLockRemainingMs > 0;
   return {
     status,
     running,
@@ -55,7 +71,10 @@ export function challengeCardView(
     badge: running ? '進行中' : achieved ? '達成!' : hasRun ? '一時停止中' : '停止中',
     hasRun,
     rankShown: challenge?.rankBoard != null,
-    pushEnabled: running,
+    pushEnabled: running && !tapLocked,
+    tapLocked,
+    tapLockRemainingMs,
+    tapLockNickname: lock?.nickname ?? null,
     // 走行中なのにモニターが閉じている = 演出が誰にも見えていない。閉じたままの
     // 配信を1本まるごと無演出で終えるのを防ぐための警告。
     warnMonitorClosed: running && !monitorOpen,

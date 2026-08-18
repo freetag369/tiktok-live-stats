@@ -8,7 +8,13 @@
  * **再生中の演出は先頭行として残す**(ユーザー指定)。キュー時と同じ key
  * (`roulette:${id}` / `band:${id}`)を使うので、FLIP はキュー行→再生中行の遷移を
  * 「同じ行が先頭へ滑る」として見せ、連続ルーレット/連続ギフトの残数(×N)は
- * スピン/ショットを消費するたび同じ行の上で減っていく。
+ * 消費するたび同じ行の上で減っていく。
+ *
+ * **ギフトルーレットの ×N は「抽選回数」であって「回すリールの本数」ではない**
+ * (rouletteStockCount)。47連打は ×47 から減り、**1 まで落ちずに ×28 で行が消える** —
+ * 21本目以降(ROULETTE_REELS_MAX 超過)は回さずに合算バナー1枚で締める設計なので、
+ * 残り27回はバナーが引き取る。入室ルーレットと「連打でもリールは1本」設定だけは
+ * 従来どおり本数(= 舞台を占有する演出の数)。
  *
  * 並び順: playing → clear → 以降は **fx-priority.ts の序列**(STOCK_KIND_PRIORITY
  * 経由で導出)→ workerQueue。順序リテラルをここに直書きしない — ドレインの
@@ -68,8 +74,12 @@ export interface FxStockQueuedRef {
 }
 
 export interface FxStockRouletteRef extends FxStockQueuedRef {
-  /** スピン本数(rouletteReelPlan(e).reels.length)。 */
-  spins: number;
+  /**
+   * ×N に出す残数(`rouletteStockCount(e, resumeAt)`)。ギフトは**抽選回数**
+   * (回さない rest 込み)、入室と「連打でもリールは1本」設定はリール本数。
+   * スピン本数ではないので `reels.length` を直接渡さないこと。
+   */
+  count: number;
 }
 
 export interface FxStockBandRef extends FxStockQueuedRef {
@@ -97,7 +107,10 @@ export interface FxStockItem {
   kind: FxStockKind;
   /** 行為者。clear は個人データを持たないので '' = ラベルのみ行。 */
   name: string;
-  /** 総回数(連続ルーレットのスピン数/連続ギフトの反復数)。表示は 2 以上で「×N」。 */
+  /**
+   * 残数。**種別で単位が違う** — ルーレットは回数(rouletteStockCount)、ギフト
+   * カットインは反復数、ブースト/CLEAR/フォローは常に 1。表示は 2 以上で「×N」。
+   */
   count: number;
   /** 再生中の先頭行(スタイル強調用)。 */
   playing: boolean;
@@ -106,8 +119,16 @@ export interface FxStockItem {
 export interface FxStockView {
   /** 表示するメイン行(≤ FX_STOCK_DISPLAY_MAX、再生中の行を含む)。 */
   items: FxStockItem[];
-  /** 表示しきれなかったメイン行数(+N)。0 = 溢れなし。 */
+  /** 表示しきれなかったメイン行**数**(「ほか N 件」)。0 = 溢れなし。 */
   overflow: number;
+  /**
+   * 溢れ行のうち**ルーレット種別の count 合計**(「計 N 回」)。0 = 溢れにルーレットなし。
+   *
+   * 行数だけだと「ほか3件」に 47連打が沈んでも規模が読めない。合計をルーレットに
+   * 限るのはユーザー決定 — count は種別で単位が違う(FxStockItem.count 参照)ので、
+   * 素朴に全種別を足すと反復数やブーストの 1 が混ざった数を「回」と称することになる。
+   */
+  overflowRouletteTotal: number;
 }
 
 export interface FxStockSnapshot {
@@ -126,7 +147,7 @@ export interface FxStockSnapshot {
   workerQueue: ChallengeFxQueueItem[];
 }
 
-export const EMPTY_FX_STOCK: FxStockView = { items: [], overflow: 0 };
+export const EMPTY_FX_STOCK: FxStockView = { items: [], overflow: 0, overflowRouletteTotal: 0 };
 
 export function buildFxStock(s: FxStockSnapshot): FxStockView {
   const all: FxStockItem[] = [];
@@ -164,7 +185,7 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
           key: `${kind}:${r.id}`,
           kind,
           name: r.nickname ?? '',
-          count: Math.max(1, r.spins),
+          count: Math.max(1, r.count),
           playing: false,
         });
       }
@@ -181,7 +202,31 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
   }
   if (all.length === 0) return EMPTY_FX_STOCK;
   const items = all.slice(0, FX_STOCK_DISPLAY_MAX);
-  return { items, overflow: all.length - items.length };
+  const rest = all.slice(FX_STOCK_DISPLAY_MAX);
+  return {
+    items,
+    overflow: rest.length,
+    overflowRouletteTotal: rest.reduce(
+      (s, it) => (it.kind === 'roulette' || it.kind === 'join-roulette' ? s + it.count : s),
+      0
+    ),
+  };
+}
+
+/**
+ * 溢れ行(`.fxs-more`)の文言。
+ *
+ * **回数が件数を上回るときだけ「計N回」を出す** — 溢れが全部単発なら「ほか3件 計3回」は
+ * 同じことを二度言っているだけで、230px の1行を浪費する。count は 1 以上に底上げ
+ * 済みなので、この比較は「溢れの中に連打が沈んでいるか」の判定として働く。
+ *
+ * 文言を shared に置くのは buildFxStock と同じ理由 — レンダラのテスト環境が
+ * このリポジトリに無いので、決定を純関数にして node の vitest で固定する。
+ */
+export function fxStockMoreLabel(v: FxStockView): string {
+  return v.overflowRouletteTotal > v.overflow
+    ? `ほか${v.overflow}件 計${v.overflowRouletteTotal}回`
+    : `ほか${v.overflow}件`;
 }
 
 /**
@@ -194,6 +239,7 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
  */
 export function fxStockKey(v: FxStockView): string {
   const parts = v.items.map((it) => `${it.key}~${it.name}~${it.count}~${it.playing ? 1 : 0}`);
-  if (v.overflow > 0) parts.push(`+${v.overflow}`);
+  // 溢れは行数と回数の両方を載せる — 「計N回」だけが動いたときも再レンダーさせる。
+  if (v.overflow > 0) parts.push(`+${v.overflow}~${v.overflowRouletteTotal}`);
   return parts.join('|');
 }

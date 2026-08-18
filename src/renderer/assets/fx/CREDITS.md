@@ -779,10 +779,10 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 
 | 項目 | 値 |
 |---|---|
-| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.5`(モード **オムニリファレンス**・参照画像あり) |
-| 生成日 | 黒豹セット 2026-08-14 / コーギーセット 2026-08-15 |
-| 出力 | 1280×720 (16:9) / 720P / H.264 / **AAC 音声トラックあり**(Dreamina が焼き込む) |
-| 参照画像 | 黒豹: TikTok ギフト「黒豹(限定ギフト)」アイコン / コーギー: `IMAGE/2026081402/S__108421123.jpg`(ギフト「コーギー」アイコン。キャプション帯を切り落として5倍に拡大したものを投入) |
+| 生成サービス / モデル | 黒豹・コーギー: **Dreamina (CapCut)** / `Dreamina Seedance 2.5`(モード **オムニリファレンス**・参照画像あり)<br>ねば〜る君: **Higgsfield** / `seedance_2_5`(`mode: omni_reference`・`image_references`) — **同じ Seedance 2.5 の同じモード**なので絵づくりが揃う |
+| 生成日 | 黒豹セット 2026-08-14 / コーギーセット 2026-08-15 / **ねば〜る君セット 2026-08-18** |
+| 出力 | 1280×720 (16:9) / 720P / H.264 / **AAC 音声トラックあり**(生成サービスが焼き込む) |
+| 参照画像 | 黒豹: TikTok ギフト「黒豹(限定ギフト)」アイコン / コーギー: `IMAGE/2026081402/S__108421123.jpg`(ギフト「コーギー」アイコン。キャプション帯を切り落として5倍に拡大したものを投入) / ねば〜る君: `IMAGE/S__108527621.jpg`(ギフト「ねば〜る君」アイコン 194×193。`hqdn3d` で JPEG ブロックを均してから5倍 lanczos + 軽い `unsharp`) |
 
 | ファイル | 段 | モチーフ | 尺 |
 |---|---|---|---|
@@ -794,6 +794,10 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 | `count-corgi.mp4` | カウントダウン | コーギー＋ピンク星雲に金の数字 3・2・1 | 3.000 秒 |
 | `loop-corgi.mp4` | タップウィンドウ | 金の「FEVER」＋コーギー＋ピンク星雲 | 15.07 秒 |
 | `result-corgi.mp4` | 結果カットシーン | コーギーが着地して決めポーズ→暗く収束 | 4.000 秒 |
+| `intro-nebaaru.mp4` | 起動カットイン | 琥珀の星雲からねば〜る君が伸び上がって叫ぶ | 5.000 秒 |
+| `count-nebaaru.mp4` | カウントダウン | ねば〜る君＋琥珀星雲に金の数字 3・2・1 | 3.000 秒 |
+| `loop-nebaaru.mp4` | タップウィンドウ | 金の「FEVER」＋ねば〜る君＋金のネバネバ糸 | 16.06 秒 |
+| `result-nebaaru.mp4` | 結果カットシーン | 着地でネバっと潰れ→決めポーズ→暗く収束 | 4.000 秒 |
 
 加工内容:
 - `loop-*.mp4` は**無加工**(Dreamina の書き出しをそのままリネームして格納)。
@@ -801,6 +805,19 @@ ffmpeg -y -i raw.mp4 -filter_complex \
   (Dreamina の出力は 5.056 / 4.064 秒。**頭を詰める** — 見せ場の白金フラッシュ・
   暗転が末尾にあるため)。`-c:v libx264 -crf 18 -pix_fmt yuv420p -r 30 -fps_mode cfr`、
   音声は `-c:a aac -b:a 192k -ar 44100 -ac 2`。
+- **ねば〜る君セット(Higgsfield)は 24fps。** Higgsfield は `duration` 秒の注文に対し
+  **`duration×24+1` フレーム @ 24fps** で返す(`rl/` の8本と同じ挙動)。24fps は
+  5.000 / 4.000 / 3.000 秒を全部割り切るので、**フレーム単位で契約尺ちょうどに切れる**:
+  - `intro-nebaaru` — 5秒注文 → 121f。頭1フレームを落として **120f = 5.000 秒**
+  - `result-nebaaru` — 4秒注文 → 97f。頭1フレームを落として **96f = 4.000 秒**
+  - `count-nebaaru` — モデル下限の4秒注文 → 97f。`start_frame=24:end_frame=96` で
+    **頭をちょうど 1.000 秒**落として **72f = 3.000 秒**(単純に 25f 落とすと 1.0417 秒
+    ズレて、プロンプトで指定した「1秒に1発のパルス」が整数秒から外れる)
+  - `loop-nebaaru` — 16秒注文 → 385f = **16.064 秒**。映像は**ストリームコピー(無加工)**、
+    音声だけ 32kHz → 44.1kHz へ焼き直した。窓上限 15 秒に対し **1.06 秒の余裕**がある
+    (`seedance_2_5` だけ duration 上限が 30 秒なので 16 秒を注文できる。上限 15 秒の
+    モデルだと 15.042 秒 = 余裕 42ms しか取れない)
+  切り出しは `-ss` ではなく `trim=start_frame=` + `settb=1/24,setpts=N`。
 - `count-*.mp4` は**背景だけを生成し、数字 3・2・1 は ffmpeg で後から合成**した。
   AI 動画はフレーム精度の数字を描けないため。数字は PIL で作った RGBA の PNG
   (Segoe UI Black・字高385px・縦グラデ `#FFEAB2`→`#FFB941`・輪郭 `#784900` 11px・
@@ -830,8 +847,12 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 > `seEnabled` のとき `muted` を外し、音量は
 > `effectiveSeVolume(seVolume, seVolumes['boost-start'])` を当てる。
 >
-> 左上に Dreamina の **"AI" ウォーターマーク**が焼き込まれている(全8本共通)。
-> Web UI に非表示オプションが見当たらないため、既存素材と見た目を揃えてそのまま出荷している。
+> 左上に Dreamina の **"AI" ウォーターマーク**が焼き込まれている(**Dreamina 製の8本のみ** —
+> 黒豹4本 + コーギー4本)。Web UI に非表示オプションが見当たらないためそのまま出荷している。
+> **ねば〜る君の4本は Higgsfield 製でウォーターマークが無い**(四隅を 64 フレーム時間平均して
+> 静止物を浮かせる検査で確認済み。`crop=320:110:0:0,format=gray,tmix=frames=64`)。
+> 消す/足すのどちらもせず、混在を許容している — 段はブースト行ごとに選べるので、
+> そもそもテーマを跨いだ組み合わせは起こりうる。
 
 ## 生成プロンプト(全文)
 
@@ -847,15 +868,34 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 - **loop-corgi.mp4**(コーギーFEVER) — High-energy FEVER TIME celebration loop animation, widescreen 16:9, cosmic corgi theme: an adorable glossy 3D cartoon corgi with a big pale pink heart-shaped rear exactly matching the reference image looming large in the background radiating power, swirling hot pink magenta and golden nebula energy, golden lightning arcs, rotating golden light rays, continuous bursts of golden sparks and heart-shaped confetti, and a huge glowing pulsing golden word FEVER at the top of the frame. No coins, no slot machines, no casino imagery, no people. Constant intensity from the first frame to the last frame so it loops seamlessly, no fade in, no fade out, no ending climax. Pure motion graphics. Audio: fast upbeat electronic festival music with taiko drums and bright bells, constant energy suitable for seamless looping, no ending cadence.
 - **result-corgi.mp4**(結果発表・コーギー) — Epic cinematic victory result animation, widescreen 16:9. An adorable glossy 3D cartoon corgi with a big pale pink heart-shaped rear exactly matching the reference image lands in the center of the frame out of a bright golden flash and strikes a proud triumphant pose. A single huge burst of pink and golden god rays sweeps out radially behind it, a dense shower of glowing pink hearts and golden confetti erupts upward and rains down through the frame, two shockwave rings snap outward. The spectacle peaks in the first half, then over the last second the confetti falls away, the rays dim and the frame settles into a calm deep magenta and gold glow with the corgi held proud in the center, ending dark and quiet rather than bright. Pure cinematic motion graphics, no people, no logos, no text, no numbers, no captions. Audio: triumphant fanfare with taiko drum impact and bright bells, decaying to silence in the final half second.
 
+- **intro-nebaaru.mp4**(ねば〜る君の登場) — Epic cinematic space fantasy animation, widescreen 16:9. Deep space background with swirling molten amber, honey gold and caramel orange nebula over a near-black indigo sky, stars and galaxies. A chubby glossy 3D cartoon mascot exactly matching the reference image — a rounded egg-shaped glossy brown body, a tiny stubby stem sprouting from the top of its head, two huge round black eyes with bright white highlights, a small red heart-shaped mouth with a little pink tongue sticking out, a golden-yellow spiral swirl painted on each cheek, two tiny stubby arms at its sides, and a cream-and-white vertically striped lower half with a small blank white label patch on its belly — emerges from a churning cloud of glowing amber goo, stretches upward tall and elastic, snaps back with a squash-and-stretch bounce, fills the frame, then opens its mouth and cries out joyfully toward the camera. The cry sends a golden amber shockwave rippling through space with camera shake, and glowing sticky golden threads stretch outward from its body, twang and snap into showers of honey-gold droplets and sparks, energy building until the final frame ends on a bright golden flare. The label patch on its belly stays completely blank with no writing on it. Ignore the flat grey backdrop of the reference image; it is not part of the character. Pure cinematic motion graphics, no people, no logos, no text, no numbers, no captions. Audio: deep cosmic rumble, one bright comical mascot yell, springy stretching goo sounds, escalating synth riser.
+- **count-nebaaru.mp4**(3・2・1・ねば〜る君 / 背景のみ生成) — Cosmic FEVER countdown background, widescreen 16:9. A chubby glossy 3D cartoon mascot exactly matching the reference image — a rounded egg-shaped glossy brown body, a tiny stubby stem sprouting from the top of its head, two huge round black eyes with bright white highlights, a small red heart-shaped mouth with a little pink tongue sticking out, a golden-yellow spiral swirl painted on each cheek, and a cream-and-white vertically striped lower half — looms large in the center of the frame, radiating power, surrounded by swirling molten amber, honey gold and caramel orange nebula energy over a near-black indigo sky, golden lightning arcs, rising sparks and long glowing sticky golden threads stretching and snapping around it, intensity charging up like the last seconds before an explosion. The mascot is lit only from the rim and from behind so the very middle of the frame stays deep, dark and uncluttered — keep all the bright amber energy pushed out toward the edges of the frame, because a large bright overlay will be composited over the exact center. Strictly NO text, NO numbers, NO letters, NO captions, no people, no coins, no slot machines. Ignore the flat grey backdrop of the reference image; it is not part of the character. Constant escalating energy from first frame to last. Audio: tense escalating riser with deep pulsing heartbeat booms, one pulse per second, springy goo stretch sounds underneath.
+- **loop-nebaaru.mp4**(ねば〜る君FEVER) — High-energy FEVER TIME celebration loop animation, widescreen 16:9, cosmic sticky-gold mascot theme: a chubby glossy 3D cartoon mascot exactly matching the reference image — a rounded egg-shaped glossy brown body, a tiny stubby stem sprouting from the top of its head, two huge round black eyes with bright white highlights, a small red heart-shaped mouth with a little pink tongue sticking out, a golden-yellow spiral swirl painted on each cheek, and a cream-and-white vertically striped lower half — looming large in the background radiating power, swirling molten amber, honey gold and caramel orange nebula energy over a near-black indigo sky, golden lightning arcs, rotating golden light rays, long glowing sticky golden threads stretching and snapping across the frame, continuous bursts of golden sparks and honey-gold droplet confetti, and a huge glowing pulsing golden word FEVER spelled F-E-V-E-R at the top of the frame. The word FEVER is the ONLY text anywhere in the frame — no other letters, no numbers, no captions. No coins, no slot machines, no casino imagery, no people. Ignore the flat grey backdrop of the reference image; it is not part of the character. Constant intensity from the first frame to the last frame so it loops seamlessly, no fade in, no fade out, no ending climax. Pure motion graphics. Audio: fast upbeat electronic festival music with taiko drums and bright bells, constant energy suitable for seamless looping, no ending cadence.
+- **result-nebaaru.mp4**(結果発表・ねば〜る君) — Epic cinematic victory result animation, widescreen 16:9. A chubby glossy 3D cartoon mascot exactly matching the reference image — a rounded egg-shaped glossy brown body, a tiny stubby stem sprouting from the top of its head, two huge round black eyes with bright white highlights, a small red heart-shaped mouth with a little pink tongue sticking out, a golden-yellow spiral swirl painted on each cheek, two tiny stubby arms at its sides, and a cream-and-white vertically striped lower half — drops into the center of the frame out of a bright golden flash, lands with a gooey elastic squash and springs up into a proud triumphant pose. A single huge burst of amber and golden god rays sweeps out radially behind it, a dense shower of honey-gold droplets and glowing caramel confetti erupts upward and rains down through the frame, long sticky golden threads snap outward, two shockwave rings snap outward. The spectacle peaks in the first half, then over the last second the confetti falls away, the rays dim and the frame settles into a calm deep amber and dark indigo glow with the mascot held proud in the center, ending dark and quiet rather than bright. Ignore the flat grey backdrop of the reference image; it is not part of the character. Pure cinematic motion graphics, no people, no logos, no text, no numbers, no captions. Audio: triumphant fanfare with taiko drum impact and bright bells plus one springy goo boing on the landing, decaying to silence in the final half second.
+
+> **ねば〜る君セットのプロンプトだけ 2 つ足してある。** ①`Ignore the flat grey backdrop of
+> the reference image; it is not part of the character.` — 参照画像がギフト一覧のスクショで
+> 背景が濃いグレー(`#2E2E2E`)の板になっており、これを絵の一部と誤認させないため。
+> ②腹の名札は `a small blank white label patch` と**白い無地の札**として書いた —
+> 実物の名札には日本語が入っており、「文字禁止」の指示と矛盾してモデルが崩れた文字を
+> 描くのを避けるため(それでも intro には名札の文字が出たが、キャラの一部として読めるので許容した)。
+> 色テーマは黒豹=紫+金 / コーギー=ホットピンク+金 に対し **ねば〜る君=琥珀+ハニーゴールド**で、
+> 3セットの色相が綺麗に分かれる。固有モチーフの**金色のネバネバ糸**(`sticky golden threads`)は
+> 全面カット `cut-nebaaru` の `stretchy glossy goo strands` と同系で、既存素材と地続きになっている。
+
 `loop-pachinko.mp4` は初代の縦 9:16 素材で、**生成来歴の記録が残っていない**
 (横ステージでは大きくクロップされるため既定では使わない)。
 
-> **結果カットシーンは `result-corgi.mp4` が初の同梱素材。** カタログには
-> `result-panther` も在るが mp4 は未同梱で、選ぶと4秒の暗幕になる
-> (`boostClipUrl` は 0 件許容 glob なので落ちはしない)。黒豹行の既定が
-> `resultClip: 'off'` なのはこのため。
+> **結果カットシーンは `result-corgi.mp4` が初の同梱素材で、`result-nebaaru.mp4` が2本目。**
+> カタログには `result-panther` も在るが mp4 は未同梱で、選ぶと4秒の暗幕になる
+> (`boostClipUrl` は 0 件許容 glob なので落ちはしない)。かつて黒豹行の既定が
+> `resultClip: 'off'` だったのはこのため。**settingsVersion 9 で既定はねば〜る君に
+> 差し替わり、4段すべて素材が揃ったので `resultClip` も実 id を既定にしている。**
 
 > 著作権の注意は `gift/` / `band/` / `cut/` と同じ — TikTok 本家のギフト演出の再現ではなく、
-> アイコンの題材を参照した完全オリジナル。生成物の利用条件は Dreamina (CapCut) の
-> 利用規約に従う。CC0 ではない。**再エンコードした3本は Dreamina が埋める C2PA の
-> コンテンツ来歴(`uuid`/`jumb` ボックス)が落ちている**点に注意。
+> アイコンの題材を参照した完全オリジナル。生成物の利用条件は、黒豹・コーギーは
+> Dreamina (CapCut)、**ねば〜る君は Higgsfield(生成時のプラン: Plus)**の利用規約に従う。
+> どちらも CC0 ではない。**再エンコードした素材は生成サービスが埋める C2PA の
+> コンテンツ来歴(`uuid`/`jumb` ボックス)が落ちている**点に注意
+> (Dreamina の3本 + ねば〜る君の intro / count / result。`loop-nebaaru` は映像
+> ストリームコピーだが `-map_metadata -1` を通しているので同様)。

@@ -12,6 +12,10 @@
  *
  * challenge.spec.ts と分けたのは、こちらが**押下と凍結の交差点だけ**を見る
  * 回帰網だから(challenge-longrun.spec.ts と同じ切り出し方)。
+ *
+ * 【例外】お邪魔(タップ封じ)だけはこの契約を意図的に上書きする — 封印中の押下は
+ * 凍結を素通しせず、値も統計も動かさずに**捨てられる**。封印は演出の遅延ではなく
+ * ゲームの状態そのものだから。その交差点は tap-lock-press.spec.ts が持つ。
  */
 import { describe, expect, it } from 'vitest';
 import {

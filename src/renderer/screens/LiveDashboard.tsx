@@ -400,6 +400,7 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   roulette: '🎰',
   'boost-start': '⚡',
   'boost-end': '⚡',
+  'tap-lock': '🚫',
   achieved: '🏁',
 };
 
@@ -465,6 +466,13 @@ function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
     }
     case 'boost-end':
       return `ブースト終了 タップ×${num(e.boostTapCount ?? 0)}`;
+    case 'tap-lock': {
+      // 秒数は effect に焼き込んだ実尺(tapLockMs)。設定を引き直さない —
+      // 過去のログの文言が設定変更で書き換わらないようにするための規約。
+      const secs = Math.max(1, Math.round((e.tapLockMs ?? 0) / 1000));
+      const label = e.giftName ? `(${e.giftName})` : '';
+      return `お邪魔 タップ封じ ${num(secs)}秒${label}`;
+    }
     case 'achieved':
       return 'カウント 0 に到達';
   }
@@ -680,7 +688,9 @@ function ChallengeCard(): React.JSX.Element | null {
   const st = challenge?.status ?? 'idle';
   const running = st === 'running';
   const achieved = st === 'achieved';
-  useNowTick(running);
+  // 封印中も1秒刻みで描き直す — 残り秒のカウントダウンは worker からの 2Hz delta
+  // ではなく、絶対期限(endsAtMs)を受け手が数えて出す規約(boost と同じ)。
+  useNowTick(running || challenge?.tapLock != null);
   // press 行は表示しない(連打でログが埋まり、いいね到達などの節目が流れてしまう)。
   // データとしては積んだまま、描画時にだけ除く — hideRouletteResultInLog と同じ流儀。
   const visibleLog = log.filter((e) => e.kind !== 'press');
@@ -703,7 +713,13 @@ function ChallengeCard(): React.JSX.Element | null {
   // 画面が読めなくなる。**押した分は失われない**(RPC はポートに積まれ、ループが
   // 空けば全部処理される)ので、状況を1本伝えれば足りる。
   const call = (
-    m: 'challenge.start' | 'challenge.stop' | 'challenge.reset' | 'challenge.press' | 'challenge.toggleRank'
+    m:
+      | 'challenge.start'
+      | 'challenge.stop'
+      | 'challenge.reset'
+      | 'challenge.press'
+      | 'challenge.toggleRank'
+      | 'challenge.clearTapLock'
   ) =>
     void rpc(m, undefined)
       .then(setChallenge)
@@ -731,6 +747,9 @@ function ChallengeCard(): React.JSX.Element | null {
   // モニターに全画面ランキングが出ているか。worker は表示中だけ rankBoard を
   // 載せるので、キーの有無がそのまま表示状態になる(別途フラグを持たない)。
   const rankShown = view.rankShown;
+  // 残り秒は切り上げ — 「残り 0 秒」を1秒間見せるより、最後の1秒を 1 と出す方が
+  // 復帰の瞬間と表示が合う(common.tsx の StatusChip と同じ式)。
+  const lockSecs = Math.ceil((view.tapLockRemainingMs ?? 0) / 1000);
 
   return (
     <div className={`card challenge-card${running || achieved ? ' stuck' : ''}${achieved ? ' cleared' : ''}`}>
@@ -794,17 +813,43 @@ function ChallengeCard(): React.JSX.Element | null {
         <div className="ch-log empty">まだ動きがありません</div>
       ) : null}
 
+      {/* お邪魔(タップ封じ)中は PUSH を灰色にして残り秒を出す。**モニターを閉じて
+          いる配信者にとってはこれが唯一の説明** — 封印は演出ではなくゲームのルール
+          なので、モニターの有無に関わらず効く。 */}
       <button
-        className="challenge-btn"
-        disabled={!running}
+        className={`challenge-btn${view.tapLocked ? ' tap-locked' : ''}`}
+        disabled={!view.pushEnabled}
         onClick={() => call('challenge.press')}
-        title={settings.challenge.hotkey ? `ホットキー: ${settings.challenge.hotkey}` : undefined}
+        title={
+          view.tapLocked
+            ? `お邪魔(タップ封じ)中です${view.tapLockNickname ? ` — ${view.tapLockNickname} さん` : ''}`
+            : settings.challenge.hotkey
+              ? `ホットキー: ${settings.challenge.hotkey}`
+              : undefined
+        }
       >
         PUSH
-        <span className="sub">−{num(settings.challenge.pressStep)}</span>
+        {view.tapLocked ? (
+          <span className="sub">お邪魔中 残り {lockSecs}秒</span>
+        ) : (
+          <span className="sub">−{num(settings.challenge.pressStep)}</span>
+        )}
         {/* ホットキー等こちらのクリック以外で押されたときの手応え。key で毎回再生。 */}
         {hit > 0 ? <i className="hit" key={hit} /> : null}
       </button>
+
+      {/* 誤爆した封印の緊急解除。**確認ダイアログは出さない** — パニックボタンで
+          あり、壊すものが何も無いため(停止/リセットと違いランには一切触れない)。 */}
+      {view.tapLocked ? (
+        <button
+          className="btn small ok"
+          style={{ marginTop: 6 }}
+          onClick={() => call('challenge.clearTapLock')}
+          title="ランの値・統計・順位はそのままに、タップ封じだけを解きます"
+        >
+          お邪魔を解除
+        </button>
+      ) : null}
 
       <div className="row wrap" style={{ marginTop: 8 }}>
         {/* 何時起き。入力途中や不正値では DOM の value が必ず '' になるので、
