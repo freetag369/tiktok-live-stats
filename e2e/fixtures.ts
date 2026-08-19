@@ -89,6 +89,10 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
       hotkey: '',
       wakeEnabled: false,
       lowThreshold: 10,
+      // 最終ゲートは既定オン(欠損は有効へ倒れる)なので明示的に落とす —
+      // lowThreshold 以下へ削るテストの「press 1回 = 1減」の決定性を守る。
+      // ゲートそのものの検証は countdown-final-gate.e2e.ts が有効化する。
+      finalGate: { enabled: false, taps: 30 },
     },
     ...patch,
   };

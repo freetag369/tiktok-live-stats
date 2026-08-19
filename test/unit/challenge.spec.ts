@@ -25,6 +25,10 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   // 「ローザ」に一致した瞬間に 5 秒の凍結を張るので、時間を進めない既存テストの
   // イベントが保留キューへ乗ってしまう。検査するテストだけ fullCutCfg() で有効化する。
   base.giftFullCut.enabled = false;
+  // 最終ゲート(既定オン)も無効にする — 残数 lowThreshold(10)以下の押下が
+  // 「30タップで1減算」に変わり、小さい値で press する既存テストの意味が変わって
+  // しまう。ゲート自体の検査は challenge-final-gate.spec.ts が明示的に有効化する。
+  base.finalGate.enabled = false;
   return { ...base, enabled: true, ...over };
 }
 

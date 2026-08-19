@@ -15,6 +15,7 @@ import type {
   TapBoostRule,
   TapLockConfig,
   TapLockRule,
+  FinalGateConfig,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
@@ -1380,20 +1381,26 @@ export function tapLockActivationCount(repeatCount: number): number {
 export const TAP_LOCK_RULES_MAX = 8;
 
 /**
- * お邪魔1行の既定。giftId は空 — クリエイター固有の値なので既定を置きようがない
- * (fanStamp / tapBoost と同じ判断)。トリガーが3つとも空の行は**どのギフトにも
- * 一致しない**(matchGiftTrigger)ので、enabled: true で配っても既存の settings.json の
- * 挙動は変わらない。
+ * お邪魔1行の既定 = **進撃グローブ**(gift 6007 / 実受信の giftName は `boxing gloves`)。
+ *
+ * giftId を本線にするのは tapBoost / fanStamp と同じ規約。giftName は ID 変更時の保険で、
+ * **ローマ字の実受信名**を入れる — 日本限定ギフトでも giftName はローマ字で届くので
+ * (ねば〜る君 = 14463 / `nebaarukun`)、`'進撃'` のような日本語部分一致を置くと**一度も
+ * 発火しない**(v0.6.0 で全面カット40行が無言で死んだのと同じ罠)。名前は長く固有なので
+ * exactName は false のままでよい(前後の空白ゆれを吸収できる)。
+ *
+ * 機能スイッチ(DEFAULT_TAP_LOCK.enabled)は false のままなので、この行を配っても
+ * 既存の settings.json の挙動は変わらない。
  *
  * DEFAULT_TAP_LOCK.rules[0] とは別に export しているのは DEFAULT_TAP_BOOST_RULE と
  * 同じ理由(noUncheckedIndexedAccess)。
  */
 export const DEFAULT_TAP_LOCK_RULE: TapLockRule = {
   id: 'lock-1',
-  label: '',
+  label: '進撃グローブ',
   enabled: true,
-  giftId: '',
-  giftName: '',
+  giftId: '6007',
+  giftName: 'boxing gloves',
   canonical: '',
   exactName: false,
   durationSec: 30,
@@ -1405,12 +1412,30 @@ export const DEFAULT_TAP_LOCK_RULE: TapLockRule = {
 
 /**
  * お邪魔(タップ封じ)の既定。**機能そのものは既定で OFF** — 配信者の主操作を止める
- * 機能なので、キー欠損のフォールバックで勝手に有効化されてはならない。行は空トリガーの
- * 1行だけ配る(どのギフトにも一致しない)。
+ * 機能なので、キー欠損のフォールバックで勝手に有効化されてはならない。行は進撃グローブの
+ * 1行だけ配り、配信者が設定画面でスイッチを入れた瞬間から使える状態にしておく。
  */
 export const DEFAULT_TAP_LOCK: TapLockConfig = {
   enabled: false,
   rules: [structuredClone(DEFAULT_TAP_LOCK_RULE)],
+};
+
+/**
+ * 最終ゲートの必要タップ数の範囲。下限 2 — taps: 1 は通常挙動と実質同じで
+ * 無意味(1タップで1減算)なので、設定として許さない。
+ */
+export const FINAL_GATE_TAPS_MIN = 2;
+export const FINAL_GATE_TAPS_MAX = 999;
+
+/**
+ * 最終ゲート(ラスト◯◯モード)の既定。enabled: true — 「ラスト10は連打で削り切る」
+ * 演出を出荷時から動かす決定(2026-08-19 ユーザー決定)。保存済み settings.json に
+ * このキーは無いが、欠損が既定へ倒れること自体が移行の代わりになる。
+ * 閾値は独立キーを持たず lowThreshold(既定10)に連動する。
+ */
+export const DEFAULT_FINAL_GATE: FinalGateConfig = {
+  enabled: true,
+  taps: 30,
 };
 
 /**
@@ -1503,6 +1528,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   stampTriggers: structuredClone(DEFAULT_STAMP_TRIGGERS),
   tapBoost: structuredClone(DEFAULT_TAP_BOOST),
   tapLock: structuredClone(DEFAULT_TAP_LOCK),
+  finalGate: { ...DEFAULT_FINAL_GATE },
 };
 
 /**
@@ -2549,6 +2575,25 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     stampTriggers: validateStampTriggers(c.stampTriggers),
     tapBoost: validateTapBoost(c.tapBoost),
     tapLock: validateTapLock(c.tapLock),
+    finalGate: validateFinalGate(c.finalGate),
+  };
+}
+
+/**
+ * 最終ゲート設定の検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(finalGate キー無し)は既定(**有効**・30タップ)へ倒す —
+ * **欠損が既定へ倒れること自体が移行の代わり**(stockCutinVolume と同じ手口)。
+ * 既定 true なので `!== false`(seEnabled と同じ向き。`=== true` にすると既定が反転する)。
+ */
+function validateFinalGate(raw: unknown): FinalGateConfig {
+  const d = DEFAULT_FINAL_GATE;
+  const c = raw as Partial<FinalGateConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return { ...d };
+  const n = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  return {
+    enabled: c.enabled !== false,
+    taps: n(c.taps, d.taps, FINAL_GATE_TAPS_MIN, FINAL_GATE_TAPS_MAX),
   };
 }
 

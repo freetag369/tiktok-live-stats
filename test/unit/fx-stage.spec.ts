@@ -620,3 +620,67 @@ describe('ブースト結果バナーだけの追加間合い', () => {
     );
   });
 });
+
+describe('pickStageNext — フィーバーはギフトカードに先を譲らせる', () => {
+  /**
+   * 「ブースト演出が始まる前に音が 3 秒消える」の土台。先行カットインの終わりに
+   * finishBandFx が出すギフトカード(⑩)が、既に待っているフィーバー(④)より
+   * 先に舞台を取ると、bannerEndAt が +2200ms 伸びて起動カットインがそのぶん遅れる。
+   * worker はギフト着弾の時点で凍結を張っていて SE が全部止まっているので、
+   * その間は完全な無音になる。
+   *
+   * ここは判定側(fx-stage)がもともと正しいことの固定 — 実際に素通ししていたのは
+   * MonitorView の pushFloat の高速路で、その不変条件は
+   * boost-arm-silence.spec.ts が持つ。
+   */
+  const now = 50_000;
+
+  it('ランク比較でドレイン(boost)が勝つ', () => {
+    const s = {
+      hasDrain: true,
+      queuedCount: 1,
+      oldestQueuedAtMs: now, // 出したばかり = 飢餓弁は開かない
+      nowMs: now,
+      lastStarveServeMs: 0,
+      drainBestRank: fxRank('boost'),
+      bannerBestRank: bannerRank('gift-card' as FxBannerKind),
+      oldestDrainWaitingSinceMs: now,
+    };
+    expect(bannerWinsByRank(s)).toBe(false);
+    expect(pickStageNext(s)).toBe('drain');
+  });
+
+  it('boost は gift-card より上位(序列が逆転したら気づく)', () => {
+    expect(fxRank('boost')).toBeLessThan(bannerRank('gift-card' as FxBannerKind));
+  });
+
+  it('同ランクなら drain 勝ち(pushFloat の >= タイブレークと同じ向き)', () => {
+    const s = {
+      hasDrain: true,
+      queuedCount: 1,
+      oldestQueuedAtMs: now,
+      nowMs: now,
+      lastStarveServeMs: 0,
+      drainBestRank: fxRank('boost'),
+      bannerBestRank: fxRank('boost'),
+      oldestDrainWaitingSinceMs: now,
+    };
+    expect(bannerWinsByRank(s)).toBe(false);
+    expect(pickStageNext(s)).toBe('drain');
+  });
+
+  it('上位バナー(follow ①)は従来どおり先に出る — 一般化していないことの確認', () => {
+    const s = {
+      hasDrain: true,
+      queuedCount: 1,
+      oldestQueuedAtMs: now,
+      nowMs: now,
+      lastStarveServeMs: 0,
+      drainBestRank: fxRank('boost'),
+      bannerBestRank: bannerRank('follow' as FxBannerKind),
+      oldestDrainWaitingSinceMs: now,
+    };
+    expect(bannerWinsByRank(s)).toBe(true);
+    expect(pickStageNext(s)).toBe('banner');
+  });
+});

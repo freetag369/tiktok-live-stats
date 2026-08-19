@@ -60,6 +60,7 @@ import {
   BANNER_PRIORITY,
   bannerRank,
   fxClassForEffect,
+  fxRank,
   shouldYieldSpinChain,
   strikeClass,
   type FxBannerKind,
@@ -125,6 +126,8 @@ import { MiniFx } from './MiniFx';
 import { RouletteFx } from './RouletteFx';
 import { SevenSeg } from './SevenSeg';
 import { countdownClass, countMirrorClass, segDigits } from './seg-class';
+import { gauntletRing } from './gauntlet-ring';
+import { GauntletRing } from './GauntletRing';
 import { rouletteBannerClass, rouletteScreenClass } from './roulette-class';
 import { LikeGauge } from './LikeGauge';
 import { WakeRow } from './WakeRow';
@@ -310,6 +313,20 @@ const STOCK_CUTIN_ABORT_MS = STOCK_CUTIN_MS + 2000;
  * 遅れへ落とすためだけのポーリング。チェーンと行列が両方ある間しか張られない。
  */
 const STAGE_RECHECK_MS = 400;
+/**
+ * worker の予告(challenge.fxQueue)に boost が居るとき、④より下位のバナーの
+ * 上演を待たせる上限。
+ *
+ * 実配信で一番多い並び「先行カットインの最中にトリガーギフトが着弾」では、
+ * worker の凍結が明けるのは**モニターのカットイン終了より GIFT_FX_FREEZE_MARGIN_MS
+ * (500ms)遅い**。その隙にギフトカード(⑩)が舞台を取ると bannerEndAt が
+ * +2200ms 伸び、起動カットインが 2.7 秒遅れる(実測値)。pendingBoosts はまだ
+ * 空なので pickStageNext からは見えない — 予告を見て短時間だけ待つ。
+ *
+ * 500ms(凍結マージン)+ delta 配送の最悪 ~525ms + 1フレーム ≒ 1.05 秒を飲む値。
+ * 予告が来ないまま消えても、待たされるのはこの上限までで固着しない。
+ */
+const BOOST_INBOUND_HOLD_MS = 1200;
 
 /**
  * ホールド固着の番犬。各ホールド(roulette/band/stockCutin/boost)の解除は自前の
@@ -607,6 +624,12 @@ export function MonitorView(): React.JSX.Element {
    * ('cutin')にしか乗らない** — 読み口は stageWaitFor 1箇所に集約する。
    */
   const boostGapUntil = useRef(0);
+  /**
+   * 「予告のフィーバーを待っている」絶対時刻ラッチ(0 = 待っていない)。
+   * boolean にしないのは舞台ラッチ全般と同じ理由 — 遮蔽でタイマーが落ちても
+   * 「今」が過ぎれば誰も何もしなくても自然に解放される。
+   */
+  const boostInboundHoldUntil = useRef(0);
   const bannerQueue = useRef<QueuedBanner[]>([]);
   /** 舞台を進める唯一のタイマー。常に1本だけ(張り直しは clearBannerTimer 経由)。 */
   const bannerTimer = useRef<number | null>(null);
@@ -1875,10 +1898,36 @@ export function MonitorView(): React.JSX.Element {
     // ラッチの読み取りは必ずクランプを通す(stageBusy / flushPendingFloat と同じ
     // 規律)。素の bannerEndAt を見ると、時計の後方ステップで未来に固着したラッチの
     // せいで free が永久に false になり、**バナーが1枚も即時表示されない**側へ倒れる。
+    //
+    // 【待機中のフィーバーを下位バナーが追い越さない】pumpStage は pickStageNext で
+    // ランク比較するのに、**この高速路だけが素通しで舞台を奪っていた**。実害は
+    // finishBandFx が出すギフトカード(⑩)— 先行カットインの終わりに無条件で
+    // bannerEndAt を +2200ms 伸ばすので、既にキューへ入っているフィーバー(④)の
+    // 起動カットインが「2200 + STAGE_GAP_CUTIN_MS」ぶん遅れる。worker はギフト着弾の
+    // 時点で凍結を張っていて SE が全部止まっているため、この間は**完全な無音**になる
+    // (ユーザー報告「ブースト演出は始まる前に音量が3秒ほど消える」の本体)。
+    // 同ランクは drain 勝ち(bannerWinsByRank のタイブレークと同じ向き)なので >= で見る。
+    // **ブーストに限定する** — 全ドレインへ一般化すると band(⑨)対 gift-card(⑩)にも
+    // 効いて、日常的に出るカットインのバナー順序が広範囲に変わる。
+    //
+    // 【**モニター側のキューだけ見ても足りない**(実測 2724ms で判明)】実配信で
+    // 一番多い並びは「先行カットインの最中にトリガーギフトが着弾」で、このとき
+    // worker は既に凍結しているので activateBoost は pendingOps へ落ちる。
+    // boost-start が届くのは**凍結明け = 尺 + GIFT_FX_FREEZE_MARGIN_MS(500ms)後**で、
+    // モニターの finishBandFx(尺ちょうど)はその 500ms **前**に走る。つまり
+    // ギフトカードを出す瞬間 pendingBoosts はまだ空で、素通しさせると
+    // bannerEndAt が +2200ms 伸びてしまう。
+    // worker の予告(challenge.fxQueue)は**ギフト着弾の時点から** kind:'boost' を
+    // 載せているので、そちらも見る。これで「まだ届いていないが確実に来る」
+    // フィーバーにも道を空けられる。
+    const boostComing =
+      pendingBoosts.current.length > 0 || fxQueueRef.current.some((q) => q.kind === 'boost');
+    const boostOutranks = boostComing && bannerRank(kind) >= fxRank('boost');
     const free =
       bannerQueue.current.length === 0 &&
       !anyCutinHold() &&
       !chainActive() &&
+      !boostOutranks &&
       stageWaitFor('banner', now) === 0;
     if (opts?.immediate === true || free) {
       showBannerNow(item);
@@ -1902,6 +1951,42 @@ export function MonitorView(): React.JSX.Element {
    * 呼ばれるのは: バナー投入 / バナー消滅(タイマー・animationend)/ finish* の
    * ドレイン予約 / 全カットイン終了のウォッチドッグ / delta 到着(2Hz の最後の砦)。
    */
+  /**
+   * 【フィーバー予告の待避】worker の予告(challenge.fxQueue)に boost が居るとき、
+   * ④より下位のバナーの上演を **BOOST_INBOUND_HOLD_MS だけ**待たせる。
+   *
+   * 実配信で一番多い並び「先行カットインの最中にトリガーギフトが着弾」では、
+   * worker の凍結が明けるのがモニターのカットイン終了より GIFT_FX_FREEZE_MARGIN_MS
+   * (500ms)遅い。その隙にギフトカード(⑩)が舞台を取ると bannerEndAt が +2200ms
+   * 伸び、起動カットインが**実測 2.7 秒**遅れる。ブーストはまだ worker の pendingOps
+   * に居て pendingBoosts が空なので、pickStageNext からは見えない。
+   *
+   * **呼ぶのは「バナーを実際に出す直前」の1箇所だけ**(takeNextBanner の手前)。
+   * pick に紐づけてはいけない — finishBandFx は giftImpactVisuals の**後**に
+   * scheduleDrain() するので、その周回の pick は 'drain' になり、ドレインが空振り
+   * したあと**バナーへフォールスルーする**。pick==='banner' だけを見張ると、
+   * この経路がまるごと素通りする(実装中に踏んで実測で判明)。
+   *
+   * 上限は絶対時刻ラッチ。予告が来ないまま消えても固着しない。
+   * 待避を一度使い切ったらラッチは張ったままにする — 予告が生きている限り
+   * 毎回 1.2 秒ずつ止めると、渋滞時のバナー排出が半分以下に落ちるため。
+   */
+  function holdForInboundBoost(nowMs: number, q: QueuedBanner[]): boolean {
+    const best = bestQueuedRank(q, (b) => bannerRank(b.kind));
+    const inbound =
+      fxQueueRef.current.some((x) => x.kind === 'boost') &&
+      best !== null &&
+      best >= fxRank('boost');
+    if (!inbound) {
+      boostInboundHoldUntil.current = 0;
+      return false;
+    }
+    if (boostInboundHoldUntil.current === 0) {
+      boostInboundHoldUntil.current = nowMs + BOOST_INBOUND_HOLD_MS;
+    }
+    return nowMs < boostInboundHoldUntil.current;
+  }
+
   function pumpStage(): void {
     // runDrain → start* → … から同期で戻ってくる経路があるので再入を止める。
     if (pumping.current) return;
@@ -1915,6 +2000,11 @@ export function MonitorView(): React.JSX.Element {
       bannerEndAt.current = clampBannerEndAt(bannerEndAt.current, Date.now());
       boostGapUntil.current = clampBoostGapUntil(boostGapUntil.current, Date.now());
       lastStarveServeAt.current = clampStarveServedAt(lastStarveServeAt.current, Date.now());
+      // 予告待ちラッチも同じ後方ステップ対策(時計が単調な限りは恒等)。
+      boostInboundHoldUntil.current = Math.min(
+        boostInboundHoldUntil.current,
+        Date.now() + BOOST_INBOUND_HOLD_MS
+      );
       // ドレイン側の待機ラッチも同じ後方ステップ対策を通す。未来に固着すると
       // 「now - since」が負のままになり、ドレイン飢餓弁が二度と開かない。
       if (drainWaitingSinceMs.current !== null) {
@@ -1995,6 +2085,9 @@ export function MonitorView(): React.JSX.Element {
       // 飛行中の着弾チェーンは自分の通知(flushPendingFloat)を出し切るまで待つ。
       // チェーンの終端は必ずしも pumpStage を呼ばないので、ここだけ再確認を張る。
       if (chainActive()) return armBannerTimer(STAGE_RECHECK_MS);
+      // 予告のフィーバーへ道を空ける(上限つき)。**ここが唯一の呼び出し点** —
+      // pick に紐づけると drain 空振りのフォールスルーを取り逃す。
+      if (holdForInboundBoost(now, q)) return armBannerTimer(STAGE_RECHECK_MS);
       // 取り出しは「最高ランク・同ランク内は最古」— 到着順(shift)ではない。
       const b = takeNextBanner(q, (x) => bannerRank(x.kind));
       if (b) {
@@ -2890,9 +2983,15 @@ export function MonitorView(): React.JSX.Element {
    * リール境界・連鎖終端の BGM 即断。実際のドレインは scheduleDrain の間合い後
    * だが、音のタイミングは従来と 1:1 に保つためここで先読みする —
    * 次が 'roulette'/'join-roulette'(連鎖の続き)なら鳴りっぱなし、
-   * 'boost'/'band'(カットイン系)なら即断(bandBgm と重ねない)、
-   * strike・バナー勝ち(ランク比較で先にバナーが出る)・idle なら 400ms フェード
-   * (バンドBGMの終端と同じ尺)。
+   * 'band'(自前の BGM を持つカットイン)なら即断(bandBgm と重ねない)、
+   * strike・バナー勝ち(ランク比較で先にバナーが出る)・idle・**boost** なら
+   * 400ms フェード(バンドBGMの終端と同じ尺)。
+   *
+   * **boost が即断でなくフェードなのは**、フィーバーが BGM を持たず音を起動
+   * カットインの mp4 に焼き込んでいるため — 重なる相手が居ないのに即断すると、
+   * 実際の再生開始(最短でも STAGE_GAP_CUTIN_MS 後)までの間が音の崖になる。
+   * stopRouletteSound → BgmHandle.stop は冪等で**フェードを伸ばす方向には
+   * 再入しない**ので、フェード中にブーストが始まっても綺麗に切れる。
    */
   function decideRouletteBgm(): void {
     const q = drainQueuesView();
@@ -2900,9 +2999,9 @@ export function MonitorView(): React.JSX.Element {
     const bannerBest = bestQueuedRank(bannerQueue.current, (b) => bannerRank(b.kind));
     const drainBest = bestDrainRank(q);
     const bannerWins = bannerBest !== null && drainBest !== null && bannerBest < drainBest;
-    if (bannerWins || nextKind === null || nextKind === 'strike') {
+    if (bannerWins || nextKind === null || nextKind === 'strike' || nextKind === 'boost') {
       stopRouletteSound(400);
-    } else if (nextKind === 'boost' || nextKind === 'band') {
+    } else if (nextKind === 'band') {
       stopRouletteSound(0);
     }
     // 'roulette' / 'join-roulette' / 'hot-roulette'(かつバナー非勝ち)は鳴りっぱなし。
@@ -4142,6 +4241,16 @@ export function MonitorView(): React.JSX.Element {
         // 押下の映像演出は出さない。フラッシュは連打で鬱陶しいので元々無し、
         // リング波紋＋火花も非表示にした（連打で画面がうるさいため）。手応えは効果音と、
         // 値の変化側で再生される 7 セグのパンチが受け持つ。
+        // **例外**: 最終ゲート完成(finalGate 印)だけはリング破裂を撃つ —
+        // これは taps 回(既定30)に1回しか来ないので「連打でうるさい」が当たらず、
+        // 満タンまで貯めたリングが弾ける瞬間の見せ場そのもの。
+        if (e.finalGate && fx) {
+          const pt = fx.pointFor(countdownRef.current);
+          if (pt) {
+            fx.ringWave(pt.x, pt.y, { hue: 45, radius: Math.max(pt.w, pt.h) * 0.7 });
+            fx.sparkBurst(pt.x, pt.y, 26, { hue: 45, speed: 620 });
+          }
+        }
         if (cfg) playMini(miniForSlot(cfg.challenge, 'press'), e.amount);
         return;
       }
@@ -4569,6 +4678,10 @@ export function MonitorView(): React.JSX.Element {
   const mirrorCls = countMirrorClass({ status: challenge.status, shownValue, lowThreshold });
   // cfg 未取得(モニターを開いた直後)は出す方に倒す — 読めないより出しすぎが安全。
   const countView = cfg?.challenge.rouletteCountView ?? 'small';
+  // 最終ゲートの進捗リング。gauntlet キーの有無が権威(worker が「アクティブ中だけ
+  // 載せる」規約で組む)。据え置き(heldValue)とは独立に**即時**で動かす —
+  // 演出中でもタップの手応え(目盛り点灯)を殺さない(pressDownTotal 追従と同じ思想)。
+  const ring = gauntletRing(challenge);
 
   return (
     // stage-viewport がウィンドウ全面、stage-scale が 540×960 の固定ステージを
@@ -4614,6 +4727,12 @@ export function MonitorView(): React.JSX.Element {
       ときの切り分け手段が無い。countdownRef は classList 操作と矩形測定にしか
       使われないので、属性を足しても既存のパンチ再生には影響しない。
     */}
+    {/* 最終ゲートの進捗リング — `.countdown` の**前の兄弟**として同じグリッドセルに
+        重ねる(.countdown の中に入れない: overflow:hidden で欠けるし、本体への
+        animation 追加禁止の規約(punch-* との取り合い)にも触れたくない)。
+        前に置くのは描画順のため — どちらも position 付きなので DOM 順に塗られ、
+        リングのトラックが7セグ数字の**背面**に敷かれる(数字の上を弧が横切らない)。 */}
+    {ring ? <GauntletRing ring={ring} /> : null}
     <div
       className={segCls}
       ref={countdownRef}

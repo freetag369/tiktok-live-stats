@@ -276,6 +276,14 @@ export class ChallengeEngine {
    */
   private pressDownTotal = 0;
   /**
+   * 最終ゲート(ラスト◯◯モード)の現ゲートの蓄積タップ(0..taps-1)。
+   * 必要タップ数は保持しない — press のたびに finalGate.taps のライブ値を読む
+   * (lowThreshold と同じ「設定変更が即効く」流儀)。start/stop/reset で 0 に戻し、
+   * 妨害(+N)で閾値を上抜けたときは press 側の遅延評価で捨てる。
+   * ブースト開始では**温存**する(フィーバーはボーナスであり、進捗没収の罰にしない)。
+   */
+  private gauntletTaps = 0;
+  /**
    * お助け(ファンスタンプ)の合算窓の期限。null = 窓なし(次の1件は「先頭」)。
    *
    * LIKE_FX_WINDOW_MS(固定長)と違い**期限を絶対時刻で直接持つ**のは、窓長が
@@ -498,6 +506,8 @@ export class ChallengeEngine {
     this.pendingOps = [];
     this.pendingPressFx = null;
     this.pressDownTotal = 0;
+    // 最終ゲートの蓄積も新ランへ持ち込まない(見えない進捗を跨がせない)。
+    this.gauntletTaps = 0;
     this.fxFreezeUntilMs = null;
     // ブーストも清算せず破棄(pendingOps と同じ判断 — 新ランは素の状態で始める)。
     this.clearBoost();
@@ -543,6 +553,9 @@ export class ChallengeEngine {
     // 押下も同じ — 値は適用済みなので、停止したあとに押下音だけ鳴らさない
     // (pressDownTotal は「ランの累計」なので stop では残す)。
     this.pendingPressFx = null;
+    // 停止で最終ゲートの蓄積は捨てる — stop→start は initialValue から再開する
+    // 意味論なので、見えない進捗を次のランへ跨がせない(clearTapLock と同じ判断)。
+    this.gauntletTaps = 0;
     this.resetFanStampFx();
     this.clearTestBoost();
     // 停止は一時停止だが封印は跨がせない — 再開したら見えないボタンが死んでいる、
@@ -557,6 +570,7 @@ export class ChallengeEngine {
     this.pendingOps = [];
     this.pendingPressFx = null;
     this.pressDownTotal = 0;
+    this.gauntletTaps = 0;
     this.fxFreezeUntilMs = null;
     this.clearBoost();
     this.clearTapLock();
@@ -717,6 +731,75 @@ export class ChallengeEngine {
       });
       return this.get();
     }
+    // ── 最終ゲート(ラスト◯◯モード)────────────────────────────────────────
+    // **この位置が仕様そのもの**なので動かさないこと:
+    //  - ブーストのタップ窓(上の分岐)より**下** = フィーバー中は免除(2026-08-19
+    //    ユーザー決定)。窓の中のタップは従来どおり倍率で即時に効く。
+    //  - tapLock(上)より**下** = 封印中のタップはゲートに蓄積されず捨てられる
+    //    (封印の契約を維持 — 蓄積すると「封印」ではなく「ゲート充填時間」になる)。
+    //  - 起動カットイン(上)より**下** = 3・2・1 中のタップは従来どおり凍結キュー行き。
+    //    「まだ押す時間ではない」の契約をゲートで上書きしない。
+    // ゲート中は 1 タップ = 蓄積 1、taps 到達で**常に 1** 減算(pressStep は使わない —
+    // pressStep>1 だと終盤が数字飛びして「最後の10個を1つずつ削り切る」演出が破綻する)。
+    // 蓄積中は effect を積まない(29発で recentEffects リングを押し流さない —
+    // シネマティックブーストの「数えるだけ」と同じ判断)。進捗は get() の gauntlet が運ぶ。
+    {
+      const fg = this.getConfig().finalGate;
+      const gateActive = fg.enabled && this.value > 0 && this.value <= this.getConfig().lowThreshold;
+      if (!gateActive && this.gauntletTaps > 0) {
+        // 妨害(+N)で閾値を上抜けた / 設定でオフに変わった — 蓄積は捨てる(遅延評価)。
+        // 唯一の未カバーは「上抜け後、一度も押さないまま応援ギフトで再突入」で旧蓄積が
+        // 残るケースだが、配信者が押していない間の話なので実害なし。
+        this.gauntletTaps = 0;
+        this.dirty = true;
+      }
+      if (gateActive) {
+        // presses は全経路で「タップ実数」の規約(ブースト清算も tap 数を加算する)。
+        // 蓄積タップも実タップなので毎回数える。
+        this.stats.presses++;
+        this.gauntletTaps++;
+        if (this.gauntletTaps < fg.taps) {
+          this.dirty = true;
+          return this.get(); // 値は動かさない。effect も積まない(進捗は gauntlet が運ぶ)。
+        }
+        // taps 到達 — 1 だけ減算してゲートを巻き直す。
+        this.gauntletTaps = 0;
+        // クランプ規約(通常経路と同じ)。gateActive が value>0 を保証するが形は揃える。
+        const gateApplied = Math.min(1, this.value);
+        this.value -= gateApplied;
+        this.pressDownTotal += gateApplied;
+        if (this.isFxFrozen()) {
+          // 凍結中は演出だけ畳む(通常経路と同じ規約)。finalGate の印は
+          // 畳み込みで失われるが、破裂演出はゲート完成の1件ずつに出すものなので
+          // 凍結明けの合算1件で鳴らさないのはむしろ正しい。
+          // **ただし幕がまだ上がっていない(アーム済みフィーバー待ち)なら畳まない** —
+          // 重ねる相手が居ないのに黙ると、ゲートを削り切った手応えだけが消える。
+          // maybeAchieve はここでも呼ばない(達成は凍結明けに出す規約を維持)。
+          if (this.fxCurtainUp()) {
+            const fx = (this.pendingPressFx ??= { amount: 0, count: 0 });
+            fx.amount += gateApplied;
+            fx.count++;
+          } else {
+            this.pushEffect({
+              kind: 'press',
+              amount: gateApplied === 0 ? 0 : -gateApplied,
+              finalGate: true,
+              atMs: nowMs,
+            });
+          }
+        } else {
+          this.pushEffect({
+            kind: 'press',
+            amount: gateApplied === 0 ? 0 : -gateApplied,
+            finalGate: true,
+            atMs: nowMs,
+          });
+          this.maybeAchieve(nowMs);
+        }
+        this.dirty = true;
+        return this.get();
+      }
+    }
     // 押下は**凍結を素通しして即時に効く**(applyOrQueue に入れない)。保留キューへ
     // 落としていた頃は、カットイン1本で最長 15 秒・連鎖で最大 45 秒ぶん数字が1も
     // 動かず、配信者からはボタンが死んで見えた。走行中のタップは必ず届くのが約束。
@@ -734,9 +817,17 @@ export class ChallengeEngine {
       this.value -= applied;
       this.stats.presses++;
       this.pressDownTotal += applied;
-      const fx = (this.pendingPressFx ??= { amount: 0, count: 0 });
-      fx.amount += applied;
-      fx.count++;
+      // 幕が上がっている間だけ畳む。アーム済みフィーバーの待ち(最長 60 秒・
+      // ルーレット連鎖の裏なら実測でも十数秒)は**まだ何も映っていない**ので、
+      // 畳む理由(カットインの音と絵に重ねない)が存在しない。
+      // 値・stats・pressDownTotal・達成の先送りは上のまま = 意味論は不変。
+      if (this.fxCurtainUp()) {
+        const fx = (this.pendingPressFx ??= { amount: 0, count: 0 });
+        fx.amount += applied;
+        fx.count++;
+      } else {
+        this.pushEffect({ kind: 'press', amount: applied === 0 ? 0 : -applied, atMs: nowMs });
+      }
       this.dirty = true;
       return this.get();
     }
@@ -1857,6 +1948,16 @@ export class ChallengeEngine {
               },
             }
           : {}),
+      // 最終ゲートがアクティブな間だけ載せる(boost/tapLock と同じ「非アクティブ時は
+      // キーごと省く」規約)。ブーストウィンドウ・起動カットイン中(boostUntilMs 非 null)は
+      // タップがゲート免除なので省く — モニターのリングもフィーバー演出に譲る。
+      ...(cfg.finalGate.enabled &&
+      this.status === 'running' &&
+      this.boostUntilMs === null &&
+      this.value > 0 &&
+      this.value <= cfg.lowThreshold
+        ? { gauntlet: { taps: this.gauntletTaps, needed: cfg.finalGate.taps } }
+        : {}),
       // お邪魔(タップ封じ)中だけ載せる(boost と同じ規約 — 絶対時刻のみ・非封印時は
       // キーごと省く)。blocked は「押したのに効かない」手応えの唯一のソース。
       ...(this.tapLockUntilMs !== null
@@ -1897,6 +1998,38 @@ export class ChallengeEngine {
 
   private isFxFrozen(): boolean {
     return this.fxFreezeUntilMs !== null;
+  }
+
+  /**
+   * **幕が上がっているか**(= 押下の演出を畳む理由が実在するか)。
+   *
+   * fxFreezeUntilMs は無関係な2つの仕事を1つのラッチでやっている:
+   *  - 仕事A(順序): この値・演出を今適用してよいか → **アーム時点で始まる必要がある**
+   *    (applyOrQueue の連打直列化が isFxFrozen() に依存している)
+   *  - 仕事B(舞台の沈黙): 音をぶつける幕が今そこにあるか → **幕が上がった時に始まるべき**
+   * 同じ boolean だと B が最大 BOOST_ARM_MAX_MS(60秒)早く始まり、アーム済みで
+   * まだ何も映っていない間の押下が無音になる(ユーザー報告「ブースト演出は始まる前に
+   * 音量が消える」のタップ音側)。押下は値へ即時に効いているのに手応えだけが無い状態。
+   *
+   * **健全性の根拠**: applyOrQueue は凍結中の critical op を**積むか捨てるかしかしない**
+   * (即時実行の枝が無い)。つまり activateBoost が走れたということはその瞬間 worker は
+   * 非凍結 = 帯域/全面カット/ブーストの幕は出ていない。アーム中に画面へ出られるのは
+   * worker が凍結しないルーレットと ±N バナーだけで、**ルーレット中の押下音は
+   * 今日でも普通に鳴っている**(非凍結なので)— 新しい音の重なり方を1つも増やさない。
+   *
+   * commitBoost / commitArmedBoostIfExpired / plainCommitArmedBoost が armedBoost を
+   * null にした瞬間に「幕が上がった」へ切り替わる。コミットの契機はモニターの実再生開始
+   * (challenge.boostCue)なので、**音の切り替えと映像の開始が構造的に同期する**。
+   *
+   * **使ってよいのは演出(effect)を出すか畳むかの判定だけ。** 値・stats・
+   * pressDownTotal・maybeAchieve の先送りは従来どおり isFxFrozen() で決めること —
+   * こちらへ寄せると、アーム中に 0 へ到達した押下がフィーバー前に CLEAR を出す。
+   *
+   * ※ 将来ルーレットでも凍結を張るようにしたらこの前提が崩れる。必ず見直すこと
+   *   (challenge-boost-arm-audio.spec.ts の「帯域凍結では畳む」が検出器)。
+   */
+  private fxCurtainUp(): boolean {
+    return this.isFxFrozen() && this.armedBoost === null;
   }
 
   /** 凍結期限に合わせてワンショットタイマーを張り直す(null なら外すだけ)。 */

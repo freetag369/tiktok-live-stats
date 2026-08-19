@@ -35,6 +35,9 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   base.tapBoost.enabled = false;
   base.fanStamp.enabled = false;
   base.roulettes = [];
+  // 最終ゲート(既定オン)も落とす — lowThreshold 以下の押下が「N タップで1減算」に
+  // 変わり、クランプ規約を見るこのファイルの press が値を動かさなくなる。
+  base.finalGate.enabled = false;
   return { ...base, enabled: true, ...over };
 }
 

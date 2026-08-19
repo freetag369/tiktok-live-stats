@@ -1176,6 +1176,20 @@ export interface ChallengeConfig {
    * 「ブーストが勝つ」ほうが安全側だから(封印が勝つと配信者のボタンが死ぬ)。
    */
   tapLock: TapLockConfig;
+  /**
+   * 最終ゲート(ラスト◯◯モード)。残数が lowThreshold 以下のとき、タップ経路の
+   * 1減算ごとに taps 回のタップが必要になる。フォロー/いいね/ギフト由来の増減と
+   * フィーバー(タップブースト)ウィンドウ中のタップは対象外。閾値は lowThreshold に連動。
+   */
+  finalGate: FinalGateConfig;
+}
+
+/** 最終ゲート(ラスト◯◯で連打モード)の設定。 */
+export interface FinalGateConfig {
+  /** 発動する。既定 true(欠損キーは既定へ倒れる = 保存済み設定の移行を兼ねる)。 */
+  enabled: boolean;
+  /** 1減算に必要なタップ数。FINAL_GATE_TAPS_MIN..FINAL_GATE_TAPS_MAX。 */
+  taps: number;
 }
 
 /** 指定コメント妨害の1規則。keyword はコメント本文への部分一致(大文字小文字無視)。 */
@@ -1428,6 +1442,12 @@ export interface ChallengeEffect {
   boostMultiplier?: number;
   /** kind='boost-end': 演出中に溜めたタップ回数。amount = -(tapCount × pressStep × multiplier)。 */
   boostTapCount?: number;
+  /**
+   * kind='press': この press が最終ゲートの完成(taps 到達による 1 減算)であること。
+   * モニターのリング破裂演出の唯一のトリガー。蓄積中(1..taps-1)は effect 自体を
+   * 積まないので、press effect の頻度は最終ゲート中むしろ 1/taps に下がる。
+   */
+  finalGate?: true;
   /**
    * kind='boost-start': タップウィンドウの期限(ms)。
    *
@@ -1808,6 +1828,18 @@ export interface ChallengeState {
    * モニターへ届ける唯一の経路。
    */
   tapLock?: { startsAtMs: Ms; endsAtMs: Ms; blocked: number; nickname?: string; label?: string };
+  /**
+   * 最終ゲート(ラスト◯◯モード)がアクティブな間だけ載る。taps = 現ゲートの蓄積
+   * (0..needed-1)、needed = 1減算に必要なタップ数(設定のライブ値)。
+   * 非アクティブ時・ブーストウィンドウ/起動カットイン中はキーごと省く
+   * (boost / tapLock と同じ規約 — フィーバー中のタップはゲート免除)。
+   *
+   * press RPC の他窓への配信は nudgeChallengeCoalesced(80ms 間引き)なので、
+   * 他窓では taps が最大数個まとめて進む — モニターのリングは stroke-dashoffset の
+   * transition で追い付かせる。押下元の窓には press RPC の戻り値で毎タップ届く
+   * (モニター自身も押下元)。
+   */
+  gauntlet?: { taps: number; needed: number };
 }
 
 /**

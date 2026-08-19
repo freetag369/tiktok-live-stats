@@ -279,6 +279,8 @@ describe('封印は演出ではなくゲームのルール', () => {
       endsAtMs: NOW + DUR * 1000,
       blocked: 0,
       nickname: 'なまえ',
+      // 行の表示名(既定は進撃グローブ)。空なら受け手が既定文言を使うのでキーごと省く。
+      label: '進撃グローブ',
     });
     t = NOW + DUR * 1000;
     expect(e.drainIfChanged()!.tapLock).toBeUndefined();

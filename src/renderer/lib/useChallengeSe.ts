@@ -58,11 +58,11 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
     case 'roulette':
       // 舞台の直列化中はリールが実際に回り出す瞬間(startRoulette の at===0)。
       return stageSynced ? null : 'roulette';
-    // ブーストの音はモニターが直接鳴らす: 起動カットインは音声焼き込み動画、
-    // 'boost-start' スロットはタップウィンドウ開始の合図として window 入りの瞬間、
-    // 'boost-end' スロットは着弾の瞬間(stock-full と同型)。ここで鳴らすと
-    // 動画音声と二重になる。モニター閉時(プレーンモード)は press 音が個々に
-    // 鳴るので無音で整合する。
+    // ブーストの**演出**の音はモニターが直接鳴らす: 起動カットインは音声焼き込み
+    // 動画、'boost-start' スロットはタップウィンドウ開始の合図として window 入りの
+    // 瞬間、'boost-end' スロットは着弾の瞬間(stock-full と同型)。これらをここで
+    // 鳴らすと動画音声と二重になる。モニター閉時(プレーンモード)は press 音が
+    // 個々に鳴るので無音で整合する。
     // お邪魔(タップ封じ)の告知は妨害系の専用音を使う。新しい ChallengeSeSlot は
     // 作らない — スロットを増やすと DEFAULT_SE_SOUNDS / 音量 / miniFx / 設定画面の
     // 音グリッドまで波及するのに対し、既存の妨害音('comment' = コメント妨害)で
@@ -70,7 +70,18 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
     case 'tap-lock':
       return stageSynced ? null : 'comment';
     case 'boost-start':
-      return null;
+      // ただし「ギフトが着弾した」音だけは別。トリガーギフトは **gift の effect を
+      // 一切出さない**(worker の giftOp は matchTapBoost に一致した時点で増減規則も
+      // バナーも通さず return する)ので、ここが着弾音の唯一の出どころになる。
+      // 鳴らさないと、ギフトが刺さってから起動カットインが始まるまでが無音になる
+      // (ユーザー報告「ブースト演出は始まる前に音量が3秒ほど消える」の一部)。
+      // 普通のギフトと同じティアスロットを使う — 新しい ChallengeSeSlot を作らないので
+      // DEFAULT_SE_SOUNDS / seVolumes / miniFx / 設定画面の音グリッド /
+      // validateChallengeConfig に波及しない。'boost-start' スロット(タップ開始の合図)
+      // は使わない — 合図が2回鳴って意味が壊れる。
+      // ファンスタンプはこの枝へ来ない(worker が fanStamp を先に判定し、
+      // 一致したら matchTapBoost を評価しないため)。
+      return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
     case 'boost-end':
       return null;
     case 'achieved':

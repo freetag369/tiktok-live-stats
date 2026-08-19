@@ -2,8 +2,8 @@
  * お邪魔(タップ封じ)の設定 — マッチングと検証。
  *
  * tap-boost-rules.spec.ts の鏡像。**キー欠損が既定へ倒れるだけで移行が要らない**
- * ことをここで固定する — 既定の行は空トリガーでどのギフトにも一致せず、機能
- * enabled も false なので、既存の settings.json に何も配らなくても挙動は変わらない。
+ * ことをここで固定する — 既定の行は進撃グローブ(6007)を持つが、機能 enabled が
+ * false なので、既存の settings.json に何も配らなくても挙動は変わらない。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -52,10 +52,19 @@ describe('matchTapLock — 先勝ちとトリガーの解決', () => {
   });
 
   it('トリガーが3つとも空の行はどのギフトにも一致しない(空文字 includes の罠)', () => {
-    // 既定の行はこの状態で配られる — 一致してしまうと「アプリを更新したら
-    // 突然ボタンが押せなくなった」になる。
-    const c = cfg([rule({ id: 'a' })]);
+    // 設定画面の「お邪魔を追加」で増える行は空トリガーで始まる — ここが一致して
+    // しまうと、行を1つ足しただけで全ギフトがボタンを止めることになる。
+    const c = cfg([rule({ id: 'a', giftId: '', giftName: '', canonical: '' })]);
     expect(matchTapLock(c, { giftId: '123', giftName: 'anything' })).toBeNull();
+  });
+
+  it('既定の1行は進撃グローブ(6007 / boxing gloves)に当たる', () => {
+    // giftName はローマ字の実受信名。日本語の '進撃' を置くと一度も発火しない
+    // (ねば〜る君 = nebaarukun と同じ — DEFAULT_TAP_LOCK_RULE のコメント参照)。
+    const c = cfg([structuredClone(DEFAULT_TAP_LOCK_RULE)]);
+    expect(matchTapLock(c, { giftId: '6007' })?.id).toBe('lock-1');
+    expect(matchTapLock(c, { giftId: '0', giftName: 'Boxing Gloves' })?.id).toBe('lock-1');
+    expect(matchTapLock(c, { giftId: '0', giftName: '進撃グローブ' })).toBeNull();
   });
 
   it('ギフト名は既定で部分一致、exactName で完全一致になる', () => {
@@ -76,11 +85,11 @@ describe('validateChallengeConfig — tapLock の検証', () => {
   it('キーが無ければ既定へ倒れる(= 移行が要らない理由)', () => {
     const c = validateChallengeConfig({});
     expect(c.tapLock).toEqual(DEFAULT_TAP_LOCK);
-    // 既定は OFF・空トリガー1行。既存設定の挙動が変わらないことの担保。
+    // 既定は機能 OFF・進撃グローブ1行。既存設定の挙動が変わらないことの担保。
     expect(c.tapLock.enabled).toBe(false);
     expect(c.tapLock.rules).toHaveLength(1);
     expect(c.tapLock.rules[0]!.durationSec).toBe(30);
-    expect(c.tapLock.rules[0]!.giftId).toBe('');
+    expect(c.tapLock.rules[0]!.giftId).toBe('6007');
   });
 
   it('機能 enabled は `=== true` で読む(既定 false — 周辺機能とは逆向き)', () => {

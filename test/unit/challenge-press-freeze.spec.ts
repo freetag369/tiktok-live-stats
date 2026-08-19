@@ -45,6 +45,9 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   base.giftFullCut.enabled = false;
   base.giftBandFx = structuredClone(DEFAULT_GIFT_BAND_FX);
   base.roulettes = [];
+  // 最終ゲート(既定オン)は落とす — lowThreshold 以下の押下の意味が変わり、
+  // 0 到達クランプを見るこのファイルのテストが成立しなくなる。
+  base.finalGate.enabled = false;
   return { ...base, enabled: true, initialValue: 1000, pressStep: 1, ...over };
 }
 

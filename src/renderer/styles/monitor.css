@@ -389,6 +389,69 @@ body {
   }
 }
 
+/*
+ * ── 最終ゲートの進捗リング ────────────────────────────────────────────
+ * `.countdown` の**兄弟**として同じグリッドセル(count)に重ねる。
+ * .countdown 本体には一切触らない — animation は punch-* と取り合うし(上の警告)、
+ * overflow:hidden の中に入れるとトラックの外周が欠ける。
+ * pointer-events: none — モニター画面タップの押下(stage-viewport の
+ * onPointerDown)を遮らない。「走行中のタップは必ず届く」の約束はリングにも優先する。
+ */
+.gauntlet-ring {
+  grid-area: count;
+  position: relative;
+  pointer-events: none;
+  min-height: 0;
+}
+
+.gauntlet-ring svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.gauntlet-ring rect {
+  fill: none;
+  stroke-width: 14;
+  stroke-linecap: butt;
+}
+
+.gr-track {
+  stroke: var(--seg-dim);
+  opacity: 0.35;
+}
+
+.gr-lit {
+  stroke: var(--gold);
+  filter: drop-shadow(0 0 10px rgba(255, 197, 66, 0.6));
+  /* press の他窓配信は 80ms コアレスで目盛りが数個まとめて飛ぶ —
+     dasharray の遷移で「高速で埋まっていく」追い付きアニメに変える。 */
+  transition: stroke-dasharray 120ms linear;
+}
+
+/* 目盛りの区切り — 背景色(ステージは黒)の短い dash を境界に重ね塗りして
+   トラックと点灯分を同時に分節する。個別 DOM を作らないための重ね塗り。 */
+.gr-sep {
+  stroke: #000;
+}
+
+/* タップの脈動 — GauntletRing が key={lit} で再マウントして毎タップ1回光る。 */
+.gr-flash {
+  stroke: #fff;
+  animation: gauntlet-pulse 220ms ease-out forwards;
+}
+
+@keyframes gauntlet-pulse {
+  0% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 .countdown.clear .seg.on {
   fill: var(--gold);
   animation: lowblink 0.6s steps(2, jump-none) 8;

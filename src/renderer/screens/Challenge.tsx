@@ -660,6 +660,28 @@ function BasicSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
             onChange={(e) => onPatch({ lowThreshold: Number(e.target.value) })}
           />
         </label>
+        {/* 最終ゲートの閾値は独立キーを持たず「点滅を始める残数」(lowThreshold)に
+            連動する — 並びで隣に置いて関係を見せる。 */}
+        <label className="field">
+          最終ゲート(点滅残数以下は連打で1ずつ)
+          <select
+            value={cfg.finalGate.enabled ? 'on' : 'off'}
+            onChange={(e) => onPatch({ finalGate: { ...cfg.finalGate, enabled: e.target.value === 'on' } })}
+          >
+            <option value="on">オン(既定)</option>
+            <option value="off">オフ</option>
+          </select>
+        </label>
+        <label className="field">
+          最終ゲートの必要タップ数(1減算あたり)
+          <input
+            type="number"
+            min="2"
+            max="999"
+            value={cfg.finalGate.taps}
+            onChange={(e) => onPatch({ finalGate: { ...cfg.finalGate, taps: Number(e.target.value) } })}
+          />
+        </label>
         <label className="field">
           ルーレット中の残り表示
           <select
