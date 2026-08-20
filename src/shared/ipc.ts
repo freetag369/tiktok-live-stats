@@ -33,6 +33,11 @@ export type RpcMap = {
    */
   'challenge.toggleRank': { p: void; r: D.ChallengeState };
   /**
+   * ルーレット焦らし短縮のトグル(ダッシュボードのライブ操作)。状態は
+   * ChallengeState.rouletteRush の有無がそのまま表す(揮発 — 再起動でオフ)。
+   */
+  'challenge.toggleRouletteRush': { p: void; r: D.ChallengeState };
+  /**
    * お邪魔(タップ封じ)の緊急解除。誤爆した封印を、ランの値・統計・順位を
    * 一切壊さずに解くための逃げ道 — 停止/リセットを強いると「ボタンを直すために
    * 配信中のカウントダウンを潰す」ことになる。封印中でなければ何もしない。
@@ -53,6 +58,12 @@ export type RpcMap = {
    * ずれ、その差を「起動カットインを削る」ことで吸収するしかなくなる。
    */
   'challenge.boostCue': { p: D.ChallengeBoostCue; r: void };
+  /**
+   * アーム済み革命の合図(boostCue の鏡像)。worker はギフト着弾で予約するだけで、
+   * 1分の窓はモニターが導入カットインを実際に再生し始めた瞬間 + 前置き(導入6秒+
+   * カウントダウン5秒)から開く。drop はプレーン即発動へ倒す(効果は破棄しない)。
+   */
+  'challenge.revolutionCue': { p: D.ChallengeRevolutionCue; r: void };
 
   // queries
   'q.viewerTable': { p: { sessionId: number | null } & D.ViewerTableQuery; r: D.Page<D.ViewerTableRow> };
@@ -99,6 +110,14 @@ export type RpcMap = {
    * removed は「ファイルが実際にあって消したか」、cfg は削除後の実効既定。
    */
   'challengeDefault.clear': { p: void; r: { removed: boolean; cfg: D.ChallengeConfig } };
+  /**
+   * カスタム回転音の取込み — ファイル選択ダイアログを開き、選ばれた音声ファイルを
+   * config/sounds/ へコピーして保存名を返す(キャンセルは null)。設定には
+   * `custom:<file>` の形で spinSe に入る(shared/challenge.ts の CUSTOM_SOUND_PREFIX)。
+   * コピー方式なのは、元ファイルの移動・削除で配信中に無音化させないためと、
+   * app-sound:// プロトコルの読み口を config/sounds/ に限定するため。
+   */
+  'sound.importCustom': { p: void; r: { file: string } | null };
   'file.exportCsv': { p: D.CsvExportSpec; r: { path: string; rows: number } | null };
   'file.backup': { p: void; r: { path: string } | null };
   'file.openDataDir': { p: void; r: void };
@@ -179,10 +198,12 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'challenge.reset': 'worker',
   'challenge.press': 'worker',
   'challenge.toggleRank': 'worker',
+  'challenge.toggleRouletteRush': 'worker',
   'challenge.clearTapLock': 'worker',
   'challenge.testEffect': 'worker',
   'challenge.fxCaps': 'worker',
   'challenge.boostCue': 'worker',
+  'challenge.revolutionCue': 'worker',
   'q.viewerTable': 'worker',
   'q.viewer': 'worker',
   'q.recallCard': 'worker',
@@ -213,6 +234,7 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'challengeDefault.save': 'main',
   'challengeDefault.get': 'main',
   'challengeDefault.clear': 'main',
+  'sound.importCustom': 'main',
   'file.exportCsv': 'main',
   'file.backup': 'main',
   'file.openDataDir': 'main',

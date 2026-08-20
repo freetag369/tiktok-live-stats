@@ -39,6 +39,7 @@ export type FxStockKind =
   | 'clear' // CLEAR 演出の持ち越し(pendingAchieved)— 序列外(並走再生)なので常に先頭側
   | 'boost' // フィーバー(pendingBoosts)
   | 'band' // ギフトカットイン(pendingBands — 帯/フルカットとも。表示ラベルは「ギフト」)
+  | 'revolution' // 革命の導入カットイン(pendingRevolutions)
   | 'join-roulette' // 初見(入室)ルーレット(joinRouletteQueue)
   | 'hot-roulette' // 激熱確定ルーレット(hotRouletteQueue)
   | 'roulette' // ギフトルーレット(rouletteQueue)
@@ -52,6 +53,7 @@ export type FxStockKind =
 export const STOCK_KIND_PRIORITY = {
   boost: 'boost',
   band: 'band',
+  revolution: 'revolution', // band と other(ギフトルーレット)の間(2026-08-20 ユーザー決定)
   'join-roulette': 'join-roulette',
   'hot-roulette': 'hot-roulette',
   roulette: 'other',
@@ -91,7 +93,7 @@ export interface FxStockBandRef extends FxStockQueuedRef {
 
 /** 再生中の演出(先頭行)。remaining はいま回している1本を含む残数。 */
 export interface FxStockPlaying {
-  kind: 'roulette' | 'join-roulette' | 'hot-roulette' | 'band';
+  kind: 'roulette' | 'join-roulette' | 'hot-roulette' | 'band' | 'revolution';
   id: number;
   nickname?: string;
   remaining: number;
@@ -141,6 +143,8 @@ export interface FxStockSnapshot {
   boosts: FxStockQueuedRef[];
   /** pendingBands(積む側上限 PENDING_BANDS_MAX)。 */
   bands: FxStockBandRef[];
+  /** pendingRevolutions(積む側上限 PENDING_REVOLUTIONS_MAX)。 */
+  revolutions: FxStockQueuedRef[];
   /** joinRouletteQueue(積む側上限 JOIN_ROULETTE_QUEUE_MAX)。 */
   joinRoulettes: FxStockRouletteRef[];
   /** hotRouletteQueue(積む側上限 ROULETTE_HOT_QUEUE_MAX)。 */
@@ -181,6 +185,10 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
           count: Math.max(1, b.rep),
           playing: false,
         });
+      }
+    } else if (kind === 'revolution') {
+      for (const b of s.revolutions) {
+        all.push({ key: `revolution:${b.id}`, kind, name: b.nickname ?? '', count: 1, playing: false });
       }
     } else {
       const refs =

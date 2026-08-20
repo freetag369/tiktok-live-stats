@@ -8,8 +8,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_CHALLENGE,
+  DEFAULT_TAP_BOOST,
+  DEFAULT_TAP_BOOST_RULE,
   DEFAULT_TAP_LOCK,
   DEFAULT_TAP_LOCK_RULE,
+  TAP_BOOST_DEFERRED_MAX,
   TAP_LOCK_ACTIVATIONS_MAX,
   TAP_LOCK_MAX_MS,
 } from '@shared/challenge';
@@ -284,5 +287,108 @@ describe('封印は演出ではなくゲームのルール', () => {
     });
     t = NOW + DUR * 1000;
     expect(e.drainIfChanged()!.tapLock).toBeUndefined();
+  });
+});
+
+describe('封印中のフィーバーは封印明けへ繰り越す(排他 — 2026-08-20 ユーザー決定)', () => {
+  const BOOST_GIFT = '9999';
+
+  function boostCfg(): ChallengeConfig {
+    const c = cfg();
+    c.tapBoost = {
+      ...structuredClone(DEFAULT_TAP_BOOST),
+      enabled: true,
+      rules: [{ ...structuredClone(DEFAULT_TAP_BOOST_RULE), giftId: BOOST_GIFT }],
+    };
+    return c;
+  }
+
+  function boostGift(): GiftEvent {
+    return lockGift({ giftId: BOOST_GIFT, giftName: 'Boost Gift' });
+  }
+
+  it('封印は打ち切られず満了まで生き、明けた直後にフィーバーがアームされる', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(lockGift());
+    t = NOW + 1000;
+    e.handleEvent(boostGift());
+    // まだ何も始まらない — 封印もそのまま(打ち切らない)。
+    const s1 = e.get();
+    expect(s1.boost).toBeUndefined();
+    expect(s1.recentEffects.some((x) => x.kind === 'boost-start')).toBe(false);
+    expect(s1.tapLock?.endsAtMs).toBe(NOW + DUR * 1000);
+    // 待機中のフィーバーはモニターの演出ストック予告(fxQueue)に出る。
+    expect((s1.fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(1);
+    // 封印明け → 即アーム(boost-start が出る)。
+    t = NOW + DUR * 1000;
+    const s2 = e.drainIfChanged()!;
+    expect(s2.tapLock).toBeUndefined();
+    expect(s2.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1);
+    // fxQueue は空になるとキーごと省かれる規約。
+    expect((s2.fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(0);
+  });
+
+  it('複数本は明けに1本目がアームし、残りは保留キューで直列に待つ', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(lockGift());
+    t = NOW + 1000;
+    for (let i = 0; i < 3; i += 1) e.handleEvent(boostGift());
+    expect((e.get().fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(3);
+    t = NOW + DUR * 1000;
+    const s = e.drainIfChanged()!;
+    // 1本目がアーム(暫定凍結を張る)→ 2・3本目は pendingOps へ落ちて清算後に直列。
+    expect(s.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1);
+    expect((s.fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(2);
+    expect(s.fxFreezeUntilMs).not.toBeNull();
+  });
+
+  it('予約は TAP_BOOST_DEFERRED_MAX で頭打ち(超過は破棄)', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(lockGift());
+    t = NOW + 1000;
+    for (let i = 0; i < TAP_BOOST_DEFERRED_MAX + 2; i += 1) e.handleEvent(boostGift());
+    expect((e.get().fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(TAP_BOOST_DEFERRED_MAX);
+  });
+
+  it('手動解除(clearTapLockNow)でも予約フィーバーは失われず即アームする', () => {
+    let t = NOW;
+    const e = engine(boostCfg(), () => t);
+    e.start();
+    e.handleEvent(lockGift());
+    t = NOW + 1000;
+    e.handleEvent(boostGift());
+    expect(e.clearTapLockNow()).toBe(true);
+    const s = e.get();
+    expect(s.tapLock).toBeUndefined();
+    expect(s.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1);
+  });
+
+  it('start / reset / stop / 機能OFF は予約ごと畳む(幽霊フィーバーを作らない)', () => {
+    for (const act of ['start', 'reset', 'stop', 'off'] as const) {
+      let t = NOW;
+      const c = boostCfg();
+      const e = engine(c, () => t);
+      e.start();
+      e.handleEvent(lockGift());
+      t = NOW + 1000;
+      e.handleEvent(boostGift());
+      if (act === 'off') {
+        c.enabled = false;
+        e.onConfigChanged();
+      } else {
+        e[act]();
+      }
+      expect((e.get().fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(0);
+      // 封印明け相当の時刻まで進めても発動しない(予約が孤児として生き残らない)。
+      t = NOW + DUR * 1000 + 1000;
+      e.drainIfChanged();
+      expect(e.get().recentEffects.some((x) => x.kind === 'boost-start')).toBe(false);
+    }
   });
 });

@@ -116,6 +116,12 @@ describe('challengeCardView — 進捗とランキング', () => {
     expect(challengeCardView(shown, CFG, true, NOW).rankShown).toBe(true);
   });
 
+  it('rouletteRushOn は rouletteRush キーの有無がそのまま(rankShown と同じ導出)', () => {
+    expect(challengeCardView(state(), CFG, true, NOW).rouletteRushOn).toBe(false);
+    expect(challengeCardView(null, CFG, true, NOW).rouletteRushOn).toBe(false);
+    expect(challengeCardView(state({ rouletteRush: true }), CFG, true, NOW).rouletteRushOn).toBe(true);
+  });
+
   it('ランのタイトルと初期値は設定より優先される(走行中の設定変更で表示が飛ばない)', () => {
     const v = challengeCardView(
       state({ status: 'running', title: 'ランのタイトル', initialValue: 500, value: 200, startedMs: NOW }),
@@ -129,6 +135,8 @@ describe('challengeCardView — 進捗とランキング', () => {
   });
 });
 
+// 排他スケジューリング(2026-08-20)により boost と tapLock の同時 state は worker が
+// 作らない — 「窓は開いているのに PUSH が灰色」の組み合わせはこの層に届かない。
 describe('challengeCardView — お邪魔(タップ封じ)', () => {
   const locked = (endsAtMs: number, nickname?: string): Partial<ChallengeState> => ({
     status: 'running',

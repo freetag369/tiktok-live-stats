@@ -84,6 +84,14 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
       return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
     case 'boost-end':
       return null;
+    // 革命の発動はトリガーギフトが gift effect を出さない(boost-start と同じ構造)
+    // ので、着弾音はここが唯一の出どころ。ティアスロットを使う理由も boost-start と
+    // 同じ — 新しい ChallengeSeSlot を作らず既存の設定面に波及させない。
+    case 'revolution-start':
+      return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
+    // 終了は合図バナーだけ(専用の清算演出が無い)。到着時に鳴らす音も無し。
+    case 'revolution-end':
+      return null;
     case 'achieved':
       return 'achieved';
   }

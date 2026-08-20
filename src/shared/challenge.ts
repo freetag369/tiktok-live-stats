@@ -15,6 +15,8 @@ import type {
   TapBoostRule,
   TapLockConfig,
   TapLockRule,
+  RevolutionConfig,
+  RevolutionRule,
   FinalGateConfig,
   GiftBandFxConfig,
   GiftFullCutConfig,
@@ -484,6 +486,9 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     ...(e.boostTapCount != null ? { boostTapCount: e.boostTapCount } : {}),
     // お邪魔の尺も同じ規約で焼き込み値を引き継ぐ(設定を変えても過去の行は不変)。
     ...(e.tapLockMs != null ? { tapLockMs: e.tapLockMs } : {}),
+    // 革命の倍率・尺も同じ規約(revolution-start/-end の焼き込み値)。
+    ...(e.revolutionMultiplier != null ? { revolutionMultiplier: e.revolutionMultiplier } : {}),
+    ...(e.revolutionMs != null ? { revolutionMs: e.revolutionMs } : {}),
     // 凍結ドレインの合算件数 → 履歴の「×N」表示(press 畳み込みと同じ概念)。
     ...(e.coalesced != null && e.coalesced > 1 ? { count: e.coalesced } : {}),
   };
@@ -882,6 +887,13 @@ export const PENDING_BANDS_MAX = 4;
  * **上げたら FX_DRAIN_MAX_STEPS の見積もりも更新すること。**
  */
 export const PENDING_BOOSTS_MAX = 4;
+
+/**
+ * 他演出中に届いた革命の導入(revolution-start)の持ち越し上限(モニター側)。
+ * 重ねがけは worker が延長へ畳む(activateRevolution)ので、キューに同時に並ぶのは
+ * 「アーム中の1本 + 稀な再アーム」程度 — 2 で足りる(fx-drain の見積もこの値)。
+ */
+export const PENDING_REVOLUTIONS_MAX = 2;
 /**
  * フィーバーの「アーム」(発動予約)を保持する上限(ms)。worker はギフト着弾で
  * 予約するだけで、**モニターが起動カットインを再生し始めた瞬間**(challenge.boostCue)に
@@ -1004,6 +1016,41 @@ export const CHALLENGE_ROULETTE_SPIN_SE_IDS: readonly string[] = [
   'spin-reel1',
   'spin-slot',
 ];
+
+/**
+ * ユーザー取込みの回転音 id の接頭辞。`custom:<ファイル名>` の形で spinSe に
+ * そのまま入る — 別フィールドにしないのは「custom 選択なのにパスが空」という
+ * 不整合状態を作らないため(enabled ブールを持たず 'off' で表す規約と同じ発想)。
+ * ファイル名は config/sounds/ 内のベース名のみ。パスを持たせないのは、
+ * main のプロトコルハンドラ(app-sound://)の「許可ディレクトリ限定」を
+ * 設定値の側から破れなくするため。Windows のファイル名に ':' は使えないので、
+ * 取込み時にサニタイズされた名前とこの接頭辞が衝突することはない。
+ * 既存カタログの接頭辞規約('spin-*' 等、bgm.ts)とも重ならない。
+ */
+export const CUSTOM_SOUND_PREFIX = 'custom:';
+
+/**
+ * カスタム回転音 id の判定。検証(validateRouletteSound)・再生(bgm.ts)・
+ * 設定UIの3者が同じ判定を共有する。fs の実在確認は shared では不可能なので
+ * しない — 実在の最終防衛線は main 側プロトコルハンドラの containment 検査で、
+ * ここでは settings.json 手編集経由のトラバーサル文字列だけを弾く。
+ */
+export function isCustomSoundId(v: unknown): v is string {
+  if (typeof v !== 'string' || !v.startsWith(CUSTOM_SOUND_PREFIX)) return false;
+  const name = v.slice(CUSTOM_SOUND_PREFIX.length);
+  return (
+    name.length > 0 &&
+    name.length <= 200 &&
+    !name.includes('/') &&
+    !name.includes('\\') &&
+    !name.includes('..')
+  );
+}
+
+/** カスタム回転音 id からファイル名(config/sounds/ 内のベース名)を取り出す。 */
+export function customSoundFileName(id: string): string {
+  return id.slice(CUSTOM_SOUND_PREFIX.length);
+}
 
 /**
  * ルーレット回転サウンドの既定。回転ループ音は**有効(鳴る)で出荷**、
@@ -1228,6 +1275,18 @@ export const TAP_BOOST_COUNT_MS = 3000;
 export const TAP_BOOST_ACTIVATIONS_MAX = 3;
 
 /**
+ * 封印(お邪魔)中に届いたフィーバーの「封印明け予約」の上限本数。
+ *
+ * 排他スケジューリング(2026-08-20 ユーザー決定: 封印とフィーバーは決して同時に
+ * 生きない)で、封印中に届いたフィーバーは破棄せず封印明けへ繰り越す。封印は
+ * 最長 TAP_LOCK_MAX_MS(120 秒)なので、その間に**別メッセージで**届く現実的な
+ * 本数をここで頭打ちにする — 超過分は critical キュー溢れと同じ「実行せず破棄」
+ * (giftDiag に必ず記録)。連打コンボ内の丸めは従来どおり tapBoostActivationCount
+ * (最大 3)が先に効き、こちらは**メッセージをまたぐ**累積の天井。
+ */
+export const TAP_BOOST_DEFERRED_MAX = 4;
+
+/**
  * このトリガーギフト1メッセージで何回フィーバーを発動するか。
  * ルーレットの rouletteDrawCount と対になるが、こちらは**演出の回数**なので
  * ハード上限で削ってよい(値は動かない — トリガーギフトの規約)。
@@ -1420,6 +1479,87 @@ export const DEFAULT_TAP_LOCK: TapLockConfig = {
   rules: [structuredClone(DEFAULT_TAP_LOCK_RULE)],
 };
 
+// ── 革命 ─────────────────────────────────────────────────────────────────────
+
+/**
+ * 窓の長さ(秒)の clamp。既定は 60(ユーザー要件「制限時間1分」)。
+ * tapBoost の 15 秒上限を使わないのは意図的 — あちらはシネマティック凍結の
+ * 上限(GIFT_FX_FREEZE_MAX_TOTAL_MS=45s)に縛られるが、革命の窓は凍結を張らない
+ * プレーン走行なので tapLock と同じ「配信が壊れない線」で決められる。
+ */
+export const REVOLUTION_DURATION_MIN_SEC = 10;
+export const REVOLUTION_DURATION_MAX_SEC = 120;
+
+/** 窓中のタップ倍率の clamp。既定は 3(ユーザー要件)。TAP_BOOST_MULT と同じ幅。 */
+export const REVOLUTION_MULT_MIN = 1;
+export const REVOLUTION_MULT_MAX = 100;
+
+/**
+ * 導入全面カットの尺(ms)。仮素材(gift-band1)も本番素材もこの尺の契約で作る。
+ * モニターは onEnded ではなく JS タイマーで打ち切る(startBandFx と同じ規約)。
+ */
+export const REVOLUTION_INTRO_MS = 6_000;
+
+/** 開始カウントダウン(5..1、DOM の大型数字)の尺(ms)。1秒刻み×5。 */
+export const REVOLUTION_COUNT_MS = 5_000;
+
+/**
+ * 窓の残り時間のハード上限(ms)。TAP_LOCK_MAX_MS と同じ二段構えの安全弁 —
+ * 重ねがけの方針は「延長」なので、天井が無いと連打コンボで数分間ゲーム経済が
+ * 変わりっぱなしになる。ラッチ時にも読み出し時(clampFutureMs)にも効かせる。
+ */
+export const REVOLUTION_MAX_MS = 180_000;
+
+/** 登録できる革命行の上限。TAP_BOOST_RULES_MAX / TAP_LOCK_RULES_MAX と同じ 8。 */
+export const REVOLUTION_RULES_MAX = 8;
+
+/**
+ * トリガーギフト1メッセージ(連打コンボ)あたりの尺加算の上限本数。
+ * tapLockActivationCount と同じ問題への同じ答え — 窓は直列化できないので、
+ * 掛けるのは発動回数ではなく尺(既定 60 秒 × 2 = 120 秒 < REVOLUTION_MAX_MS)。
+ */
+export const REVOLUTION_ACTIVATIONS_MAX = 2;
+
+/** このトリガーギフト1メッセージで窓を何本ぶん重ねるか(tapLockActivationCount と同型)。 */
+export function revolutionActivationCount(repeatCount: number): number {
+  return Math.min(REVOLUTION_ACTIVATIONS_MAX, Math.max(1, Math.round(repeatCount)));
+}
+
+/**
+ * 革命1行の既定 = **白鳥(Swan / 699💎)**。
+ *
+ * giftId が空なのは**未採取**だから — このリポジトリの規約(gift-aliases の
+ * _topGifts)どおり、実イベントで確認できていない giftId は推測で焼かない。
+ * 初回の実受信を diag.log(`[challenge/gift] 受信 giftId=...`)で確認したら
+ * ここへ焼き込む(それまでは giftName の完全一致が本線)。
+ *
+ * exactName は必ず true — 'swan' は短く、'black swan' 等の別ギフトに部分一致
+ * しうる。誤爆すると1分間ゲーム経済が変わるので、tapLock より代償が大きい。
+ */
+export const DEFAULT_REVOLUTION_RULE: RevolutionRule = {
+  id: 'rev-1',
+  label: '白鳥',
+  enabled: true,
+  giftId: '',
+  giftName: 'swan',
+  canonical: '',
+  exactName: true,
+  multiplier: 3,
+  durationSec: 60,
+  flash: true,
+};
+
+/**
+ * 革命の既定。**機能そのものは既定で OFF**(DEFAULT_TAP_LOCK と同じ判断)—
+ * いいね妨害の反転はゲーム経済の意味を変えるので、キー欠損のフォールバックで
+ * 勝手に有効化されてはならない。行は白鳥の1行だけ配り、配信者が設定画面で
+ * スイッチを入れた瞬間から使える状態にしておく。
+ */
+export const DEFAULT_REVOLUTION: RevolutionConfig = {
+  enabled: false,
+  rules: [structuredClone(DEFAULT_REVOLUTION_RULE)],
+};
+
 /**
  * 最終ゲートの必要タップ数の範囲。下限 2 — taps: 1 は通常挙動と実質同じで
  * 無意味(1タップで1減算)なので、設定として許さない。
@@ -1528,6 +1668,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   stampTriggers: structuredClone(DEFAULT_STAMP_TRIGGERS),
   tapBoost: structuredClone(DEFAULT_TAP_BOOST),
   tapLock: structuredClone(DEFAULT_TAP_LOCK),
+  revolution: structuredClone(DEFAULT_REVOLUTION),
   finalGate: { ...DEFAULT_FINAL_GATE },
 };
 
@@ -2575,6 +2716,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     stampTriggers: validateStampTriggers(c.stampTriggers),
     tapBoost: validateTapBoost(c.tapBoost),
     tapLock: validateTapLock(c.tapLock),
+    revolution: validateRevolution(c.revolution),
     finalGate: validateFinalGate(c.finalGate),
   };
 }
@@ -2639,9 +2781,14 @@ function validateRouletteSound(raw: unknown): RouletteSoundConfig {
   const id = (v: unknown, list: readonly string[], fb: string): string =>
     typeof v === 'string' && (v === 'off' || list.includes(v)) ? v : fb;
   return {
+    // bgm はカタログのみ — custom を許すのは今回は spinSe だけ(将来 bgm を
+    // 対応させるときも同じ `custom:` 規約で isCustomSoundId を足すだけの形)。
     bgm: id(c.bgm, CHALLENGE_ROULETTE_BGM_IDS, d.bgm),
     bgmVolume: vol(c.bgmVolume, d.bgmVolume),
-    spinSe: id(c.spinSe, CHALLENGE_ROULETTE_SPIN_SE_IDS, d.spinSe),
+    // 取込み済みカスタム音(custom:<ファイル名>)は素通し。不正な custom
+    // (空名・トラバーサル文字列)は未知 id と同じく既定へ — ファイルの実在は
+    // ここでは見ない(消えていた場合は再生側が無音+警告ログで扱う)。
+    spinSe: isCustomSoundId(c.spinSe) ? c.spinSe : id(c.spinSe, CHALLENGE_ROULETTE_SPIN_SE_IDS, d.spinSe),
     spinSeVolume: vol(c.spinSeVolume, d.spinSeVolume),
     // 旧 settings.json にはキーが無い(超激アツ動画より前の世代)— 欠損が
     // 既定へ倒れること自体が移行の代わり(rouletteTease と同じ手口)。
@@ -3001,6 +3148,59 @@ function validateTapLockRule(raw: unknown): TapLockRule {
     exactName: typeof r.exactName === 'boolean' ? r.exactName : false,
     durationSec: n(r.durationSec, dr.durationSec, TAP_LOCK_DURATION_MIN_SEC, TAP_LOCK_DURATION_MAX_SEC),
     amountEach: n(r.amountEach, dr.amountEach, -999_999, 999_999),
+    flash: r.flash !== false,
+  };
+}
+
+/**
+ * 革命の検証。validateTapLock の鏡像 — この機能にも出荷済みの旧形式は存在しない。
+ *
+ * **キー欠損は既定へ倒れるだけで移行(migrate*)は要らない。** 既定の行は giftId が
+ * 空で giftName の完全一致だけ、機能 enabled も false なので、既存の settings.json へ
+ * 何も配らなくても挙動は 1 ミリも変わらない(tapLock / stockCutinVolume と同じ前例)。
+ */
+function validateRevolution(raw: unknown): RevolutionConfig {
+  const d = DEFAULT_REVOLUTION;
+  const c = raw as Partial<RevolutionConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  // 既定が false の真偽値なので `=== true` で読む(tapLock と同じ向き)。
+  const enabled = c.enabled === true;
+  if (!Array.isArray(c.rules)) return { enabled, rules: structuredClone(d.rules) };
+
+  const out: RevolutionRule[] = [];
+  const seen = new Set<string>();
+  for (const r of c.rules.slice(0, REVOLUTION_RULES_MAX)) {
+    const v = validateRevolutionRule(r);
+    // 重複・欠損 id は振り直す(validateTapLock と同じ理由・同じ式)。
+    const id =
+      v.id !== '' && !seen.has(v.id) ? v.id : v.id !== '' ? `${v.id}-${out.length}` : `rev-${out.length}`;
+    seen.add(id);
+    out.push({ ...v, id });
+  }
+  // 明示的な空配列は空のまま通す(全行消したユーザーの意思を尊重する)。
+  return { enabled, rules: out };
+}
+
+/** 革命1行の検証。validateTapLockRule と同じ clamp の流儀。 */
+function validateRevolutionRule(raw: unknown): RevolutionRule {
+  const dr = DEFAULT_REVOLUTION_RULE;
+  const r = raw as Partial<RevolutionRule> | null | undefined;
+  if (!r || typeof r !== 'object') return structuredClone(dr);
+  const n = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  return {
+    id: typeof r.id === 'string' ? r.id.trim() : '',
+    label: typeof r.label === 'string' ? r.label.trim() : '',
+    enabled: r.enabled !== false,
+    giftId: typeof r.giftId === 'string' ? r.giftId.trim() : dr.giftId,
+    giftName: typeof r.giftName === 'string' ? r.giftName.trim().toLowerCase() : dr.giftName,
+    canonical: typeof r.canonical === 'string' ? r.canonical.trim().toLowerCase() : dr.canonical,
+    // 既定行が exactName: true なのは意図(短い 'swan' の誤爆ガード)だが、検証の
+    // フォールバックは他の rule 系と同じ false — ユーザーが明示的に外した意思を
+    // boolean 以外の壊れた値から復元はしない。
+    exactName: typeof r.exactName === 'boolean' ? r.exactName : false,
+    multiplier: n(r.multiplier, dr.multiplier, REVOLUTION_MULT_MIN, REVOLUTION_MULT_MAX),
+    durationSec: n(r.durationSec, dr.durationSec, REVOLUTION_DURATION_MIN_SEC, REVOLUTION_DURATION_MAX_SEC),
     flash: r.flash !== false,
   };
 }
@@ -3417,6 +3617,35 @@ export function matchTapLock(
   const tl = cfg.tapLock;
   if (!tl.enabled) return null;
   for (const r of tl.rules) {
+    if (!r.enabled) continue;
+    if (matchGiftTrigger(r, g)) return r;
+  }
+  return null;
+}
+
+/**
+ * ギフト → 革命行の写像。**上から順に評価し、最初に一致した1行だけ**を返す
+ * (tapBoost / tapLock と同じ先勝ち)。**fanStamp・tapBoost の次・tapLock より先**に
+ * 評価し、一致したら増減規則(roulettes/giftRules/giftDefault)を一切評価しない。
+ *
+ * tapBoost より後ろなのは matchTapLock と同じ理由 — 同じ giftId を両方に登録した
+ * 誤設定では「フィーバーが勝つ」ほうが分かりやすい(どちらもタップ倍率系で、
+ * フィーバーの方が大きな山場)。tapLock より先なのは、同時登録の誤設定で
+ * 「お助けが封印に食われる」のを避けるため(お助けが勝つほうが配信者に優しい)。
+ *
+ * **これは「どちらの機能が発動するか」の話**で、走行中のタップの扱いとは別軸。
+ * 発動後に封印が掛かった場合は**封じが勝つ**(2026-08-20 ユーザー決定 —
+ * press() の革命窓分岐が tapLock 分岐より下に居る)。
+ *
+ * 無効な行は飛ばすだけで**下の行の評価は続ける**(matchTapBoost と同じ)。
+ */
+export function matchRevolution(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): RevolutionRule | null {
+  const rv = cfg.revolution;
+  if (!rv.enabled) return null;
+  for (const r of rv.rules) {
     if (!r.enabled) continue;
     if (matchGiftTrigger(r, g)) return r;
   }

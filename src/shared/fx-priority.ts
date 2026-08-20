@@ -25,6 +25,10 @@
  * 再生していようが時間は減る。band(⑦)の後ろに並べると、band のドレインが数本
  * 詰まっただけで「残り数秒」になってから告知バナーが出る(= 何が起きたか分からない
  * まま復帰する)。boost より下なのはフィーバーのほうが大きな山場だから。
+ * ⑦.5 revolution(革命)は 2026-08-20 にユーザーが「通常ギフトルーレットの前だけ」を
+ * 選択(band と other の間。初見⑥・激熱確定⑥.5 は革命より上のまま)。革命は
+ * お助け系だが helper(⑤)には同居させない — あちらはファンスタンプの±Nバナーで、
+ * こちらは 11 秒の導入カットイン+窓を持つ別種の山場。
  *
  * 序列と**遮蔽(shared/fx-occlusion.ts)は別軸**。序列は「いつ出すか」、遮蔽は
  * 「被さっている幕の下で何を出すか」。満タン系②③は舞台キューを迂回して常時実行
@@ -53,6 +57,7 @@ export const FX_PRIORITY_ORDER = [
   'join-roulette',
   'hot-roulette',
   'band',
+  'revolution',
   'other',
 ] as const;
 
@@ -72,6 +77,7 @@ export const FX_DRAIN_KINDS = [
   'join-roulette',
   'hot-roulette',
   'band',
+  'revolution',
   'roulette',
 ] as const;
 export type FxDrainKind = (typeof FX_DRAIN_KINDS)[number];
@@ -86,6 +92,7 @@ export const DRAIN_PRIORITY = {
   'join-roulette': 'join-roulette',
   'hot-roulette': 'hot-roulette', // 激熱確定(cfg.roulettes[].hot)は band の直前
   band: 'band',
+  revolution: 'revolution', // 革命は band の直後・通常ギフトルーレットの直前(2026-08-20)
   roulette: 'other', // ギフトルーレットは「その他」(ユーザー指定のリスト外)
 } as const satisfies Record<FxDrainKind, FxPriorityClass>;
 
@@ -111,6 +118,8 @@ export const FX_BANNER_KINDS = [
   'boost-announce',
   'boost-result',
   'tap-lock',
+  'revolution-announce',
+  'revolution-result',
 ] as const;
 export type FxBannerKind = (typeof FX_BANNER_KINDS)[number];
 
@@ -138,6 +147,10 @@ export const BANNER_PRIORITY = {
   // お邪魔の告知バナーは effect 側の分類(fxClassForEffect の tap-lock)と揃える —
   // 揃えないと bannerWinsByRank の厳密 < 判定で band のドレインに永久に負ける。
   'tap-lock': 'tap-lock',
+  // 革命のバナーも effect 側の分類(revolution-start/-end → 'revolution')と揃える —
+  // boost-announce / tap-lock / roulette-*-hot が踏んだのと同じ罠(厳密 < 判定)の予防。
+  'revolution-announce': 'revolution',
+  'revolution-result': 'revolution',
 } as const satisfies Record<FxBannerKind, FxPriorityClass>;
 
 export function bannerRank(kind: FxBannerKind): number {
@@ -166,6 +179,9 @@ export function fxClassForEffect(e: ChallengeEffect): FxPriorityClass | 'paralle
     case 'boost-start':
     case 'boost-end':
       return 'boost';
+    case 'revolution-start':
+    case 'revolution-end':
+      return 'revolution';
     case 'roulette':
       // 入室(⑥)→ 激熱確定(⑥.5)→ 通常のギフトルーレット(⑧)。入室を先に見るのは
       // 入室ルーレットが hot を持たない(RouletteHotConfig の解説)ので排他だから。

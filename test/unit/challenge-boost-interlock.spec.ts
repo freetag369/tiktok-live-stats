@@ -17,9 +17,13 @@ import {
   DEFAULT_GIFT_BAND_FX,
   DEFAULT_TAP_BOOST,
   DEFAULT_TAP_BOOST_RULE,
+  DEFAULT_TAP_LOCK,
+  DEFAULT_TAP_LOCK_RULE,
+  GIFT_FX_FREEZE_MARGIN_MS,
   TAP_BOOST_COUNT_MS,
   TAP_BOOST_INTRO_MS,
 } from '@shared/challenge';
+import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import type { ChallengeConfig } from '@shared/dto';
 import type { GiftEvent, LikeEvent, SocialEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
@@ -229,6 +233,74 @@ describe('enabled=false — フィーバー/凍結の後始末', () => {
     const s = e.get();
     expect(s.value).toBe(1040); // 受け取り済みのフォローを闇に落とさない
     expect(s.fxFreezeUntilMs).toBeNull();
+  });
+});
+
+describe('排他スケジューリングのカスケード(A清算 → 封印発動 → B は封印明けへ)', () => {
+  const LOCK_GIFT = '5555';
+  const LOCK_SEC = DEFAULT_TAP_LOCK_RULE.durationSec; // 30
+
+  function lockGift(): GiftEvent {
+    seq += 1;
+    return {
+      kind: 'gift',
+      msgId: `m${seq}`,
+      tsMs: NOW,
+      tsSource: 'server',
+      seq,
+      viewer: { userId: `u${seq}`, nickname: `u${seq}` },
+      giftId: LOCK_GIFT,
+      giftName: 'Jam Gift',
+      repeatCount: 1,
+      diamondEach: 1,
+      diamonds: 1,
+      isBoxGift: false,
+    };
+  }
+
+  function lockCfg(): ChallengeConfig {
+    return cfg({
+      tapLock: {
+        ...structuredClone(DEFAULT_TAP_LOCK),
+        enabled: true,
+        rules: [{ ...structuredClone(DEFAULT_TAP_LOCK_RULE), id: 'lock-1', giftId: LOCK_GIFT }],
+      },
+    });
+  }
+
+  it('フィーバーA窓中にお邪魔(予約)→ B着弾 → A清算で封印発動 → Bは封印明けにアーム', () => {
+    let t = NOW;
+    const e = engine(lockCfg(), () => t);
+    e.start();
+    // A: アーム → コミット(窓は NOW+PRE から)。
+    e.handleEvent(boostGift());
+    e.boostCue({ action: 'start', effectId: realBoostStartId(e), startedAtMs: NOW, preMs: PRE });
+    // A の窓中にお邪魔 → 予約(ラッチされない)。
+    t = NOW + PRE + 1000;
+    e.handleEvent(lockGift());
+    expect(e.get().tapLock).toBeUndefined();
+    // 続けてフィーバーB → 凍結中なので保留キューへ(まだ何も起きない)。
+    t = NOW + PRE + 2000;
+    e.handleEvent(boostGift());
+    expect(e.get().recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1);
+
+    // 第1幕: A の清算(凍結明け)— 封印が満額で発動し、B は封印を見て封印明けへ再延期。
+    const settleAt = NOW + PRE + DURATION_MS + TAP_BOOST_RESULT_MS + BOOST_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS + 1;
+    t = settleAt;
+    const s1 = e.drainIfChanged()!;
+    expect(s1.recentEffects.some((x) => x.kind === 'boost-end')).toBe(true);
+    expect(s1.tapLock?.startsAtMs).toBe(settleAt);
+    expect(s1.tapLock!.endsAtMs - s1.tapLock!.startsAtMs).toBe(LOCK_SEC * 1000);
+    expect(s1.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(1); // B はまだ
+    expect((s1.fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(1); // B が待機予告に出る
+
+    // 第2幕: 封印明け — B がアームされる(3幕が時系列で並ぶ)。
+    t = settleAt + LOCK_SEC * 1000;
+    const s2 = e.drainIfChanged()!;
+    expect(s2.tapLock).toBeUndefined();
+    expect(s2.recentEffects.filter((x) => x.kind === 'boost-start')).toHaveLength(2);
+    // fxQueue は空になるとキーごと省かれる規約。
+    expect((s2.fxQueue ?? []).filter((q) => q.kind === 'boost')).toHaveLength(0);
   });
 });
 

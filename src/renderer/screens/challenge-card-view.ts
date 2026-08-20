@@ -21,6 +21,8 @@ export interface ChallengeCardView {
   hasRun: boolean;
   /** モニターに全画面ランキングが出ているか(rankBoard の有無がそのまま表示状態)。 */
   rankShown: boolean;
+  /** ルーレット焦らし短縮が ON か(rouletteRush の有無がそのまま表示状態)。 */
+  rouletteRushOn: boolean;
   /** PUSH を押せるか。**お邪魔(タップ封じ)中は false**(worker も弾く)。 */
   pushEnabled: boolean;
   /**
@@ -71,6 +73,9 @@ export function challengeCardView(
     badge: running ? '進行中' : achieved ? '達成!' : hasRun ? '一時停止中' : '停止中',
     hasRun,
     rankShown: challenge?.rankBoard != null,
+    rouletteRushOn: challenge?.rouletteRush === true,
+    // 排他スケジューリング(2026-08-20)により封印とフィーバー窓は同時に生きない
+    // ので、「窓は開いているのに PUSH が灰色」の不整合は worker 側が作らない。
     pushEnabled: running && !tapLocked,
     tapLocked,
     tapLockRemainingMs,

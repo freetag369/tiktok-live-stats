@@ -665,7 +665,11 @@ export interface RouletteSoundConfig {
   bgm: string;
   /** BGMの音量 0-100。seVolume・giftBandFx.bgmVolume とは独立。 */
   bgmVolume: number;
-  /** リール回転ループ音の id(CHALLENGE_ROULETTE_SPIN_SE_IDS)または 'off'。 */
+  /**
+   * リール回転ループ音の id(CHALLENGE_ROULETTE_SPIN_SE_IDS)、'off'、または
+   * `custom:<ファイル名>`(ユーザーが取り込んだ config/sounds/ 内のファイル —
+   * 規約は shared/challenge.ts の CUSTOM_SOUND_PREFIX)。
+   */
   spinSe: string;
   /** ループ音の音量 0-100。 */
   spinSeVolume: number;
@@ -1007,6 +1011,56 @@ export interface TapLockConfig {
 }
 
 /**
+ * 革命の1行。tapBoost / tapLock と同じトリガー3フィールド+exactName の規約で、
+ * 判定は matchGiftTrigger を共有する(matchRevolution)。
+ *
+ * 効果は「1分間の窓」を開くこと: ①タップが multiplier 倍で**即時**に効く
+ * (フィーバーのプレーンモードと同じ — 凍結は張らない)、②いいね着弾・いいね
+ * ストック着弾の増減が**反転**して減算になる(妨害がお助けになる)。
+ */
+export interface RevolutionRule {
+  /** 行の識別子。UI の key と行ごとの実演(ChallengeTestEffectSpec.revolutionId)の対象特定に使う。 */
+  id: string;
+  /** 設定画面の行見出し。表示専用でマッチには使わない。 */
+  label: string;
+  enabled: boolean;
+  /** トリガーギフトの giftId 直接一致。ライブ経路の本線(TapBoostRule と同じ理由)。 */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  /**
+   * giftName の照合を**完全一致**にする(既定 false = 部分一致)。既定行は
+   * 'swan' という短い名前を使うので必ず立てる(TapBoostRule.exactName と同じ警告 —
+   * 'black swan' 等への部分一致誤爆で1分間ゲーム経済が変わる)。
+   */
+  exactName: boolean;
+  /** 窓中のタップ倍率。既定 3(clamp REVOLUTION_MULT_MIN〜MAX)。 */
+  multiplier: number;
+  /** 窓の長さ(秒)。既定 60・clamp REVOLUTION_DURATION_MIN_SEC〜MAX_SEC。 */
+  durationSec: number;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+}
+
+/**
+ * 革命の設定。**上から順に評価し、最初に一致した1行だけ**を使う(tapBoost /
+ * tapLock と同じ先勝ち)。
+ *
+ * 機能 enabled の既定は **false**(tapLock と同じ向き)。いいね妨害の反転は
+ * ゲーム経済の意味を変えるので、キー欠損の既定フォールバックで勝手に有効化
+ * されてはならない — validate 側も `=== true` で読む。旧 settings.json に
+ * このキーは無いので、**欠損時のフォールバックが移行の代わり**になる
+ * (SETTINGS_VERSION は上げない)。
+ */
+export interface RevolutionConfig {
+  /** 機能全体のスイッチ。false で全行が止まる(行ごとの enabled とは別)。 */
+  enabled: boolean;
+  rules: RevolutionRule[];
+}
+
+/**
  * ルーレット走行中の「残り」小窓の出し方。既定は 'small'。
  * 見え方の実装は monitor.css の .count-mirror 節を参照。
  */
@@ -1177,6 +1231,13 @@ export interface ChallengeConfig {
    */
   tapLock: TapLockConfig;
   /**
+   * 革命。tapBoost の**次・tapLock より先**に評価され、一致したギフトは増減規則を
+   * 通らない(matchRevolution — tapBoost と同じ先勝ち規約)。tapBoost より後ろ
+   * なのは tapLock と同じ理由 — 同じ giftId を両方に登録したときはフィーバーが
+   * 勝つほうが分かりやすい(どちらもタップ倍率系で、フィーバーの方が大きな山場)。
+   */
+  revolution: RevolutionConfig;
+  /**
    * 最終ゲート(ラスト◯◯モード)。残数が lowThreshold 以下のとき、タップ経路の
    * 1減算ごとに taps 回のタップが必要になる。フォロー/いいね/ギフト由来の増減と
    * フィーバー(タップブースト)ウィンドウ中のタップは対象外。閾値は lowThreshold に連動。
@@ -1255,6 +1316,8 @@ export interface ChallengeEffect {
     | 'boost-start'
     | 'boost-end'
     | 'tap-lock'
+    | 'revolution-start'
+    | 'revolution-end'
     | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
@@ -1489,6 +1552,27 @@ export interface ChallengeEffect {
   /** boostResultMs > 0 のときのクリップ id(欠損 = 暗幕)。焼き込みの流儀は boostIntroClip と同じ。 */
   boostResultClip?: string;
   /**
+   * kind='revolution-start'/'revolution-end': 革命のタップ倍率。boostMultiplier と
+   * 同じ「effect 1件で自己完結」の流儀 — 発動時点の設定を worker が焼き込む。
+   */
+  revolutionMultiplier?: number;
+  /**
+   * kind='revolution-start': 窓の期限のフォールバックタイムライン
+   * (atMs + REVOLUTION_ARM_MAX_MS + 前置き + 窓)。boostEndsAtMs と同じ規約で、
+   * 実際の期限はモニターが challenge.revolutionCue を撃った時刻から決まる
+   * (権威は ChallengeState.revolution.endsAtMs)。
+   */
+  revolutionEndsAtMs?: Ms;
+  /**
+   * kind='revolution-start': 導入全面カットの尺(ms)。0 = 演出なし(プレーン
+   * モード発動 — モニター不在・reduced-motion)。boostIntroMs と同じ焼き込みの流儀。
+   */
+  revolutionIntroMs?: number;
+  /** kind='revolution-start': 開始カウントダウン(5..1)の尺(ms)。0 = この段なし。 */
+  revolutionCountMs?: number;
+  /** kind='revolution-start'/'revolution-end': 窓の尺(ms)。バナー文言用の焼き込み。 */
+  revolutionMs?: number;
+  /**
    * カットイン凍結の解除ドレインで同種の保留演出を1件に畳んだとき、元の件数
    * (2以上のときだけ載る)。amount 等は合算済み。ダッシュボードの履歴ログは
    * これを「×N」として1行にまとめる。省略 = 畳んでいない(1件そのまま)。
@@ -1594,6 +1678,17 @@ export type ChallengeTestEffectSpec =
       /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
       lockId?: string;
     }
+  /**
+   * 革命。設定中の multiplier/durationSec/flash をそのまま使って導入カットイン+
+   * カウントダウン+告知バナーを実演する — fanStamp / tapBoost / tapLock と同じく
+   * トリガー一致は評価しない。**実際には窓を開かない**(testEffect の規約どおり
+   * 値・統計・状態には触れない)。
+   */
+  | {
+      kind: 'revolution';
+      /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
+      revolutionId?: string;
+    }
   | { kind: 'achieved' };
 
 /**
@@ -1624,6 +1719,37 @@ export type ChallengeBoostCue =
       effectId: number;
     };
 
+/**
+ * challenge.revolutionCue のパラメータ。ChallengeBoostCue の鏡像 — 革命も worker が
+ * ギフト着弾で**予約(arm)するだけ**で、窓はモニターが導入カットインを実際に
+ * 再生し始めた瞬間を原点に開く(導入6秒+カウントダウン5秒の後)。
+ *
+ * boostCue の拡張ではなく別型なのは、boostCue の冪等判定(effectId 照合・
+ * 「0 = アーム中を全解放」)が armedBoost 専用に密結合しており、混ぜると 0 の
+ * 意味が二重になるため。
+ *
+ * drop の挙動だけ boost と違う: **プレーン即発動へ倒す**(演出だけ諦めて窓は
+ * 開く)。タップ倍率といいね反転はゲームの状態なので、モニターの都合
+ * (キュー溢れ・再読み込み)で 699💎 のギフトが無かったことになってはいけない。
+ */
+export type ChallengeRevolutionCue =
+  | {
+      /** 導入カットインの再生を開始した = 前置き明けに窓を開いてよい。 */
+      action: 'start';
+      /** 対象の revolution-start effect の id。アーム中のものと一致しなければ無視される。 */
+      effectId: number;
+      /** モニターが再生を開始した時刻(Date.now())。worker 側で now を超えない範囲に丸める。 */
+      startedAtMs: Ms;
+      /** 実際に再生する前置きの尺(導入カットイン + カウントダウン)。 */
+      preMs: number;
+    }
+  | {
+      /** この予約の演出は再生されない → プレーン即発動へ倒す。 */
+      action: 'drop';
+      /** 対象の revolution-start effect の id。**0 = アーム中のものを種類を問わず対象**。 */
+      effectId: number;
+    };
+
 export interface ChallengeStats {
   presses: number;
   /** フォロー妨害の回数(同一ユーザーはチャレンジ1回につき1度だけ数える)。 */
@@ -1636,6 +1762,15 @@ export interface ChallengeStats {
   likeUp: number;
   /** いいねストック満杯による加算量の合計(likeUp とは別枠 — likeUp = fills×step の検算を壊さない)。 */
   likeStockUp: number;
+  /**
+   * 革命(反転)中のいいね満タンによる**減算**量の合計(正の数で保持・クランプ後の
+   * 実減少量)。likeUp に混ぜないのは likeUp = 加算 fills×step の検算を壊さないため
+   * (likeStockUp と同じ判断)。クランプで満タン1回あたりの額が step 未満になりうる
+   * ので、こちらには fills×step の検算は成り立たない。
+   */
+  likeDown: number;
+  /** 革命(反転)中のいいねストック満杯による**減算**量の合計(規約は likeDown と同じ)。 */
+  likeStockDown: number;
   /** 指定コメント(commentRules)による加算量の合計。 */
   commentUp: number;
   /** 入室ルーレットによる減算量の合計(正の数で保持)。ギフト由来ではないので giftDown とは別枠。 */
@@ -1663,6 +1798,17 @@ export interface ChallengeLikeGauge {
    * でき、counter の増減(閾値跨ぎで増えて見える・reset で減る)と混同しない。
    */
   fills: number;
+  /**
+   * 満タン到達のうち**革命(反転)中に着弾した**回数の累計。fills と同じ単調増加
+   * 規約(reset でも巻き戻さない)で、常に downFills <= fills。
+   *
+   * モニターの据え置き会計は effect ではなく fills の差分×step から額を自前復元
+   * している(加算前提の符号ハードコード)ため、符号をここで運ばないと反転中の
+   * 着弾で据え置きが逆方向へ飛ぶ。1つの delta 内に反転前後の満タンが混在しても
+   * `upUnits = (fills−prevFills) − (downFills−prevDownFills)` で正確に分解できる —
+   * `dir: 'up'|'down'` のような排他フラグではこの境界 tick が復元できない。
+   */
+  downFills: number;
   /** null = ストックが無効(likeStockCount <= 0 または likeStockStep <= 0)。 */
   stock: ChallengeLikeStock | null;
 }
@@ -1681,6 +1827,8 @@ export interface ChallengeLikeStock {
   step: number;
   /** 満杯到達の累計回数。likeGauge.fills と同じ単調増加規約(reset でも巻き戻さない)。 */
   fills: number;
+  /** 満杯到達のうち革命(反転)中の回数の累計。規約は ChallengeLikeGauge.downFills と同じ。 */
+  downFills: number;
   /**
    * 点灯スロットごとの「そのゲージ区間で最もいいねしたユーザー」。長さ === filled
    * (i 番目 = i 番目に点灯したドット)。モニターはこのアバターをドットに描く。
@@ -1781,6 +1929,13 @@ export interface ChallengeState {
    */
   rankBoard?: ChallengeResult;
   /**
+   * ルーレット焦らし短縮(ライブトグル)。**キーの有無が ON/OFF**(rankBoard と
+   * 同じ規約)。揮発 — settings.json には載せず、worker 再起動でオフに戻る。
+   * 効果は planRouletteSpin の rush 入力(次のリールから fast で確定する。
+   * 激熱確定・入室ルーレット・▶試写は対象外)。
+   */
+  rouletteRush?: true;
+  /**
    * カットイン再生中のカウンタ凍結の期限(ms)。null = 凍結なし。
    * ダッシュボードの表示・テスト用 — モニターは自前でクリップ再生中を知っている。
    */
@@ -1829,6 +1984,13 @@ export interface ChallengeState {
    */
   tapLock?: { startsAtMs: Ms; endsAtMs: Ms; blocked: number; nickname?: string; label?: string };
   /**
+   * 革命の窓が開いている間だけ載る。boost / tapLock と同じ規約で**絶対時刻のみ**を
+   * 配り、非アクティブ時はキーごと省く(残り秒は受け手が endsAtMs から計算する —
+   * モニターの終了5秒前カウントダウンもこれが唯一のソース)。
+   * multiplier は発動時に焼き込んだ値(窓中の設定変更で表示と適用がズレないように)。
+   */
+  revolution?: { startsAtMs: Ms; endsAtMs: Ms; multiplier: number; nickname?: string; label?: string };
+  /**
    * 最終ゲート(ラスト◯◯モード)がアクティブな間だけ載る。taps = 現ゲートの蓄積
    * (0..needed-1)、needed = 1減算に必要なタップ数(設定のライブ値)。
    * 非アクティブ時・ブーストウィンドウ/起動カットイン中はキーごと省く
@@ -1850,7 +2012,7 @@ export interface ChallengeState {
 export interface ChallengeFxQueueItem {
   /** ワーカー内の単調採番。ドレインまで不変 — 表示側の同一性キー。 */
   id: number;
-  kind: 'band' | 'boost' | 'roulette' | 'follow';
+  kind: 'band' | 'boost' | 'roulette' | 'follow' | 'revolution';
   /** 行為者(viewer.nickname ?? displayId)。 */
   nickname?: string;
   /**
@@ -1910,6 +2072,10 @@ export interface ChallengeLogEntry {
    * 引き継ぐ — 表示時に設定を読み直すと、秒数を変えた瞬間に過去のログまで書き換わる。
    */
   tapLockMs?: number;
+  /** kind='revolution-start'/'revolution-end': 倍率(effect からそのまま引き継ぐ)。 */
+  revolutionMultiplier?: number;
+  /** kind='revolution-start'/'revolution-end': 窓の尺 ms(tapLockMs と同じ規約)。 */
+  revolutionMs?: number;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────

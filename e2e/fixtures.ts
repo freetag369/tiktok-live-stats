@@ -75,6 +75,10 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
       giftBandFx: { enabled: false, bands: [] },
       giftFullCut: { enabled: false, rules: [] },
       tapBoost: { enabled: false, rules: [] },
+      // 革命も明示的に落とす。既定は OFF だが、行(白鳥)は配られるので明示して
+      // おく — 既定が将来 ON になったとき、いいね妨害が反転して全テストの
+      // 「いいねで +N 増える」前提が静かに壊れるのを防ぐ(tapBoost と同じ規約)。
+      revolution: { enabled: false, rules: [] },
       fanStamp: { enabled: false },
       stampTriggers: { enabled: false, rules: [] },
       fxClipsEnabled: false,

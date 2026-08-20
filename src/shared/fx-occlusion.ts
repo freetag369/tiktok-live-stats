@@ -47,16 +47,18 @@ export function maxOcclusion(a: FxOcclusion, b: FxOcclusion): FxOcclusion {
 }
 
 /**
- * 据え置きを持つカットインの種別(MonitorView の 4 ホールドと 1 対 1)。
+ * 据え置きを持つカットインの種別(MonitorView の 5 ホールドと 1 対 1)。
  *
  * お邪魔(タップ封じ)は**ここに登録しない**のが意図的な判断 — 封印の見た目は
  * ChallengeState.tapLock から引く常設 HUD で、幕を張らないしホールドも取らない。
- * 幕を持たないものを足すとこの 1 対 1 の対応が崩れる。
+ * 幕を持たないものを足すとこの 1 対 1 の対応が崩れる。革命は**登録する** —
+ * 導入カットイン+カウントダウンの 11 秒はホールドを取る幕(不透明)で、
+ * 窓中の常設 HUD(ChallengeState.revolution から引く)だけが tapLock と同型。
  */
-export type FxCutinKind = 'roulette' | 'band' | 'stock-cutin' | 'boost';
+export type FxCutinKind = 'roulette' | 'band' | 'stock-cutin' | 'boost' | 'revolution';
 
 /**
- * カットイン種別 → 遮蔽。ルーレットだけが半透明の暗幕で、残り 3 種は
+ * カットイン種別 → 遮蔽。ルーレットだけが半透明の暗幕で、残り 4 種は
  * 不透明フルフレーム(`.fx-clip-opaque` = opacity .96 + `background:#000`)。
  */
 export function occlusionOfCutin(kind: FxCutinKind): FxOcclusion {

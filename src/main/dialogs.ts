@@ -43,6 +43,19 @@ export async function askSourceZipPath(win: BrowserWindow | null, version: strin
   return r.canceled || !r.filePath ? null : r.filePath;
 }
 
+/** カスタム回転音の取込み元を選ぶ。拡張子はプロトコル側の制約ではなく案内 — 一覧は custom-sounds.ts と共有。 */
+export async function askSoundImportPath(
+  win: BrowserWindow | null,
+  extensions: readonly string[]
+): Promise<string | null> {
+  const r = await dialog.showOpenDialog(win ?? BrowserWindow.getAllWindows()[0]!, {
+    title: '回転音にする音声ファイルを選ぶ',
+    filters: [{ name: '音声ファイル', extensions: [...extensions] }],
+    properties: ['openFile'],
+  });
+  return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
+}
+
 export async function confirmDestructive(win: BrowserWindow | null, message: string, detail: string): Promise<boolean> {
   const r = await dialog.showMessageBox(win ?? BrowserWindow.getAllWindows()[0]!, {
     type: 'warning',

@@ -19,6 +19,7 @@ import {
   MINI_MAX,
   PENDING_BANDS_MAX,
   PENDING_BOOSTS_MAX,
+  PENDING_REVOLUTIONS_MAX,
   JOIN_ROULETTE_QUEUE_MAX,
   ROULETTE_CHAIN_GAP_MS,
   ROULETTE_HOT_QUEUE_MAX,
@@ -113,6 +114,7 @@ import { useChallengeSe } from '../lib/useChallengeSe';
 import {
   ACHIEVED_CLIP_URL,
   GAUGE_FULL_CLIP_URL,
+  REVOLUTION_INTRO_CLIP_URL,
   STOCK_CUTIN_CLIP_URL,
   STOCK_FULL_CLIP_URL,
   STRIKE_CLIP_URL,
@@ -388,23 +390,25 @@ function rouletteBanner(e: ChallengeEffect, amount: number = e.amount): React.JS
  * 「♥ +N いいね妨害!」バナーの中身。保留(PendingFloat)は金額しか持たないので、
  * 描画は flush の瞬間にここで組む — 畳んだ合計でも即時1件でも同じ見た目になる。
  */
-function likeFloatNode(amount: number): React.JSX.Element {
+function likeFloatNode(amount: number, down = false): React.JSX.Element {
+  // 革命(反転)中は妨害がお助けになる — 符号と文言を替える(down 用の緑スタイルは
+  // .float.like-down、色は monitor.css 側)。amount は正の絶対値で受ける規約のまま。
   return (
     <>
       <span className="f-heart">♥</span>
-      <span className="f-amt">+{num(amount)}</span>
-      <span className="f-txt">いいね妨害!</span>
+      <span className="f-amt">{down ? `-${num(amount)}` : `+${num(amount)}`}</span>
+      <span className="f-txt">{down ? 'いいねお助け!' : 'いいね妨害!'}</span>
     </>
   );
 }
 
 /** 「💚 +N いいねストック満杯!」バナーの中身(likeFloatNode と同じ理由で関数)。 */
-function stockFloatNode(amount: number): React.JSX.Element {
+function stockFloatNode(amount: number, down = false): React.JSX.Element {
   return (
     <>
       <span className="f-heart">💚</span>
-      <span className="f-amt">+{num(amount)}</span>
-      <span className="f-txt">いいねストック満杯!</span>
+      <span className="f-amt">{down ? `-${num(amount)}` : `+${num(amount)}`}</span>
+      <span className="f-txt">{down ? 'ストックお助け!' : 'いいねストック満杯!'}</span>
     </>
   );
 }
@@ -466,6 +470,16 @@ function bandWillStart(e: ChallengeEffect): boolean {
  * 譲る判定(yieldToCutin)と startBoostFx の入口ガードは必ずこれを共有する。
  */
 function boostWillStart(e: ChallengeEffect): boolean {
+  return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
+}
+
+/**
+ * この革命 effect(revolution-start)で導入演出が実際に始まるか。素材は
+ * REVOLUTION_INTRO_CLIP_URL が必ずフォールバックを持つ(gift-band1 仮流用)ので、
+ * 断るのは尺不足(= worker のプレーンモード発動は fxDurationMs 0)と動きの抑制
+ * だけ — 譲る判定(imminentOcc)と startRevolutionFx の入口ガードは必ずこれを共有する。
+ */
+function revolutionWillStart(e: ChallengeEffect): boolean {
   return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
 }
 
@@ -581,6 +595,11 @@ export function MonitorView(): React.JSX.Element {
   cfgRef.current = cfg;
   const landscapeRef = useRef(false);
   landscapeRef.current = landscape;
+  // 焦らし短縮(ダッシュボードのライブトグル)。startRoulette は finishRoulette や
+  // 安全弁の setTimeout 越しに呼ばれるので、render スコープの challenge を直読み
+  // すると連打中はトグルが効かない — cfgRef と同じ「同期は ref」の流儀で読む。
+  const rouletteRushRef = useRef(false);
+  rouletteRushRef.current = challenge?.rouletteRush === true;
 
   // 演出レイヤの揮発状態(store は汚さない)。
   const lastPlayed = useRef<number | null>(null);
@@ -711,6 +730,14 @@ export function MonitorView(): React.JSX.Element {
   const prevFills = useRef<number | null>(null);
   /** ストック満杯累計の前回値。likeGauge.fills と同じ単調増加規約で比較する。 */
   const prevStockFills = useRef<number | null>(null);
+  /**
+   * 革命(反転)中の満タン/満杯累計の前回値。fills と同じ単調増加規約。
+   * `(fills−prevF) − (downFills−prevDF)` で妨害(加算)ぶんだけを復元する —
+   * 1つの delta に反転前後の満タンが混在する境界 tick でも正確に分解できる。
+   * **prevFills と必ず同じ場所で前進させること**(据え置き会計の基準ズレ防止)。
+   */
+  const prevDownFills = useRef<number | null>(null);
+  const prevStockDownFills = useRef<number | null>(null);
   const strikeTimers = useRef<number[]>([]);
   /**
    * 着弾までバナーを我慢させる保留。「アニメーション → セグ通知」の順序を守るため、
@@ -880,6 +907,25 @@ export function MonitorView(): React.JSX.Element {
    * 最大 TAP_BOOST_ACTIVATIONS_MAX 本)ぶん、2件では溢れて無言破棄が起きうる。
    */
   const pendingBoosts = useRef<ChallengeEffect[]>([]);
+
+  // ── 革命 ────────────────────────────────────────────────────────────────
+  // revolution-start effect → 導入全面カット(revolutionIntroMs・不透明・
+  // 仮素材は gift-band1)→ DOM の大型カウントダウン(revolutionCountMs・5..1、
+  // .fx-layer 内なので動画より必ず手前)→ 窓オープン(worker が revolutionCue の
+  // 実再生時刻 + 前置きから開く)。窓中は全画面を張らない — 走行 HUD と終了5秒前
+  // カウントダウンは ChallengeState.revolution(時刻ラッチ)駆動の常設 DOM。
+  const [revolutionClip, setRevolutionClip] = useState<{ key: number; url: string; out: boolean } | null>(
+    null
+  );
+  /** 開始カウントダウンの残り秒(null = 非表示)。key=秒 の再マウントでパンチする。 */
+  const [revCount, setRevCount] = useState<number | null>(null);
+  /** 据え置きの持ち主が革命の導入である印(bandHold と同じ役割)。 */
+  const revolutionHold = useRef(false);
+  const revolutionTimers = useRef<number[]>([]);
+  /** 再生中の導入のトリガー effect(cue 照合と据え置き復帰に使う)。 */
+  const revolutionEffect = useRef<ChallengeEffect | null>(null);
+  /** 他演出中に届いた革命の持ち越し(pendingBoosts と同型)。 */
+  const pendingRevolutions = useRef<ChallengeEffect[]>([]);
   /** タップカウンタ(着弾の発射点)。 */
   const boostCounterRef = useRef<HTMLDivElement | null>(null);
   /** タップ数の前回値(増加検知で press 音とカウンタのパンチを出す)。 */
@@ -952,7 +998,7 @@ export function MonitorView(): React.JSX.Element {
    * 自分の安全弁と同じ権威尺から書き、hold が偽の間は読まれない(解除側で 0 に
    * 戻す義務は無い — hold を立てる側が必ず上書きする)。判定は番犬 interval。
    */
-  const fxHoldDeadlines = useRef({ roulette: 0, band: 0, stock: 0, boost: 0 });
+  const fxHoldDeadlines = useRef({ roulette: 0, band: 0, stock: 0, boost: 0, revolution: 0 });
 
   // CLEAR リザルトへの切り替えタイマー。演出ホールド中は張らない —
   // achieved は pendingAchieved で持ち越され、finish* が再生した時点で
@@ -978,7 +1024,10 @@ export function MonitorView(): React.JSX.Element {
     bandClip !== null ||
     stockCutin !== null ||
     boostClip !== null ||
-    boostSettle !== null;
+    boostSettle !== null ||
+    // 革命の導入(動画)と開始カウントダウン(DOM)も最前面のオーバーレイ。
+    revolutionClip !== null ||
+    revCount !== null;
 
   /*
    * 保留バナーの最後の砦 — 全カットアニメーションが終わった瞬間に、取り残された
@@ -1050,6 +1099,16 @@ export function MonitorView(): React.JSX.Element {
     void rpc('challenge.boostCue', { action: 'drop', effectId }).catch(() => undefined);
   }
 
+  /**
+   * 「この革命の導入は再生されない」の申告。worker はアームを**プレーン即発動**へ
+   * 倒す(dropBoostCue と違い破棄でも待機でもない — タップ倍率といいね反転は
+   * ゲームの状態なので、モニターの都合で 699💎 が消えてはいけない)。
+   * **effectId 0 = アーム中のものを種類を問わず対象**(再マウント時)。
+   */
+  function dropRevolutionCue(effectId: number): void {
+    void rpc('challenge.revolutionCue', { action: 'drop', effectId }).catch(() => undefined);
+  }
+
   // ワーカー再起動・起動レースで凍結許可(fxCaps)は既定 false に戻る/失われる。
   // 従来は 120 秒ポーリングが唯一の再送で、その間ワーカーは全カットインを
   // 「モニター未表示/動きの抑制」として拒否していた(dev 起動直後の実配信で
@@ -1065,6 +1124,8 @@ export function MonitorView(): React.JSX.Element {
   // アームが無ければ worker 側で no-op。
   useEffect(() => {
     dropBoostCue(0);
+    // 革命も同じ理由で解放する — こちらはプレーン即発動へ倒れる(効果は失われない)。
+    dropRevolutionCue(0);
   }, []);
 
   // worker 再起動で effect の id が振り直されたら watermark を白紙へ戻す。
@@ -1084,6 +1145,14 @@ export function MonitorView(): React.JSX.Element {
         dropped: pendingBoosts.current.length,
       });
       pendingBoosts.current = [];
+      refreshFxStock();
+    }
+    // 革命の持ち越しも同じ理由で破棄(worker 再起動でアームごと消えている)。
+    if (pendingRevolutions.current.length > 0) {
+      fxWarn('worker 再起動 — 再生できない革命の持ち越しを破棄', {
+        dropped: pendingRevolutions.current.length,
+      });
+      pendingRevolutions.current = [];
       refreshFxStock();
     }
     // 依存は workerEpoch だけ — refreshFxStock は毎レンダー同一性が変わるので
@@ -1155,6 +1224,10 @@ export function MonitorView(): React.JSX.Element {
         fxWarn('ホールド番犬: roulette が期限超過 — 強制解除', { overdueMs: now - d.roulette });
         expireRoulette();
       }
+      if (revolutionHold.current && d.revolution !== 0 && now > d.revolution) {
+        fxWarn('ホールド番犬: revolution が期限超過 — 強制解除', { overdueMs: now - d.revolution });
+        abortRevolutionFx();
+      }
     }, FX_HOLD_WATCHDOG_MS);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1173,11 +1246,23 @@ export function MonitorView(): React.JSX.Element {
     const step = challenge.likeGauge?.step ?? 0;
     const stock = challenge.likeGauge?.stock ?? null;
     const sFills = stock?.fills ?? null;
+    // 革命(反転)中の満タン/満杯の累計。**「ゲージの有無」と「キーの有無」を
+    // 分けること** — 素の `?? 0` だと、ゲージを無効化(likeEvery/likeStep を 0)した
+    // 間も prevDownFills に 0 が焼かれ、再有効化した瞬間に「0 → 実際の累計」の差分が
+    // 反転の着弾として誤検出される(いいねが1件も来ていないのに緑の粒子と SE が出る)。
+    // fills と同じ null 規約に揃え、旧 worker 混在(ゲージはあるが downFills 未定義)
+    // だけを 0 に倒す。
+    const dnFills = challenge.likeGauge ? (challenge.likeGauge.downFills ?? 0) : null;
+    const sDnFills = stock ? (stock.downFills ?? 0) : null;
     const prevF = prevFills.current;
     const prevSF = prevStockFills.current;
+    const prevDF = prevDownFills.current;
+    const prevSDF = prevStockDownFills.current;
     const prevV = prevValue.current;
     prevFills.current = fills;
     prevStockFills.current = sFills;
+    prevDownFills.current = dnFills;
+    prevStockDownFills.current = sDnFills;
     prevValue.current = challenge.value;
     // prevValue と**必ず同じ場所で**前進させる — heldValueFor は prevValue を原点に
     // 使うので、押下追従の基準がそれより古い delta のものだと、据え置きに既に
@@ -1189,19 +1274,36 @@ export function MonitorView(): React.JSX.Element {
     // ゲージ満タン由来かは fills の単調増加で判定する。recentEffects を見ないのは、
     // watermark の 5 秒ゲートで落ちた古い演出とラッチがズレるのを避けるため。
     // 譲る判定より前に出しておく — 譲るときも「満タンが起きた」事実は要る。
-    const units = fills !== null && prevF !== null ? fills - prevF : 0;
+    // 革命(反転)ぶん(downFills の進み)は妨害チェーンから**除外**する — 値は
+    // worker が即時に減算済みで、加算前提の据え置き会計に混ぜると符号が壊れる。
+    // 反転の演出は strikeDownNow(下)が別立てで出す。
+    const allUnits = fills !== null && prevF !== null ? fills - prevF : 0;
+    const dnUnits = dnFills !== null && prevDF !== null ? Math.max(0, dnFills - prevDF) : 0;
+    const units = allUnits - dnUnits;
     const likeDelta = units > 0 ? units * step : 0;
+    const likeDownDelta = dnUnits > 0 ? dnUnits * step : 0;
     // ストック満杯はゲージ満タンと同じ tick でしか起きない(worker の従属関係)。
     // 満杯分も据え置いて2段目の着弾まで持ち越す — 引き忘れるとボーナスが
     // ゲージ演出より先に7セグへ出る(因果逆転)。
-    const stockUnits = sFills !== null && prevSF !== null ? sFills - prevSF : 0;
+    const allStockUnits = sFills !== null && prevSF !== null ? sFills - prevSF : 0;
+    const dnStockUnits = sDnFills !== null && prevSDF !== null ? Math.max(0, sDnFills - prevSDF) : 0;
+    const stockUnits = allStockUnits - dnStockUnits;
     const stockDelta = stockUnits > 0 ? stockUnits * (stock?.step ?? 0) : 0;
+    const stockDownDelta = dnStockUnits > 0 ? dnStockUnits * (stock?.step ?? 0) : 0;
 
     // 「値が変わっていない」だけでは帰れない — 押下(−1)といいね満タン(+1)が
     // 同一デルタで相殺すると value は不変のまま fills だけ進む。ここで帰ると
     // prevFills は上で前進済みなので、着弾チェーン(音・光・バナー)が恒久的に
     // 1回ぶん消える。fills/stock の進みがあれば下の着弾判定まで進む。
-    if (prevV === challenge.value && likeDelta <= 0 && stockDelta <= 0) return;
+    if (
+      prevV === challenge.value &&
+      likeDelta <= 0 &&
+      stockDelta <= 0 &&
+      likeDownDelta <= 0 &&
+      stockDownDelta <= 0
+    ) {
+      return;
+    }
 
     // 2Hz のデルタはボタン押下といいね満タンを1スナップショットに相乗りさせうる。
     // 丸ごと据え置くと押下の手応えが 0.72 秒遅れるので、いいね分だけを持ち越す。
@@ -1247,12 +1349,28 @@ export function MonitorView(): React.JSX.Element {
             if (e.kind === 'boost-start') {
               return boostWillStart(e) ? maxOcclusion(acc, occlusionOfCutin('boost')) : acc;
             }
+            if (e.kind === 'revolution-start') {
+              return revolutionWillStart(e) ? maxOcclusion(acc, occlusionOfCutin('revolution')) : acc;
+            }
             if (e.kind === 'gift' && e.fxBandClip != null) {
               return bandWillStart(e) ? maxOcclusion(acc, occlusionOfCutin('band')) : acc;
             }
             return acc;
           }, 'none');
     const cutinImminent = imminentOcc !== 'none';
+
+    // 革命(反転)の着弾 — 妨害の着弾チェーン(据え置き+飛翔+2段着弾)には乗せない。
+    // 値は worker が即時に減算済みで、その場でお助け色の衝撃だけ出す(visuals-only
+    // ビートの流儀)。緑バナーは playEffect の 'like'/'stock-full'(amount 負)が出す。
+    if (likeDownDelta > 0 || stockDownDelta > 0) {
+      strikeDownNow(likeDownDelta, stockDownDelta, imminentOcc);
+      // 反転だけのデルタはここで完結(数字は素通しで既に減っている)。妨害ぶんが
+      // 同居する境界デルタだけ下の経路へ続ける。
+      if (likeDelta <= 0 && stockDelta <= 0) {
+        followHoldWithPresses();
+        return;
+      }
+    }
 
     // 着弾の経路決定は shared/fx-strike-route.ts が権威(真理値表はテストで凍結)。
     // 入力に stageBusy が**無い** = バナーは着弾を止めない — かつてはバナー表示中の
@@ -1367,6 +1485,7 @@ export function MonitorView(): React.JSX.Element {
       clearRouletteTimers();
       clearBandTimers();
       clearBoostTimers();
+      clearRevolutionTimers();
       clearRepeatTimers();
       clearMiniTimers();
       clearFloatTimers();
@@ -1389,6 +1508,7 @@ export function MonitorView(): React.JSX.Element {
       abortRoulette();
       abortBandFx();
       abortBoostFx();
+      abortRevolutionFx();
       clearRepeatTimers();
       clipQueue.current = [];
       // 着弾待ちのバナーも捨てる — 停止/リセット後に古い通知を出さない。
@@ -1456,6 +1576,46 @@ export function MonitorView(): React.JSX.Element {
   const lockLeftMs = tapLock != null ? Math.max(0, tapLock.endsAtMs - Date.now()) : 0;
   const lockSecs = Math.ceil(lockLeftMs / 1000);
   const lockShown = tapLock != null && lockLeftMs > 0;
+
+  // ── 革命(走行 HUD と終了5秒前カウントダウン) ───────────────────────────
+  // tapLock と同じ規約: worker が配るのは絶対時刻だけ(ChallengeState.revolution)。
+  // 残り秒はここで数える。窓の HUD はホールドを取らない常設表示 — 導入演出
+  // (revolutionHold)とは別物で、孤児ホールド事故を作らない。
+  const revolution = challenge?.revolution ?? null;
+  const revActive = revolution != null;
+  const [, setRevTick] = useState(0);
+  useEffect(() => {
+    if (!revActive) return;
+    const t = setInterval(() => setRevTick((n) => n + 1), 250);
+    return () => clearInterval(t);
+  }, [revActive]);
+  // 窓が worker 側で畳まれたら、再生中の導入(revolutionHold)も必ず畳む。
+  //
+  // **revolution-end effect には頼れない**: あれを積むのは自然満了(flushRevolution)
+  // だけで、stop / reset / 達成 / 機能OFF は clearRevolution を呼ぶだけ(値の清算が
+  // 無いので end を積む理由が無い — tapLock の clearTapLock と同じ設計)。
+  // 導入の 11 秒は自前タイマーで走っているので、state から消えたことを見る
+  // **この effect が唯一の確実な出口**。tapLock HUD と同じ「state 駆動」。
+  useEffect(() => {
+    if (revActive) return;
+    if (revolutionHold.current || pendingRevolutions.current.length > 0) {
+      fxWarn('革命の窓が worker 側で畳まれた — 導入と持ち越しを片付ける');
+      abortRevolutionFx();
+      refreshFxStock();
+      // 据え置きの持ち主が居なくなったので舞台を進める(finish* の scheduleDrain 相当)。
+      scheduleDrain();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revActive]);
+  const revNowMs = Date.now();
+  const revLeftMs = revolution != null ? Math.max(0, revolution.endsAtMs - revNowMs) : 0;
+  // 窓の中か(導入演出中は startsAtMs が未来 = HUD もまだ出さない)。
+  const revWindowOn = revolution != null && revNowMs >= revolution.startsAtMs && revLeftMs > 0;
+  const revLeftSecs = Math.ceil(revLeftMs / 1000);
+  // 終了5秒前カウントダウン(開始側と同じ .revolution-count を key=秒 で再マウント)。
+  // 導入の開始カウントダウン(revCount — タイマー駆動)とは排他: 窓が開くまで
+  // revWindowOn は立たないので、両方が同時に出ることは構造的にない。
+  const revEndCount = revWindowOn && revLeftSecs <= 5 ? Math.max(1, revLeftSecs) : null;
 
   // 封印中に弾かれたタップの手応え。worker は press を捨てるので effect は積まれず、
   // 増分を見るこの経路だけが「押したのに効かない」を視聴者と配信者へ伝える。
@@ -1557,7 +1717,7 @@ export function MonitorView(): React.JSX.Element {
 
   /** 不透明フルフレームが被さっている(この下に描いても見えない)。 */
   function opaqueCutinActive(): boolean {
-    return bandHold.current || stockCutinHold.current || boostHold.current;
+    return bandHold.current || stockCutinHold.current || boostHold.current || revolutionHold.current;
   }
   /**
    * 今どんな幕が着弾の上に被さっているか(2026-08-17 ユーザー決定の遮蔽)。
@@ -1588,7 +1748,13 @@ export function MonitorView(): React.JSX.Element {
   }
   /** カットイン(= 据え置きの持ち主)が居る。 */
   function anyCutinHold(): boolean {
-    return rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current;
+    return (
+      rouletteHold.current ||
+      bandHold.current ||
+      stockCutinHold.current ||
+      boostHold.current ||
+      revolutionHold.current
+    );
   }
   /** 着弾チェーンが飛行中。 */
   function chainActive(): boolean {
@@ -1716,6 +1882,7 @@ export function MonitorView(): React.JSX.Element {
       pendingAchieved.current !== null ||
       pendingBoosts.current.length > 0 ||
       pendingBands.current.length > 0 ||
+      pendingRevolutions.current.length > 0 ||
       joinRouletteQueue.current.length > 0 ||
       hotRouletteQueue.current.length > 0 ||
       rouletteQueue.current.length > 0 ||
@@ -1734,6 +1901,7 @@ export function MonitorView(): React.JSX.Element {
       strike: pendingStrike.current,
       boosts: pendingBoosts.current,
       bands: pendingBands.current,
+      revolutions: pendingRevolutions.current,
       joinRoulettes: joinRouletteQueue.current,
       hotRoulettes: hotRouletteQueue.current,
       roulettes: rouletteQueue.current,
@@ -1753,6 +1921,7 @@ export function MonitorView(): React.JSX.Element {
       pendingStrike.current !== null ||
       pendingBoosts.current.length > 0 ||
       pendingBands.current.length > 0 ||
+      pendingRevolutions.current.length > 0 ||
       joinRouletteQueue.current.length > 0 ||
       hotRouletteQueue.current.length > 0 ||
       rouletteQueue.current.length > 0;
@@ -1784,6 +1953,7 @@ export function MonitorView(): React.JSX.Element {
         nickname: e.nickname,
         rep: giftFxShots(e).rep,
       })),
+      revolutions: pendingRevolutions.current.map((e) => ({ id: e.id, nickname: e.nickname })),
       joinRoulettes: joinRouletteQueue.current.map((w) => ({
         id: w.e.id,
         nickname: w.e.nickname,
@@ -2341,8 +2511,17 @@ export function MonitorView(): React.JSX.Element {
     return {
       chainActive: strikeTimers.current.length > 0,
       strikePending: pendingStrike.current !== null,
+      // 5 ホールドすべてを見る(anyCutinHold / opaqueCutinActive と同じ集合)。
+      // 革命を落とすと、着弾チェーン飛行中に revolution-start が直行したとき
+      // (startRevolutionFx の flushStrike が chainActive と strikePending を同時に
+      // false にした直後)に「幕なし」と誤判定し、不透明な導入動画の**上**へ
+      // 「+N いいね妨害!」を出してしまう。
       cutinActive:
-        rouletteHold.current || bandHold.current || stockCutinHold.current || boostHold.current,
+        rouletteHold.current ||
+        bandHold.current ||
+        stockCutinHold.current ||
+        boostHold.current ||
+        revolutionHold.current,
       ...over,
     };
   }
@@ -2433,6 +2612,57 @@ export function MonitorView(): React.JSX.Element {
     // ストックが乗るときはそちらへ譲る(launchStrike の !stockFollows と同じ
     // 「主役は1本」規約)。mode は既定の 'queue'。
     if (plan.fullClip) playClip(stockDelta > 0 ? STOCK_FULL_CLIP_URL : GAUGE_FULL_CLIP_URL);
+  }
+
+  /**
+   * 革命(反転)中の満タン/満杯の着弾 — 妨害の着弾チェーン(据え置き+飛翔+
+   * 2段着弾)には**乗せない**。値は worker が即時に減算済みで、据え置き会計
+   * (likeGauge.fills 差分 × step の加算前提)へ符号を持ち込むと据え置きの持ち主が
+   * 二重になる。visuals-only ビート(strikeBeatNow)と同じ流儀で、その場でお助け色
+   * (緑 hue 140 — コメント応援と同じ規約)の衝撃・パンチ・SE を出す。
+   * 「−N お助け!」バナーは playEffect の 'like'/'stock-full'(amount 負)が担う —
+   * effect 駆動なので凍結ドレイン遅延でも額が worker の会計と必ず一致する。
+   */
+  function strikeDownNow(likeDownDelta: number, stockDownDelta: number, imminent: FxOcclusion): void {
+    if (likeDownDelta <= 0 && stockDownDelta <= 0) return;
+    if (prefersReducedMotion()) return; // 数字は素通しで既に減っている
+    // 遮蔽の畳み込みは strikeBeatNow と同じ(引数で「これから立つ幕」を受ける)。
+    const occ = maxOcclusion(imminent, currentOcclusion());
+    // 据え置き中(カットインが数字を持っている)なら、いま見せた反転ぶんだけ据え置きも
+    // 進める — **strikeBeatNow の `h + likeDelta + stockDelta` の鏡像**。worker の値は
+    // 既に減っているので、追従させないと「演出は出たのに数字が動かず、カットイン明けに
+    // まとめて落ちる」= 因果が読めない見え方になる。減る方向にしか動かないので
+    // 出目の先漏れ・巻き戻りは起こさない(0 クランプは値の規約どおり)。
+    setHeldValue((h) => (h === null ? h : Math.max(0, h - likeDownDelta - stockDownDelta)));
+    const prevOcc = beatOcclusion.current;
+    beatOcclusion.current = occ;
+    try {
+      const plan = impactPlanNow();
+      setPunchDir('strike');
+      setPunchKey((k) => k + 1);
+      if (plan.shake) pushShake('shake');
+      const fx = fxRef.current;
+      const r = fx?.pointFor(countdownRef.current);
+      const stageW = landscape ? STAGE_LW : STAGE_W;
+      const stageH = landscape ? STAGE_LH : STAGE_H;
+      const cx = r?.x ?? stageW / 2;
+      const cy = r?.y ?? stageH * 0.4;
+      if (plan.particles && fx && r) {
+        fx.ringWave(cx, cy, { hue: 140, radius: Math.max(r.w, r.h) * 0.62 });
+        fx.sparkBurst(cx, cy, 26, { hue: 142, speed: 620 });
+        fx.heartBurst(cx, cy, 12, { hue: 148 });
+      }
+      // SE は遮蔽に依存しない(impactStrikeVisuals と同じ理由 — ここが唯一の発音点)。
+      if (plan.se && cfg) {
+        const slot: ChallengeSeSlot = stockDownDelta > 0 ? 'stock-full' : 'gauge-full';
+        playSe(
+          cfg.challenge.seSounds[slot],
+          effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes[slot])
+        );
+      }
+    } finally {
+      beatOcclusion.current = prevOcc;
+    }
   }
 
   /**
@@ -2623,6 +2853,31 @@ export function MonitorView(): React.JSX.Element {
           hooks?.onNext?.('band');
           return startBandFx(e);
         }
+        if (next.kind === 'revolution') {
+          const e = next.effect;
+          // アーム期限切れの遅着は再生しない(playEffect 直行経路と同じ判定 —
+          // worker は deadlineMs 起点で自走済みで、窓は既に開いている)。
+          const revOpenMs = (e.revolutionEndsAtMs ?? Infinity) - (e.revolutionMs ?? 0);
+          if (!e.test && Date.now() >= revOpenMs) {
+            fxWarn('ドレイン: 革命のアーム期限切れ — 導入を再生しない', {
+              atMs: e.atMs,
+              endsAtMs: e.revolutionEndsAtMs,
+              waitedMs: Date.now() - e.atMs,
+            });
+            dropRevolutionCue(e.id);
+            return false;
+          }
+          if (!revolutionWillStart(e)) {
+            fxWarn('ドレイン: 革命の導入を開始できない — プレーンへ倒す', {
+              durationMs: e.fxDurationMs,
+              reducedMotion: prefersReducedMotion(),
+            });
+            if (!e.test) dropRevolutionCue(e.id);
+            return false;
+          }
+          hooks?.onNext?.('revolution');
+          return startRevolutionFx(e);
+        }
         // ブーストだけは「期限切れ」がある。ただし worker はギフト着弾で**予約する
         // だけ**(アーム)になったので、焼き込まれた boostEndsAtMs は
         // 「アーム期限 BOOST_ARM_MAX_MS で強制発動した場合」のフォールバックの
@@ -2699,7 +2954,8 @@ export function MonitorView(): React.JSX.Element {
    * planRouletteSpin が唯一の権威** — 1〜15本目フル尺・16〜20本目短縮、複数
    * リールの effect は超焦らしカウント素通し、合算 effect(coalesced ≥ 2)は
    * 1本目だけフル尺、入室ルーレット(e.rouletteJoin)は本数に関係なく常にフル尺
-   * かつカウント対象外。**条件式をここに書き戻さないこと**(境界は
+   * かつカウント対象外、焦らし短縮トグル(rouletteRushRef)ON なら本数に関係なく
+   * 短縮(join/hot/試写は免除)。**条件式をここに書き戻さないこと**(境界は
    * test/unit/roulette-spin.spec.ts が凍結している)。
    */
   function startRoulette(e: ChallengeEffect, at = 0): boolean {
@@ -2759,6 +3015,9 @@ export function MonitorView(): React.JSX.Element {
       // donAts にしか無いので、どちらも倍率を消してしまう)。
       hot: e.rouletteHotMult != null,
       teaseEnabled: tease?.enabled === true,
+      // ダッシュボードの「焦らし短縮」トグル。毎リールここで読み直すので、
+      // 回転中の1本は完走し次のリールから短縮/OFF で次からフル尺に戻る。
+      rush: rouletteRushRef.current,
       queueRest: rouletteQueue.current.length,
     });
     const short = spinPlan.short;
@@ -2969,6 +3228,14 @@ export function MonitorView(): React.JSX.Element {
     if (p !== null) waiting.push(strikeClass(p));
     if (pendingBoosts.current.length > 0) waiting.push('boost');
     if (pendingBands.current.length > 0) waiting.push('band');
+    // 革命は band(⑦)と other(⑧ = ギフトルーレット)の間なので、ここに置くと
+    // 並びもそのまま序列順になる。**入れ忘れるとギフトルーレットの連鎖が革命に
+    // 譲らない** — 連打の連鎖は数十秒続きうるので、その間に worker のアーム期限
+    // (BOOST_ARM_MAX_MS)が切れて導入カットインと開始カウントダウンが丸ごと
+    // 捨てられる(playEffect / runDrain の revOpenMs ガード)。アーム期限の 60 秒
+    // 予算は「ルーレット連鎖は譲るので待ちは1リールの尺で有界」を前提に置かれている
+    // (shared/challenge.ts の BOOST_ARM_MAX_MS の解説)。
+    if (pendingRevolutions.current.length > 0) waiting.push('revolution');
     if (excludeSelf !== 'join-roulette' && joinRouletteQueue.current.length > 0) {
       waiting.push('join-roulette');
     }
@@ -3343,6 +3610,132 @@ export function MonitorView(): React.JSX.Element {
     bandHold.current = false;
     bandEffect.current = null;
     setBandClip(null);
+    setHeldValue(null);
+  }
+
+  // ── 革命 ─────────────────────────────────────────────────────────────────
+
+  function clearRevolutionTimers() {
+    for (const t of revolutionTimers.current) window.clearTimeout(t);
+    revolutionTimers.current = [];
+  }
+
+  /** 窓オープン(または開始不可のプレーン発動)の告知バナー。 */
+  function revolutionAnnounceNode(e: ChallengeEffect): React.JSX.Element {
+    return (
+      <>
+        <span className="f-amt">×{num(e.revolutionMultiplier ?? 1)}</span>
+        {nameLines({ who: e.nickname ?? '', act: 'が革命発動!いいねがお助けに!' })}
+      </>
+    );
+  }
+
+  /**
+   * 革命の導入開始。導入全面カット(revolutionIntroMs・不透明・.fx-clip-opaque)→
+   * DOM の大型カウントダウン(revolutionCountMs・5..1、.fx-layer 内なので動画より
+   * 手前)。窓は worker が revolutionCue の実再生時刻 + 前置きから開く(フィーバーの
+   * アーム→コミットと同じ設計)。数字は導入の間だけ据え置く — 窓中は全画面もホールド
+   * も張らないプレーン走行(60 秒は凍結上限を超えるため。worker 側の設計と対)。
+   * 尺は JS タイマーが権威(onEnded は使わない — startBandFx と同じ流儀)。
+   * 戻り値 false = 開始不可(呼び出し側はバナーへフォールバック)。
+   */
+  function startRevolutionFx(e: ChallengeEffect): boolean {
+    if (!revolutionWillStart(e)) {
+      fxWarn('革命の導入開始不可(尺不足 / 動きの抑制)', {
+        durationMs: e.fxDurationMs,
+        reducedMotion: prefersReducedMotion(),
+      });
+      if (!e.test) dropRevolutionCue(e.id);
+      return false;
+    }
+    const introMs = e.revolutionIntroMs ?? 0;
+    const countMs = e.revolutionCountMs ?? 0;
+    const totalMs = e.fxDurationMs ?? introMs + countMs;
+    // ★アーム済み革命の発動合図。直行経路(playEffect)とドレイン経路(runDrain)の
+    // 両方が必ずここを通る(boostCue と同じ「唯一の合流点」)。▶実演は撃たない —
+    // 撃っても worker 側はアーム無しで無視するが、実発動のアームが偶然生きていると
+    // 試写の時刻で本物をコミットしてしまう。
+    if (!e.test) {
+      void rpc('challenge.revolutionCue', {
+        action: 'start',
+        effectId: e.id,
+        startedAtMs: Date.now(),
+        preMs: totalMs,
+      }).catch(() => undefined);
+    }
+    // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。
+    flushStrike(true, occlusionOfCutin('revolution'));
+    clearRevolutionTimers();
+    clearRepeatTimers();
+    revolutionHold.current = true;
+    // 番犬の期限は下の二重安全弁(totalMs+2000)と同じ権威尺から導く。
+    fxHoldDeadlines.current.revolution = Date.now() + totalMs + 2000 + FX_HOLD_GRACE_MS;
+    revolutionEffect.current = e;
+    // トリガーギフト自体は値を動かさない(amount 0)が、会計の式は heldValueFor に
+    // 一本化(舞台待ちの持ち越しぶんを差し引く)。▶実演は据え置かない(値を変えない契約)。
+    if (!e.test) holdValue(heldValueFor(e.amount));
+    if (e.flash) pushFlash('gift-t3');
+    playingFx.current = { kind: 'revolution', id: e.id, nickname: e.nickname, remaining: 1 };
+    refreshFxStock();
+    const push = (ms: number, fn: () => void) => {
+      revolutionTimers.current.push(window.setTimeout(fn, ms));
+    };
+    if (introMs > 0) {
+      setRevolutionClip({ key: ++fxKey, url: REVOLUTION_INTRO_CLIP_URL, out: false });
+      // 終端 0.4 秒前にフェード(.fx-clip-opaque の transition 400ms と一致)。
+      push(Math.max(0, introMs - 400), () => setRevolutionClip((c) => (c ? { ...c, out: true } : c)));
+    }
+    if (countMs > 0) {
+      const secs = Math.max(1, Math.round(countMs / 1000));
+      push(introMs, () => {
+        if (!revolutionHold.current) return;
+        setRevolutionClip(null);
+        setRevCount(secs);
+      });
+      // 毎秒 key=秒 の再マウントでパンチ(.tap-lock-count と同じ手口)。
+      for (let s = secs - 1; s >= 1; s--) {
+        push(introMs + (secs - s) * 1000, () => {
+          if (revolutionHold.current) setRevCount(s);
+        });
+      }
+    } else if (introMs > 0) {
+      push(introMs, () => setRevolutionClip(null));
+    }
+    push(totalMs, () => finishRevolutionIntro());
+    push(totalMs + 2000, () => finishRevolutionIntro()); // 二重安全弁
+    return true;
+  }
+
+  /** 導入終了 — ここで数字が動き出し、窓オープンの告知バナーを出す。 */
+  function finishRevolutionIntro() {
+    if (!revolutionHold.current) return;
+    clearRevolutionTimers();
+    revolutionHold.current = false;
+    const e = revolutionEffect.current;
+    revolutionEffect.current = null;
+    setRevolutionClip(null);
+    setRevCount(null);
+    setHeldValue(null);
+    playingFx.current = null; // 表示はドレイン経由の pumpStage が写す
+    // 窓オープンの告知。演出(導入+カウントダウン)の直後 = 「アニメーション → 通知」。
+    if (e && e.test !== true) pushFloat(revolutionAnnounceNode(e), 'good banner-revolution', 'revolution-announce');
+    // 導入中に届いた持ち越しのドレイン(順序は FX_PRIORITY_ORDER が権威)。
+    scheduleDrain();
+  }
+
+  /** reset/stop・番犬用の全破棄。据え置きもタイマーも捨てて worker 値へ戻す。 */
+  function abortRevolutionFx() {
+    clearRevolutionTimers();
+    pendingRevolutions.current = [];
+    if (playingFx.current?.kind === 'revolution') playingFx.current = null;
+    setRevCount(null);
+    if (!revolutionHold.current) {
+      setRevolutionClip(null);
+      return;
+    }
+    revolutionHold.current = false;
+    revolutionEffect.current = null;
+    setRevolutionClip(null);
     setHeldValue(null);
   }
 
@@ -4315,6 +4708,15 @@ export function MonitorView(): React.JSX.Element {
         return;
       }
       case 'like': {
+        // 革命(反転)中のお助け(amount 負)。妨害の保留合算(mergePendingFloat)へ
+        // 混ぜない — 符号が混ざると flush の1枚が相殺で嘘の額になる。据え置き・
+        // 粒子・SE・パンチは fills 差分側(strikeDownNow)が担うので、ここは
+        // 緑バナー1枚だけ(ハート吸い込みも出さない — 「注がれて貯まる」の絵は
+        // 妨害方向の視覚連結)。
+        if (e.amount < 0) {
+          pushFloat(likeFloatNode(-e.amount, true), 'good like-float', 'like-float');
+          return;
+        }
         // 高頻度なのでフラッシュ/シェイクは付けない — 合算済みの +N だけ流す。
         // バナーは7セグ着弾(impactStrike)まで我慢する — 「アニメーション → 通知」。
         // 我慢するのはチェーン飛行中だけでなく、持ち越し(pendingStrike)や
@@ -4389,6 +4791,12 @@ export function MonitorView(): React.JSX.Element {
         return;
       }
       case 'stock-full': {
+        // 革命(反転)中のお助け(amount 負)。like と同じ理由で保留合算へ混ぜず、
+        // 緑バナー1枚だけ出す(衝撃・SE は fills 差分側の strikeDownNow が担う)。
+        if (e.amount < 0) {
+          pushFloat(stockFloatNode(-e.amount, true), 'good like-float', 'stock-float');
+          return;
+        }
         // フラッシュ/シェイク/クリップ/SE は着弾側(impactStock)が担当する
         // (gauge-full と同じ分担)。バナーも2発目(緑)の着弾まで我慢して
         // revealStock で出す — 「アニメーション → 通知」。チェーン・持ち越し・
@@ -4612,6 +5020,72 @@ export function MonitorView(): React.JSX.Element {
             effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['boost-end'])
           );
         }
+        return;
+      }
+      case 'revolution-start': {
+        // プレーン発動(fxDurationMs 0)・動きの抑制は導入を出さずバナーだけ —
+        // 窓は worker 側で既に(または drop で)開くので、発動の事実は必ず残す。
+        if (!revolutionWillStart(e)) {
+          if (!e.test) dropRevolutionCue(e.id);
+          pushFloat(revolutionAnnounceNode(e), 'good banner-revolution', 'revolution-announce');
+          return;
+        }
+        // アーム期限切れ(worker が deadlineMs 起点で自走済み)の遅着は再生しない —
+        // 11秒の導入を今から流すと、既に開いている窓の頭を全画面で覆う。
+        // フォールバックの窓オープン時刻 = revolutionEndsAtMs − revolutionMs。
+        const revOpenMs = (e.revolutionEndsAtMs ?? Infinity) - (e.revolutionMs ?? 0);
+        if (!e.test && Date.now() >= revOpenMs) {
+          fxWarn('革命のアーム期限切れ — 導入を再生しない', {
+            atMs: e.atMs,
+            endsAtMs: e.revolutionEndsAtMs,
+            waitedMs: Date.now() - e.atMs,
+          });
+          dropRevolutionCue(e.id);
+          return;
+        }
+        // 他演出の再生中は持ち越す(pendingBoosts と同型)。テストは持ち越さずスキップ。
+        if (stageBusy()) {
+          if (e.test) {
+            fxWarn('revolution 実演: 他演出の再生中 — スキップ');
+            return;
+          }
+          if (pendingRevolutions.current.length < PENDING_REVOLUTIONS_MAX) {
+            pendingRevolutions.current.push(e);
+          } else {
+            fxWarn('revolution-start: 持ち越しキュー満杯 — プレーン発動へ倒す', {
+              queued: pendingRevolutions.current.length,
+            });
+            dropRevolutionCue(e.id);
+          }
+          return;
+        }
+        if (!startRevolutionFx(e)) {
+          pushFloat(revolutionAnnounceNode(e), 'good banner-revolution', 'revolution-announce');
+        }
+        return;
+      }
+      case 'revolution-end': {
+        // 終了済み革命の持ち越しの押し出し(boost-end と同型 — 死んだ導入が
+        // PENDING_REVOLUTIONS_MAX の枠を占めて次の生きた1本を弾かないように)。
+        if (pendingRevolutions.current.length > 0) {
+          const alive = pendingRevolutions.current.filter((x) => x.id > e.id);
+          if (alive.length !== pendingRevolutions.current.length) {
+            fxWarn('revolution-end: 終了済み革命の持ち越しを破棄', {
+              dropped: pendingRevolutions.current.length - alive.length,
+            });
+            pendingRevolutions.current = alive;
+          }
+        }
+        // 導入がまだ再生中に end が来た(機能OFF・強制終了の異常系)— 畳んで戻す。
+        if (revolutionHold.current) abortRevolutionFx();
+        pushFloat(
+          <>
+            <span className="f-amt">×{num(e.revolutionMultiplier ?? 1)}</span>
+            <span className="f-txt">革命タイム終了</span>
+          </>,
+          'good banner-revolution',
+          'revolution-result'
+        );
         return;
       }
       case 'achieved':
@@ -5020,6 +5494,32 @@ export function MonitorView(): React.JSX.Element {
       ) : null}
 
       {/*
+        革命の導入カットイン(不透明フルフレーム)。配置の制約は .fx-clip-opaque と
+        同じ — .monitor-root 直下・z-index なし。仮素材(gift-band1)は無音なので
+        muted のまま(専用素材 intro.mp4 を音声焼き込みで作ったらここの muted 分岐を
+        fullCut と同じ形にする)。尺は startRevolutionFx のタイマーが権威
+        (REVOLUTION_INTRO_MS = 6秒。onEnded は使わない・loop で持たせて打ち切る)。
+        再生失敗は導入を畳んで即カウントダウンへ — cue は送信済みなので窓は開く。
+      */}
+      {revolutionClip ? (
+        <video
+          key={revolutionClip.key}
+          className={`fx-clip fx-clip-opaque${revolutionClip.out ? ' out' : ''}`}
+          src={revolutionClip.url}
+          autoPlay
+          playsInline
+          loop
+          preload="auto"
+          muted
+          ref={(v) => armVideoPlay(v, 'revolution-cutin', () => setRevolutionClip(null))}
+          onError={(ev) => {
+            fxWarn('革命の導入カットインの再生エラー — カウントダウンへ縮退', ev.currentTarget.error);
+            setRevolutionClip(null);
+          }}
+        />
+      ) : null}
+
+      {/*
         タップブーストのカットイン(不透明フルフレーム・音声焼き込み)。配置の
         制約は .fx-clip-opaque と同じ — .monitor-root 直下・z-index なし。
         起動(intro)と結果カットシーン(result・boost-end 後の発表前置き)は
@@ -5211,6 +5711,36 @@ export function MonitorView(): React.JSX.Element {
               <div className="tap-lock-label">
                 {tapLock?.nickname ? `${tapLock.nickname} さんのお邪魔` : 'お邪魔中'}
               </div>
+            </div>
+          </div>
+        ) : null}
+        {/*
+          革命のカウントダウン(開始 5..1 と終了5秒前で共用)。数字が画面一杯・
+          最前列(ユーザー要件)— fx-layer 内・DOM 順で後ろ = 不透明カットイン動画
+          より必ず手前(.boost-overlay と同じ手口。z-index は付けない)。
+          key=秒 の再マウントで毎秒パンチ(.tap-lock-count と同じ手口)。
+          開始側(revCount)は startRevolutionFx のタイマー駆動、終了側(revEndCount)
+          は challenge.revolution.endsAtMs(時刻ラッチ)駆動 — 両者は構造的に排他。
+        */}
+        {revCount !== null || revEndCount !== null ? (
+          <div className="revolution-count-overlay">
+            <div className="revolution-count" key={`${revCount !== null ? 's' : 'e'}${revCount ?? revEndCount}`}>
+              {num(revCount ?? revEndCount ?? 0)}
+            </div>
+          </div>
+        ) : null}
+        {/*
+          革命の走行 HUD(倍率と残り秒)。tapLock と同じ「幕を張らない常設 HUD」で、
+          ホールドにも舞台にも参加しない。reduced-motion でも出す — 演出ではなく
+          「なぜタップが3倍でいいねで数字が減るのか」の説明。
+          終了5秒前カウントダウン中は畳む(全画面の数字と重ねない)。
+        */}
+        {revWindowOn && revEndCount === null ? (
+          <div className="revolution-overlay">
+            <div className="revolution-box">
+              <div className="revolution-title">革命タイム</div>
+              <div className="revolution-mult">×{num(revolution?.multiplier ?? 1)}</div>
+              <div className="revolution-label">残り {num(revLeftSecs)} 秒 — いいねがお助けに!</div>
             </div>
           </div>
         ) : null}

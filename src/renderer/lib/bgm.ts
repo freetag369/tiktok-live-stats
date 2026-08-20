@@ -1,3 +1,4 @@
+import { customSoundFileName, isCustomSoundId } from '@shared/challenge';
 import bgmBand1Url from '../assets/se/band/bgm-band1.mp3';
 import bgmBand2Url from '../assets/se/band/bgm-band2.mp3';
 import bgmBand3Url from '../assets/se/band/bgm-band3.mp3';
@@ -92,14 +93,46 @@ const FADE_STEP_MS = 50;
  */
 export function playBandBgm(id: string | null | undefined, volume: number): BgmHandle | null {
   if (!id) return null;
-  const s = BY_ID.get(id);
-  if (!s) return null;
-  const v = Math.min(1, Math.max(0, volume / 100)) * s.gain;
+  let url: string;
+  let gain: number;
+  if (isCustomSoundId(id)) {
+    // ユーザー取込みの回転音(custom:<ファイル名>)。実体は config/sounds/ で、
+    // main の app-sound:// プロトコル経由で読む(CSP の media-src が許可)。
+    // gain 1: カタログの gain は素材間の音圧差を測って詰めた値で、未知の
+    // ユーザー素材に当てられる基準が無い — 音量スライダーに全権を渡す。
+    url = `app-sound:///${encodeURIComponent(customSoundFileName(id))}`;
+    gain = 1;
+  } else {
+    const s = BY_ID.get(id);
+    if (!s) return null;
+    url = s.url;
+    gain = s.gain;
+  }
+  const v = Math.min(1, Math.max(0, volume / 100)) * gain;
   if (v <= 0) return null;
 
-  const a = new Audio(s.url);
+  const a = new Audio(url);
   a.loop = true; // 曲がカットインより短くても途切れない(尺はタイマーが権威)
   a.volume = Math.min(1, v);
+
+  // 取り壊し済みの印 = 下の error リスナーの偽陽性除け。
+  //
+  // Electron 43 で実測した限り、kill() の `pause() → removeAttribute('src') →
+  // load()` が出すのは abort と emptied だけで error は出ない(a.error は null)。
+  // **ただし `src = ''` にする書き方だと error(code 4)が出る**し、どちらになるかは
+  // 取り壊しの書き方と Chromium のバージョン次第で変わる。取り壊した後に届く error は
+  // 定義上どのみち対処できないので、ここで無条件に落とす — 正常停止のたびに
+  // 全ループ音が「読込に失敗」を吐いて diag.log の本物の欠損報告を埋める、という
+  // 壊れ方(fx-video-pool の「play() が拒否された」偽陽性と同型)を構造的に防ぐ。
+  // 本物の欠損(ファイルが無い)は読み込み時 = kill より前に出るので握り潰さない。
+  let killed = false;
+  // ファイル欠損(config/sounds/ を手で掃除した等)は無音のまま進める —
+  // 既定音へのフォールバックは「選んだ覚えのない音が本番で鳴る」事故のほうが重い。
+  // console.warn は attachConsoleCapture 経由で diag.log に残る(事後診断用)。
+  a.addEventListener('error', () => {
+    if (killed) return;
+    console.warn(`[bgm] 音声の読込に失敗: ${id}(ファイルが移動・削除された可能性)`);
+  });
   // デコード失敗等で reject し得る — 演出は視覚が主なので握りつぶす(playSe と同じ)。
   void a.play().catch(() => {});
 
@@ -115,6 +148,8 @@ export function playBandBgm(id: string | null | undefined, volume: number): BgmH
       window.clearInterval(fadeTimer);
       fadeTimer = null;
     }
+    // src を外す前に立てる — 空 src の error を「欠損の報告」と取り違えない。
+    killed = true;
     a.pause();
     // src を空にしてバッファを解放(Audio 要素はどこにも参照が残らない)。
     a.removeAttribute('src');

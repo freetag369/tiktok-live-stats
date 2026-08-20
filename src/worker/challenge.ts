@@ -7,11 +7,13 @@ import type {
   ChallengeFxQueueItem,
   ChallengeRankRow,
   ChallengeResult,
+  ChallengeRevolutionCue,
   ChallengeState,
   ChallengeStats,
   ChallengeStatus,
   ChallengeStockSlot,
   ChallengeTestEffectSpec,
+  RevolutionRule,
   RoulettePattern,
   TapBoostRule,
   TapLockRule,
@@ -47,11 +49,17 @@ import {
   matchStampTriggers,
   matchTapBoost,
   matchTapLock,
+  matchRevolution,
   tapBoostActivationCount,
   tapLockActivationCount,
+  revolutionActivationCount,
+  TAP_BOOST_DEFERRED_MAX,
   TAP_LOCK_MAX_MS,
   TAP_BOOST_COUNT_MS,
   TAP_BOOST_INTRO_MS,
+  REVOLUTION_INTRO_MS,
+  REVOLUTION_COUNT_MS,
+  REVOLUTION_MAX_MS,
 } from '@shared/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { clampFutureMs } from '@shared/time';
@@ -131,7 +139,7 @@ export class ChallengeEngine {
   private value: number;
   private startedMs: number | null = null;
   private achievedMs: number | null = null;
-  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
+  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
   private recentEffects: ChallengeEffect[] = [];
   /**
    * get() が返す recentEffects のコピーのキャッシュ。press 連打(フィーバー中は
@@ -224,6 +232,12 @@ export class ChallengeEngine {
    * 既定 false = delta にアバターURL 10 本を常時載せない(result と同じ理由)。
    */
   private rankShown = false;
+  /**
+   * ダッシュボードの「焦らし短縮」トグル(ルーレットを次のリールから fast で
+   * 確定させる)。揮発 — worker 再起動でオフに戻るのが仕様で、start/reset/達成
+   * では消さない(再生速度のモードでありランの状態ではない)。
+   */
+  private rouletteRush = false;
   /** いいねの端数繰り越し(likeEvery 未満の余り)。 */
   private likeCounter = 0;
   /**
@@ -345,6 +359,14 @@ export class ChallengeEngine {
    * 不変条件(テストで固定):
    *  - armedBoost !== null ⟹ boostUntilMs === null(窓はまだ開いていない)
    *  - armedBoost !== null ⟹ fxFreezeUntilMs !== null(暫定凍結を必ず張る)
+   *  - tapLockUntilMs !== null ⟹ armedBoost === null && boostUntilMs === null
+   *    (排他: 封印とフィーバーは決して同時に生きない — 2026-08-20 ユーザー決定。
+   *    封印中に届いたフィーバーは deferredBoosts へ、フィーバー在航中に届いた
+   *    封印は pendingTapLock へ、それぞれ予約して順番に発効する)
+   *  - pendingTapLock !== null ⟹ armedBoost !== null || boostUntilMs !== null
+   *  - deferredBoosts.length > 0 ⟹ tapLockUntilMs !== null
+   *    (後2つがあるので armFreezeTimer の「全部 null なら張らない」ガードは
+   *    予約を孤児にしない — 予約がある間は必ず起床候補も生きている)
    * 後者は**連打コンボの直列化が依存している** — activateBoost が同期的に凍結を
    * 張るおかげで、1メッセージ内の2本目以降が applyOrQueue で pendingOps へ落ちる。
    * ここで凍結を張らないと全部が即時発動して互いを強制清算し合う。
@@ -404,6 +426,88 @@ export class ChallengeEngine {
   private tapLockNickname = '';
   /** 発動した行の表示名(label)。空なら表示側が既定文言を使う。 */
   private tapLockLabel = '';
+  /**
+   * フィーバー在航中(アーム〜清算完了)に届いたお邪魔の予約(排他スケジューリング —
+   * armedBoost の不変条件リスト参照)。ワンスロット合算: 複数着弾は addMs を累積し
+   * TAP_LOCK_MAX_MS で頭打ち、表示系(nickname/label/flash)は最新着弾で上書き
+   * (activateTapLock の延長規約と同じ)。settleBoost の末尾で満額発動する。
+   * tapLockUntilMs と同じく**永続化しない**(再起動をまたぐ罰は故障)。
+   */
+  private pendingTapLock: {
+    /** 発動時の総尺(ms)。予約時点で連打丸め・天井まで焼き込み済み。 */
+    addMs: number;
+    /** Σ amountEach × repeatCount(clamp は発動時 — clampDownAmount の規約)。 */
+    amount: number;
+    nickname: string;
+    label: string;
+    flash: boolean;
+  } | null = null;
+  /**
+   * 封印中に届いたフィーバーの予約(排他スケジューリングの逆向き)。封印明け
+   * (flushTapLock / clearTapLockNow)に先頭から applyOrQueue(critical) へ流し、
+   * 既存の直列化(1本目がアーム凍結を張り、2本目以降は pendingOps)にそのまま乗せる。
+   * tb/e は structuredClone で焼き込む(「到着時点で確定」の規約 — 待機中の設定
+   * 変更で倍率が揺れない)。fxId は get() の fxQueue 表示用の同一性キー。
+   * 上限 TAP_BOOST_DEFERRED_MAX、超過は破棄(activateBoost 内のゲート)。永続化しない。
+   */
+  private deferredBoosts: Array<{
+    tb: TapBoostRule;
+    e: Extract<NormalizedEvent, { kind: 'gift' }>;
+    fxId: number;
+  }> = [];
+  // ── 革命 ──────────────────────────────────────────────────────────────────
+  /**
+   * 革命の窓の期限(絶対 ms)。null = 非発動。tapLockUntilMs と同じ流儀で専用
+   * タイマーは持たず flushFxFreeze(唯一の時計入口)で lazy に解除する。
+   * **boostUntilMs は流用しない** — あちらを使うと最終ゲート(get() の gauntlet)が
+   * 窓の 60 秒間消え、フィーバーの清算機構まで巻き込む。
+   * **永続化しない**(tapLockUntilMs と同じ規約 — 再起動を跨ぐ効果は故障)。
+   */
+  private revolutionUntilMs: number | null = null;
+  /**
+   * 窓の開始時刻。シネマティックでは cue の実再生開始 + 前置き(導入6秒+
+   * カウントダウン5秒)、プレーンでは発動即。開始前(導入演出中)のタップは
+   * 倍にならず凍結キューへ落ちる(press の専用分岐)。
+   */
+  private revolutionStartMs = 0;
+  /** 発動時に焼き込んだ倍率と1タップの重み(boostMultiplier と同じ「到着時点で確定」)。 */
+  private revolutionMultiplier = 1;
+  private revolutionPressStep = 1;
+  /** 発動させた視聴者の表示名と行の label(HUD・バナー用)。 */
+  private revolutionNickname = '';
+  private revolutionLabel = '';
+  /**
+   * 革命の発動予約(アーム)。armedBoost の鏡像 — モニターが導入カットインを
+   * 実際に再生し始めた合図(revolutionCue)でコミットして窓を開く。
+   * 不変条件: armedRevolution !== null ⟹ revolutionUntilMs === null、かつ
+   * 暫定凍結(fxFreezeUntilMs)を必ず張る(applyOrQueue の直列化が依存)。
+   * プレーンモード(fxAllowed()=false)はアームしない — 映像が無いので即発動。
+   */
+  private armedRevolution: {
+    /** 対応する revolution-start effect の id(合図の照合キー)。 */
+    id: number;
+    /** ギフト着弾時刻(診断とフォールバックの原点)。 */
+    atMs: number;
+    /** atMs + BOOST_ARM_MAX_MS。ここを過ぎたら worker が自走する。 */
+    deadlineMs: number;
+    /** 到着時点で確定した焼き込み(activateRevolution の規約)。 */
+    introMs: number;
+    countMs: number;
+    durationMs: number;
+    multiplier: number;
+    pressStep: number;
+    nickname: string;
+    label: string;
+    flash: boolean;
+  } | null = null;
+  /**
+   * ゲージ満タンのうち革命(反転)中に着弾した回数の累計。likeFills と同じ
+   * 単調増加規約(reset でも巻き戻さない)— モニターの据え置き会計が
+   * `(fills−prevF) − (downFills−prevDF)` で符号を復元する唯一のソース。
+   */
+  private likeDownFills = 0;
+  /** ストック満杯のうち革命(反転)中の回数の累計。規約は likeDownFills と同じ。 */
+  private stockDownFills = 0;
   /**
    * 凍結中に届いたイベントの値適用+演出の保留キュー(dedup・ランキング集計は
    * 凍結中も即時に回る — 取りこぼしゼロの肝)。解除時に到着順で実行し、途中で
@@ -483,7 +587,7 @@ export class ChallengeEngine {
     this.value = cfg.initialValue;
     this.startedMs = this.now();
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
@@ -513,6 +617,11 @@ export class ChallengeEngine {
     this.clearBoost();
     // お邪魔も同じ — 新ランは素の状態で始める(前ランの罰を持ち込まない)。
     this.clearTapLock();
+    // 革命も同じ(窓も予約もまとめて破棄 — clearRevolution が両方落とす)。
+    this.clearRevolution();
+    // 排他スケジューリングの予約も持ち込まない(前ランの罰・演出を跨がせない)。
+    this.pendingTapLock = null;
+    this.deferredBoosts = [];
     // ▶実演の窓も破棄 — press() は実演ブロックを最優先で見るので、実演の残り窓を
     // 跨いで開始すると開幕のタップが全部テストカウンタに吸われて実値が減らない。
     this.clearTestBoost();
@@ -540,6 +649,11 @@ export class ChallengeEngine {
       // いないので清算するものが無く、停止後にフィーバーを始める意味も無い
       // (settleBoost は boostUntilMs null で早期 return するのでここが唯一の出口)。
       this.armedBoost = null;
+      // 排他スケジューリングの予約も同じ判断で捨てる。pendingTapLock は必ず
+      // **settleBoost(force) より前** — 後だと清算のフックが封印を発動し、直後の
+      // clearTapLock で消えるだけの無駄バナーが出る(stopping ガードは二重の防御)。
+      this.pendingTapLock = null;
+      this.deferredBoosts = [];
       // 溜めたタップを闇に落とさない — stop は「値を残す」規約なので、保留 op の
       // 強制適用より先にブーストを清算する(boost-end が保留分より先に並ぶ)。
       this.settleBoost(this.now(), true);
@@ -561,6 +675,9 @@ export class ChallengeEngine {
     // 停止は一時停止だが封印は跨がせない — 再開したら見えないボタンが死んでいる、
     // が最悪の体験(pendingPressFx / testBoost を捨てるのと同じ判断)。
     this.clearTapLock();
+    // 革命も跨がせない — 再開後に「いいねで数字が減る」が説明なく続くのは
+    // 封印の固着と同種の事故(armedRevolution も clearRevolution が落とす)。
+    this.clearRevolution();
     this.dirty = true;
     return this.get();
   }
@@ -574,13 +691,17 @@ export class ChallengeEngine {
     this.fxFreezeUntilMs = null;
     this.clearBoost();
     this.clearTapLock();
+    this.clearRevolution();
+    // 排他スケジューリングの予約も破棄(start/stop と同じ判断)。
+    this.pendingTapLock = null;
+    this.deferredBoosts = [];
     this.clearTestBoost();
     this.armFreezeTimer();
     this.status = 'idle';
     this.value = this.getConfig().initialValue;
     this.startedMs = null;
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 };
     this.recentEffects = [];
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
@@ -611,6 +732,17 @@ export class ChallengeEngine {
    */
   toggleRank(): ChallengeState {
     this.rankShown = !this.rankShown;
+    this.dirty = true;
+    return this.get();
+  }
+
+  /**
+   * ダッシュボードの「焦らし短縮」ボタン。短縮判定そのものはモニター側の
+   * planRouletteSpin(rush 入力)が行い、こちらは旗を揚げ下げするだけ —
+   * 値・統計・抽選(出目やパターン)には一切触らない。
+   */
+  toggleRouletteRush(): ChallengeState {
+    this.rouletteRush = !this.rouletteRush;
     this.dirty = true;
     return this.get();
   }
@@ -692,8 +824,12 @@ export class ChallengeEngine {
     }
     // ── お邪魔(タップ封じ) ────────────────────────────────────────────────
     // **この位置が仕様そのもの**なので動かさないこと:
-    //  - フィーバーのタップ窓(すぐ上の分岐)より**下** = 開いている窓は免除
-    //    (2026-08-18 ユーザー決定)。窓の中のタップは封印中でも通り倍率も乗る。
+    //  - フィーバーのタップ窓(すぐ上の分岐)より**下** = 排他スケジューリング
+    //    (2026-08-20 ユーザー決定)により窓と封印は同時に生きない(armedBoost の
+    //    不変条件リスト参照)ので、原理上この順序に意味はなくなった — が、万一
+    //    不変条件が破れたときに窓側が勝つのは**防御としてこのまま**にする。
+    //    課金フィーバーのタップを食う事故のほうが、封印1本の目減りより重い。
+    //    (旧仕様 2026-08-18「開いている窓は免除」はこの排他化で置き換え。)
     //  - 3・2・1(すぐ下の分岐)より**上** = 封印中のタップを applyOrQueue に積まない。
     //    下に置くと封印明けに溜まったぶんが一気に落ち、「封印」ではなく「遅延」になる
     //    (お邪魔が奪ったはずのカウントをそのまま返してしまう)。
@@ -709,10 +845,44 @@ export class ChallengeEngine {
       this.dirty = true;
       return this.get();
     }
+    // ── 革命の窓(タップ×N・即時) ──────────────────────────────────────────
+    // **この位置が仕様そのもの**なので動かさないこと:
+    //  - フィーバーのタップ窓(上)より**下** = 同時発動ではフィーバーの倍率が勝ち、
+    //    革命の×Nは重畳しない(2026-08-20 ユーザー決定 — どちらもタップ倍率系で、
+    //    フィーバーの方が大きな山場)。
+    //  - お邪魔(すぐ上の分岐)より**下** = **封じが勝つ**(2026-08-20 ユーザー決定)。
+    //    革命は 699💎 の課金ギフトだが、封印は「押させない」というゲームの状態そのもの
+    //    なので、そちらの契約を革命が上書きしない。封印中のタップは捨てられ、
+    //    **革命の時計は止まらない**(窓の残り時間は減り続ける)。
+    //    フィーバーの窓が封印より上に居るのは排他スケジューリングの防御であって、
+    //    「窓は封印より強い」という一般則ではない(あちらのコメント参照)。
+    //  - 最終ゲート(下)より**上** = 窓中はゲート免除(フィーバー窓と同じ
+    //    2026-08-20 ユーザー決定)。get() の gauntlet 省略条件と対。
+    // boostPlain 枝の鏡像: 即時×倍率・クランプ後の実減少量・pressDownTotal 追従。
+    if (this.revolutionActive(nowMs)) {
+      const revStep = this.revolutionPressStep * this.revolutionMultiplier;
+      const revApplied = Math.min(revStep, this.value);
+      this.pressDownTotal += revApplied;
+      this.value -= revApplied;
+      this.stats.presses++;
+      this.pushEffect({
+        kind: 'press',
+        amount: revApplied === 0 ? 0 : -revApplied,
+        revolutionMultiplier: this.revolutionMultiplier,
+        atMs: nowMs,
+      });
+      // 凍結中(窓中に帯域カットインが走った等)は達成を見送る — 押下経路の達成は
+      // 必ず演出明け(flushFxFreeze の末尾)に出す(boostPlain 枝と同じ規約)。
+      if (!this.isFxFrozen()) this.maybeAchieve(nowMs);
+      this.dirty = true;
+      return this.get();
+    }
     // フィーバーの起動カットイン(咆哮 → 3・2・1)中だけは**従来どおり凍結キューへ**。
     // 倍率が乗らないのは元からだが、ここは即時にもしない — 3・2・1 は「まだ押す
     // 時間ではない」合図で、フライングで数字が動くと溜めの意味が消える。溜めたぶんは
     // boost-end の後にドレインで通常適用される(取りこぼしはゼロ)。
+    // 封印(上の分岐)がここより上なのも排他化後は原理上到達しない並びだが、防御
+    // として維持する — 3・2・1 中の封印は「遅延」ではなく「封印」のまま(上のコメント)。
     if (this.boostUntilMs !== null && nowMs < this.boostStartMs) {
       this.applyOrQueue(() => {
         const introStep = this.getConfig().pressStep;
@@ -721,6 +891,36 @@ export class ChallengeEngine {
         this.stats.presses++;
         this.pressDownTotal += introApplied;
         // クランプ後の実減少量を焼く(flushPressFx / 通常経路と同じ規約)。
+        this.pushEffect({
+          kind: 'press',
+          amount: introApplied === 0 ? 0 : -introApplied,
+          atMs: this.now(),
+        });
+        this.maybeAchieve(this.now());
+        this.dirty = true;
+      });
+      return this.get();
+    }
+    // 革命の起動演出(導入全面カット → 5..1 カウントダウン)中だけは**凍結キューへ**
+    // (フィーバーの 3・2・1 と同じ「まだ押す時間ではない」— 2026-08-20 ユーザー
+    // 決定「溜めて後で反映」)。窓が開いた瞬間(commitRevolution が凍結を
+    // 窓オープンまで引き戻す)にドレインされ、等倍で一括反映される(取りこぼしゼロ)。
+    //
+    // **アーム中(armedRevolution)はここに入れてはいけない。** アームは「モニターが
+    // 導入を再生し始めるのを待っている」時間で、最長 BOOST_ARM_MAX_MS(60秒)ある。
+    // まだ何も映っていないのだから「まだ押す時間ではない」の合図が画面に無く、
+    // 溜める理由が存在しない — 入れると 699💎 を撃った直後から最大71秒、押しても
+    // 数字が1も動かない。フィーバーの分岐(すぐ上)が `boostUntilMs !== null` で
+    // アーム中に入らないのと同じ形にする(不変条件 armedRevolution ⟹
+    // revolutionUntilMs === null により、この条件はコミット済みの導入中だけを覆う)。
+    // アーム中の押下は通常経路(下)へ落ち、凍結を素通しして即時に効く。
+    if (this.revolutionUntilMs !== null && nowMs < this.revolutionStartMs) {
+      this.applyOrQueue(() => {
+        const introStep = this.getConfig().pressStep;
+        const introApplied = Math.min(introStep, this.value);
+        this.value -= introApplied;
+        this.stats.presses++;
+        this.pressDownTotal += introApplied;
         this.pushEffect({
           kind: 'press',
           amount: introApplied === 0 ? 0 : -introApplied,
@@ -972,7 +1172,15 @@ export class ChallengeEngine {
         // スキップするので、実カウンタを乗っ取らないのが正。アーム中は
         // boostUntilMs がまだ null(armedBoost ⟹ boostUntilMs === null の不変条件)
         // なので、armedBoost も見ないと commit 後の実タップが実演に吸われる。
-        if (this.boostUntilMs === null && this.armedBoost === null) {
+        // **革命も同じ理由で列挙する** — press() の実演ブロックは最優先で return
+        // するので、革命の窓/アームと重なると窓のタップが丸ごと実演カウンタへ
+        // 吸われ、699💎 を撃った視聴者から見て数字が1も動かない。
+        if (
+          this.boostUntilMs === null &&
+          this.armedBoost === null &&
+          this.revolutionUntilMs === null &&
+          this.armedRevolution === null
+        ) {
           this.testBoostStartMs = atMs + introMs + countMs;
           this.testBoostUntilMs = this.testBoostStartMs + durationMs;
           this.testBoostTapCount = 0;
@@ -1076,6 +1284,35 @@ export class ChallengeEngine {
             : gr
               ? { rouletteId: gr.id }
               : {}),
+          nickname: 'テスト',
+        };
+        break;
+      }
+      case 'revolution': {
+        // 行ごとの実演(revolutionId)。未指定・対象行が消えていたら最初の有効な行、
+        // 1件も無ければ既定値で演出だけ見せる(tapLock / roulette の行フォールバックと同型)。
+        // トリガー一致は評価しない。**実際には窓を開かない**(値・統計・状態に触れない
+        // 規約 — アームも凍結も張らないので、モニターの revolutionCue は worker 側で
+        // 黙って無視され、導入+カウントダウンの試写だけが流れる)。
+        const rule =
+          cfg.revolution.rules.find((r) => r.id === spec.revolutionId) ??
+          cfg.revolution.rules.find((r) => r.enabled) ??
+          cfg.revolution.rules[0];
+        const mult = rule?.multiplier ?? 3;
+        const durMs = (rule?.durationSec ?? 60) * 1000;
+        const cine = this.fxAllowed();
+        const introMs = cine ? REVOLUTION_INTRO_MS : 0;
+        const countMs = cine ? REVOLUTION_COUNT_MS : 0;
+        e = {
+          kind: 'revolution-start',
+          amount: 0,
+          revolutionMultiplier: mult,
+          revolutionEndsAtMs: atMs + introMs + countMs + durMs,
+          revolutionIntroMs: introMs,
+          revolutionCountMs: countMs,
+          revolutionMs: durMs,
+          fxDurationMs: cine ? introMs + countMs : 0,
+          ...(rule?.flash ? { flash: true } : {}),
           nickname: 'テスト',
         };
         break;
@@ -1335,19 +1572,36 @@ export class ChallengeEngine {
         }
         this.likeCounter -= units * cfg.likeEvery;
         this.likeFills += units;
+        const nowMs = this.now();
+        // 反転(革命)は **op 実行時**の窓で判定する — 尺・倍率の「到着時点で確定」
+        // 規約とは別軸で、反転は窓と同期すべきゲームの状態(凍結ドレインで遅れて
+        // 実行されたいいねは実行時点の残量が基準になる、clampDownAmount と同じ哲学)。
+        const rev = this.revolutionActive(nowMs);
         const amount = units * cfg.likeStep;
-        this.value += amount; // 加算方向のみなので maybeAchieve もクランプも不要
-        this.stats.likeUp += amount;
-        this.likeFxPending += amount;
+        if (rev) {
+          // 妨害がお助けになる: 加算ではなく**減算**。クランプ後の実減少量で会計する —
+          // 「加算方向のみなのでクランプ不要」の前提がこの枝でだけ崩れるので、
+          // stats は likeUp に混ぜず likeDown へ(likeUp = fills×step の検算を守る)。
+          // downFills は据え置き会計の符号復元の唯一のソース(dto.ts の doc 参照)。
+          const applied = Math.min(amount, this.value);
+          this.value -= applied;
+          this.stats.likeDown += applied;
+          this.likeDownFills += units;
+          this.likeFxPending -= applied;
+        } else {
+          this.value += amount; // 加算方向はクランプ不要
+          this.stats.likeUp += amount;
+          this.likeFxPending += amount;
+        }
         // 演出は合算窓ごとに1件だけ(窓内の分は flushLikeFx がまとめて出す)。
         // 縮退時(allowFx=false)は積むだけ — 溜まった likeFxPending は次の
         // 通常経路か flushLikeFx がまとめて出す。
-        const nowMs = this.now();
         if (allowFx) {
           // 過去時刻の記録なので未来はあり得ない — 時計の後方ステップで未来に
           // 取り残されると、演出がステップ幅ぶん抑止される(値は無事)。
           this.likeFxLastMs = clampFutureMs(this.likeFxLastMs, nowMs, 0);
-          if (nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
+          // pending 0 は出さない(反転のクランプで額が 0 に潰れたときの「±0」バナー避け)。
+          if (this.likeFxPending !== 0 && nowMs - this.likeFxLastMs >= LIKE_FX_WINDOW_MS) {
             this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
             this.likeFxPending = 0;
             this.likeFxLastMs = nowMs;
@@ -1374,12 +1628,31 @@ export class ChallengeEngine {
             this.lastFullSlots = consumed.slice(-cfg.likeStockCount);
             this.stockFills += stockUnits;
             const bonus = stockUnits * cfg.likeStockStep;
-            this.value += bonus; // 加算方向のみなので maybeAchieve もクランプも不要
-            this.stats.likeStockUp += bonus;
-            // 満杯はゲージ満タンより一桁稀なイベントなので合算窓は使わず即 push。
-            if (allowFx) this.pushEffect({ kind: 'stock-full', amount: bonus, atMs: nowMs });
+            if (rev) {
+              // ゲージ側と同じ反転会計(likeStockDown / stockDownFills)。
+              const appliedBonus = Math.min(bonus, this.value);
+              this.value -= appliedBonus;
+              this.stats.likeStockDown += appliedBonus;
+              this.stockDownFills += stockUnits;
+              // -0 を作らない(settleBoost の boost-end と同じ理由)。
+              if (allowFx) {
+                this.pushEffect({
+                  kind: 'stock-full',
+                  amount: appliedBonus === 0 ? 0 : -appliedBonus,
+                  atMs: nowMs,
+                });
+              }
+            } else {
+              this.value += bonus; // 加算方向はクランプ不要
+              this.stats.likeStockUp += bonus;
+              // 満杯はゲージ満タンより一桁稀なイベントなので合算窓は使わず即 push。
+              if (allowFx) this.pushEffect({ kind: 'stock-full', amount: bonus, atMs: nowMs });
+            }
           }
         }
+        // 反転(減算)で 0 到達しうる。凍結中は見送り — 達成は演出明け
+        // (flushFxFreeze の末尾)に出す(press と同じ規約)。
+        if (rev && !this.isFxFrozen()) this.maybeAchieve(nowMs);
         this.dirty = true;
         return true;
       };
@@ -1468,7 +1741,33 @@ export class ChallengeEngine {
         return changed;
       }
 
-      // お邪魔(タップ封じ)。fanStamp・タップブーストの**次・ルーレットより先**。
+      // 革命。fanStamp・タップブーストの**次・お邪魔より先**に評価する
+      // (matchRevolution の規約 — 同じ giftId の誤設定ではフィーバーが勝ち、
+      // お助けが封印に食われない)。一致したらこのギフトはルーレットも増減規則も
+      // 全面カットも通らない(先勝ち)。
+      const rv = fs
+        ? null
+        : matchRevolution(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+      if (rv) {
+        // ここで return するのでお邪魔/ルーレット/全面カットは評価すらされない。
+        // 記録が無いと giftId の打ち間違いが診断不能になる(タップブーストと同じ理由)。
+        this.giftDiag(
+          `→ 革命一致 id=${rv.id} ×${rv.multiplier} ${rv.durationSec}秒(お邪魔/ルーレット/全面カットは評価されません)`
+        );
+        const revNick = e.viewer.nickname ?? e.viewer.displayId;
+        // 連打はメッセージ内で尺へ畳む(activateRevolution が repeatCount を見る —
+        // tapLock と同じ「発動回数ではなく尺に掛けて上限」方式)ので、発動 op は
+        // 1メッセージ1件でよい。critical: フィーバー発動と同じ理由(溢れ弁の
+        // 即時実行で凍結中に走らせない — 699💎 の課金ギフトなので破棄より積む)。
+        return this.applyOrQueue(
+          () => this.activateRevolution(rv, e),
+          undefined,
+          { kind: 'revolution', nickname: revNick },
+          true
+        );
+      }
+
+      // お邪魔(タップ封じ)。fanStamp・タップブースト・革命の**次・ルーレットより先**。
       // 一致したらこのギフトはルーレットも増減規則も全面カットも通らない(先勝ち)。
       const tl = fs
         ? null
@@ -1479,6 +1778,13 @@ export class ChallengeEngine {
         this.giftDiag(
           `→ お邪魔(タップ封じ)一致 id=${tl.id} ${tl.durationSec}秒(ルーレット/全面カットは評価されません)`
         );
+        // フィーバー在航中(アーム〜清算完了)は**即時ラッチせず予約**する — 排他
+        // スケジューリング(2026-08-20 ユーザー決定: 封印とフィーバーは同時に生きない)。
+        // 発動は settleBoost の末尾で満額の尺(バナーもそこで1枚)。
+        if (this.armedBoost !== null || this.boostUntilMs !== null) {
+          this.reserveTapLock(tl, e);
+          return false;
+        }
         // **期限のラッチは applyOrQueue に通さず即時**。カットイン凍結中にキューへ
         // 落とすと、封印の開始が最長 45 秒(GIFT_FX_FREEZE_MAX_TOTAL_MS)、アーム中なら
         // 60 秒(BOOST_ARM_MAX_MS)後ろ倒しになり、しかもその間タップは押下凍結の分岐で
@@ -1823,14 +2129,43 @@ export class ChallengeEngine {
     if (this.startedMs === null && this.status === 'idle') {
       this.value = this.getConfig().initialValue;
     }
+    // 革命だけを OFF にしたら走行中の窓もアームも畳む — 反転(いいねで数字が減る)は
+    // ゲーム経済を変えるので、無効化済み機能の効果を生かし続けない(タップ封じの
+    // 「機能OFF は逃げ道」と同じ判断)。行ごとの enabled: false では消さない
+    // (到着時点で確定の規約)。アーム中は暫定凍結が張られているので、引き戻して
+    // 保留 op を次の tick で解放する(clearRevolution 単体だと凍結が期限まで残る)。
+    if (
+      !this.getConfig().revolution.enabled &&
+      (this.revolutionUntilMs !== null || this.armedRevolution !== null)
+    ) {
+      const armed = this.armedRevolution !== null;
+      // 窓が実際に開いていた(コミット済み)ときだけ終了の合図を積む。**アーム止まり
+      // では積まない** — settleBoost がアーム止まりの boost-end を積まないのと同じで、
+      // 一度も開いていない窓の「終了」は履歴でも演出でも嘘になる。
+      this.pushRevolutionEnd(this.now());
+      this.clearRevolution();
+      if (armed && this.fxFreezeUntilMs !== null) {
+        this.fxFreezeUntilMs = this.now();
+        this.flushFxFreeze(this.now());
+      }
+      this.armFreezeTimer();
+    }
     // 機能そのものを OFF にしたら封印も解除する — 「チャレンジを止める」が固着した
     // 封印からの逃げ道であり続けるため(main のホットキー登録もここで外れる)。
     // 行ごとの enabled: false では既存の封印を消さない(到着時点で確定の規約)。
     if (!this.getConfig().enabled) {
+      // 排他スケジューリングの予約も逃げ道に含める。pendingTapLock は必ず下の
+      // settleBoost(force) より**前**に捨てる — 後だと「OFF にしたのに封印が発動して
+      // 生き残る」(stop() と同じ順序の規約。stopping ガードは二重の防御)。
+      this.pendingTapLock = null;
+      this.deferredBoosts = [];
       if (this.tapLockUntilMs !== null) {
         this.clearTapLock();
         this.armFreezeTimer();
       }
+      // 革命も逃げ道に含める(チャレンジ全体 OFF — stop() と同じ判断で窓ごと破棄)。
+      this.pushRevolutionEnd(this.now());
+      this.clearRevolution();
       // フィーバーと凍結も逃げ道に含める — 封印だけ解除しても、アーム済みの
       // フィーバーが 60 秒後の期限切れで「無効化済み機能の全画面演出」を強制発動し、
       // 凍結が保留 op を抱えたまま生き続けていた。stop() と同じ規約で畳む:
@@ -1868,11 +2203,17 @@ export class ChallengeEngine {
     const runRank = this.topRankCached('diamonds', CHALLENGE_MONITOR_TOP_N);
     // 凍結中にワーカーで待っている演出付きイベントの予告(モニターの演出ストック
     // 表示用)。凍結中は effect が recentEffects に載らないため、これが無いと
-    // 表示がその間だけ盲目になる。
-    const fxQueue = this.pendingOps
-      .filter((p) => p.fx !== null)
-      .slice(0, CHALLENGE_FX_QUEUE_MAX)
-      .map((p) => p.fx!);
+    // 表示がその間だけ盲目になる。封印明け待ちのフィーバー予約(deferredBoosts)も
+    // 同じ「待ち」なので後ろに合流させる — kind 'boost' は既存の表示語彙で足りる。
+    // 解放時は pendingOps 側の新しい id に入れ替わる(表示キーが変わるだけ)。
+    const fxQueue = [
+      ...this.pendingOps.filter((p) => p.fx !== null).map((p) => p.fx!),
+      ...this.deferredBoosts.map((d) => ({
+        id: d.fxId,
+        kind: 'boost' as const,
+        nickname: d.e.viewer.nickname ?? d.e.viewer.displayId,
+      })),
+    ].slice(0, CHALLENGE_FX_QUEUE_MAX);
     return {
       status: this.status,
       value: this.value,
@@ -1891,6 +2232,7 @@ export class ChallengeEngine {
               every: cfg.likeEvery,
               step: cfg.likeStep,
               fills: this.likeFills,
+              downFills: this.likeDownFills,
               stock:
                 cfg.likeStockCount > 0 && cfg.likeStockStep > 0
                   ? {
@@ -1898,6 +2240,7 @@ export class ChallengeEngine {
                       filled: this.likeStocks,
                       step: cfg.likeStockStep,
                       fills: this.stockFills,
+                      downFills: this.stockDownFills,
                       // 長さは filled に揃える(通常は stockSlots と同数だが防御的に
                       // null 埋め/切り詰め)。要素は不変なのでコピー不要 — worker→main
                       // は structuredClone を通る(result と同じ理由)。
@@ -1919,6 +2262,8 @@ export class ChallengeEngine {
       // ダッシュボードのボタン文言もこのキーの有無だけで決まる。
       // 走行中も毎 delta で組み直すので順位はライブに動く(result は凍結値)。
       ...(this.rankShown ? { rankBoard: this.buildResult(this.now()) } : {}),
+      // 焦らし短縮も rankBoard と同じ「キーの有無 = 状態」規約(OFF はキーごと省く)。
+      ...(this.rouletteRush ? { rouletteRush: true as const } : {}),
       fxFreezeUntilMs: this.fxFreezeUntilMs,
       // 0 のときはキーごと省く(runRank と同じ「2Hz の delta を太らせない」規約)。
       ...(this.pressDownTotal > 0 ? { pressDownTotal: this.pressDownTotal } : {}),
@@ -1951,9 +2296,12 @@ export class ChallengeEngine {
       // 最終ゲートがアクティブな間だけ載せる(boost/tapLock と同じ「非アクティブ時は
       // キーごと省く」規約)。ブーストウィンドウ・起動カットイン中(boostUntilMs 非 null)は
       // タップがゲート免除なので省く — モニターのリングもフィーバー演出に譲る。
+      // 革命(revolutionUntilMs 非 null — 導入演出中を含む)も同じ免除
+      // (2026-08-20 ユーザー決定。press の革命窓分岐がゲートより上に居るのと対)。
       ...(cfg.finalGate.enabled &&
       this.status === 'running' &&
       this.boostUntilMs === null &&
+      this.revolutionUntilMs === null &&
       this.value > 0 &&
       this.value <= cfg.lowThreshold
         ? { gauntlet: { taps: this.gauntletTaps, needed: cfg.finalGate.taps } }
@@ -1968,6 +2316,21 @@ export class ChallengeEngine {
               blocked: this.tapLockBlocked,
               ...(this.tapLockNickname !== '' ? { nickname: this.tapLockNickname } : {}),
               ...(this.tapLockLabel !== '' ? { label: this.tapLockLabel } : {}),
+            },
+          }
+        : {}),
+      // 革命の窓が開いている間だけ載せる(tapLock と同じ規約 — 絶対時刻のみ・
+      // 非アクティブ時はキーごと省く)。モニターの走行 HUD と終了5秒前カウント
+      // ダウンの唯一のソース。導入演出中(cue 後・窓オープン前)も載る —
+      // startsAtMs が未来なので受け手は「まだ窓前」を判別できる。
+      ...(this.revolutionUntilMs !== null
+        ? {
+            revolution: {
+              startsAtMs: this.revolutionStartMs,
+              endsAtMs: this.revolutionUntilMs,
+              multiplier: this.revolutionMultiplier,
+              ...(this.revolutionNickname !== '' ? { nickname: this.revolutionNickname } : {}),
+              ...(this.revolutionLabel !== '' ? { label: this.revolutionLabel } : {}),
             },
           }
         : {}),
@@ -2029,7 +2392,12 @@ export class ChallengeEngine {
    *   (challenge-boost-arm-audio.spec.ts の「帯域凍結では畳む」が検出器)。
    */
   private fxCurtainUp(): boolean {
-    return this.isFxFrozen() && this.armedBoost === null;
+    // 革命のアームも同じ理由で除く — アーム中は暫定凍結が張られているが**まだ何も
+    // 映っていない**ので、押下 SE を畳む理由(カットインの音と絵に重ねない)が
+    // 存在しない。入れないと 699💎 の着弾からモニターが導入を再生し始めるまで
+    // (最長 60 秒)タップの手応えだけが無音になる = ブーストで実際に起きた
+    // 「アーム無音」と同型の事故。
+    return this.isFxFrozen() && this.armedBoost === null && this.armedRevolution === null;
   }
 
   /** 凍結期限に合わせてワンショットタイマーを張り直す(null なら外すだけ)。 */
@@ -2044,7 +2412,9 @@ export class ChallengeEngine {
       this.fxFreezeUntilMs === null &&
       this.armedBoost === null &&
       this.tapLockUntilMs === null &&
-      this.boostUntilMs === null
+      this.boostUntilMs === null &&
+      this.armedRevolution === null &&
+      this.revolutionUntilMs === null
     ) {
       return;
     }
@@ -2064,7 +2434,11 @@ export class ChallengeEngine {
       // 必ず先に発火し、expireBoostFx が据え置きごと畳んで**清算発表(結果カット
       // シーン → ロールアップ → 着弾)が丸ごと出ない**。2Hz tick は「最大 500ms
       // 遅れ」の相乗りであって権威ではない — settleBoost に自前の時計を持たせる。
-      this.boostUntilMs ?? Infinity
+      this.boostUntilMs ?? Infinity,
+      // 革命のアーム期限と窓の期限もこのタイマーが唯一の出口(理由は tapLock と
+      // 同じ — 配信終了後に効果が永久に切れない事故を塞ぐ)。
+      this.armedRevolution?.deadlineMs ?? Infinity,
+      this.revolutionUntilMs ?? Infinity
     );
     const delay = Math.max(0, at - this.now()) + 25;
     const t = setTimeout(() => {
@@ -2082,7 +2456,9 @@ export class ChallengeEngine {
         (this.fxFreezeUntilMs !== null ||
           this.armedBoost !== null ||
           this.tapLockUntilMs !== null ||
-          this.boostUntilMs !== null) &&
+          this.boostUntilMs !== null ||
+          this.armedRevolution !== null ||
+          this.revolutionUntilMs !== null) &&
         this.freezeTimer === null
       ) {
         this.armFreezeTimer();
@@ -2157,6 +2533,8 @@ export class ChallengeEngine {
     // 直後の settleBoost(force) が即座に閉じてしまう(実行中とアームは排他なので
     // 順序を入れ替えても取りこぼしは起きない)。
     this.plainCommitArmedBoost(this.now(), 'モニター閉 / 動きの抑制');
+    // 革命の予約も同じ判断でプレーン即発動(破棄しない — 効果はゲームの状態)。
+    this.plainCommitArmedRevolution(this.now(), 'モニター閉 / 動きの抑制');
     this.fxFreezeUntilMs = this.now();
     this.flushFxFreeze(this.now());
     this.armFreezeTimer();
@@ -2286,10 +2664,24 @@ export class ChallengeEngine {
     // ここを通るので、時計の入口はこの1箇所で足りる。
     this.commitArmedBoostIfExpired(nowMs);
     this.settleBoost(nowMs);
+    // 革命のアーム期限切れと窓の解除も**早期 return より上**(flushTapLock と同じ
+    // 理由)。アーム期限切れを先に見る — 強制発動で revolutionUntilMs が入るので、
+    // 直後の flushRevolution が同じ時間軸で処理できる(boost 側の順序と同型)。
+    this.commitArmedRevolutionIfExpired(nowMs);
+    this.flushRevolution(nowMs);
     // 封印の解除は**この位置**(下の早期 return より上)でなければならない —
     // 下だと凍結が同時に切れるときにしか解除されず、事実上いつまでも解けない。
     this.flushTapLock(nowMs);
-    if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) return;
+    if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) {
+      // 封印明けのフィーバー予約の解放(自然解除の本線)。早期 return 側に置くのは
+      // 安全なケースだけ: 凍結なし(1本目が即アーム — 封印だけが切れる経路はここ)
+      // か凍結中(applyOrQueue が pendingOps へ落とすだけ)。**凍結が今まさに切れた
+      // 経路(下のドレイン)ではここを通さない** — 先にアーム凍結を張り直すと
+      // 待っていた保留 op のドレインが最長 ~82 秒延期される。そちらはドレイン
+      // 完了後の末尾で解放する。
+      this.releaseDeferredBoosts();
+      return;
+    }
     this.fxFreezeUntilMs = null;
     this.dirty = true;
     // 凍結中に即時適用した押下の演出(合算1件)。**ドレインより先**に出す —
@@ -2330,6 +2722,10 @@ export class ChallengeEngine {
     // 再凍結(ドレイン中断)なら次の解除へ持ち越す。2Hz tick と armFreezeTimer の
     // 両方がここを通るので、イベントが途絶えても最大 500ms で到達する。
     if (!this.isFxFrozen()) this.maybeAchieve(nowMs);
+    // ドレイン経路のフィーバー予約の解放(上の早期 return 側と対)。maybeAchieve の
+    // **後** — ドレイン中の 0 到達で達成なら予約は破棄済みで、ここで新しいアームを
+    // 始めない。再凍結(ドレイン中断)なら applyOrQueue が pendingOps へ落とすだけ。
+    this.releaseDeferredBoosts();
   }
 
   /**
@@ -2376,6 +2772,29 @@ export class ChallengeEngine {
     // プレーンモード中の再トリガーは即実行で届く(凍結が無いので直列化されない)。
     // 前のブーストを清算してから始める — 溜め直しではなく「延長戦」を2本に分ける。
     this.settleBoost(atMs, true);
+    // 封印中はアームせず封印明けへ繰り越す(排他スケジューリング — armedBoost の
+    // 不変条件リスト参照)。**settleBoost の後**なのが要:
+    //  - 封印中に届いた場合、在航フィーバーは無い(不変条件)ので上2つは no-op。
+    //  - 再トリガー清算のカスケード — 直前の settleBoost(force) が予約中のお邪魔を
+    //    発動した場合、自分自身がその封印を見てここで自己延期する
+    //    (A清算 → 封印発動 → B は封印明けへ)。
+    // 全経路(giftOp 直行 / pendingOps ドレイン / releaseDeferredBoosts)が
+    // このメソッドを通るので、ゲートはこの1箇所で漏れがない。プレーンモード分岐
+    // より上なので、プレーン即発動も封印を尊重する。
+    if (this.tapLockUntilMs !== null) {
+      if (this.deferredBoosts.length >= TAP_BOOST_DEFERRED_MAX) {
+        this.giftDiag(`→ フィーバーの封印明け予約が上限(${TAP_BOOST_DEFERRED_MAX}本)— 破棄`);
+        return;
+      }
+      // tb/e は焼き込み(「到着時点で確定」— 待機中の設定変更で倍率が揺れない)。
+      this.deferredBoosts.push({ tb: structuredClone(tb), e: structuredClone(e), fxId: ++this.fxQueueSeq });
+      this.giftDiag(
+        `→ 封印中のためフィーバーを封印明けに予約(封印残り${Math.max(0, Math.round((this.tapLockUntilMs - atMs) / 1000))}秒)`
+      );
+      // fxQueue(get() が deferredBoosts を合流させる)が変わった = モニターへ配る変化。
+      this.dirty = true;
+      return;
+    }
     const durationMs = tb.durationSec * 1000;
     const cinematic = this.fxAllowed();
     // プレーンモード化は「起動カットインが飛ばされた」と見た目で区別がつかないので
@@ -2612,6 +3031,16 @@ export class ChallengeEngine {
       atMs: nowMs,
     });
     this.maybeAchieve(nowMs);
+    // 清算完了 = 予約していたお邪魔の発動点(排他スケジューリング)。maybeAchieve の
+    // **後** — 清算で 0 到達したら達成が勝ち、予約は捨てる(達成後のイベントは元の
+    // タイムラインでも無視される規約)。stop()/機能OFF は settleBoost(force) より
+    // 前に予約を破棄する規約(そちらのコメント参照)だが、stopping ガードも重ねて
+    // 「停止処理の中で封印が発動する」を構造的に塞ぐ。
+    if (this.pendingTapLock !== null) {
+      const p = this.pendingTapLock;
+      this.pendingTapLock = null;
+      if (this.status === 'running' && !this.stopping) this.activatePendingTapLock(p, nowMs);
+    }
     this.dirty = true;
   }
 
@@ -2680,6 +3109,115 @@ export class ChallengeEngine {
   }
 
   /**
+   * フィーバー在航中に届いたお邪魔の予約(排他スケジューリング — 呼び出しは giftOp の
+   * tapLock 分岐だけ)。ラッチも effect もここでは起こさない — 発動もバナーも
+   * settleBoost 末尾の activatePendingTapLock が満額で行う。
+   *
+   * 合算は activateTapLock の延長規約を予約に写した形: 尺は到着時点で焼き込み、
+   * 連打はメッセージ内で tapLockActivationCount に丸め、累積は TAP_LOCK_MAX_MS で
+   * 頭打ち。表示系は最新着弾で上書き(延長でも nickname/label が最新になるのと同じ)。
+   */
+  private reserveTapLock(tl: TapLockRule, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
+    const times = tapLockActivationCount(e.repeatCount);
+    if (times < e.repeatCount) {
+      this.giftDiag(`→ お邪魔の連打 ${e.repeatCount}個 — 加算は${times}本ぶんに制限`);
+    }
+    const addMs = tl.durationSec * 1000 * times;
+    const prevMs = this.pendingTapLock?.addMs ?? 0;
+    const capped = Math.min(prevMs + addMs, TAP_LOCK_MAX_MS);
+    if (capped < prevMs + addMs) {
+      this.giftDiag(`→ お邪魔の予約が累積上限(${TAP_LOCK_MAX_MS}ms)に到達 — 延長を打ち切り`);
+    }
+    this.pendingTapLock = {
+      addMs: capped,
+      amount: (this.pendingTapLock?.amount ?? 0) + tl.amountEach * e.repeatCount,
+      nickname: e.viewer.nickname ?? e.viewer.displayId ?? '',
+      label: tl.label,
+      flash: tl.flash,
+    };
+    this.giftDiag(`→ フィーバー中のためお邪魔を清算後に予約 予約尺=${Math.round(capped / 1000)}秒`);
+  }
+
+  /**
+   * 予約していたお邪魔の発動(呼び出しは settleBoost の末尾だけ — 清算完了直後)。
+   * 満額の尺で 0 から張る(延長ではない — フィーバー在航中は封印が存在しないので
+   * base は常に now)。結果カットシーン(発表演出)中から封印の時計は進むが、
+   * タップ窓とは重ならないので排他の仕様を満たす — 発表は演出でありゲーム状態では
+   * ない(press() の「押下凍結より上」の線引きと同じ)。
+   *
+   * バナー+値適用は giftOp の即時ラッチ経路(:tap-lock effect)と同型の applyOrQueue —
+   * シネマティックでは凍結が resultMs + BOOST_SETTLE_BUDGET_MS ぶん残っているので
+   * 清算発表の後に自然にドレインされ、boost-end < tap-lock の id 順が保証される。
+   * プレーンモード(凍結なし)では即時実行され即バナーが出る。どちらも正しい。
+   */
+  private activatePendingTapLock(
+    p: NonNullable<ChallengeEngine['pendingTapLock']>,
+    nowMs: number
+  ): void {
+    this.tapLockStartMs = nowMs;
+    this.tapLockBlocked = 0;
+    this.tapLockUntilMs = nowMs + p.addMs;
+    this.tapLockTotalMs = p.addMs;
+    this.tapLockNickname = p.nickname;
+    this.tapLockLabel = p.label;
+    // 実演の窓は抜け道にしない(activateTapLock と同じ理由)。
+    this.clearTestBoost();
+    this.giftDiag(`→ 予約していたお邪魔を発動 残り${Math.round(p.addMs / 1000)}秒`);
+    this.dirty = true;
+    this.armFreezeTimer();
+    const lockUntil = this.tapLockUntilMs;
+    this.applyOrQueue(() => {
+      // クランプは実行時(凍結明けの残量が基準 — clampDownAmount の doc 参照)。
+      const applied = this.clampDownAmount(p.amount);
+      if (applied < 0) this.stats.giftDown += -applied;
+      else if (applied > 0) this.stats.giftUp += applied;
+      this.value = Math.max(0, this.value + applied);
+      const atMs = this.now();
+      this.pushEffect({
+        kind: 'tap-lock',
+        amount: applied,
+        nickname: p.nickname,
+        tapLockMs: p.addMs,
+        tapLockUntilMs: lockUntil,
+        ...(p.label !== '' ? { giftName: p.label } : {}),
+        ...(p.flash ? { flash: true } : {}),
+        atMs,
+      });
+      this.maybeAchieve(atMs);
+      this.dirty = true;
+    });
+  }
+
+  /**
+   * 封印明けに、封印中へ繰り越したフィーバー予約を発動キューへ流す(排他
+   * スケジューリングの解放側)。呼び出しは flushFxFreeze(自然解除)と
+   * clearTapLockNow(手動解除)— clearTapLock 自体には置かない(stop/reset/達成/
+   * 機能OFF は予約ごと破棄する経路で、そちらは各出口が明示的に捨てる)。
+   *
+   * giftOp の tapBoost 分岐と同型の applyOrQueue(critical): 1本目が非凍結なら即
+   * activateBoost(アーム凍結を張る)、2本目以降は pendingOps へ落ちて清算後に
+   * 直列発動する — 既存の直列化にそのまま乗る。
+   */
+  private releaseDeferredBoosts(): void {
+    if (this.deferredBoosts.length === 0) return;
+    if (this.tapLockUntilMs !== null || this.status !== 'running') return;
+    const queue = this.deferredBoosts;
+    this.deferredBoosts = [];
+    for (const d of queue) {
+      this.applyOrQueue(
+        () => this.activateBoost(d.tb, d.e),
+        undefined,
+        { kind: 'boost', nickname: d.e.viewer.nickname ?? d.e.viewer.displayId },
+        // critical: giftOp の発動経路と同じ理由(溢れ弁の即時実行で凍結中に走らせない)。
+        true
+      );
+    }
+    // 予約行が fxQueue(get() が deferredBoosts を合流させる)から pendingOps 側へ
+    // 移った = モニターへ配るべき変化。
+    this.dirty = true;
+  }
+
+  /**
    * 封印の遅延解除。**flushFxFreeze の早期 return より上**から呼ぶこと — 下だと
    * 「凍結が同時に切れるときにしか解除されない」= 事実上解除されない。
    *
@@ -2718,9 +3256,321 @@ export class ChallengeEngine {
     if (this.tapLockUntilMs === null) return false;
     this.giftDiag('→ お邪魔を手動で解除(配信者操作)');
     this.clearTapLock();
+    // 手動解除でも封印明けのフィーバー予約は失わない(課金ギフト)。凍結中なら
+    // applyOrQueue が pendingOps へ落とすだけなので、どのタイミングでも安全。
+    this.releaseDeferredBoosts();
     this.dirty = true;
     this.armFreezeTimer();
     return true;
+  }
+
+  // ── 革命 ──────────────────────────────────────────────────────────────────
+
+  /** 革命の窓が開いているか(導入演出中は false — 窓は revolutionStartMs から)。 */
+  private revolutionActive(nowMs: number): boolean {
+    return (
+      this.revolutionUntilMs !== null && nowMs >= this.revolutionStartMs && nowMs < this.revolutionUntilMs
+    );
+  }
+
+  /**
+   * 合算窓の途中でも、積んであるいいねバナーを吐き切る(凍結中は持ち越し —
+   * flushLikeFx と同じガード)。呼び出しは革命の窓の開閉境界だけ: 反転前の +N と
+   * 反転後の −N を1枚のバナーに混ぜないための符号の区切り。値・統計は既に
+   * 適用済みなので、ここで落とせるのは見た目の1枚だけ(凍結中に境界が来た場合は
+   * 次の flushLikeFx が混在した1枚を出すが、額の会計は fills/downFills 側で正しい)。
+   */
+  private forceFlushLikeFx(): void {
+    if (this.likeFxPending === 0 || this.status !== 'running' || this.isFxFrozen()) return;
+    const nowMs = this.now();
+    this.pushEffect({ kind: 'like', amount: this.likeFxPending, atMs: nowMs });
+    this.likeFxPending = 0;
+    this.likeFxLastMs = nowMs;
+    this.dirty = true;
+  }
+
+  /**
+   * 革命の発動(applyOrQueue の op として実行される — activateBoost と同じ規約で、
+   * 実行時点の this.now() が期限の原点になる)。トリガーギフト自体は値を動かさない。
+   * 倍率・尺・pressStep はここで焼き込み、以後の設定変更の影響を受けない。
+   *
+   * 重ねがけは**延長 + 上限クランプ**(tapLock の規約 — 2発目の 699💎 が無反応に
+   * なる「課金ギフトが何も生まない」形を作らない)。走行中は期限へ、アーム中は
+   * 予約尺へ加算し、どちらも REVOLUTION_MAX_MS で頭打ち。
+   */
+  private activateRevolution(rv: RevolutionRule, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
+    const atMs = this.now();
+    // 実発動が優先 — ▶実演のタップ窓が残っていたら破棄する(activateBoost と同じ
+    // 規約)。press() の実演ブロックは最優先で return するので、残しておくと
+    // 革命の窓のタップが実演カウンタへ吸われて実値が動かない。
+    this.clearTestBoost();
+    // 連打コンボは normalize.ts が1メッセージへ畳むので repeatCount を見る。掛ける
+    // のは発動回数ではなく**尺**(tapLock と同じ判断 — 窓の直列化はできない)。
+    const times = revolutionActivationCount(e.repeatCount);
+    if (times < e.repeatCount) {
+      this.giftDiag(`→ 革命の連打 ${e.repeatCount}個 — 加算は${times}本ぶんに制限`);
+    }
+    const addMs = rv.durationSec * 1000 * times;
+    const nickname = e.viewer.nickname ?? e.viewer.displayId ?? '';
+    if (this.revolutionUntilMs !== null) {
+      // 走行中(導入演出中を含む)は延長。残っていれば期限から、切れかけなら now から。
+      const base = Math.max(this.revolutionUntilMs, atMs);
+      const capped = Math.min(base + addMs, atMs + REVOLUTION_MAX_MS);
+      if (capped < base + addMs) {
+        this.giftDiag(`→ 革命の累積が上限(${REVOLUTION_MAX_MS}ms)に到達 — 延長を打ち切り`);
+      }
+      this.revolutionUntilMs = capped;
+      // 表示系は最新着弾で上書き(tapLock の延長規約と同じ)。倍率・pressStep は
+      // 焼き込んだまま動かさない — 窓の途中で1タップの重みが変わると説明がつかない。
+      this.revolutionNickname = nickname;
+      this.revolutionLabel = rv.label;
+      this.giftDiag(`→ 革命を延長 残り${Math.round((capped - atMs) / 1000)}秒`);
+      this.dirty = true;
+      this.armFreezeTimer();
+      return;
+    }
+    if (this.armedRevolution !== null) {
+      // アーム中(モニターの再生待ち)は予約尺へ加算(reserveTapLock と同型)。
+      const a = this.armedRevolution;
+      const capped = Math.min(a.durationMs + addMs, REVOLUTION_MAX_MS);
+      if (capped < a.durationMs + addMs) {
+        this.giftDiag(`→ 革命の予約が累積上限(${REVOLUTION_MAX_MS}ms)に到達 — 延長を打ち切り`);
+      }
+      a.durationMs = capped;
+      a.nickname = nickname;
+      a.label = rv.label;
+      this.giftDiag(`→ アーム中の革命へ加算 予約尺=${Math.round(capped / 1000)}秒`);
+      this.dirty = true;
+      return;
+    }
+    const durationMs = Math.min(addMs, REVOLUTION_MAX_MS);
+    const cinematic = this.fxAllowed();
+    if (!cinematic) {
+      // プレーンモード化は見た目で区別がつかないので必ず記録(activateBoost と同じ)。
+      this.giftDiag('→ 革命はプレーンモードで発動(モニター未表示 / 動きの抑制)— 導入もカウントダウンも無し、即窓オープン');
+    }
+    const introMs = cinematic ? REVOLUTION_INTRO_MS : 0;
+    const countMs = cinematic ? REVOLUTION_COUNT_MS : 0;
+    const pressStep = this.getConfig().pressStep;
+    // アームの期限はフィーバーと同じ BOOST_ARM_MAX_MS を流用(60秒 — 舞台が他演出で
+    // 塞がっている最悪ケースの待ち時間の上限。短くしない: ARM=60秒の決定を参照)。
+    const deadlineMs = atMs + BOOST_ARM_MAX_MS;
+    if (cinematic) {
+      this.armedRevolution = {
+        id: 0, // pushEffect の戻り値で埋める(下)
+        atMs,
+        deadlineMs,
+        introMs,
+        countMs,
+        durationMs,
+        multiplier: rv.multiplier,
+        pressStep,
+        nickname,
+        label: rv.label,
+        flash: rv.flash,
+      };
+    } else {
+      // プレーンモードは待つ理由がない(映像が無い)ので即窓オープン。
+      this.commitRevolutionState(atMs, durationMs, rv.multiplier, pressStep, nickname, rv.label);
+    }
+    const effectId = this.pushEffect({
+      kind: 'revolution-start',
+      amount: 0,
+      revolutionMultiplier: rv.multiplier,
+      // フォールバックのタイムライン(boostEndsAtMs と同じ規約 — 実際の期限は
+      // ChallengeState.revolution が権威)。アーム期限まで cue が来なければ
+      // worker が deadlineMs 起点で自走するので、その時の窓の終端がこれ。
+      revolutionEndsAtMs: (cinematic ? deadlineMs + introMs + countMs : atMs) + durationMs,
+      revolutionIntroMs: introMs,
+      revolutionCountMs: countMs,
+      revolutionMs: durationMs,
+      // プレーンは 0(revolutionWillStart が false になり、モニターはバナーだけ出す)。
+      // シネマは導入+カウントダウンの前置きのみ — 窓中は全画面を張らない。
+      fxDurationMs: cinematic ? introMs + countMs : 0,
+      ...(rv.flash ? { flash: true } : {}),
+      nickname,
+      ...(e.giftName ? { giftName: e.giftName } : {}),
+      ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+      ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+      diamonds: e.diamonds,
+      atMs,
+    });
+    if (cinematic) {
+      this.armedRevolution!.id = effectId;
+      // **暫定**の凍結期限 — 窓オープン(導入+カウントダウン明け)まで。窓そのものは
+      // 凍結しない(60秒は GIFT_FX_FREEZE_MAX_TOTAL_MS を超える — 革命の窓は
+      // boostPlain と同じ「即時反映の通常走行」)。cue が来たら短縮方向に張り直す。
+      this.fxFreezeUntilMs = deadlineMs + introMs + countMs + GIFT_FX_FREEZE_MARGIN_MS;
+      this.armFreezeTimer();
+    }
+    this.dirty = true;
+  }
+
+  /** 窓の状態を一括で開く(commit と プレーン即発動の共通実体)。 */
+  private commitRevolutionState(
+    startMs: number,
+    durationMs: number,
+    multiplier: number,
+    pressStep: number,
+    nickname: string,
+    label: string
+  ): void {
+    // コミット時にも破棄する(commitBoost と同じ二重の防御)— アームしてから
+    // 窓が開くまでの最長 60 秒の間に ▶実演を張られる経路があるため。
+    this.clearTestBoost();
+    this.revolutionStartMs = startMs;
+    this.revolutionUntilMs = startMs + durationMs;
+    this.revolutionMultiplier = multiplier;
+    this.revolutionPressStep = pressStep;
+    this.revolutionNickname = nickname;
+    this.revolutionLabel = label;
+    // 窓の符号境界: 合算中のいいねバナーをここで切る(反転前の +N と反転後の −N を
+    // 1枚に混ぜない)。凍結中なら持ち越し(forceFlushLikeFx のガード)。
+    this.forceFlushLikeFx();
+    this.armFreezeTimer();
+    this.dirty = true;
+  }
+
+  /**
+   * アーム済み革命の発動(**唯一の commit 経路**)。ここで窓が開く。
+   * startMs はモニターが導入カットインを再生し始めた時刻(commitBoost と同じ設計)。
+   */
+  private commitRevolution(
+    a: NonNullable<ChallengeEngine['armedRevolution']>,
+    startMs: number,
+    preMs: number,
+    cinematic: boolean
+  ): void {
+    this.armedRevolution = null;
+    this.commitRevolutionState(
+      startMs + (cinematic ? preMs : 0),
+      a.durationMs,
+      a.multiplier,
+      a.pressStep,
+      a.nickname,
+      a.label
+    );
+    if (cinematic) {
+      // 暫定期限(deadlineMs 起点)から実際の再生に合わせて張り直す = 必ず短縮方向。
+      // 凍結は窓オープンの瞬間まで — 導入演出中に溜めたタップ(applyOrQueue)が
+      // 窓オープンでドレインされ「等倍で一括反映」が構造的に成立する。
+      this.fxFreezeUntilMs = this.revolutionStartMs + GIFT_FX_FREEZE_MARGIN_MS;
+      this.armFreezeTimer();
+    }
+  }
+
+  /**
+   * モニターの RPC(challenge.revolutionCue)から: アーム済み革命の合図。
+   * boostCue の鏡像。戻り値 = 状態が変わった(呼び出し側は nudge)。
+   * drop はフィーバーと違い**プレーン即発動へ倒す**(破棄しない)— タップ倍率と
+   * いいね反転はゲームの状態なので、モニターの都合で 699💎 が消えてはいけない。
+   */
+  revolutionCue(p: ChallengeRevolutionCue): boolean {
+    const a = this.armedRevolution;
+    if (a === null) return false;
+    const nowMs = this.now();
+    if (p.action === 'drop') {
+      if (p.effectId !== 0 && p.effectId !== a.id) return false;
+      this.plainCommitArmedRevolution(nowMs, 'モニターが再生を見送った');
+      this.flushFxFreeze(nowMs);
+      return true;
+    }
+    if (p.effectId !== a.id) return false;
+    // startedAtMs の丸めは boostCue と同じ(now を超えさせない — 未来だと窓が
+    // 映像より後ろへずれて開幕の押下を飲む)。
+    const startMs = Math.min(Math.max(p.startedAtMs, nowMs - BOOST_COMMIT_MAX_LAG_MS), nowMs);
+    const preMs = Math.min(Math.max(0, p.preMs), a.introMs + a.countMs);
+    this.commitRevolution(a, startMs, preMs, true);
+    return true;
+  }
+
+  /**
+   * アーム期限切れ = モニターが最後まで再生しなかった。**破棄ではなく強制発動**
+   * (commitArmedBoostIfExpired と同じユーザー決定の適用 — 課金ギフトをもらったのに
+   * 革命が起きない形を作らない)。起点は deadlineMs — effect に焼いた
+   * revolutionEndsAtMs がそのまま真になる。
+   */
+  private commitArmedRevolutionIfExpired(nowMs: number): void {
+    const a = this.armedRevolution;
+    if (a === null || nowMs < a.deadlineMs) return;
+    this.giftDiag(
+      `→ 革命のアーム期限切れ(${Math.round(BOOST_ARM_MAX_MS / 1000)}秒)— モニターの再生を待たず強制発動`
+    );
+    this.commitRevolution(a, a.deadlineMs, a.introMs + a.countMs, true);
+  }
+
+  /** アーム中の革命をプレーンモードで即発動(plainCommitArmedBoost の鏡像)。 */
+  private plainCommitArmedRevolution(nowMs: number, why: string): void {
+    const a = this.armedRevolution;
+    if (a === null) return;
+    this.giftDiag(`→ アーム中の革命をプレーンモードで即発動(${why})— 映像なし、効果だけ`);
+    this.commitRevolution(a, nowMs, 0, false);
+    // 暫定凍結を引き戻す(プレーンは凍結しない契約 — plainCommitArmedBoost と同じ)。
+    // ドレインは呼び出し側に任せる(ここで flushFxFreeze を呼ぶと再入する)。
+    this.fxFreezeUntilMs = nowMs;
+    this.armFreezeTimer();
+  }
+
+  /**
+   * 窓の遅延解除。**flushFxFreeze の早期 return より上**から呼ぶこと(flushTapLock と
+   * 同じ理由 — 下だと凍結が同時に切れるときにしか解除されず、事実上いつまでも
+   * 解けない)。期限は毎回 clampFutureMs で押さえる(時刻ラッチの規約)。
+   */
+  private flushRevolution(nowMs: number): void {
+    if (this.revolutionUntilMs === null) return;
+    // クランプの上限に**前置き(導入+カウントダウン)を足す**。窓はコミット直後
+    // まだ開いておらず(startsAtMs = 実再生開始 + 前置き)、endsAtMs は now から
+    // 「前置き + 尺」ぶん先にある。素の REVOLUTION_MAX_MS で切ると、尺を上限まで
+    // 積んだ設定(120秒 × 連打2本 = 180秒)でコミット直後に 11 秒ぶん削られる。
+    // 安全弁としての意味(時計飛び・NTP 巻き戻しで期限が未来へ取り残される事故の
+    // 検出)は上限を前置きぶん広げても失われない。
+    this.revolutionUntilMs = clampFutureMs(
+      this.revolutionUntilMs,
+      nowMs,
+      REVOLUTION_MAX_MS + REVOLUTION_INTRO_MS + REVOLUTION_COUNT_MS
+    );
+    if (nowMs < this.revolutionUntilMs) return;
+    this.pushRevolutionEnd(nowMs);
+    this.clearRevolution();
+    // 窓の符号境界(閉じる側)。開く側(commitRevolutionState)と対。
+    this.forceFlushLikeFx();
+    this.dirty = true;
+    this.armFreezeTimer();
+  }
+
+  /**
+   * 革命の終了合図(**窓が実際に開いていたときだけ**)。amount 0 — 革命は即時反映
+   * なので清算 lump が無く(フィーバーのシネマティックと違い溜めた値が無い)、
+   * これは「窓が閉じた」の合図と履歴の区切りとしてだけ積む。
+   *
+   * 呼び出しは窓を畳む全経路(自然満了の flushRevolution、機能OFF の
+   * onConfigChanged 2箇所)。**アーム止まり(revolutionUntilMs === null)では
+   * 積まない** — 一度も開いていない窓の「終了」は履歴でも演出でも嘘になる
+   * (settleBoost がアーム止まりの boost-end を積まないのと同じ判断)。
+   *
+   * stop / reset / 達成はこれを呼ばない — あちらは status 遷移そのものが合図で、
+   * モニターは idle/achieved の監視で全演出を畳む(clearTapLock も同じ扱い)。
+   */
+  private pushRevolutionEnd(nowMs: number): void {
+    if (this.revolutionUntilMs === null) return;
+    this.pushEffect({
+      kind: 'revolution-end',
+      amount: 0,
+      revolutionMultiplier: this.revolutionMultiplier,
+      revolutionMs: this.revolutionUntilMs - this.revolutionStartMs,
+      atMs: nowMs,
+    });
+  }
+
+  /** 革命の破棄(start/stop/reset/達成/機能OFFの共通出口 — 予約ごと落とす)。 */
+  private clearRevolution(): void {
+    this.armedRevolution = null;
+    this.revolutionUntilMs = null;
+    this.revolutionStartMs = 0;
+    this.revolutionMultiplier = 1;
+    this.revolutionPressStep = 1;
+    this.revolutionNickname = '';
+    this.revolutionLabel = '';
   }
 
   /** stop 用の強制適用。保留分を残さず適用する(ドレイン中の再凍結は無視)。 */
@@ -2892,6 +3742,14 @@ export class ChallengeEngine {
     // 達成したら封印も解除する — 押下せずに 0 到達しうる(sub 方向のルーレット等)。
     // achieved の pushEffect より**前**に置く(すぐ下の「演出を積む前に凍結する」規約)。
     this.clearTapLock();
+    // 革命も畳む — 達成後のイベントは無視される規約なので、窓もアームも残す意味がない
+    // (反転で 0 到達した直後の CLEAR がこの経路を通る)。
+    this.clearRevolution();
+    // 排他スケジューリングの予約も破棄 — 達成後のイベントは元のタイムラインでも
+    // 無視される規約(pendingTapLock は settleBoost のフックが status で捨てるが、
+    // ここでも対にして「達成 = 予約ゼロ」を一目で保証する)。
+    this.pendingTapLock = null;
+    this.deferredBoosts = [];
     // 演出を積む前に凍結する — pushEffect の時点で state は配られうる。
     this.result = this.buildResult(atMs);
     this.pushEffect({ kind: 'achieved', amount: 0, atMs });
@@ -3065,7 +3923,11 @@ export class ChallengeEngine {
     // 凍結中は出さない — 「凍結中のイベントは演出も保留する」契約から
     // like 合算だけが漏れて、カットイン再生中にバナーが割り込んでいた。
     // 解除後の次の tick(最大500ms)で出る。
-    if (this.likeFxPending <= 0 || this.status !== 'running' || this.isFxFrozen()) return;
+    //
+    // **`=== 0` で見ること(`<= 0` にしない)。** 革命(反転)中の保留は**負**なので、
+    // `<= 0` だと 2Hz tick の出口がその間だけ塞がり、−N バナーが窓が閉じるまで
+    // (最長1分)滞留する。0 は「保留なし」の意味で、そこだけを弾けばよい。
+    if (this.likeFxPending === 0 || this.status !== 'running' || this.isFxFrozen()) return;
     const nowMs = this.now();
     // 時計の後方ステップ対策(like 経路のクランプと同じ理由)。
     this.likeFxLastMs = clampFutureMs(this.likeFxLastMs, nowMs, 0);

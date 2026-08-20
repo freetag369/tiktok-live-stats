@@ -22,7 +22,7 @@ import {
  */
 
 describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 2026-08-18)', () => {
-  it('10ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
+  it('11ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
     expect(FX_PRIORITY_ORDER).toEqual([
       'follow',
       'strike-like',
@@ -33,8 +33,19 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'join-roulette',
       'hot-roulette',
       'band',
+      'revolution',
       'other',
     ]);
+  });
+
+  it('革命は band の直後・通常ギフトルーレットの直前(2026-08-20 ユーザー決定)', () => {
+    // ユーザー決定は「通常ルーレットの前だけ」— 初見(⑥)と激熱確定(⑥.5)は
+    // 革命より上のまま。band(⑦)より下なのは、革命が 11 秒の導入を持つ山場でも
+    // カットインの列を追い越すほどではないという位置づけ。
+    expect(fxRank('revolution')).toBe(fxRank('band') + 1);
+    expect(fxRank('revolution')).toBeLessThan(fxRank('other'));
+    expect(fxRank('revolution')).toBeGreaterThan(fxRank('join-roulette'));
+    expect(fxRank('revolution')).toBeGreaterThan(fxRank('hot-roulette'));
   });
 
   it('激熱確定は band より上・初見ルーレットより下(2026-08-18 ユーザー決定)', () => {
@@ -66,6 +77,7 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'join-roulette',
       'hot-roulette',
       'band',
+      'revolution',
       'roulette',
     ]);
     expect(FX_BANNER_KINDS).toEqual([
@@ -82,6 +94,8 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'boost-announce',
       'boost-result',
       'tap-lock',
+      'revolution-announce',
+      'revolution-result',
     ]);
     // 全登録が有効なクラスを指す(satisfies の値レベル二重化)。
     for (const k of FX_DRAIN_KINDS) expect(FX_PRIORITY_ORDER).toContain(DRAIN_PRIORITY[k]);
@@ -103,6 +117,10 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
     expect(DRAIN_PRIORITY['hot-roulette']).toBe('hot-roulette');
     expect(BANNER_PRIORITY['roulette-result-hot']).toBe('hot-roulette');
     expect(BANNER_PRIORITY['roulette-rest-hot']).toBe('hot-roulette');
+    // 革命のバナーも同じ理由で effect 側(revolution-start/-end)と揃える。
+    expect(DRAIN_PRIORITY.revolution).toBe('revolution');
+    expect(BANNER_PRIORITY['revolution-announce']).toBe('revolution');
+    expect(BANNER_PRIORITY['revolution-result']).toBe('revolution');
     const named = new Set([
       'follow',
       'helper',
@@ -111,6 +129,8 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'tap-lock',
       'roulette-result-hot',
       'roulette-rest-hot',
+      'revolution-announce',
+      'revolution-result',
     ]);
     for (const k of FX_BANNER_KINDS) {
       if (!named.has(k)) expect(BANNER_PRIORITY[k]).toBe('other');

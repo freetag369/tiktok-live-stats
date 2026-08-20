@@ -32,6 +32,7 @@ function snap(over: Partial<FxStockSnapshot> = {}): FxStockSnapshot {
     achievedPending: false,
     boosts: [],
     bands: [],
+    revolutions: [],
     joinRoulettes: [],
     hotRoulettes: [],
     roulettes: [],
@@ -359,6 +360,7 @@ describe('fx-priority 序列との整合(v0.8.0)', () => {
       'join-roulette',
       'hot-roulette',
       'band',
+      'revolution',
       'roulette',
     ]);
   });

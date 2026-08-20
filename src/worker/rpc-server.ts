@@ -117,6 +117,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       session.nudgeChallenge();
       return s;
     },
+    'challenge.toggleRouletteRush': async () => {
+      const s = challenge.toggleRouletteRush();
+      session.nudgeChallenge();
+      return s;
+    },
     'challenge.clearTapLock': async () => {
       // 解除できたときだけ配る(封印中でなければ状態は動いていない)。
       if (challenge.clearTapLockNow()) session.nudgeChallenge();
@@ -135,6 +140,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       // **合体(nudgeChallengeCoalesced)は使えない** — タップ窓が開くより先に
       // ChallengeState.boost がモニターとダッシュボードへ届いている必要がある。
       if (challenge.boostCue(p)) session.nudgeChallenge();
+    },
+    'challenge.revolutionCue': async (p) => {
+      // boostCue と同じ理由で即時 nudge — 窓が開くより先に ChallengeState.revolution
+      // がモニター(HUD・終了カウントダウン)へ届いている必要がある。
+      if (challenge.revolutionCue(p)) session.nudgeChallenge();
     },
 
     'q.viewerTable': async (p) => store.getSessionViewerTable(p.sessionId, p),
@@ -234,10 +244,12 @@ type HandlerMap = {
   'challenge.reset': () => Promise<D.ChallengeState>;
   'challenge.press': () => Promise<D.ChallengeState>;
   'challenge.toggleRank': () => Promise<D.ChallengeState>;
+  'challenge.toggleRouletteRush': () => Promise<D.ChallengeState>;
   'challenge.clearTapLock': () => Promise<D.ChallengeState>;
   'challenge.testEffect': (p: D.ChallengeTestEffectSpec) => Promise<void>;
   'challenge.fxCaps': (p: { bandFx: boolean }) => Promise<void>;
   'challenge.boostCue': (p: D.ChallengeBoostCue) => Promise<void>;
+  'challenge.revolutionCue': (p: D.ChallengeRevolutionCue) => Promise<void>;
   'q.viewerTable': (p: { sessionId: number | null } & D.ViewerTableQuery) => Promise<unknown>;
   'q.viewer': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;
   'q.recallCard': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;

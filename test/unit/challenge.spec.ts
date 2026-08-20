@@ -761,7 +761,7 @@ describe('ChallengeEngine — 状態機械', () => {
     expect(stopped.value).toBe(109); // 凍結表示
     const rs = e.reset();
     expect(rs.value).toBe(100);
-    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 });
+    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 });
     // reset 後は同じユーザーのフォローがまた妨害になる
     e.start();
     expect(e.handleEvent(follow('a'))).toBe(true);
@@ -1674,6 +1674,57 @@ describe('ChallengeEngine — ダッシュボードのランキング表示ト�
     expect(after.value).toBe(before.value);
     expect(after.stats).toEqual(before.stats);
     expect(after.recentEffects).toEqual(before.recentEffects);
+  });
+});
+
+describe('ChallengeEngine — ルーレット焦らし短縮トグル(rouletteRush)', () => {
+  const RUSH_CFG = { initialValue: 100, pressStep: 1_000_000 };
+
+  it('既定はオフ — キーごと省く(キーの有無 = 状態、rankBoard と同じ規約)', () => {
+    const e = engine(cfg(RUSH_CFG));
+    expect(e.get().rouletteRush).toBeUndefined();
+  });
+
+  it('トグルで載る/消える', () => {
+    const e = engine(cfg(RUSH_CFG));
+    expect(e.toggleRouletteRush().rouletteRush).toBe(true);
+    expect(e.toggleRouletteRush().rouletteRush).toBeUndefined();
+  });
+
+  it('start / stop / reset / 達成では消えない — 再生速度のモードでありランの状態ではない', () => {
+    const e = engine(cfg(RUSH_CFG));
+    e.toggleRouletteRush();
+    expect(e.start().rouletteRush).toBe(true);
+    expect(e.stop().rouletteRush).toBe(true);
+    expect(e.reset().rouletteRush).toBe(true);
+    e.start();
+    const s = e.press();
+    expect(s.status).toBe('achieved');
+    expect(s.rouletteRush).toBe(true);
+  });
+
+  it('値・統計・演出には一切触らない(旗の揚げ下げだけ)', () => {
+    const e = engine(cfg(RUSH_CFG));
+    e.start();
+    const before = e.get();
+    const after = e.toggleRouletteRush();
+    expect(after.value).toBe(before.value);
+    expect(after.stats).toEqual(before.stats);
+    expect(after.recentEffects).toEqual(before.recentEffects);
+  });
+
+  it('dirty が立つので押した瞬間に delta で全ウィンドウへ配られる', () => {
+    const e = engine(cfg(RUSH_CFG));
+    e.start();
+    e.drainIfChanged(); // start ぶんの dirty を落とす
+    expect(e.drainIfChanged()).toBeNull();
+    e.toggleRouletteRush();
+    expect(e.drainIfChanged()?.rouletteRush).toBe(true);
+  });
+
+  it('未開始でも切り替えられる(status を見ない)', () => {
+    const e = engine(cfg(RUSH_CFG));
+    expect(e.toggleRouletteRush().rouletteRush).toBe(true);
   });
 });
 

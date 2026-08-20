@@ -29,6 +29,7 @@ function input(over: Partial<RouletteSpinInput> = {}): RouletteSpinInput {
     test: false,
     hot: false,
     teaseEnabled: true,
+    rush: false,
     queueRest: 0,
     ...over,
   };
@@ -149,9 +150,11 @@ describe('planRouletteSpin — 全入力の総当り不変条件', () => {
           for (const test of [false, true]) {
             for (const hot of [false, true]) {
               for (const teaseEnabled of [false, true]) {
-                for (const queueRest of [0, 1, 5]) {
-                  const s = { at, reels, coalesced, join, test, hot, teaseEnabled, queueRest };
-                  all.push({ s, label: JSON.stringify(s) });
+                for (const rush of [false, true]) {
+                  for (const queueRest of [0, 1, 5]) {
+                    const s = { at, reels, coalesced, join, test, hot, teaseEnabled, rush, queueRest };
+                    all.push({ s, label: JSON.stringify(s) });
+                  }
                 }
               }
             }
@@ -189,8 +192,52 @@ describe('planRouletteSpin — 全入力の総当り不変条件', () => {
         expect(s.test, label).toBe(false);
         expect(s.teaseEnabled, label).toBe(true);
         expect(p.short, label).toBe(false);
+        // rush 中の単発は short になる(= skip)ので、tease が通るのは rush オフのときだけ。
+        expect(s.rush, label).toBe(false);
       }
     }
+  });
+
+  it('rush=false は従来の式と完全一致(後方互換の凍結)', () => {
+    for (const { s, label } of all) {
+      if (s.rush) continue;
+      const legacy = !s.join && !s.hot && s.at >= (s.coalesced > 1 ? 1 : ROULETTE_FULL_REELS);
+      expect(planRouletteSpin(s).short, label).toBe(legacy);
+    }
+  });
+});
+
+describe('planRouletteSpin — rush(焦らし短縮のライブトグル)', () => {
+  it('rush=true なら at=0(1本目)から短縮(単発・連打・合算とも)', () => {
+    expect(planRouletteSpin(input({ rush: true })).short).toBe(true);
+    for (let at = 0; at <= 19; at++) {
+      expect(planRouletteSpin(input({ at, reels: 20, rush: true })).short, `at=${at}`).toBe(true);
+    }
+    expect(planRouletteSpin(input({ at: 0, reels: 20, coalesced: 5, rush: true })).short).toBe(true);
+  });
+
+  it('join / hot は rush でも常にフル尺(免除は rush より強い)', () => {
+    for (let at = 0; at <= ROULETTE_REELS_MAX; at++) {
+      expect(planRouletteSpin(input({ at, reels: 20, join: true, rush: true })).short, `join at=${at}`).toBe(false);
+      // hot はフル尺だが超焦らしも素通し(倍率の段 donAts を消さない)。
+      const p = planRouletteSpin(input({ at, reels: 20, hot: true, rush: true }));
+      expect(p.short, `hot at=${at}`).toBe(false);
+      expect(p.tease, `hot at=${at}`).toBeNull();
+    }
+  });
+
+  it('▶ 試写(test)は rush 単独では短縮されない — 抽選パターンをそのまま見せる', () => {
+    const p = planRouletteSpin(input({ test: true, rush: true }));
+    expect(p.short).toBe(false);
+    expect(p.tease).toBeNull();
+    // 既存の本数境界側は test を見ない(従来挙動の凍結)。
+    expect(planRouletteSpin(input({ at: 15, reels: 20, test: true, rush: true })).short).toBe(true);
+  });
+
+  it('rush 中は超焦らしカウントを通さない(short 経由の素通し)', () => {
+    const p = planRouletteSpin(input({ rush: true, teaseEnabled: true }));
+    expect(p.short).toBe(true);
+    expect(p.tease).toBeNull();
   });
 });
 
@@ -205,6 +252,10 @@ describe('MonitorView の配線(ソース不変条件)', () => {
 
   it('startRoulette は planRouletteSpin を通す(判断の再発明を検出)', () => {
     expect(fnBody('startRoulette')).toContain('planRouletteSpin(');
+  });
+
+  it('startRoulette は rush を ref 経由で読む(setTimeout 越しのステールクロージャ対策)', () => {
+    expect(fnBody('startRoulette')).toContain('rouletteRushRef');
   });
 
   it('旧述語(fast || at > 0)がソースに残っていない', () => {

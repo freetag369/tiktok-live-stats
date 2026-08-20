@@ -1,10 +1,12 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron';
+import { Readable } from 'node:stream';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, protocol, screen, shell } from 'electron';
 import type { AppSettings, ChallengeConfig, CsvExportSpec } from '@shared/dto';
 import { CH_MONITOR_STATE, CH_SETTINGS_PUSH, CH_TOAST, CH_WORKER_STATE, MAIN_HANDLED, type RpcRequest, type RpcResponse } from '@shared/ipc';
 import { clearChallengeDefault, defaultSettings, loadChallengeDefault, loadSettings, needsWorkerRestart, sanitizeSettings, saveChallengeDefault, saveSettings } from './boot-settings';
-import { askBackupPath, askCsvPath, askSourceZipPath, offerAdoptDb } from './dialogs';
+import { CUSTOM_SOUND_EXTS, importSoundFile, parseByteRange, resolveCustomSoundPath, soundMimeType, soundsDirIn } from './custom-sounds';
+import { askBackupPath, askCsvPath, askSoundImportPath, askSourceZipPath, offerAdoptDb } from './dialogs';
 import { closeMonitorWindow, getMonitorWindow, getMonitorWindowPid, openMonitorWindow, repositionMonitor } from './monitor-window';
 import { configDirIn, defaultDataDir, docsPath, findExistingDb, isPortable, resourcesDir } from './paths';
 import { attachConsoleCapture, diagLogDir, initDiagLog, recentDiag, report } from './diag-log';
@@ -36,6 +38,17 @@ if (!app.requestSingleInstanceLock()) {
   );
   app.exit(0);
 }
+
+/**
+ * カスタム回転音(config/sounds/)の配信スキーム。**app.whenReady より前が必須**
+ * (ready 後の registerSchemesAsPrivileged は無効)なのでトップレベルに置く —
+ * boot() 内へ移すと packaged でだけ media 再生が黙って失敗する。
+ * stream: true が <audio>/<video> 再生の要件、secure: true が dev
+ * (http://localhost ページ)からの読み込みブロック回避。ハンドラ本体は boot() 内。
+ */
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app-sound', privileges: { secure: true, stream: true, supportFetchAPI: true } },
+]);
 
 let win: BrowserWindow | null = null;
 let host: WorkerHost | null = null;
@@ -249,6 +262,17 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
         } as RpcResponse;
       }
 
+      // カスタム回転音の取込み — 選択ダイアログ → config/sounds/ へコピー。
+      // キャンセルは null(file.pickDataDir と同じ流儀)、サイズ超過などは
+      // VALIDATION エラー → renderer の rpc() throw → トースト。
+      case 'sound.importCustom': {
+        const src = await askSoundImportPath(win, CUSTOM_SOUND_EXTS);
+        if (!src) return { id, ok: true, result: null } as RpcResponse;
+        const r = importSoundFile(dataDir, src);
+        if (!r.ok) return { id, ok: false, error: { code: 'VALIDATION', message: r.message } };
+        return { id, ok: true, result: { file: r.file } } as RpcResponse;
+      }
+
       case 'file.exportCsv': {
         const spec = req.params as CsvExportSpec;
         const path = await askCsvPath(win, spec.kind);
@@ -443,6 +467,47 @@ async function boot(): Promise<void> {
   settings = loadSettings(dataDir);
 
   await app.whenReady();
+
+  // カスタム回転音の読み口。デフォルトセッション登録なのでメイン窓(試聴)と
+  // モニター窓(本番)の両方に効く。resolveCustomSoundPath が containment の
+  // 最終防衛線(config/sounds/ 外は 404)。
+  // ディレクトリはここで1回だけ作る — ハンドラ内で mkdir すると、ループ音の
+  // 再生と Range 要求のたびに syscall が増えるうえ、読み取りが書き込みを伴う。
+  //
+  // **Range は自前で処理する。** net.fetch(file://) に丸投げすると req のヘッダが
+  // 引き継がれず、Chromium が投げた `Range: bytes=N-` に対しても常に 200 + 全体を
+  // 返してしまう。加えて file:// の応答は Content-Length を持たないので長さ不明
+  // ストリーム扱いになり、WAV/OGG の duration が Infinity になる。実測では、
+  // モニターがカットイン動画を並行再生してバッファが追い出される状況で、数MB級の
+  // WAV をループさせるとループ折返しの再取得が要求と食い違い、
+  // PIPELINE_ERROR_READ でその回の回転音が死ぬ(以後その要素は復帰しない)。
+  const soundsDir = soundsDirIn(dataDir);
+  protocol.handle('app-sound', (req) => {
+    const p = resolveCustomSoundPath(soundsDir, new URL(req.url).pathname);
+    if (!p) return new Response(null, { status: 404 });
+    let size: number;
+    try {
+      const st = statSync(p);
+      if (!st.isFile()) return new Response(null, { status: 404 });
+      size = st.size;
+    } catch {
+      return new Response(null, { status: 404 }); // 取り込んだファイルを消した等
+    }
+    const type = soundMimeType(p);
+    const range = parseByteRange(req.headers.get('range'), size);
+    if (range === 'invalid') {
+      return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+    }
+    const { start, end } = range ?? { start: 0, end: size - 1 };
+    const body = Readable.toWeb(createReadStream(p, { start, end })) as ReadableStream;
+    const headers: Record<string, string> = {
+      'Content-Type': type,
+      'Content-Length': String(end - start + 1),
+      'Accept-Ranges': 'bytes',
+    };
+    if (range) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
+    return new Response(body, { status: range ? 206 : 200, headers });
+  });
 
   win = createWindow(join(__dirname, '../preload/index.js'));
   if (process.platform === 'darwin') {

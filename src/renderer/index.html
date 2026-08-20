@@ -6,10 +6,13 @@
       Viewer nicknames and comments are attacker-controlled text rendered in this
       window. No remote code, no eval, and images only from TikTok's CDN (and only
       when 「アバター画像を読み込む」 is on).
+      media-src: app-sound: はカスタム回転音(config/sounds/、main の protocol.handle)。
+      'self' を必ず併記 — media-src を書いた時点で default-src フォールバックが
+      切れるので、落とすと同梱の ogg/mp3 が全部無音になる。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.tiktokcdn.com https://*.tiktokcdn-us.com https://*.tiktokcdn-eu.com https://p16-sign-va.tiktokcdn.com; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.tiktokcdn.com https://*.tiktokcdn-us.com https://*.tiktokcdn-eu.com https://p16-sign-va.tiktokcdn.com; media-src 'self' app-sound:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TikTokライブ分析</title>

@@ -372,10 +372,12 @@ describe('着弾の背面再生 — 遮蔽 occlusion(2026-08-17 ユーザー決�
     }
   });
 
-  it('横取り 3 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
+  it('横取り 4 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
     const calls = SRC.split('flushStrike(true, ').length - 1;
-    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(3);
-    for (const kind of ['roulette', 'band', 'boost']) {
+    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(4);
+    // revolution は 2026-08-20 追加(導入カットインが不透明フルフレームなので
+    // band / boost と同じ 'opaque' の横取りが要る)。
+    for (const kind of ['roulette', 'band', 'boost', 'revolution']) {
       expect(SRC, `${kind} の横取りが遮蔽を渡していない`).toContain(
         `flushStrike(true, occlusionOfCutin('${kind}'));`
       );

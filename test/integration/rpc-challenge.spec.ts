@@ -168,6 +168,18 @@ describe('challenge.* RPC — 戻り値と delta 配信', () => {
     expect(off.rankBoard).toBeUndefined();
     expect(challengeDeltas()).toHaveLength(1);
   });
+
+  it('challenge.toggleRouletteRush は焦らし短縮を反転し、毎回 delta を1通だけ配る', async () => {
+    clearPosts();
+    const on = okResult<ChallengeState>(await rpc('challenge.toggleRouletteRush'));
+    expect(on.rouletteRush).toBe(true);
+    expect(challengeDeltas()).toHaveLength(1);
+
+    clearPosts();
+    const off = okResult<ChallengeState>(await rpc('challenge.toggleRouletteRush'));
+    expect(off.rouletteRush).toBeUndefined();
+    expect(challengeDeltas()).toHaveLength(1);
+  });
 });
 
 describe('challenge.press — 押した本人は即時、ブロードキャストは間引く', () => {

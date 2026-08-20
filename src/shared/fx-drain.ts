@@ -48,6 +48,8 @@ export interface FxDrainQueues<T, R = T> {
   boosts: T[];
   /** 他演出中に届いたカットイン(PENDING_BANDS_MAX は積む側の規約)。 */
   bands: T[];
+  /** 他演出中に届いた革命の導入カットイン(PENDING_REVOLUTIONS_MAX は積む側の規約)。 */
+  revolutions: T[];
   /** 初見(入室)ルーレット(JOIN_ROULETTE_QUEUE_MAX は積む側の規約)。 */
   joinRoulettes: R[];
   /** 激熱確定ルーレット(ROULETTE_HOT_QUEUE_MAX は積む側の規約)。 */
@@ -60,6 +62,7 @@ export type FxDrainNext<T, R = T> =
   | { kind: 'strike'; strike: FxStrikePending }
   | { kind: 'boost'; effect: T }
   | { kind: 'band'; effect: T }
+  | { kind: 'revolution'; effect: T }
   | { kind: 'join-roulette'; effect: R }
   | { kind: 'hot-roulette'; effect: R }
   | { kind: 'roulette'; effect: R };
@@ -107,8 +110,8 @@ export function drainFxQueues<T, R = T>(q: FxDrainQueues<T, R>): FxDrainResult<T
         q.strike = null;
         return { achieved, next: { kind, strike } };
       }
-    } else if (kind === 'boost' || kind === 'band') {
-      const e = (kind === 'boost' ? q.boosts : q.bands).shift();
+    } else if (kind === 'boost' || kind === 'band' || kind === 'revolution') {
+      const e = (kind === 'boost' ? q.boosts : kind === 'band' ? q.bands : q.revolutions).shift();
       if (e !== undefined) return { achieved, next: { kind, effect: e } };
     } else {
       const e = rouletteQueueOf(q, kind).shift();
@@ -132,7 +135,9 @@ export function peekNextDrainKind<T, R = T>(q: FxDrainQueues<T, R>): FxDrainKind
           ? q.boosts.length > 0
           : kind === 'band'
             ? q.bands.length > 0
-            : rouletteQueueOf(q, kind).length > 0;
+            : kind === 'revolution'
+              ? q.revolutions.length > 0
+              : rouletteQueueOf(q, kind).length > 0;
     if (has) return kind;
   }
   return null;
@@ -151,6 +156,7 @@ export function bestDrainRank<T, R = T>(q: FxDrainQueues<T, R>): number | null {
   if (q.strike !== null) consider(fxRank(strikeClass(q.strike)));
   if (q.boosts.length > 0) consider(fxRank(DRAIN_PRIORITY.boost));
   if (q.bands.length > 0) consider(fxRank(DRAIN_PRIORITY.band));
+  if (q.revolutions.length > 0) consider(fxRank(DRAIN_PRIORITY.revolution));
   if (q.joinRoulettes.length > 0) consider(fxRank(DRAIN_PRIORITY['join-roulette']));
   if (q.hotRoulettes.length > 0) consider(fxRank(DRAIN_PRIORITY['hot-roulette']));
   if (q.roulettes.length > 0) consider(fxRank(DRAIN_PRIORITY.roulette));
@@ -162,8 +168,8 @@ export function bestDrainRank<T, R = T>(q: FxDrainQueues<T, R>): number | null {
  * 将来 start が新たにキューへ積むようになった場合の暴走止め。
  * **各キューの上限を上げたらここも上げること** — 到達可能になると
  * 「まだ残っているのに idle へ倒れる」= 持ち越しが1周ぶん遅れる。
- * 見積: strike(1) + boosts(4) + bands(4) + joinRoulettes(4) + hotRoulettes(8) +
- * roulettes(24) + 1 = 46 < 64。
+ * 見積: strike(1) + boosts(4) + bands(4) + revolutions(2) + joinRoulettes(4) +
+ * hotRoulettes(8) + roulettes(24) + 1 = 48 < 64。
  */
 export const FX_DRAIN_MAX_STEPS = 64;
 

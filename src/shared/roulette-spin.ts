@@ -25,6 +25,13 @@
  * RUN_BASE_FAST / ROULETTE_PATTERN_TIMING.fast / @keyframes rl-run-fast /
  * RouletteSpinKey の 'fast')は温存 — **発動条件だけがここに移った。**
  *
+ * 【2026-08-20】**焦らし短縮(rush)** — ダッシュボードのライブトグル
+ * (ChallengeState.rouletteRush、揮発)。ON の間は本数に関係なく短縮する。
+ * startRoulette は毎リールここを呼び直すので「回転中の1本は完走し、次の
+ * リールから短縮/OFF に戻せば次からフル尺」がリール境界で自然に成立する。
+ * join / hot の免除はそのまま(rush より強い)。test(▶試写)も rush では
+ * 短縮しない — 試写は抽選パターンをそのまま見せるのが目的。
+ *
  * shared に置くのは fx-strike-route.ts / fx-drain.ts / roulette-tease.ts と
  * 同じ理由 — レンダラのテスト環境がこのリポジトリに無いので、決定ロジックを
  * 純関数として node の vitest で固定する(test/unit/roulette-spin.spec.ts)。
@@ -62,6 +69,11 @@ export interface RouletteSpinInput {
   /** 設定 challenge.rouletteTease.enabled(cfg 未取得は false)。 */
   teaseEnabled: boolean;
   /**
+   * ChallengeState.rouletteRush === true(ダッシュボードの「焦らし短縮」ライブ
+   * トグル)。ON なら本数に関係なく短縮する。join / hot / test は免除。
+   */
+  rush: boolean;
+  /**
    * ギフトルーレットキューの残り件数。drainFxQueues は shift 済みなので、
    * これがそのまま「後続の並び」になる(runDrain のコメント参照)。
    */
@@ -94,7 +106,11 @@ function fullReelsFor(coalesced: number): number {
 export function planRouletteSpin(s: RouletteSpinInput): RouletteSpinPlan {
   // 激熱確定は本数に関係なく常にフル尺(入室ルーレットと同じ免除)。倍率の段は
   // ultra の donAts にしか無いので、短縮すると倍率が一度も上がらない。
-  const short = !s.join && !s.hot && s.at >= fullReelsFor(s.coalesced);
+  // rush(焦らし短縮トグル)は本数の境界を無視して短縮に倒す。ただし ▶試写は
+  // 抽選パターンをそのまま見せるのが目的なので rush では潰さない(既存の
+  // 本数境界側は従来どおり test を見ない = 挙動凍結)。
+  const short =
+    !s.join && !s.hot && (s.at >= fullReelsFor(s.coalesced) || (s.rush && !s.test));
   // 素通しの条件。短縮スピンは段が無くてゴーストを出せないので元から対象外。
   // 激熱確定も素通し — 超焦らしの差し替え先(jack 3種)は heavy 段位で donAts を
   // 持たないため、通すと倍率が消える。

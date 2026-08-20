@@ -344,23 +344,27 @@ describe('盤面の同一性 — 激熱と通常は絶対に畳まない', () =>
 describe('planRouletteSpin — 激熱は短縮も超焦らしも免除', () => {
   it('どの本数・どの合算でもフル尺で、超焦らしの差し替えを通さない', () => {
     // 通さないと donAts の無いパターン('fast' / jack 3種)へ落ちて倍率が消える。
+    // rush(焦らし短縮トグル)込みでも免除は破れない。
     for (const at of [0, 1, 14, 15, 16, 19]) {
       for (const coalesced of [1, 2, 9]) {
         for (const reels of [1, 2, 20]) {
-          for (const queueRest of [0, 1, 5]) {
-            const plan = planRouletteSpin({
-              at,
-              reels,
-              coalesced,
-              join: false,
-              test: false,
-              hot: true,
-              teaseEnabled: true,
-              queueRest,
-            });
-            const label = `at=${at} coalesced=${coalesced} reels=${reels} rest=${queueRest}`;
-            expect(plan.short, label).toBe(false);
-            expect(plan.tease, label).toBeNull();
+          for (const rush of [false, true]) {
+            for (const queueRest of [0, 1, 5]) {
+              const plan = planRouletteSpin({
+                at,
+                reels,
+                coalesced,
+                join: false,
+                test: false,
+                hot: true,
+                teaseEnabled: true,
+                rush,
+                queueRest,
+              });
+              const label = `at=${at} coalesced=${coalesced} reels=${reels} rush=${rush} rest=${queueRest}`;
+              expect(plan.short, label).toBe(false);
+              expect(plan.tease, label).toBeNull();
+            }
           }
         }
       }
@@ -368,7 +372,7 @@ describe('planRouletteSpin — 激熱は短縮も超焦らしも免除', () => {
   });
 
   it('激熱でなければ従来どおり(16本目は短縮・単発は超焦らしを通す)', () => {
-    const input = { reels: 1, coalesced: 1, join: false, test: false, hot: false, teaseEnabled: true, queueRest: 0 };
+    const input = { reels: 1, coalesced: 1, join: false, test: false, hot: false, teaseEnabled: true, rush: false, queueRest: 0 };
     expect(planRouletteSpin({ ...input, at: 0 }).tease).toEqual({ lastOne: true });
     expect(planRouletteSpin({ ...input, at: 15, reels: 20 }).short).toBe(true);
   });

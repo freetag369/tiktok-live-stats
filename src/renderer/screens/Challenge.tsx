@@ -14,6 +14,8 @@ import type {
   TapBoostRule,
   TapLockConfig,
   TapLockRule,
+  RevolutionConfig,
+  RevolutionRule,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
@@ -69,9 +71,22 @@ import {
   TAP_LOCK_DURATION_MIN_SEC,
   TAP_LOCK_MAX_MS,
   TAP_LOCK_RULES_MAX,
+  DEFAULT_REVOLUTION,
+  DEFAULT_REVOLUTION_RULE,
+  REVOLUTION_DURATION_MAX_SEC,
+  REVOLUTION_DURATION_MIN_SEC,
+  REVOLUTION_INTRO_MS,
+  REVOLUTION_COUNT_MS,
+  REVOLUTION_MAX_MS,
+  REVOLUTION_MULT_MAX,
+  REVOLUTION_MULT_MIN,
+  REVOLUTION_RULES_MAX,
   TAP_BOOST_MULT_MIN,
   TAP_BOOST_RESULT_CLIPS,
+  CUSTOM_SOUND_PREFIX,
+  customSoundFileName,
   effectiveSeVolume,
+  isCustomSoundId,
   rouletteCommonSound,
   rouletteHeadline,
   rouletteSoundOverrideToggle,
@@ -307,7 +322,17 @@ function MonitorTestBtn({
   );
 }
 
-type Tab = 'basic' | 'se' | 'fx' | 'roulette' | 'gifts' | 'comment' | 'helper' | 'boost' | 'taplock';
+type Tab =
+  | 'basic'
+  | 'se'
+  | 'fx'
+  | 'roulette'
+  | 'gifts'
+  | 'comment'
+  | 'helper'
+  | 'revolution'
+  | 'boost'
+  | 'taplock';
 
 const TABS: Array<[Tab, string]> = [
   ['basic', '基本設定'],
@@ -317,6 +342,7 @@ const TABS: Array<[Tab, string]> = [
   ['gifts', 'ギフト増減'],
   ['comment', 'コメント'],
   ['helper', 'お助け'],
+  ['revolution', '革命'],
   ['boost', 'ブースト'],
   ['taplock', 'お邪魔'],
 ];
@@ -558,6 +584,9 @@ export function Challenge(): React.JSX.Element {
         ) : null}
         {tab === 'helper' ? (
           <HelperSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+        ) : null}
+        {tab === 'revolution' ? (
+          <RevolutionSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
         ) : null}
         {tab === 'boost' ? (
           <BoostSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
@@ -1717,6 +1746,17 @@ function RouletteSoundFields({
 }): React.JSX.Element {
   const bgmKey = `${keyPrefix}:bgm:${snd.bgm}`;
   const spinKey = `${keyPrefix}:spin:${snd.spinSe}`;
+  // カスタム回転音の取込み。main がダイアログ → config/sounds/ へコピーまで担い、
+  // ここは返ってきた保存名を spinSe に書くだけ。キャンセルは null で何もしない。
+  const pickCustomSpin = (): void => {
+    void rpc('sound.importCustom', undefined)
+      .then((r) => {
+        if (r) onPatch({ spinSe: CUSTOM_SOUND_PREFIX + r.file });
+      })
+      .catch((e: Error) => {
+        toast({ level: 'error', msgJa: `回転音の取込みに失敗しました: ${e.message}` });
+      });
+  };
   return (
     <>
       <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
@@ -1759,6 +1799,11 @@ function RouletteSoundFields({
                 {m.label}
               </option>
             ))}
+            {/* 現在値がカスタムのときだけ動的に足す — 無いと controlled select が空表示になる。
+                取込みは横の「参照…」経由なので、擬似オプションとして常設はしない。 */}
+            {isCustomSoundId(snd.spinSe) ? (
+              <option value={snd.spinSe}>カスタム: {customSoundFileName(snd.spinSe)}</option>
+            ) : null}
           </select>
         </label>
         <button
@@ -1768,6 +1813,13 @@ function RouletteSoundFields({
           onClick={() => audition.toggle(spinKey, snd.spinSe, snd.spinSeVolume)}
         >
           {audition.key === spinKey ? '■' : '♪'}
+        </button>
+        <button
+          className="btn small"
+          title="自分の音声ファイル(mp3 / ogg / wav / m4a)を取り込んで回転音にする"
+          onClick={pickCustomSpin}
+        >
+          参照…
         </button>
         <input
           type="range"
@@ -1970,6 +2022,14 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
           (効果音そのものをオフにすると動画も無音になります)。
           行ごとに違う音にしたいときは、各ルーレット行と入室ルーレットの
           「回転中のサウンドをこの行だけ上書きする」で差し替えられます。
+        </div>
+        <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+          リール回転音は「参照…」から<b>自分の音声ファイル</b>(mp3 / ogg / wav / m4a)も使えます。
+          選んだファイルはデータフォルダの <b>config/sounds</b> に<b>コピー</b>されるので、元のファイルを移動・削除しても
+          鳴り続けます(他のPCへデフォ保存を持っていくときは、このフォルダも一緒にコピーしてください)。
+          ずっとループするので、<b>短くて継ぎ目の目立たない音</b>が向いています(mp3 は仕様上つなぎ目に
+          わずかな無音が入るため、気になる場合は ogg / wav を推奨)。取り込んだファイルは自動では消えません —
+          不要になったら「データフォルダを開く」から手で削除してください。
         </div>
         <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
           各行の「出目の方向」に応じて、上の2組のどちらかで回ります(入室ルーレットも同じ)。
@@ -3648,6 +3708,201 @@ function TapLockSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn small" onClick={() => onPatch({ tapLock: structuredClone(DEFAULT_TAP_LOCK) })}>
           お邪魔設定を既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * 革命(1分間タップ×N+いいね反転)。TapLockSection の鏡像 + 倍率入力
+ * (BoostSection の multiplier と同じ clamp 表示)。既定は OFF(反転はゲーム
+ * 経済の意味を変えるので、キー欠損フォールバックで勝手に有効化しない)。
+ */
+function RevolutionSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const rv = cfg.revolution;
+  const patchRv = (p: Partial<RevolutionConfig>): void => {
+    onPatch({ revolution: { ...rv, ...p } });
+  };
+  const patchRule = (i: number, p: Partial<RevolutionRule>): void => {
+    patchRv({ rules: rv.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+  const capSec = Math.round(REVOLUTION_MAX_MS / 1000);
+  const preSec = Math.round((REVOLUTION_INTRO_MS + REVOLUTION_COUNT_MS) / 1000);
+
+  return (
+    <>
+      <h3>革命</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={rv.enabled} onChange={(e) => patchRv({ enabled: e.target.checked })} />
+        <span>指定ギフト(既定: 白鳥 699💎)で一定時間「革命タイム」を開く</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        発動すると<b>導入カットイン({Math.round(REVOLUTION_INTRO_MS / 1000)}秒)→
+        画面一杯のカウントダウン({Math.round(REVOLUTION_COUNT_MS / 1000)}秒)</b>のあと窓が開き、
+        窓の間は<b>タップが倍率ぶん即時に効き、いいね妨害・いいねストック妨害が反転して
+        カウントを減らすお助け</b>になります。導入の約{preSec}秒間のタップは溜まり、
+        窓が開いた瞬間に等倍でまとめて反映されます(取りこぼしなし)。
+        <b>お助け・ブーストの次・お邪魔より先</b>に判定され、一致したギフトは増減規則も
+        カットインも通りません。<b>フィーバーのタップ窓と重なったときはフィーバーの倍率が
+        優先</b>されます(倍率は重なりません)。<b>お邪魔(タップ封じ)が掛かっている間は
+        革命の窓でもタップは効きません</b>(封じが優先。ただし革命の残り時間は止まらずに
+        減り続けます)。ラスト◯◯の連打モード(最終ゲート)は窓の間だけ免除されます。
+        窓の残り5秒は画面一杯のカウントダウンで予告します。
+      </div>
+
+      {rv.enabled ? (
+        <>
+          {rv.rules.map((r, i) => (
+            <div className="challenge-rule" key={r.id}>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 60 }}
+                title="この行だけ一時的に止めます(下の行の判定は続きます)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.enabled}
+                  onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  有効
+                </span>
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="白鳥"
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                対象 giftId
+                <input
+                  type="text"
+                  placeholder="実受信で確認"
+                  value={r.giftId}
+                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
+                />
+              </label>
+              <div style={{ width: 150 }}>
+                <label className="field">
+                  ギフト名(IDの保険)
+                  <input
+                    type="text"
+                    value={r.giftName}
+                    placeholder="swan"
+                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                  />
+                </label>
+                <label
+                  className="row"
+                  style={{ cursor: 'pointer', marginTop: 2 }}
+                  title="オンにするとギフト名が完全に一致したときだけ発動します。既定の 'swan' のような短い名前は必ずオンに — 部分一致だと別のギフト名(black swan 等)にも誤爆し、1分間ゲームのルールが変わってしまいます。"
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.exactName}
+                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    完全一致
+                  </span>
+                </label>
+              </div>
+              <label className="field" style={{ width: 96 }} title={`タップ1回の効きが倍率ぶんになります(${REVOLUTION_MULT_MIN}〜${REVOLUTION_MULT_MAX})`}>
+                タップ倍率
+                <input
+                  type="number"
+                  min={REVOLUTION_MULT_MIN}
+                  max={REVOLUTION_MULT_MAX}
+                  value={r.multiplier}
+                  onChange={(e) => patchRule(i, { multiplier: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                窓の長さ(秒)
+                <input
+                  type="number"
+                  min={REVOLUTION_DURATION_MIN_SEC}
+                  max={REVOLUTION_DURATION_MAX_SEC}
+                  value={r.durationSec}
+                  onChange={(e) => patchRule(i, { durationSec: Number(e.target.value) })}
+                />
+              </label>
+              <label className="row" style={{ cursor: 'pointer', width: 76 }}>
+                <input
+                  type="checkbox"
+                  checked={r.flash}
+                  onChange={(e) => patchRule(i, { flash: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  フラッシュ
+                </span>
+              </label>
+              <MonitorTestBtn
+                spec={{ kind: 'revolution', revolutionId: r.id }}
+                onTest={onTest}
+                busy={testBusy}
+                label="▶ この行"
+                title="モニターウィンドウで、導入カットイン+カウントダウンだけを実演再生します(giftId 未設定でも確認できます)。実際には窓を開きません・カウント値も変わりません"
+              />
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchRv({ rules: rv.rules.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={rv.rules.length >= REVOLUTION_RULES_MAX}
+              onClick={() =>
+                patchRv({
+                  rules: [
+                    ...rv.rules,
+                    {
+                      ...structuredClone(DEFAULT_REVOLUTION_RULE),
+                      id: `rev-${Date.now().toString(36)}-${clipSeq++}`,
+                    },
+                  ],
+                })
+              }
+            >
+              革命を追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {REVOLUTION_RULES_MAX} 件(現在 {rv.rules.length} 件)
+            </span>
+          </div>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。既定行の giftId は
+            未設定です — 白鳥の giftId は実配信で一度受け取り、ログ
+            (diag.log の「受信 giftId=…」行)かライブフィードで確認してから入れてください。
+            窓の途中で同じギフトがもう一度届くと<b>残り時間に加算</b>されますが、
+            <b>合計は最大 {capSec} 秒</b>で頭打ちになります(連打コンボは2本ぶんまで)。
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            モニターには窓の間<b>上部に倍率と残り秒</b>が出ます。モニターを閉じているときは
+            演出なしで即座に窓が開きます(効果だけは必ず発動します)。停止・リセット・達成・
+            この機能を OFF にすると窓は必ず閉じます。
+          </div>
+        </>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          className="btn small"
+          onClick={() => onPatch({ revolution: structuredClone(DEFAULT_REVOLUTION) })}
+        >
+          革命設定を既定に戻す
         </button>
       </div>
     </>

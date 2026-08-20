@@ -56,6 +56,7 @@ describe('occlusionOfCutin — カットイン種別 → 幕の濃さ', () => {
       band: 'opaque',
       'stock-cutin': 'opaque',
       boost: 'opaque',
+      revolution: 'opaque',
     };
     for (const [kind, expected] of Object.entries(table)) {
       expect(occlusionOfCutin(kind as FxCutinKind), kind).toBe(expected);

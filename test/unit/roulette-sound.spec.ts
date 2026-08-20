@@ -189,6 +189,55 @@ describe('validateChallengeConfig — 行ごとの回転サウンド上書き', 
   });
 });
 
+describe('validateChallengeConfig — カスタム回転音(custom:<ファイル名>)', () => {
+  it('共通・行別・入室のすべてで custom id を素通しする', () => {
+    // 取込み済みのユーザー音源。**ファイルの実在はここでは見ない** — 消えていた
+    // 場合は再生側が無音+警告ログで扱う契約(検証で既定へ倒すと、config/sounds を
+    // 一時的に触っただけで設定が書き換わってしまう)。
+    const v = validateChallengeConfig({
+      ...structuredClone(DEFAULT_CHALLENGE),
+      rouletteSound: { ...DEFAULT_ROULETTE_SOUND, spinSe: 'custom:回転音.ogg' },
+      rouletteSoundSub: { ...DEFAULT_ROULETTE_SOUND, spinSe: 'custom:sub.wav' },
+      roulettes: [{ ...structuredClone(DEFAULT_ROULETTE), sound: { ...DEFAULT_ROULETTE_SOUND, spinSe: 'custom:row.mp3' } }],
+      joinRoulette: {
+        ...structuredClone(DEFAULT_JOIN_ROULETTE),
+        sound: { ...DEFAULT_ROULETTE_SOUND, spinSe: 'custom:join.m4a' },
+      },
+    } as unknown);
+    expect(v.rouletteSound.spinSe).toBe('custom:回転音.ogg');
+    expect(v.rouletteSoundSub.spinSe).toBe('custom:sub.wav');
+    expect(v.roulettes[0]!.sound!.spinSe).toBe('custom:row.mp3');
+    expect(v.joinRoulette.sound!.spinSe).toBe('custom:join.m4a');
+  });
+
+  it('不正な custom(空名・トラバーサル・区切り)は未知 id と同じく既定へ倒す', () => {
+    for (const bad of ['custom:', 'custom:../evil.mp3', 'custom:a/b.mp3', 'custom:a\\b.mp3']) {
+      const v = validateChallengeConfig({
+        ...structuredClone(DEFAULT_CHALLENGE),
+        rouletteSound: { ...DEFAULT_ROULETTE_SOUND, spinSe: bad },
+      } as unknown);
+      expect(v.rouletteSound.spinSe, bad).toBe(DEFAULT_ROULETTE_SOUND.spinSe);
+    }
+  });
+
+  it('BGM 枠は custom を受け付けない(今回の対象は回転音だけ)', () => {
+    const v = validateChallengeConfig({
+      ...structuredClone(DEFAULT_CHALLENGE),
+      rouletteSound: { ...DEFAULT_ROULETTE_SOUND, bgm: 'custom:曲.mp3' },
+    } as unknown);
+    expect(v.rouletteSound.bgm).toBe(DEFAULT_ROULETTE_SOUND.bgm);
+  });
+
+  it('resolveRouletteSound は custom 入りの行別上書きをそのまま返す', () => {
+    const c = cfg();
+    const custom: RouletteSoundConfig = { ...DEFAULT_ROULETTE_SOUND, spinSe: 'custom:row.ogg' };
+    c.roulettes[0]!.sound = { ...custom };
+    expect(resolveRouletteSound(c, rlEffect(1, { rouletteId: 'rl-a' }))).toEqual(custom);
+    // 別の行は巻き込まない(行ごとに違う音、が今回の主目的)。
+    expect(resolveRouletteSound(c, rlEffect(2, { rouletteId: 'rl-b' }))).toBe(c.rouletteSound);
+  });
+});
+
 describe('rouletteSoundOverrideToggle — 設定UIの「この行だけ上書き」チェック', () => {
   it('オンは共通の丸ごとコピーを種にする — チェックした瞬間に音が変わらない', () => {
     // DEFAULT_ROULETTE_SOUND を種にしてはいけない: 共通を編集済みのユーザーでは
@@ -413,5 +462,57 @@ describe('行別サウンド編集UIの配線(ソース不変条件)', () => {
 
   it('チェック切替は shared の rouletteSoundOverrideToggle を通す(種の規約を UI が再発明しない)', () => {
     expect(src.includes('rouletteSoundOverrideToggle(')).toBe(true);
+  });
+
+  it('カスタム回転音の取込みボタンが居る(共通・行別・入室が共用する1実装)', () => {
+    // RouletteSoundFields は3経路すべてが共用するので、ここに1つあれば全部に効く。
+    expect(src.includes("rpc('sound.importCustom'")).toBe(true);
+    expect(src.includes('CUSTOM_SOUND_PREFIX')).toBe(true);
+  });
+});
+
+/**
+ * カスタム回転音の再生経路のソース不変条件。
+ *
+ * この機能は「CSP の media-src」「main のプロトコル登録」「bgm.ts の分岐」の
+ * 3点が揃って初めて音が出る。どれが欠けても**設定は保存できるのに鳴らない**
+ * (しかも packaged でだけ壊れうる)ので、配線をここで固定する。
+ * CRLF チェックアウトの CI でも読めるよう改行は正規化する。
+ */
+describe('カスタム回転音の再生配線(ソース不変条件)', () => {
+  const read = (p: string): string => readFileSync(resolve(p), 'utf8').replace(/\r\n/g, '\n');
+
+  it('両ウィンドウの CSP が app-sound: を許可し、同梱音源の self も残っている', () => {
+    for (const html of ['src/renderer/index.html', 'src/renderer/monitor.html']) {
+      const s = read(html);
+      // media-src を書いた時点で default-src フォールバックが切れる —
+      // 'self' を落とすと同梱の ogg/mp3 が全部無音になる。
+      expect(s.includes("media-src 'self' app-sound:"), html).toBe(true);
+    }
+  });
+
+  it('main が app-sound スキームを ready 前に特権登録し、stream を立てている', () => {
+    const s = read('src/main/index.ts');
+    // registerSchemesAsPrivileged は app.whenReady より前でしか効かない。
+    // **行頭の呼び出しだけを見る**: 素の識別子検索だと、すぐ上のコメント
+    // (「ready 後の registerSchemesAsPrivileged は無効」)に先にヒットして、
+    // 実コードを boot() 内へ移してもコメントさえ残れば緑のままになる
+    // — このテストが唯一守っている壊れ方をそのまま通してしまう。
+    const reg = s.search(/^protocol\.registerSchemesAsPrivileged\(/m);
+    const ready = s.indexOf('app.whenReady()');
+    expect(reg).toBeGreaterThan(0);
+    expect(ready).toBeGreaterThan(0);
+    expect(reg).toBeLessThan(ready);
+    // stream が無いと登録は通るのに media 要素の再生だけ失敗する(一番わかりにくい壊れ方)。
+    expect(s.includes('stream: true')).toBe(true);
+    expect(s.includes("protocol.handle('app-sound'")).toBe(true);
+    // 読み口は必ず containment 検査を通す。
+    expect(s.includes('resolveCustomSoundPath(')).toBe(true);
+  });
+
+  it('bgm.ts が custom id を app-sound:// URL へ分岐している', () => {
+    const s = read('src/renderer/lib/bgm.ts');
+    expect(s.includes('isCustomSoundId(')).toBe(true);
+    expect(s.includes('app-sound:///')).toBe(true);
   });
 });

@@ -401,6 +401,8 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   'boost-start': '⚡',
   'boost-end': '⚡',
   'tap-lock': '🚫',
+  'revolution-start': '🦢',
+  'revolution-end': '🦢',
   achieved: '🏁',
 };
 
@@ -434,8 +436,12 @@ function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
     case 'like': {
       if (!e.likeEvery) return 'いいね(妨害)';
       // amount は step の倍数。何回ぶん満タンになったかを件数に戻して見せる。
-      const units = e.likeStep && e.likeStep > 0 ? Math.max(1, Math.round(e.amount / e.likeStep)) : 1;
-      return `いいね ${num(units * e.likeEvery)}件到達`;
+      // **絶対値で割る** — 革命(反転)中の amount は負なので、素で割ると
+      // Math.max(1, …) に潰れて「−15 なのに 1 満タンぶん」と額が食い違う
+      // (符号は同じ行の amount 列が持っているので、件数は絶対値でよい)。
+      const units =
+        e.likeStep && e.likeStep > 0 ? Math.max(1, Math.round(Math.abs(e.amount) / e.likeStep)) : 1;
+      return `いいね ${num(units * e.likeEvery)}件到達${e.amount < 0 ? '(お助け)' : ''}`;
     }
     // 実演専用 kind(test 付きなのでログには積まれない)— 型の網羅性のためだけの行。
     case 'gauge-full':
@@ -473,6 +479,14 @@ function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
       const label = e.giftName ? `(${e.giftName})` : '';
       return `お邪魔 タップ封じ ${num(secs)}秒${label}`;
     }
+    case 'revolution-start': {
+      // 秒数・倍率は effect の焼き込み(tap-lock と同じ規約 — 設定を引き直さない)。
+      const secs = Math.max(1, Math.round((e.revolutionMs ?? 0) / 1000));
+      const gift = e.giftName ? `(${e.giftName})` : '';
+      return `革命発動 ×${num(e.revolutionMultiplier ?? 1)} ${num(secs)}秒${gift}`;
+    }
+    case 'revolution-end':
+      return `革命終了 ×${num(e.revolutionMultiplier ?? 1)}`;
     case 'achieved':
       return 'カウント 0 に到達';
   }
@@ -719,6 +733,7 @@ function ChallengeCard(): React.JSX.Element | null {
       | 'challenge.reset'
       | 'challenge.press'
       | 'challenge.toggleRank'
+      | 'challenge.toggleRouletteRush'
       | 'challenge.clearTapLock'
   ) =>
     void rpc(m, undefined)
@@ -956,6 +971,21 @@ function ChallengeCard(): React.JSX.Element | null {
           }
         >
           入室ルーレット{settings.challenge.joinRoulette.enabled ? ' ON' : ' OFF'}
+        </button>
+        {/* ルーレット焦らし短縮。ON の間、回転中の1本が終わり次第、キュー・連打の
+            残り全部が fast(約1.6秒/本)で確定する。状態は worker が権威で
+            ChallengeState.rouletteRush の有無がそのまま表す(揮発 — 再起動でオフ)。
+            値・統計・抽選には触らないので確認は不要(toggleRank と同じ)。 */}
+        <button
+          className={`btn small${view.rouletteRushOn ? ' primary' : ''}`}
+          onClick={() => call('challenge.toggleRouletteRush')}
+          title={
+            view.rouletteRushOn
+              ? '短縮中: 回転中の1本が終わり次第、キューと連打の残りすべてが約1.6秒で確定します。激熱確定と入室ルーレットは通常尺のまま。アプリ再起動でOFFに戻ります'
+              : 'ルーレットが溜まったときに。次のリールから全部を約1.6秒で確定させます(激熱確定と入室ルーレットは対象外)'
+          }
+        >
+          焦らし短縮{view.rouletteRushOn ? ' ON' : ' OFF'}
         </button>
         <button
           className="btn small"

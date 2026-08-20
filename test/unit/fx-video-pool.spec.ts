@@ -42,7 +42,7 @@ describe('MonitorView の <video> ホルダー(ソース不変条件)', () => {
     expect(videoTags(MONITOR)).toBe(labels.length);
     // ラベルは diag.log の識別子。ホルダーを増減したらこの一覧も更新すること。
     expect(labels.sort()).toEqual(
-      ['band-cutin', 'boost-cutin', 'fx-clip', 'fx-strike', 'rl-hot-intro', 'stock-cutin'].sort()
+      ['band-cutin', 'boost-cutin', 'fx-clip', 'fx-strike', 'revolution-cutin', 'rl-hot-intro', 'stock-cutin'].sort()
     );
   });
 

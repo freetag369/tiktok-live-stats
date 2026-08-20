@@ -70,6 +70,8 @@ function challenge(over: Partial<ChallengeState> = {}): ChallengeState {
       giftUp: 0,
       likeUp: 0,
       likeStockUp: 0,
+      likeDown: 0,
+      likeStockDown: 0,
       commentUp: 0,
       joinDown: 0,
       joinUp: 0,

@@ -206,6 +206,32 @@ export function rouletteHotIntroUrl(pattern: string): string | null {
   return rlHotGlob[`../assets/fx/rl/hot/${pattern}.mp4`] ?? null;
 }
 
+/**
+ * 革命の導入全面カット(6秒 = REVOLUTION_INTRO_MS・不透明)。専用素材は
+ * assets/fx/revolution/intro.mp4(将来生成 — 専用サブディレクトリなのは rl/hot と
+ * 同じ理由: 既存カタログの孤児検査を踏まない)。素材を置くだけでコード変更ゼロで
+ * 差し替わる。
+ *
+ * **未投入の間は激熱確定の導入(rl/hot/dragon.mp4・8秒)を仮流用**する
+ * (2026-08-20 ユーザー選択)。用途が同型 — 「山場に入る前の全画面導入」。
+ * 8秒素材を6秒で打ち切るが、モニターは loop 属性 + JS タイマーで畳むので
+ * 途中で黒画面にはならない(尺の権威はタイマー = startBandFx と同じ流儀)。
+ * 素材が両方無ければ gift-band1(6秒・不透明)へ落ちる。
+ *
+ * gift-t1〜t4 で代用してはいけない: あちらは screen 合成前提の黒背景素材で、
+ * 不透明ホルダー(.fx-clip-opaque)に出すと黒画面6秒になる。
+ */
+const revolutionGlob = import.meta.glob('../assets/fx/revolution/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+export const REVOLUTION_INTRO_CLIP_URL: string =
+  revolutionGlob['../assets/fx/revolution/intro.mp4'] ??
+  rlHotGlob['../assets/fx/rl/hot/dragon.mp4'] ??
+  giftBand1Url;
+
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 
 /** クリップ id → URL。未知の id は null(設定が古い/壊れていても落とさない)。 */

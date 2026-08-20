@@ -26,6 +26,7 @@ function q(over: Partial<Q> = {}): Q {
     strike: null,
     boosts: [],
     bands: [],
+    revolutions: [],
     joinRoulettes: [],
     hotRoulettes: [],
     roulettes: [],
@@ -34,13 +35,14 @@ function q(over: Partial<Q> = {}): Q {
 }
 
 describe('FX_DRAIN_SEQ — 走査順は優先度表から導出される', () => {
-  it('strike → boost → join → hot → band → roulette(序列②③④⑥⑥.5⑦⑧の写像)', () => {
+  it('strike → boost → join → hot → band → revolution → roulette(序列②③④⑥⑥.5⑦⑦.5⑧の写像)', () => {
     expect(FX_DRAIN_SEQ).toEqual([
       'strike',
       'boost',
       'join-roulette',
       'hot-roulette',
       'band',
+      'revolution',
       'roulette',
     ]);
   });
@@ -129,12 +131,13 @@ describe('runFxDrain — 「何かが始まるまで」のドライバ', () => {
       strike: { like: 0, stock: 2 },
       boosts: ['B1'],
       bands: ['C1'],
+      revolutions: ['V1'],
       joinRoulettes: ['J1'],
       roulettes: ['R1'],
     });
     const r = runFxDrain(queues, { start: () => false });
     expect(r.started).toBeNull();
-    expect(r.skipped.map((s) => s.kind)).toEqual(['strike', 'boost', 'join-roulette', 'band', 'roulette']);
+    expect(r.skipped.map((s) => s.kind)).toEqual(['strike', 'boost', 'join-roulette', 'band', 'revolution', 'roulette']);
   });
 
   it('start が true を返した時点で止まり、残りは消費しない', () => {
@@ -196,6 +199,7 @@ describe('runFxDrain — 「何かが始まるまで」のドライバ', () => {
       strike: null,
       boosts: [],
       bands: [],
+      revolutions: [],
       joinRoulettes: [],
       hotRoulettes: [],
       roulettes: [{ e: 'R1', resumeAt: 3 }],

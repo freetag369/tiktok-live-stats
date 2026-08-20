@@ -23,7 +23,7 @@ function state(effects: ChallengeEffect[], over: Partial<ChallengeState> = {}): 
     title: 'テスト',
     startedMs: NOW,
     achievedMs: null,
-    stats: { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 },
+    stats: { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 },
     recentEffects: effects,
     likeGauge: null,
     result: null,
@@ -212,7 +212,7 @@ describe('appendChallengeLog — 行の中身', () => {
 
   it('いいねは取り込み時点の every/step を焼き付ける(あとで設定を変えても行が化けない)', () => {
     const s = state([fx({ id: 1, kind: 'like', amount: 3, valueAfter: 103 })], {
-      likeGauge: { counter: 5, every: 100, step: 3, fills: 1, stock: null },
+      likeGauge: { counter: 5, every: 100, step: 3, fills: 1, downFills: 0, stock: null },
     });
     const r = appendChallengeLog([], s, null);
     expect(r.log[0]).toMatchObject({ kind: 'like', likeEvery: 100, likeStep: 3 });
@@ -220,7 +220,7 @@ describe('appendChallengeLog — 行の中身', () => {
 
   it('いいね以外に likeEvery は付かない', () => {
     const s = state([fx({ id: 1, kind: 'follow', amount: 10 })], {
-      likeGauge: { counter: 5, every: 100, step: 3, fills: 1, stock: null },
+      likeGauge: { counter: 5, every: 100, step: 3, fills: 1, downFills: 0, stock: null },
     });
     expect(appendChallengeLog([], s, null).log[0]).not.toHaveProperty('likeEvery');
   });
