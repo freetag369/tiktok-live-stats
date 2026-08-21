@@ -372,14 +372,16 @@ describe('着弾の背面再生 — 遮蔽 occlusion(2026-08-17 ユーザー決�
     }
   });
 
-  it('横取り 6 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
+  it('横取り 8 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
     const calls = SRC.split('flushStrike(true, ').length - 1;
-    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(6);
+    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(8);
     // revolution は 2026-08-20 追加(導入カットインが不透明フルフレームなので
     // band / boost と同じ 'opaque' の横取りが要る)。tap-lock も同日・同じ理由で追加。
     // 6 箇所目は同日追加の革命の**結果**カットシーン(導入と同じ 'revolution' の遮蔽を
     // 渡す — occlusionOfCutin は種別→遮蔽の 1:1 対応なので新しい種別は作らない)。
-    for (const kind of ['roulette', 'band', 'boost', 'revolution', 'tap-lock']) {
+    // 7・8 箇所目は 2026-08-21 追加のお題ルーレット(前置きと結果発表 — どちらも
+    // 'quiz' の 'opaque')。
+    for (const kind of ['roulette', 'band', 'boost', 'revolution', 'tap-lock', 'quiz']) {
       expect(SRC, `${kind} の横取りが遮蔽を渡していない`).toContain(
         `flushStrike(true, occlusionOfCutin('${kind}'));`
       );
@@ -481,5 +483,67 @@ describe('革命: 導入と結果は別の生存期間(結果カットシーン�
   it('遮蔽と舞台の述語にも結果ホールドが入っている', () => {
     expect(fnBody('opaqueCutinActive')).toContain('revolutionResultHold.current');
     expect(fnBody('anyCutinHold')).toContain('revolutionResultHold.current');
+  });
+});
+
+describe('2026-08-21 バグ修正の凍結(舞台の排他・チェーン保護・据え置きの押下追従)', () => {
+  it('お邪魔の導入は舞台の排他を通す(他演出中はバナーへ縮退)', () => {
+    // B1: worker はルーレット系で凍結しないので、リール回転中でも tap-lock effect は
+    // 即時に届く。ガードが無いと据え置きを横取りして出目が先漏れする(激熱×10 なら
+    // 5000 がネタバレ)。縮退先は case 'tap-lock' の pushTapLockBanner。
+    const fn = fnBody('startTapLockFx');
+    expect(fn).toContain('anyCutinHold() || chainActive() || stageBusy()');
+    // ガードは横取り(flushStrike の実呼び出し)より前 — 横取りしてから断ると本末転倒。
+    // アンカーは実呼び出しの形で見る(コメント中の 'flushStrike(true)' に先ヒットさせない)。
+    expect(fn.indexOf('anyCutinHold() || chainActive() || stageBusy()')).toBeLessThan(
+      fn.indexOf('flushStrike(true, occlusionOfCutin')
+    );
+  });
+
+  it('runDrain の strike 経路は飛行中チェーンを横取りしない', () => {
+    // B3: coalesce が queueStrike した同一コミットの pumpStage がドレインへ落ち、
+    // startStrike 冒頭の clearStrikeTimers が前チェーンの着弾を無再生で潰していた。
+    // 消化はチェーン終端の continueStrikeChain の直結(routeStrike 'coalesce' の規約)。
+    const fn = fnBody('runDrain');
+    const strikeAt = fn.indexOf("next.kind === 'strike'");
+    const guardAt = fn.indexOf('if (chainActive()) return false;');
+    const startAt = fn.indexOf('startStrikeFromPending(next.strike)');
+    expect(guardAt, 'chainActive ガードが無い').toBeGreaterThanOrEqual(0);
+    expect(strikeAt).toBeLessThan(guardAt);
+    expect(guardAt).toBeLessThan(startAt);
+  });
+
+  it('2段着弾の1段目は押下追従ぶん(holdPressApplied)を持ち越す', () => {
+    // B5(8/18見送り#4): 捕獲時の held を素で渡すと飛行中の押下が着弾の瞬間に
+    // 巻き戻る(「走行中のタップは演出より優先」への違反)。
+    const fn = fnBody('startStrike');
+    expect(fn).toContain('impactStrikePartial(Math.max(0, held - holdPressApplied.current) + likeDelta)');
+  });
+
+  it('最前面オーバーレイの一覧(fxHoldBusy)にお邪魔の導入も並んでいる', () => {
+    // L5: 69eac53 で tapLockClip が追加されたとき、この一覧だけ漏れていた。
+    const at = SRC.indexOf('const fxHoldBusy =');
+    const expr = SRC.slice(at, SRC.indexOf(';', at));
+    expect(expr).toContain('tapLockClip !== null');
+  });
+
+  it('gauge-full / stock-full の▶実演ガードはホールドを個別列挙しない(anyCutinHold に一本化)', () => {
+    // L6: 個別列挙だと後から増えたホールド(革命・お邪魔・お題)が漏れて、実演が
+    // 持ち主の据え置きを横取りしていた。stock-full はフォールバックの busy 判定も同じ。
+    const gauge = SRC.slice(SRC.indexOf("case 'gauge-full':"), SRC.indexOf("case 'stock-full':"));
+    expect(gauge).toContain('!chainActive() && !anyCutinHold()');
+    expect(gauge).not.toContain('rouletteHold.current');
+    // stock-full の次の case は並びに依存させない(固定幅で切る — ガードと busy の
+    // 2箇所は case 冒頭から十分近い)。
+    const stockAt = SRC.indexOf("case 'stock-full':");
+    const stock = SRC.slice(stockAt, stockAt + 4000);
+    expect(stock).toContain('!chainActive() && !anyCutinHold()');
+    expect(stock).toContain('const busy = chainActive() || anyCutinHold();');
+  });
+
+  it('WakeRow の錨は初回 start のラッチ(firstStartedMs)を使う', () => {
+    // L9(8/18見送り#2): startedMs 直渡しだと stop→start・reset で錨が張り直され、
+    // 起床24時間超の徹夜配信で経過表示が丸1日巻き戻る。旧 worker 混在は startedMs へ縮退。
+    expect(SRC).toContain('refMs={challenge.firstStartedMs ?? challenge.startedMs}');
   });
 });

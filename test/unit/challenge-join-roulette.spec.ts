@@ -261,11 +261,15 @@ describe('ChallengeEngine — 入室ルーレット', () => {
     const s = e.get();
     expect(s.value).toBe(0); // 3 - 5 → clamp
     expect(s.status).toBe('achieved');
-    expect(s.stats.joinDown).toBe(5);
+    // stats・effect.amount は名目値でなく**実減少量**(2026-08-21 修正・ギフト
+    // ルーレットと同じ規約 — 名目のままだと据え置き会計が worker とズレる)。
+    expect(s.stats.joinDown).toBe(3);
     const [ach, rl] = s.recentEffects;
     expect(ach!.kind).toBe('achieved');
     expect(rl!.kind).toBe('roulette');
-    expect(rl!.amount).toBe(-5);
+    expect(rl!.amount).toBe(-3);
+    // クランプ発生時だけ実適用量が焼かれる(復元 rouletteDraws が名目式より優先)。
+    expect(rl!.rouletteAmounts).toEqual([-3]);
     expect(rl!.rouletteDirection).toBe('sub');
     // 達成判定は pushEffect の後(id 順契約)— 逆だとモニターが CLEAR を先に再生する。
     expect(ach!.id).toBeGreaterThan(rl!.id);

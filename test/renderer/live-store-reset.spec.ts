@@ -99,6 +99,8 @@ function runningChallenge(): ChallengeState {
       joinDown: 0,
       joinUp: 0,
       rouletteSpins: 0,
+      quizDown: 0,
+      quizUp: 0,
     },
     recentEffects: [],
     likeGauge: null,

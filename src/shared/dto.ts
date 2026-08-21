@@ -639,14 +639,37 @@ export interface ChallengeRouletteConfig {
 }
 
 /**
+ * 激熱倍率の候補1件。盤面(ChallengeRouletteSegment)と同じ「候補+重み」形式 —
+ * weight は相対値で、0 の候補は出ない(sanitizeRouletteSegments と同じ規約)。
+ */
+export interface RouletteHotMultCandidate {
+  /** 出目に掛ける倍率の候補。ROULETTE_HOT_MULT_MIN..MAX へ clamp される。 */
+  multiplier: number;
+  /** 抽選の重み(相対値)。 */
+  weight: number;
+}
+
+/**
  * 激熱確定の設定。ギフトルーレット行(ChallengeRouletteConfig.hot)専用で、入室
  * ルーレットには持たせない — 入室は単一設定・盤面も1つなので、100% 発動の 50 倍が
  * 入室のたびに走ると 43 秒の演出でモニターが埋まる。
  */
 export interface RouletteHotConfig {
   enabled: boolean;
-  /** 出目に掛ける実倍率。ROULETTE_HOT_MULT_MIN..MAX へ clamp される。 */
+  /**
+   * 出目に掛ける実倍率(従来形)。ROULETTE_HOT_MULT_MIN..MAX へ clamp される。
+   * multipliers があるときは代表値(最大 weight・同率先勝ち)を validate が焼き直す —
+   * 旧バージョンで読んだときの縮退先。
+   */
   multiplier: number;
+  /**
+   * 候補倍率の分布(確率抽選)。**キー欠損 = 単一 multiplier 動作**(保存済み
+   * settings.json の移行代わり — hot 自身・sound と同じ手口で SETTINGS_VERSION は
+   * 上げない)。**正規形はキー存在 ⇔ 候補2件以上**: validateRouletteHot が候補1件を
+   * 従来形へ畳むので、出荷既定(DJメガネ ×10)の形は変わらない。存在するときだけ
+   * worker が出目側の rand をちょうど1回消費して重み抽選する(drawRouletteHotMult)。
+   */
+  multipliers?: RouletteHotMultCandidate[];
 }
 
 /**
@@ -1115,6 +1138,72 @@ export interface RevolutionConfig {
 }
 
 /**
+ * お題ルーレットのトリガー1行。マッチのフィールド構成は RevolutionRule と同一
+ * (matchGiftTrigger 互換)で、倍率・秒数を持たない — 窓の尺や増減幅は行ごと
+ * ではなく QuizConfig 側の1組(お題の企画はゲーム内で1種類、という整理)。
+ */
+export interface QuizRule {
+  /** 行の識別子。UI の key と行ごとの実演(ChallengeTestEffectSpec.quizId)の対象特定に使う。 */
+  id: string;
+  /** 設定画面の行見出し。モニターの見出し表示にも使う(「{label} ○○がお題ルーレット!」)。 */
+  label: string;
+  enabled: boolean;
+  /** トリガーギフトの giftId 直接一致。ライブ経路の本線(RevolutionRule と同じ理由)。 */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  /** giftName の照合を**完全一致**にする(既定 false = 部分一致)。RevolutionRule と同じ警告。 */
+  exactName: boolean;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+}
+
+/**
+ * お題ルーレットの設定。トリガー行は**上から順に評価し、最初に一致した1行だけ**
+ * (revolution と同じ先勝ち)。
+ *
+ * 機能 enabled の既定は **false**(revolution と同じ向き)。全アクション停止+投票で
+ * ±amount というゲーム経済の大技なので、キー欠損の既定フォールバックで勝手に
+ * 有効化されてはならない — validate 側も `=== true` で読む。旧 settings.json に
+ * このキーは無いので、**欠損時のフォールバックが移行の代わり**になる
+ * (SETTINGS_VERSION は上げない)。
+ */
+export interface QuizConfig {
+  /** 機能全体のスイッチ。false で全行が止まる(行ごとの enabled とは別)。 */
+  enabled: boolean;
+  rules: QuizRule[];
+  /**
+   * お題の候補(表示順)。arm 時に worker が等確率で1件抽選する。
+   * 空配列のままでは発動しない(トリガー一致しても不発 + giftDiag に記録)。
+   */
+  prompts: string[];
+  /** 挑戦ウィンドウ(制限時間)の秒数。既定 60・clamp QUIZ_DURATION_MIN_SEC〜MAX_SEC。 */
+  durationSec: number;
+  /** 投票タイムの秒数。既定 30・clamp QUIZ_VOTE_MIN_SEC〜MAX_SEC。 */
+  voteSec: number;
+  /** 判定の増減幅(正の数で保持)。よかった多数で減算、だめ多数で加算。既定 5000。 */
+  amount: number;
+  /** 「よかった」判定ワード(部分一致・大文字小文字無視)。先頭が投票画面の表示語。 */
+  goodWords: string[];
+  /** 「だめ」判定ワード(規約は goodWords と同じ)。 */
+  badWords: string[];
+  /**
+   * 発動中(アーム〜清算)に流すBGM の id('off' / 同梱カタログ id / custom:)。
+   * ギフト着弾の瞬間からモニターが切り替える — 「お題モードが来る」予告そのもの。
+   */
+  bgm: string;
+  /** bgm の音量 0-100(絶対値・seVolume は掛からない — rouletteSound と同じ規約)。 */
+  bgmVolume: number;
+  /**
+   * 導入全面カットのクリップ id。既定 'off'(再生枠のみ = この段をスキップ)。
+   * 全面カット素材(FX_CLIPS)から選ぶ。
+   */
+  introClip: string;
+}
+
+/**
  * ルーレット走行中の「残り」小窓の出し方。既定は 'small'。
  * 見え方の実装は monitor.css の .count-mirror 節を参照。
  */
@@ -1292,6 +1381,13 @@ export interface ChallengeConfig {
    */
   revolution: RevolutionConfig;
   /**
+   * お題ルーレット。revolution の**次・tapLock より先**に評価され、一致したギフトは
+   * 増減規則を通らない(matchQuiz — revolution と同じ先勝ち規約)。発動すると
+   * バリア(発動時点の演出キューを消化してから開始・以降のイベントは清算まで
+   * 後回し)+ 挑戦ウィンドウ + 投票タイムの長丁場になる。
+   */
+  quiz: QuizConfig;
+  /**
    * 最終ゲート(ラスト◯◯モード)。残数が lowThreshold 以下のとき、タップ経路の
    * 1減算ごとに taps 回のタップが必要になる。フォロー/いいね/ギフト由来の増減と
    * フィーバー(タップブースト)ウィンドウ中のタップは対象外。閾値は lowThreshold に連動。
@@ -1372,6 +1468,8 @@ export interface ChallengeEffect {
     | 'tap-lock'
     | 'revolution-start'
     | 'revolution-end'
+    | 'quiz-start'
+    | 'quiz-end'
     | 'achieved';
   /** カウント変化量(負=減、正=増)。achieved は 0。 */
   amount: number;
@@ -1451,6 +1549,25 @@ export interface ChallengeEffect {
   roulettePattern?: RoulettePattern;
   /** kind='roulette': スピンごとの終盤演出パターン。rouletteIndexes と同じ長さ。 */
   roulettePatterns?: RoulettePattern[];
+  /**
+   * kind='roulette': スピンごとの**実適用量**(rouletteIndexes と同じ並び)。
+   * 残量クランプ(終盤の sub 出目が残量を超えた: 残3にマス−10 → 実適用−3)が
+   * 発生した effect にだけ載る — 通常経路は名目式(rouletteSegments[index] × 符号 ×
+   * 倍率)と同値なので載せない(既存 effect と 1 バイトも変わらない)。
+   * 復元(shared の rouletteDraws)はこれがあれば名目式より優先する。名目のままだと
+   * モニターの据え置き会計(rouletteRemainingAmount → heldValueFor)が worker と
+   * ズレて、リール再生待ちの間 7 セグが水増し表示される(3→10→0)。
+   */
+  rouletteAmounts?: number[];
+  /**
+   * kind='roulette': 連結の切り詰め(ROULETTE_DRAWS_MAX)で出目列から落とした
+   * 抽選ぶんの増減合計と回数。**値は worker が全抽選ぶん適用済み**なので、出目列に
+   * 現れない超過分をここで運ばないと、据え置き会計(rouletteReelPlan の rest)から
+   * 漏れてリール再生前に数字だけ動く(出目の先漏れ)。合算バナーの「残りN回ぶん」と
+   * 演出ストックの ×N もこの2つを合算する。切り詰めが無ければ載せない。
+   */
+  rouletteTruncatedAmount?: number;
+  rouletteTruncatedCount?: number;
   /**
    * kind='roulette': 実際にリールを回す本数(rouletteIndexes.length 以下)。
    *
@@ -1649,6 +1766,51 @@ export interface ChallengeEffect {
    */
   revolutionResultMs?: number;
   /**
+   * kind='quiz-start': お題の盤面(表示順)。rouletteSegments と同じ「effect 1件で
+   * 自己完結」の流儀 — モニターの cfg は 120 秒ポーリング(CFG_POLL_MS)で古くなり
+   * うるので、回転演出は cfg からではなくここから読む。
+   */
+  quizPrompts?: string[];
+  /** kind='quiz-start': 当選 index(quizPrompts 内)。worker が arm 時に抽選済み。 */
+  quizPromptIndex?: number;
+  /**
+   * kind='quiz-start'/'quiz-end': 確定したお題の本文。quizPrompts[quizPromptIndex]
+   * と同値だが、end 側と履歴ログが盤面なしで自己完結できるよう本文も焼き込む。
+   */
+  quizPrompt?: string;
+  /**
+   * kind='quiz-start': 導入全面カットの尺(ms)。0 = この段なし(素材 'off'・
+   * プレーン発動)。revolutionIntroMs と同じ焼き込みの流儀。
+   */
+  quizIntroMs?: number;
+  /** kind='quiz-start': 導入全面カットのクリップ id。quizIntroMs > 0 のときだけ載る。 */
+  quizIntroClip?: string;
+  /** kind='quiz-start'/'quiz-end': 挑戦ウィンドウ(制限時間)の尺(ms)。 */
+  quizDurationMs?: number;
+  /** kind='quiz-start'/'quiz-end': 投票タイムの尺(ms)。 */
+  quizVoteMs?: number;
+  /**
+   * kind='quiz-start'/'quiz-end': 判定の増減幅(設定値・正の数)。end の amount は
+   * クランプ後の実増減で、こちらは「±5000」等のバナー文言用の焼き込み。
+   */
+  quizAmount?: number;
+  /**
+   * kind='quiz-start': 投票期限のフォールバックタイムライン
+   * (atMs + QUIZ_ARM_MAX_MS + 前置き + 窓 + 投票)。boostEndsAtMs と同じ規約で、
+   * 実際の期限はモニターが challenge.quizCue を撃った時刻から決まる
+   * (権威は ChallengeState.quiz)。
+   */
+  quizEndsAtMs?: Ms;
+  /** kind='quiz-end': 「よかった」の票数(userId 重複排除済み)。 */
+  quizGood?: number;
+  /** kind='quiz-end': 「だめ」の票数(同上)。 */
+  quizBad?: number;
+  /**
+   * kind='quiz-end': 結果発表カットシーンの尺(ms)。0/未指定 = 発表なし
+   * (プレーン発動・モニター不在)。revolutionResultMs と同じ焼き込みの流儀。
+   */
+  quizResultMs?: number;
+  /**
    * カットイン凍結の解除ドレインで同種の保留演出を1件に畳んだとき、元の件数
    * (2以上のときだけ載る)。amount 等は合算済み。ダッシュボードの履歴ログは
    * これを「×N」として1行にまとめる。省略 = 畳んでいない(1件そのまま)。
@@ -1772,6 +1934,16 @@ export type ChallengeTestEffectSpec =
       /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
       revolutionId?: string;
     }
+  /**
+   * お題ルーレット。設定中のお題リストから抽選し、前置き(回転→決定表示)だけを
+   * 実演する — revolution と同じくトリガー一致は評価しない。**窓・投票・値には
+   * 一切触れない**(testEffect の規約どおり)。
+   */
+  | {
+      kind: 'quiz';
+      /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
+      quizId?: string;
+    }
   | { kind: 'achieved' };
 
 /**
@@ -1833,6 +2005,35 @@ export type ChallengeRevolutionCue =
       effectId: number;
     };
 
+/**
+ * challenge.quizCue のパラメータ。ChallengeRevolutionCue の鏡像 — お題ルーレットも
+ * worker がギフト着弾で**予約(arm)するだけ**で、窓はモニターが「発動時点で
+ * 溜まっていた演出キューを消化し切った」あと前置き(導入カット+回転+決定表示)を
+ * 実際に再生し始めた瞬間を原点に開く。
+ *
+ * 別型なのは revolutionCue と同じ理由(effectId 照合が armedQuiz 専用)。
+ * drop も revolution と同じ判断: **プレーン即発動へ倒す**(演出だけ諦めて窓と
+ * 投票は生かす — ±の判定はゲームの状態なので、モニターの都合でギフトが
+ * 無かったことになってはいけない)。
+ */
+export type ChallengeQuizCue =
+  | {
+      /** 前置きの再生を開始した = 前置き明けに窓を開いてよい。 */
+      action: 'start';
+      /** 対象の quiz-start effect の id。アーム中のものと一致しなければ無視される。 */
+      effectId: number;
+      /** モニターが再生を開始した時刻(Date.now())。worker 側で now を超えない範囲に丸める。 */
+      startedAtMs: Ms;
+      /** 実際に再生する前置きの尺(導入カット + 回転 + 決定表示)。 */
+      preMs: number;
+    }
+  | {
+      /** この予約の演出は再生されない → プレーン即発動へ倒す。 */
+      action: 'drop';
+      /** 対象の quiz-start effect の id。**0 = アーム中のものを種類を問わず対象**。 */
+      effectId: number;
+    };
+
 export interface ChallengeStats {
   presses: number;
   /** フォロー妨害の回数(同一ユーザーはチャレンジ1回につき1度だけ数える)。 */
@@ -1862,6 +2063,10 @@ export interface ChallengeStats {
   joinUp: number;
   /** ルーレットの回転回数。ギフト・入室の両ルーレットを合算(増減量は giftUp/Down・joinUp/Down が持つ)。 */
   rouletteSpins: number;
+  /** お題ルーレットの清算による減算量の合計(正の数で保持)。ギフト由来ではあるが清算は投票なので giftDown とは別枠。 */
+  quizDown: number;
+  /** お題ルーレットの清算による加算量の合計。 */
+  quizUp: number;
 }
 
 /**
@@ -1984,6 +2189,15 @@ export interface ChallengeState {
   initialValue: number;
   title: string;
   startedMs: Ms | null;
+  /**
+   * この worker 世代で**最初に** start した時刻(2026-08-21 ユーザー決定)。
+   * startedMs と違い stop→start・reset でも張り直さない(worker 再起動でのみ消える)。
+   * モニターの「起きている時間」(WakeRow)の錨はこちら — startedMs を錨にすると、
+   * 起床から24時間を超えた徹夜配信でランを仕切り直した瞬間に wakeAnchorMs
+   * (shared/time.ts)が丸1日前進し、表示が 25時間30分 → 1時間30分 へ巻き戻る。
+   * 一度も start していなければキーごと省く(runRank と同じ流儀)。
+   */
+  firstStartedMs?: Ms;
   achievedMs: Ms | null;
   stats: ChallengeStats;
   /** 新しい順・最大 CHALLENGE_EFFECTS_MAX 件のリングバッファ。 */
@@ -2074,6 +2288,34 @@ export interface ChallengeState {
    */
   revolution?: { startsAtMs: Ms; endsAtMs: Ms; multiplier: number; nickname?: string; label?: string };
   /**
+   * お題ルーレットが進行中(アーム〜投票締切)だけ載る。boost / tapLock / revolution と
+   * 同じ規約で**絶対時刻のみ**を配り、非進行時はキーごと省く。
+   *
+   * armed=true の間(バリア〜cue 待ち)は窓の時刻が未確定なので 0 — モニターは
+   * このキーの出現で BGM を予告へ切り替え、自分の演出キューが空になったら
+   * challenge.quizCue を撃つ。commit 後は armed が落ちて絶対時刻が入る。
+   *
+   * good/bad は投票のライブ票数(2Hz delta)。blocked は tapLock.blocked と同じ
+   * 「押したのに効かない」手応えの累計。goodLabel/badLabel は投票画面の表示語
+   * (arm 時に焼き込み — 窓中の設定変更で表示と判定がズレないように)。
+   * queued は連続発動の予約待ち件数(0 のときは省く)。
+   */
+  quiz?: {
+    armed?: true;
+    startsAtMs: Ms;
+    windowEndsAtMs: Ms;
+    voteEndsAtMs: Ms;
+    prompt: string;
+    good: number;
+    bad: number;
+    blocked: number;
+    goodLabel: string;
+    badLabel: string;
+    nickname?: string;
+    label?: string;
+    queued?: number;
+  };
+  /**
    * 最終ゲート(ラスト◯◯モード)がアクティブな間だけ載る。taps = 現ゲートの蓄積
    * (0..needed-1)、needed = 1減算に必要なタップ数(設定のライブ値)。
    * 非アクティブ時・ブーストウィンドウ/起動カットイン中はキーごと省く
@@ -2095,7 +2337,7 @@ export interface ChallengeState {
 export interface ChallengeFxQueueItem {
   /** ワーカー内の単調採番。ドレインまで不変 — 表示側の同一性キー。 */
   id: number;
-  kind: 'band' | 'boost' | 'roulette' | 'follow' | 'revolution';
+  kind: 'band' | 'boost' | 'roulette' | 'follow' | 'revolution' | 'quiz';
   /** 行為者(viewer.nickname ?? displayId)。 */
   nickname?: string;
   /**
@@ -2165,6 +2407,12 @@ export interface ChallengeLogEntry {
   revolutionTapCount?: number;
   /** kind='revolution-end': 反転いいねによる減算(同上)。 */
   revolutionLikeDown?: number;
+  /** kind='quiz-start'/'quiz-end': 確定したお題の本文(effect からそのまま引き継ぐ)。 */
+  quizPrompt?: string;
+  /** kind='quiz-end': 「よかった」の票数(effect からそのまま引き継ぐ)。 */
+  quizGood?: number;
+  /** kind='quiz-end': 「だめ」の票数(同上)。 */
+  quizBad?: number;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────

@@ -1,16 +1,8 @@
 import { useMemo, useState } from 'react';
-import type { ChallengeConfig, GiftCatalogRow } from '@shared/dto';
-import {
-  matchFanStamp,
-  matchGiftFullCut,
-  matchGiftRule,
-  matchRevolution,
-  matchRoulette,
-  matchTapBoost,
-  matchTapLock,
-} from '@shared/challenge';
+import type { ChallengeConfig } from '@shared/dto';
 import { useQuery } from '../ipc/client';
 import { toast } from '../state/uiStore';
+import { hintOf, labelOf, usagesOf, type Usage } from './gift-list-usages';
 
 /**
  * 【ギフトリスト】受信済み全ギフトの giftId ↔ ギフト名 対応表。
@@ -29,65 +21,6 @@ import { toast } from '../state/uiStore';
  * match* にそのまま食わせて出す — 目視の突き合わせをやめるため。判定を
  * ここで書き直すと本番と乖離するので、必ず shared の関数を経由すること。
  */
-
-/** 評価順(worker/challenge.ts の giftOp)。上ほど先勝ちで、下の段は評価されない。 */
-const FEATURES = [
-  { key: 'fanStamp', label: 'お助け', hint: 'お助け(ファンスタンプ)' },
-  { key: 'tapBoost', label: 'ブースト', hint: 'ブースト(フィーバー)' },
-  { key: 'revolution', label: '革命', hint: '革命(いいね反転)' },
-  { key: 'tapLock', label: 'お邪魔', hint: 'お邪魔(タップ封じ)' },
-  { key: 'roulette', label: 'ルーレット', hint: 'ギフトルーレット' },
-  { key: 'giftRule', label: '増減規則', hint: 'ギフト増減の規則(giftRules)' },
-  { key: 'fullCut', label: '全面カット', hint: '全面カット(giftFullCut)' },
-] as const;
-
-type FeatureKey = (typeof FEATURES)[number]['key'];
-
-interface Usage {
-  key: FeatureKey;
-  /** 一致した行の見出し(ラベルが空なら giftId など)。 */
-  detail: string;
-}
-
-/**
- * このギフトが今の設定でどの機能に当たるか。**評価順のまま**返す — 先頭が実際に
- * 発火する1件で、2件目以降は上位に食われて**永久に発火しない**。
- *
- * 判定は shared の match* をそのまま使う(本番と同じ 3段: giftId 完全一致 →
- * canonical 完全一致 → giftName 部分一致/exactName なら完全一致)。canonical は
- * DB の gift_alias 値をそのまま渡す — ライブ経路では乗らない補助段だが、
- * 「設定が canonical で当てている」ことをこの表では見せたい。
- */
-function usagesOf(cfg: ChallengeConfig, r: GiftCatalogRow): Usage[] {
-  const g = { canonical: r.canonical ?? undefined, giftId: r.giftId, giftName: r.name };
-  const out: Usage[] = [];
-  // FanStampConfig は単一設定でラベルを持たない — 増減量をそのまま見出しにする。
-  const fs = matchFanStamp(cfg, g);
-  if (fs) out.push({ key: 'fanStamp', detail: `1個あたり ${fs.amountEach}` });
-  const tb = matchTapBoost(cfg, g);
-  if (tb) out.push({ key: 'tapBoost', detail: tb.label || `×${tb.multiplier}` });
-  const rv = matchRevolution(cfg, g);
-  if (rv) out.push({ key: 'revolution', detail: rv.label || '革命' });
-  const tl = matchTapLock(cfg, g);
-  if (tl) out.push({ key: 'tapLock', detail: tl.label || `${tl.durationSec}秒` });
-  const rl = matchRoulette(cfg, g);
-  if (rl) out.push({ key: 'roulette', detail: rl.label || rl.giftName || rl.giftId });
-  // 増減規則は名前を見ない(canonical / giftId / minDiamonds のみ)。giftDefault は
-  // 「どの規則にも当たらない全ギフト」に効く既定なので、行ごとの用途には出さない。
-  const gr = cfg.giftRules.length > 0 ? matchGiftRule(cfg, { ...g, diamonds: r.diamonds }) : null;
-  if (gr) out.push({ key: 'giftRule', detail: `${gr.amount > 0 ? '+' : ''}${gr.amount}` });
-  const fc = matchGiftFullCut(cfg, g);
-  if (fc) out.push({ key: 'fullCut', detail: fc.label || fc.clip });
-  return out;
-}
-
-function hintOf(key: FeatureKey): string {
-  return FEATURES.find((f) => f.key === key)?.hint ?? key;
-}
-
-function labelOf(key: FeatureKey): string {
-  return FEATURES.find((f) => f.key === key)?.label ?? key;
-}
 
 /** 1 は連打(コンボ)あり。2・4 は単発系。未受信で不明なら空。 */
 function typeLabel(t: number | null): string {
@@ -295,21 +228,22 @@ export function GiftListSection({ cfg }: { cfg: ChallengeConfig }): React.JSX.El
                     <td className="n">{r.totalDiamonds.toLocaleString()}</td>
                     <td style={{ fontSize: 11 }}>{ymd(r.lastSeenMs)}</td>
                     <td>
-                      {u.map((x, i) => (
+                      {u.map((x) => (
                         <span
                           key={x.key}
                           className="badge"
                           style={{
                             marginRight: 4,
-                            // 2件目以降は上位の段に食われて**発火しない**。同じ見た目で
+                            // blockedBy 付きは上位に食われて**発火しない**。同じ見た目で
                             // 並べると「登録したのに出ない」の原因が読めないので落とす。
-                            opacity: i === 0 ? 1 : 0.42,
-                            textDecoration: i === 0 ? 'none' : 'line-through',
+                            // (発火するものが2つ並ぶことはある — 増減規則と全面カットは併発。)
+                            opacity: x.blockedBy == null ? 1 : 0.42,
+                            textDecoration: x.blockedBy == null ? 'none' : 'line-through',
                           }}
                           title={
-                            i === 0
+                            x.blockedBy == null
                               ? `${hintOf(x.key)}: ${x.detail}`
-                              : `${hintOf(x.key)}: ${x.detail} — ${labelOf(u[0]!.key)}が先に一致するため発火しません`
+                              : `${hintOf(x.key)}: ${x.detail} — ${labelOf(x.blockedBy)}が先に一致するため発火しません`
                           }
                         >
                           {labelOf(x.key)}
@@ -326,12 +260,13 @@ export function GiftListSection({ cfg }: { cfg: ChallengeConfig }): React.JSX.El
 
       <div className="faint" style={{ fontSize: 11, marginTop: 10, lineHeight: 1.6 }}>
         <b>「現在の用途」の読み方</b> — いまの設定(この画面の未保存の変更を含む)にそのまま当てた結果です。
-        ギフト到着時の評価は<b>先勝ち</b>で、
-        <span style={{ whiteSpace: 'nowrap' }}>
-          お助け → ブースト → 革命 → お邪魔 → ルーレット → 増減規則 → 全面カット → 帯域カットイン
-        </span>
-        の順に見ます。<b>取り消し線の付いたバッジは上の段に食われていて発火しません</b>
-        (「登録したのに出ない」の主犯です)。
+        <b>先勝ちの排他</b>は
+        <span style={{ whiteSpace: 'nowrap' }}>お助け → ブースト → 革命 → お邪魔 → ルーレット</span>
+        の5機能だけで、最初に一致した1つが発火します。<b>増減規則</b>はこの5機能のどれかに食われますが、
+        <b>全面カットは増減規則と同時に出ます</b>(値の増減とカットインが両方起きる。
+        全面カットが死ぬのはブースト/革命/お邪魔/ルーレットが勝ったときと、
+        お助け一致かつ「カットイン抑止」ONのときだけ。帯域カットインは全面カットに食われます)。
+        <b>取り消し線の付いたバッジは食われていて発火しません</b>(「登録したのに出ない」の主犯です)。
         <br />
         判定は ① giftId 完全一致 → ② canonical 完全一致 → ③ ギフト名の小文字部分一致(
         <code>exactName</code> 指定時のみ完全一致)。③ が生きていると

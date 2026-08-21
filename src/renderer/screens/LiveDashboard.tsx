@@ -403,6 +403,8 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   'tap-lock': '🚫',
   'revolution-start': '🦢',
   'revolution-end': '🦢',
+  'quiz-start': '🎤',
+  'quiz-end': '🎤',
   achieved: '🏁',
 };
 
@@ -492,6 +494,17 @@ function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
       const tap = e.revolutionTapCount ?? 0;
       const like = e.revolutionLikeDown ?? 0;
       return `革命終了 ×${num(e.revolutionMultiplier ?? 1)} -${num(down)}(タップ${num(tap)}回 / いいね反転 -${num(like)})`;
+    }
+    case 'quiz-start': {
+      // お題本文は effect の焼き込み(tap-lock と同じ規約 — 設定を引き直さない)。
+      const gift = e.giftName ? `(${e.giftName})` : '';
+      return e.quizPrompt ? `お題ルーレット「${e.quizPrompt}」${gift}` : `お題ルーレット発動${gift}`;
+    }
+    case 'quiz-end': {
+      const good = e.quizGood ?? 0;
+      const bad = e.quizBad ?? 0;
+      const verdict = good > bad ? 'よかった多数' : bad > good ? 'だめ多数' : '引き分け';
+      return `お題終了 ${verdict}(よかった${num(good)} / だめ${num(bad)})`;
     }
     case 'achieved':
       return 'カウント 0 に到達';

@@ -60,6 +60,9 @@ describe('occlusionOfCutin — カットイン種別 → 幕の濃さ', () => {
       // お邪魔は 2026-08-20 に導入全面カット(5秒・音声焼き込み)を得て登録側へ移った。
       // それまでは「幕を張らない常設 HUD だけ」だったので、意図的に未登録だった。
       'tap-lock': 'opaque',
+      // お題ルーレット(2026-08-21)。回転は全画面テキストだが「読ませる演出」なので
+      // 不透明側(roulette の sheer とは違う判断 — fx-occlusion.ts の型コメント参照)。
+      quiz: 'opaque',
     };
     for (const [kind, expected] of Object.entries(table)) {
       expect(occlusionOfCutin(kind as FxCutinKind), kind).toBe(expected);

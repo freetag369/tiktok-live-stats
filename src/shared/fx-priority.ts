@@ -29,6 +29,12 @@
  * 選択(band と other の間。初見⑥・激熱確定⑥.5 は革命より上のまま)。革命は
  * お助け系だが helper(⑤)には同居させない — あちらはファンスタンプの±Nバナーで、
  * こちらは 11 秒の導入カットイン+窓を持つ別種の山場。
+ * ⑦.6 quiz(お題ルーレット)は 2026-08-21 に追加。序列上は revolution の直後だが、
+ * **実際の開始順はこの表では決まらない** — ユーザー決定は「発動時点で溜まっていた
+ * キューを全部消化してから開始・発動以降のキューは優先が高くても後回し」の
+ * バリア方式で、モニターは quiz.armed の間ドレインが空になるのを待ってから
+ * 始動する(worker 側は armedQuiz バリアで以降のイベントを清算まで deferred)。
+ * ここへの登録は quiz-end(結果発表)の持ち越しキューとバナーの取り出し順の保険。
  *
  * 序列と**遮蔽(shared/fx-occlusion.ts)は別軸**。序列は「いつ出すか」、遮蔽は
  * 「被さっている幕の下で何を出すか」。満タン系②③は舞台キューを迂回して常時実行
@@ -58,6 +64,7 @@ export const FX_PRIORITY_ORDER = [
   'hot-roulette',
   'band',
   'revolution',
+  'quiz',
   'other',
 ] as const;
 
@@ -78,6 +85,7 @@ export const FX_DRAIN_KINDS = [
   'hot-roulette',
   'band',
   'revolution',
+  'quiz',
   'roulette',
 ] as const;
 export type FxDrainKind = (typeof FX_DRAIN_KINDS)[number];
@@ -93,6 +101,7 @@ export const DRAIN_PRIORITY = {
   'hot-roulette': 'hot-roulette', // 激熱確定(cfg.roulettes[].hot)は band の直前
   band: 'band',
   revolution: 'revolution', // 革命は band の直後・通常ギフトルーレットの直前(2026-08-20)
+  quiz: 'quiz', // お題ルーレット(quiz-end の結果発表)は revolution の直後(2026-08-21)
   roulette: 'other', // ギフトルーレットは「その他」(ユーザー指定のリスト外)
 } as const satisfies Record<FxDrainKind, FxPriorityClass>;
 
@@ -120,6 +129,8 @@ export const FX_BANNER_KINDS = [
   'tap-lock',
   'revolution-announce',
   'revolution-result',
+  'quiz-announce',
+  'quiz-result',
 ] as const;
 export type FxBannerKind = (typeof FX_BANNER_KINDS)[number];
 
@@ -151,6 +162,11 @@ export const BANNER_PRIORITY = {
   // boost-announce / tap-lock / roulette-*-hot が踏んだのと同じ罠(厳密 < 判定)の予防。
   'revolution-announce': 'revolution',
   'revolution-result': 'revolution',
+  // お題ルーレットのバナーも effect 側の分類(quiz-start/-end → 'quiz')と揃える —
+  // 'other' のままだと bannerWinsByRank の厳密 < 判定で band のドレインに永久に負ける
+  // (boost-announce / tap-lock / revolution が踏んだのと同じ罠)。
+  'quiz-announce': 'quiz',
+  'quiz-result': 'quiz',
 } as const satisfies Record<FxBannerKind, FxPriorityClass>;
 
 export function bannerRank(kind: FxBannerKind): number {
@@ -182,6 +198,11 @@ export function fxClassForEffect(e: ChallengeEffect): FxPriorityClass | 'paralle
     case 'revolution-start':
     case 'revolution-end':
       return 'revolution';
+    case 'quiz-start':
+    case 'quiz-end':
+      // quiz-start はドレインキューに積まない(モニターが armed 監視で始動する
+      // バリア方式)ので、この分類が効くのは quiz-end(結果発表)の持ち越しだけ。
+      return 'quiz';
     case 'roulette':
       // 入室(⑥)→ 激熱確定(⑥.5)→ 通常のギフトルーレット(⑧)。入室を先に見るのは
       // 入室ルーレットが hot を持たない(RouletteHotConfig の解説)ので排他だから。

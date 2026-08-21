@@ -59,7 +59,18 @@ export function maxOcclusion(a: FxOcclusion, b: FxOcclusion): FxOcclusion {
  * > 同日 `TAP_LOCK_INTRO_MS`(5秒)の導入全面カットを入れた時点で前提が変わり、
  * > 革命と同じ「導入は幕・窓は常設 HUD」の形になったので登録側へ移した。
  */
-export type FxCutinKind = 'roulette' | 'band' | 'stock-cutin' | 'boost' | 'revolution' | 'tap-lock';
+export type FxCutinKind =
+  | 'roulette'
+  | 'band'
+  | 'stock-cutin'
+  | 'boost'
+  | 'revolution'
+  | 'tap-lock'
+  // お題ルーレット(2026-08-21)。前置き(導入全面カット+回転+決定表示)の
+  // ホールドが対象 — 60秒窓と投票のオーバーレイは革命の窓と同じくホールドを
+  // 取らないので、ここには出てこない。回転は全画面テキスト(暗幕)だが、
+  // roulette の 'sheer'(7セグを透かす)とは違い読ませる演出なので不透明側。
+  | 'quiz';
 
 /**
  * カットイン種別 → 遮蔽。ルーレットだけが半透明の暗幕で、残り 5 種は

@@ -22,7 +22,7 @@ import {
  */
 
 describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 2026-08-18)', () => {
-  it('11ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
+  it('12ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
     expect(FX_PRIORITY_ORDER).toEqual([
       'follow',
       'strike-like',
@@ -34,6 +34,10 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'hot-roulette',
       'band',
       'revolution',
+      // お題ルーレット(2026-08-21)。序列上は revolution の直後だが、実際の開始順は
+      // バリア方式(モニターの armed 監視 + worker の quizDeferredOps)が支配する —
+      // ここへの登録は quiz-end(結果発表)の持ち越しとバナーの取り出し順の保険。
+      'quiz',
       'other',
     ]);
   });
@@ -78,6 +82,7 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'hot-roulette',
       'band',
       'revolution',
+      'quiz',
       'roulette',
     ]);
     expect(FX_BANNER_KINDS).toEqual([
@@ -96,6 +101,8 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'tap-lock',
       'revolution-announce',
       'revolution-result',
+      'quiz-announce',
+      'quiz-result',
     ]);
     // 全登録が有効なクラスを指す(satisfies の値レベル二重化)。
     for (const k of FX_DRAIN_KINDS) expect(FX_PRIORITY_ORDER).toContain(DRAIN_PRIORITY[k]);
@@ -121,6 +128,11 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
     expect(DRAIN_PRIORITY.revolution).toBe('revolution');
     expect(BANNER_PRIORITY['revolution-announce']).toBe('revolution');
     expect(BANNER_PRIORITY['revolution-result']).toBe('revolution');
+    // お題ルーレットも同じ理由(quiz-start/-end → 'quiz')。'other' のままだと
+    // band のドレインに厳密 < 判定で永久に負ける(boost / tap-lock / revolution の前例)。
+    expect(DRAIN_PRIORITY.quiz).toBe('quiz');
+    expect(BANNER_PRIORITY['quiz-announce']).toBe('quiz');
+    expect(BANNER_PRIORITY['quiz-result']).toBe('quiz');
     const named = new Set([
       'follow',
       'helper',
@@ -131,6 +143,8 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'roulette-rest-hot',
       'revolution-announce',
       'revolution-result',
+      'quiz-announce',
+      'quiz-result',
     ]);
     for (const k of FX_BANNER_KINDS) {
       if (!named.has(k)) expect(BANNER_PRIORITY[k]).toBe('other');

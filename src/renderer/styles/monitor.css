@@ -6303,3 +6303,389 @@ body {
     animation: none;
   }
 }
+
+/*
+ * お題ルーレット(quiz)— 回転・決定・挑戦ウィンドウ・投票・結果発表。
+ * すべて fx-layer(z-index:50)の中・DOM 順で後方 = 不透明カットイン動画より
+ * 必ず手前。z-index は付けない(恒久ルール — fx-backdrop.spec.ts が凍結)。
+ * 配色は「お題=紫系」— 革命(赤)・応援(緑)と一目で見分ける。
+ */
+
+/* 回転・決定の共通全面(暗幕込み)。読ませる演出なので不透明寄りの濃い幕。 */
+.quiz-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  padding: 0 28px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 44%, rgba(44, 14, 74, 0.94), rgba(8, 3, 16, 0.97) 72%);
+  animation: boost-overlay-in 260ms ease-out both;
+}
+
+.quiz-screen .qz-label {
+  font-family: var(--font);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: #d9c4ff;
+  text-shadow: 0 0 18px rgba(150, 80, 255, 0.85);
+}
+
+/*
+ * お題本文。最長 60 文字(QUIZ_PROMPT_LEN_MAX)を 540px 幅で折り返して読ませる。
+ * 差し替え(key=show の再マウント)ごとに軽いパンチ — 回転の「コマ」感を出す。
+ */
+.quiz-screen .qz-prompt {
+  max-width: 484px;
+  font-family: var(--font);
+  font-size: 52px;
+  line-height: 1.3;
+  font-weight: 700;
+  text-align: center;
+  overflow-wrap: anywhere;
+  color: #f3eaff;
+  text-shadow:
+    0 0 22px rgba(150, 80, 255, 0.9),
+    0 0 70px rgba(90, 30, 200, 0.6),
+    0 4px 0 rgba(30, 0, 60, 0.8);
+  animation: quiz-tick 140ms ease-out both;
+}
+
+@keyframes quiz-tick {
+  0% {
+    transform: translateY(10px) scale(0.96);
+    opacity: 0.55;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+/* 決定の1枚だけ強いパンチ(revolution-count-punch と同族)。 */
+.quiz-screen.quiz-reveal .qz-prompt.hit {
+  font-size: 64px;
+  animation: quiz-hit 420ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+@keyframes quiz-hit {
+  0% {
+    transform: scale(1.35, 0.75);
+    filter: brightness(2.2);
+  }
+  45% {
+    transform: scale(0.94, 1.08);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+/*
+ * 挑戦ウィンドウ(制限時間)。お題を画面いっぱい+残り秒の大型数字(ユーザー要件
+ * 「タイムリミット・お題を画面いっぱいに表示」)。常設・ホールドなしなので幕は
+ * 半透明に留め、盤面の気配は後ろに残す(全遮蔽は前置きと発表だけ)。
+ */
+.quiz-window-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 28px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 42%, rgba(38, 12, 66, 0.78), rgba(8, 3, 16, 0.82) 76%);
+}
+
+.quiz-window-overlay .qw-cap {
+  font-family: var(--font);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: #d9c4ff;
+  text-shadow: 0 0 16px rgba(150, 80, 255, 0.8);
+}
+
+.quiz-window-overlay .qw-prompt {
+  max-width: 500px;
+  font-family: var(--font);
+  font-size: 56px;
+  line-height: 1.28;
+  font-weight: 700;
+  text-align: center;
+  overflow-wrap: anywhere;
+  color: #f6efff;
+  text-shadow:
+    0 0 24px rgba(150, 80, 255, 0.9),
+    0 0 80px rgba(90, 30, 200, 0.55);
+}
+
+/* 残り秒。key=秒 の再マウントで毎秒パンチ(.revolution-count と同じ手口)。 */
+.quiz-window-overlay .qw-timer {
+  font-family: var(--num);
+  font-size: 200px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #ffe9c9;
+  text-shadow:
+    0 0 26px rgba(255, 180, 60, 0.9),
+    0 0 90px rgba(255, 120, 20, 0.55),
+    0 5px 0 rgba(80, 40, 0, 0.8);
+  animation: revolution-count-punch 300ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/* 投票タイム。票数のライブ表示(good/bad は 2Hz delta で増える)。 */
+.quiz-vote-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 0 24px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 42%, rgba(38, 12, 66, 0.82), rgba(8, 3, 16, 0.86) 76%);
+}
+
+.quiz-vote-overlay .qv-cap {
+  font-family: var(--font);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #ffe9c9;
+  text-shadow: 0 0 16px rgba(255, 180, 60, 0.85);
+}
+
+.quiz-vote-overlay .qv-cap em {
+  font-style: normal;
+  margin-left: 14px;
+  font-family: var(--num);
+  font-variant-numeric: tabular-nums;
+  color: #ffd9a0;
+}
+
+.quiz-vote-overlay .qv-prompt {
+  max-width: 500px;
+  font-family: var(--font);
+  font-size: 34px;
+  line-height: 1.3;
+  font-weight: 700;
+  text-align: center;
+  overflow-wrap: anywhere;
+  color: #e7dbff;
+  text-shadow: 0 0 18px rgba(150, 80, 255, 0.75);
+}
+
+.quiz-vote-overlay .qv-row {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+}
+
+.quiz-vote-overlay .qv-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 170px;
+  padding: 16px 26px 20px;
+  border-radius: 22px;
+  background: rgba(10, 4, 20, 0.78);
+}
+
+.quiz-vote-overlay .qv-side.good {
+  box-shadow:
+    inset 0 0 0 3px rgba(80, 255, 160, 0.7),
+    0 0 34px rgba(40, 220, 120, 0.4);
+}
+
+.quiz-vote-overlay .qv-side.bad {
+  box-shadow:
+    inset 0 0 0 3px rgba(255, 90, 90, 0.7),
+    0 0 34px rgba(255, 60, 60, 0.4);
+}
+
+.quiz-vote-overlay .qv-word {
+  font-family: var(--font);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.quiz-vote-overlay .qv-side.good .qv-word {
+  color: #c9ffe2;
+  text-shadow: 0 0 14px rgba(60, 240, 140, 0.8);
+}
+
+.quiz-vote-overlay .qv-side.bad .qv-word {
+  color: #ffd0d0;
+  text-shadow: 0 0 14px rgba(255, 80, 80, 0.8);
+}
+
+/* 票数。key=票数 の再マウントで着弾パンチ。 */
+.quiz-vote-overlay .qv-side b {
+  font-family: var(--num);
+  font-size: 84px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: #fdf8ff;
+  animation: quiz-hit 320ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+.quiz-vote-overlay .qv-vs {
+  font-family: var(--font);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #b9a6e6;
+  text-shadow: 0 0 12px rgba(150, 80, 255, 0.7);
+}
+
+/*
+ * 結果発表(票数 → 判定 → ±N)。全面の濃い幕 + 段階表示。
+ * タイムラインの権威は shared/quiz-settle.ts(planQuizResult)。
+ */
+.quiz-settle {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 0 24px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 44%, rgba(44, 14, 74, 0.94), rgba(8, 3, 16, 0.97) 72%);
+  animation: boost-overlay-in 260ms ease-out both;
+}
+
+.quiz-settle .qs-prompt {
+  max-width: 500px;
+  font-family: var(--font);
+  font-size: 30px;
+  line-height: 1.3;
+  font-weight: 700;
+  text-align: center;
+  overflow-wrap: anywhere;
+  color: #d9c4ff;
+  text-shadow: 0 0 16px rgba(150, 80, 255, 0.75);
+}
+
+.quiz-settle .qs-votes {
+  display: flex;
+  align-items: baseline;
+  gap: 30px;
+  font-family: var(--font);
+  font-size: 30px;
+  font-weight: 700;
+}
+
+.quiz-settle .qs-votes b {
+  font-family: var(--num);
+  font-size: 56px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quiz-settle .qs-votes .good {
+  color: #c9ffe2;
+  text-shadow: 0 0 14px rgba(60, 240, 140, 0.8);
+}
+
+.quiz-settle .qs-votes .bad {
+  color: #ffd0d0;
+  text-shadow: 0 0 14px rgba(255, 80, 80, 0.8);
+}
+
+/* 判定と±Nは出番まで場所ごと消す(.rs-tile.hidden と同じ判断)。 */
+.quiz-settle .qs-verdict,
+.quiz-settle .qs-amt {
+  display: none;
+}
+
+.quiz-settle.verdict .qs-verdict,
+.quiz-settle.amount .qs-verdict {
+  display: block;
+  font-family: var(--font);
+  font-size: 64px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #fdf8ff;
+  text-shadow:
+    0 0 24px rgba(150, 80, 255, 0.9),
+    0 0 80px rgba(90, 30, 200, 0.6);
+  animation: quiz-hit 420ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+.quiz-settle.amount .qs-amt {
+  display: block;
+  font-family: var(--num);
+  font-size: 150px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  animation: boost-settle-lock 400ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/* 減算(よかった多数)= 応援の緑、増加(だめ多数)= 妨害の赤。 */
+.quiz-settle.down .qs-amt {
+  color: #d2ffe6;
+  text-shadow:
+    0 0 22px rgba(60, 240, 140, 0.95),
+    0 0 80px rgba(20, 200, 100, 0.6),
+    0 4px 0 rgba(0, 70, 30, 0.8);
+}
+
+.quiz-settle.up .qs-amt {
+  color: #ffdada;
+  text-shadow:
+    0 0 22px rgba(255, 80, 80, 0.95),
+    0 0 80px rgba(255, 30, 40, 0.6),
+    0 4px 0 rgba(90, 0, 6, 0.8);
+}
+
+/* お題バナー(発動/結果)。紫系 — banner-revolution と同じ構造で変数差し替えのみ。 */
+.float.banner-quiz {
+  --fl-lamp: #c9a6ff;
+  --fl-glow: rgba(150, 80, 255, 0.6);
+  --fl-bg-1: rgba(40, 14, 70, 0.96);
+  --fl-bg-2: rgba(14, 4, 26, 0.94);
+}
+
+.float.banner-quiz::before {
+  animation-duration: 480ms;
+}
+
+/* 横ステージは高さが足りないので一回り小さく(.revolution-settle と同じ判断)。 */
+.landscape .quiz-window-overlay .qw-timer {
+  font-size: 150px;
+}
+
+.landscape .quiz-window-overlay .qw-prompt,
+.landscape .quiz-screen .qz-prompt {
+  max-width: 900px;
+  font-size: 44px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 前置きと発表は quizWillStart / startQuizResultFx が丸ごと弾く(念のため対にする)。 */
+  .quiz-screen,
+  .quiz-settle {
+    display: none;
+  }
+
+  /* 窓・投票のオーバーレイは残す(演出ではなく「なぜ止まっているか」の説明)。
+     動きだけ止める。 */
+  .quiz-window-overlay .qw-timer,
+  .quiz-vote-overlay .qv-side b {
+    animation: none;
+  }
+}

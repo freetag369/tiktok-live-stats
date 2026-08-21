@@ -761,7 +761,7 @@ describe('ChallengeEngine — 状態機械', () => {
     expect(stopped.value).toBe(109); // 凍結表示
     const rs = e.reset();
     expect(rs.value).toBe(100);
-    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0 });
+    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0 });
     // reset 後は同じユーザーのフォローがまた妨害になる
     e.start();
     expect(e.handleEvent(follow('a'))).toBe(true);
@@ -2467,14 +2467,20 @@ describe('ChallengeEngine — ギフトルーレット', () => {
       initialValue: 3,
       roulettes: [{ ...structuredClone(DEFAULT_ROULETTE), direction: 'sub' as const }],
     });
-    const e = rlEngine(c); // rand=0 → 出目 5 → -5
+    const e = rlEngine(c); // rand=0 → 出目 5 → 残量クランプで実適用 -3
     e.start();
     e.handleEvent(heartMe());
     const s = e.get();
     expect(s.value).toBe(0); // クランプ
     expect(s.status).toBe('achieved');
-    expect(s.stats.giftDown).toBe(5);
+    // stats・effect.amount は名目値でなく**実減少量**(2026-08-21 修正 — 残3にマス5は
+    // 3 しか減らせない。名目のままだとモニターの据え置きが 3→5→0 と水増しされる)。
+    expect(s.stats.giftDown).toBe(3);
     expect(s.recentEffects.map((x) => x.kind)).toEqual(['achieved', 'roulette']);
+    const rl = s.recentEffects.find((x) => x.kind === 'roulette')!;
+    expect(rl.amount).toBe(-3);
+    // クランプ発生時だけ実適用量の列が焼かれる(復元 rouletteDraws が名目式より優先)。
+    expect(rl.rouletteAmounts).toEqual([-3]);
   });
 
   it('無効時は通常のギフト規則(giftDefault)に落ちる', () => {

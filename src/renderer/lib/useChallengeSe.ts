@@ -92,6 +92,13 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
     // 終了は合図バナーだけ(専用の清算演出が無い)。到着時に鳴らす音も無し。
     case 'revolution-end':
       return null;
+    // お題ルーレットの着弾音は revolution-start と同じ構造(トリガーギフトは
+    // gift effect を出さない)なので、ティアスロットが唯一の出どころ。
+    case 'quiz-start':
+      return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
+    // 清算の音はモニターが結果発表の瞬間に直接鳴らす(boost-end と同型)。
+    case 'quiz-end':
+      return null;
     case 'achieved':
       return 'achieved';
   }

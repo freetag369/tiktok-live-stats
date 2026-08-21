@@ -209,8 +209,12 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
         // 非有限の diamondToJpy 等も、DB のスコアに永続化される前にここで止める。
         const next: AppSettings = sanitizeSettings(settings, req.params as Partial<AppSettings>);
         const restart = needsWorkerRestart(settings, next);
+        // 書けてからメモリを差し替える。先に差し替えると、保存失敗(ディスク満杯・
+        // 権限・AV の rename ロック)時に「cfg.get は新値 = UI では保存済みに見える /
+        // settings.json は旧値 = 再起動で黙って巻き戻る / worker は旧値のまま動く」の
+        // 三者乖離が固定される(catch へ飛ぶと下の送信・プッシュが全部スキップされるため)。
+        saveSettings(dataDir, next);
         settings = next;
-        saveSettings(dataDir, settings);
         if (restart) {
           await host?.restart(bootPayload());
         } else {
@@ -229,7 +233,9 @@ async function handleMainRpc(req: RpcRequest): Promise<RpcResponse> {
           closeMonitorWindow();
           setTimeout(() => openMonitor(), 350);
         } else if (prev.challenge.monitorDisplayId !== settings.challenge.monitorDisplayId) {
-          repositionMonitor(settings.challenge.monitorDisplayId, settings.challenge.monitorWindowed);
+          // ユーザーが対象ディスプレイを選び直した明示操作なので force — 手動配置の
+          // 温存(repositionMonitor の可視ガード)より指示どおり動かすほうが優先。
+          repositionMonitor(settings.challenge.monitorDisplayId, settings.challenge.monitorWindowed, true);
         }
         return { id, ok: true, result: { workerRestarted: restart } } as RpcResponse;
       }

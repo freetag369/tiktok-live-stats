@@ -20,6 +20,9 @@ import {
   PENDING_BANDS_MAX,
   PENDING_BOOSTS_MAX,
   PENDING_REVOLUTIONS_MAX,
+  PENDING_QUIZZES_MAX,
+  QUIZ_SPIN_MS,
+  QUIZ_REVEAL_MS,
   REVOLUTION_HUD_INTRO_MS,
   JOIN_ROULETTE_QUEUE_MAX,
   ROULETTE_CHAIN_GAP_MS,
@@ -110,6 +113,8 @@ import {
   rollupDisplayAt,
 } from '@shared/boost-settle';
 import { planRevolutionResult } from '@shared/revolution-settle';
+import { quizSpinTicks } from '@shared/quiz-spin';
+import { planQuizResult } from '@shared/quiz-settle';
 import { rpc } from '../ipc/client';
 import { setChallenge, useLive } from '../state/liveStore';
 import { Avatar } from '../components/common';
@@ -486,6 +491,15 @@ function boostWillStart(e: ChallengeEffect): boolean {
  * だけ — 譲る判定(imminentOcc)と startRevolutionFx の入口ガードは必ずこれを共有する。
  */
 function revolutionWillStart(e: ChallengeEffect): boolean {
+  return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
+}
+
+/**
+ * このお題 effect(quiz-start)で前置き演出が実際に始まるか。断るのは尺不足
+ * (= worker のプレーン発動は fxDurationMs 0)と動きの抑制だけ — 導入動画の
+ * 素材欠損は startQuizFx 側が「導入だけスキップ」で吸収する(全滅させない)。
+ */
+function quizWillStart(e: ChallengeEffect): boolean {
   return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
 }
 
@@ -996,6 +1010,47 @@ export function MonitorView(): React.JSX.Element {
   const tapLockTimers = useRef<number[]>([]);
   /** 再生中の導入のトリガー effect(明けたあとの告知バナーに使う)。 */
   const tapLockEffect = useRef<ChallengeEffect | null>(null);
+
+  // ── お題ルーレット(quiz) ────────────────────────────────────────────────
+  // quiz-start effect はドレインキューに積まない**バリア方式**: pendingQuizStart に
+  // 保持し、ChallengeState.quiz.armed の間「発動時点で溜まっていた演出キューが
+  // 空になる」のを 250ms 監視で待つ → 空になったら quizCue{start} を撃って前置き
+  // (導入動画 → お題回転 → 決定表示)を再生する(ユーザー決定 2026-08-21)。
+  // 60秒窓と投票のオーバーレイは革命の窓と同じくホールドを取らない常設 DOM
+  // (ChallengeState.quiz の絶対時刻駆動)。
+  /** 導入全面カット(introClip・素材 'off' なら段ごとスキップ)。 */
+  const [quizClip, setQuizClip] = useState<{ key: number; url: string; out: boolean } | null>(null);
+  /** お題回転(全画面テキストの減速差し替え)。show = いま見えている表示 index。 */
+  const [quizSpin, setQuizSpin] = useState<{ key: number; prompts: string[]; show: number } | null>(null);
+  /** お題決定の全面パンチ表示。 */
+  const [quizReveal, setQuizReveal] = useState<{ key: number; prompt: string } | null>(null);
+  /** 据え置きの持ち主がお題の前置きである印(revolutionHold と同じ役割)。 */
+  const quizHold = useRef(false);
+  const quizTimers = useRef<number[]>([]);
+  /** 再生中の前置きのトリガー effect(cue 照合と決定表示に使う)。 */
+  const quizEffect = useRef<ChallengeEffect | null>(null);
+  /** armed 待ちの quiz-start(バリアの片割れ — ドレインキューには積まない)。 */
+  const pendingQuizStart = useRef<ChallengeEffect | null>(null);
+  /** quiz-end(結果発表)の持ち越し(pendingRevolutions と同型)。 */
+  const pendingQuizzes = useRef<ChallengeEffect[]>([]);
+  /** 結果発表オーバーレイ。stage で票数 → 判定 → ±N ロールアップと進める。 */
+  const [quizSettle, setQuizSettle] = useState<{
+    key: number;
+    stage: 'votes' | 'verdict' | 'amount';
+    prompt: string;
+    good: number;
+    bad: number;
+    goodLabel: string;
+    badLabel: string;
+    amount: number;
+  } | null>(null);
+  /** 結果発表の幕とホールド(revolutionResultHold と同型 — 前置きとは別生存期間)。 */
+  const quizResultHold = useRef(false);
+  const quizResultTimers = useRef<number[]>([]);
+  /** 発表中の quiz-end effect(締めのバナー文言に使う — 同期値は ref)。 */
+  const quizResultEffect = useRef<ChallengeEffect | null>(null);
+  /** 発動中 BGM のハンドル(quiz キーの出現/消滅に反応する effect が持ち主)。 */
+  const quizBgm = useRef<{ stop: (fadeMs?: number) => void } | null>(null);
   /** タップカウンタ(着弾の発射点)。 */
   const boostCounterRef = useRef<HTMLDivElement | null>(null);
   /** タップ数の前回値(増加検知で press 音とカウンタのパンチを出す)。 */
@@ -1068,7 +1123,7 @@ export function MonitorView(): React.JSX.Element {
    * 自分の安全弁と同じ権威尺から書き、hold が偽の間は読まれない(解除側で 0 に
    * 戻す義務は無い — hold を立てる側が必ず上書きする)。判定は番犬 interval。
    */
-  const fxHoldDeadlines = useRef({ roulette: 0, band: 0, stock: 0, boost: 0, revolution: 0, revolutionResult: 0, tapLock: 0 });
+  const fxHoldDeadlines = useRef({ roulette: 0, band: 0, stock: 0, boost: 0, revolution: 0, revolutionResult: 0, tapLock: 0, quiz: 0, quizResult: 0 });
 
   // CLEAR リザルトへの切り替えタイマー。演出ホールド中は張らない —
   // achieved は pendingAchieved で持ち越され、finish* が再生した時点で
@@ -1100,7 +1155,16 @@ export function MonitorView(): React.JSX.Element {
     revCount !== null ||
     // 結果カットシーン(動画)と戦果の発表(DOM)も同じ理由で必ず並べる。
     revolutionResult !== null ||
-    revSettle !== null;
+    revSettle !== null ||
+    // お邪魔の導入(5秒・不透明フルフレーム)も最前面のオーバーレイ(2026-08-21 —
+    // 69eac53 で追加されたとき、この一覧だけ漏れていた)。
+    tapLockClip !== null ||
+    // お題ルーレットの前置き(導入動画・回転・決定表示)と結果発表も最前面の
+    // オーバーレイ — 漏らすと CLEAR リザルトが幕の上に生える(既知の事故パターン)。
+    quizClip !== null ||
+    quizSpin !== null ||
+    quizReveal !== null ||
+    quizSettle !== null;
 
   /*
    * 保留バナーの最後の砦 — 全カットアニメーションが終わった瞬間に、取り残された
@@ -1182,6 +1246,15 @@ export function MonitorView(): React.JSX.Element {
     void rpc('challenge.revolutionCue', { action: 'drop', effectId }).catch(() => undefined);
   }
 
+  /**
+   * 「このお題の前置きは再生されない」の申告。worker はアームを**プレーン即発動**へ
+   * 倒す(dropRevolutionCue と同じ判断 — 投票と±はゲームの状態なので、モニターの
+   * 都合でトリガーギフトが消えてはいけない)。**effectId 0 = アーム中のものを対象**。
+   */
+  function dropQuizCue(effectId: number): void {
+    void rpc('challenge.quizCue', { action: 'drop', effectId }).catch(() => undefined);
+  }
+
   // ワーカー再起動・起動レースで凍結許可(fxCaps)は既定 false に戻る/失われる。
   // 従来は 120 秒ポーリングが唯一の再送で、その間ワーカーは全カットインを
   // 「モニター未表示/動きの抑制」として拒否していた(dev 起動直後の実配信で
@@ -1199,6 +1272,8 @@ export function MonitorView(): React.JSX.Element {
     dropBoostCue(0);
     // 革命も同じ理由で解放する — こちらはプレーン即発動へ倒れる(効果は失われない)。
     dropRevolutionCue(0);
+    // お題も同じ(プレーン即発動 — 投票と±は失われない)。アームが無ければ no-op。
+    dropQuizCue(0);
   }, []);
 
   // worker 再起動で effect の id が振り直されたら watermark を白紙へ戻す。
@@ -1226,6 +1301,17 @@ export function MonitorView(): React.JSX.Element {
         dropped: pendingRevolutions.current.length,
       });
       pendingRevolutions.current = [];
+      refreshFxStock();
+    }
+    // お題も同じ — armed 待ちの quiz-start と結果発表の持ち越しは worker 再起動で
+    // 対応する状態ごと消えている(再生しても cue は無視され、発表は嘘になる)。
+    if (pendingQuizStart.current !== null || pendingQuizzes.current.length > 0) {
+      fxWarn('worker 再起動 — お題の待ち・持ち越しを破棄', {
+        droppedStart: pendingQuizStart.current !== null ? 1 : 0,
+        droppedEnd: pendingQuizzes.current.length,
+      });
+      pendingQuizStart.current = null;
+      pendingQuizzes.current = [];
       refreshFxStock();
     }
     // 依存は workerEpoch だけ — refreshFxStock は毎レンダー同一性が変わるので
@@ -1311,6 +1397,14 @@ export function MonitorView(): React.JSX.Element {
       if (tapLockHold.current && d.tapLock !== 0 && now > d.tapLock) {
         fxWarn('ホールド番犬: tapLock が期限超過 — 強制解除', { overdueMs: now - d.tapLock });
         finishTapLockFx();
+      }
+      if (quizHold.current && d.quiz !== 0 && now > d.quiz) {
+        fxWarn('ホールド番犬: quiz が期限超過 — 強制解除', { overdueMs: now - d.quiz });
+        finishQuizIntro();
+      }
+      if (quizResultHold.current && d.quizResult !== 0 && now > d.quizResult) {
+        fxWarn('ホールド番犬: quiz-result が期限超過 — 強制解除', { overdueMs: now - d.quizResult });
+        finishQuizResultFx();
       }
     }, FX_HOLD_WATCHDOG_MS);
     return () => clearInterval(t);
@@ -1597,6 +1691,8 @@ export function MonitorView(): React.JSX.Element {
       abortRevolutionFx();
       abortRevolutionResultFx();
       abortTapLockFx();
+      abortQuizFx();
+      abortQuizResultFx();
       clearRepeatTimers();
       clipQueue.current = [];
       // 着弾待ちのバナーも捨てる — 停止/リセット後に古い通知を出さない。
@@ -1821,6 +1917,105 @@ export function MonitorView(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [challenge?.fxQueue]);
 
+  // ── お題ルーレット(発動 BGM・armed 監視・常設オーバーレイ) ───────────────
+  // tapLock / revolution と同じ規約: worker が配るのは絶対時刻と票数だけ
+  // (ChallengeState.quiz)。残り秒はここで数える。窓・投票のオーバーレイは
+  // ホールドを取らない常設表示 — 前置き(quizHold)と結果(quizResultHold)だけが
+  // 幕とホールドを持つ。
+  const quiz = challenge?.quiz ?? null;
+  const quizActive = quiz != null;
+  const [, setQuizTick] = useState(0);
+  useEffect(() => {
+    if (!quizActive) return;
+    const t = setInterval(() => setQuizTick((n) => n + 1), 250);
+    return () => clearInterval(t);
+  }, [quizActive]);
+
+  // 発動 BGM。quiz キーの出現で鳴らし、消滅でフェード停止する state 駆動 —
+  // effect の watermark 消失・再マウントに強く、アーム(発動)の瞬間に即鳴る =
+  // 「BGM の変化がお題モードの予告」(2026-08-21 ユーザー決定)。窓・投票の間も
+  // 鳴りっぱなし(loop)で、清算(quiz キー消滅)で止まる。音量は cfg 直読み —
+  // rouletteSound と同じ「絶対値・seVolume は掛けない」規約。
+  useEffect(() => {
+    if (!quizActive) return;
+    const q = cfgRef.current?.challenge.quiz;
+    quizBgm.current?.stop(0);
+    quizBgm.current = q && q.bgm !== 'off' ? playBandBgm(q.bgm, q.bgmVolume) : null;
+    return () => {
+      quizBgm.current?.stop(600);
+      quizBgm.current = null;
+    };
+  }, [quizActive]);
+
+  // 窓が worker 側で畳まれたら(stop/reset/達成/機能OFF)、待ち・前置きも必ず畳む。
+  // revActive の後始末 effect と同じ「state 駆動が唯一の確実な出口」。
+  // 結果発表(quiz-end)の持ち越しは残す — 締めくくりを無言で消さない。
+  useEffect(() => {
+    if (quizActive) return;
+    if (pendingQuizStart.current !== null || quizHold.current) {
+      fxWarn('お題の窓が worker 側で畳まれた — 待ちと前置きを片付ける');
+      pendingQuizStart.current = null;
+      abortQuizFx();
+      refreshFxStock();
+      scheduleDrain();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quizActive]);
+
+  // armed 監視(バリア方式の片割れ): 「発動時点で溜まっていた演出キューを全部
+  // 消化してから」前置きを開始する(2026-08-21 ユーザー決定)。250ms tick が
+  // 再レンダーを供給するので、毎レンダー評価の effect で待ち行列を覗く。
+  // ゲートに boost / revolution の状態キーも含める — バリア前に pendingOps へ
+  // 積まれていたフィーバー発動 op がドレインで開いた窓も「溜まっていた分」なので、
+  // その清算(キー消滅)まで待つ。fxFreezeUntilMs も同じ理由(worker の pendingOps
+  // がまだ吐き切っていない)。待ちの上限は worker の QUIZ_ARM_MAX_MS(120秒)—
+  // 期限切れは worker が強制発動し、quiz.armed が落ちて startsAtMs が入る。
+  const quizArmed = quiz?.armed === true;
+  useEffect(() => {
+    if (!quizArmed) return;
+    const e = pendingQuizStart.current;
+    if (e === null) return;
+    if (challenge?.boost != null || challenge?.revolution != null) return;
+    if (challenge?.fxFreezeUntilMs != null) return;
+    if ((challenge?.fxQueue?.length ?? 0) > 0) return;
+    if (pendingAchieved.current !== null) return;
+    if (peekNextDrainKind(drainQueuesView()) !== null) return;
+    if (anyCutinHold() || chainActive()) return;
+    if (bannerQueue.current.length > 0 || stageBusy()) return;
+    pendingQuizStart.current = null;
+    if (!startQuizFx(e)) {
+      // 開始不可(reduced-motion 等)。dropQuizCue は startQuizFx 内で撃ち済み —
+      // worker はプレーン即発動へ倒すので、発動の事実だけバナーで残す。
+      pushFloat(quizAnnounceNode(e), 'bad banner-quiz', 'quiz-announce');
+    }
+  });
+
+  const quizNowMs = Date.now();
+  // 前置き(quizHold)中はオーバーレイを出さない — 回転・決定表示が主役。
+  // 窓の中か(startsAtMs 前 = まだ前置き中。armed 中は時刻 0 なので必ず false)。
+  const quizWindowOn =
+    quiz != null &&
+    !quiz.armed &&
+    quizNowMs >= quiz.startsAtMs &&
+    quizNowMs < quiz.windowEndsAtMs &&
+    !quizHold.current;
+  // 投票タイム中か(窓の満了〜投票締切)。
+  const quizVoteOn =
+    quiz != null && !quiz.armed && quizNowMs >= quiz.windowEndsAtMs && quizNowMs < quiz.voteEndsAtMs;
+  const quizLeftSecs = quiz != null ? Math.max(0, Math.ceil((quiz.windowEndsAtMs - quizNowMs) / 1000)) : 0;
+  const quizVoteLeftSecs =
+    quiz != null ? Math.max(0, Math.ceil((quiz.voteEndsAtMs - quizNowMs) / 1000)) : 0;
+
+  // 窓・投票中に弾かれたタップの手応え(tapLock の blocked と同型)。
+  const prevQuizBlocked = useRef(0);
+  const quizBlockedCount = quiz?.blocked ?? 0;
+  useEffect(() => {
+    const prev = prevQuizBlocked.current;
+    prevQuizBlocked.current = quizBlockedCount;
+    if (quizBlockedCount <= prev) return;
+    pushShake('shake');
+  }, [quizBlockedCount]);
+
   // ── 舞台(stage)の排他 ────────────────────────────────────────────────
   // 判定は shared/fx-stage.ts の純関数、状態は bannerEndAt / bannerQueue /
   // pendingDrain の3本だけ。ここから下の述語は**すべて ref を同期に読む** —
@@ -1835,7 +2030,11 @@ export function MonitorView(): React.JSX.Element {
       revolutionHold.current ||
       // 結果カットシーンも 6 秒の不透明フルフレーム(導入と同じ .fx-clip-opaque)。
       revolutionResultHold.current ||
-      tapLockHold.current
+      tapLockHold.current ||
+      // お題の前置き(導入動画+全画面テキスト)と結果発表も不透明扱い —
+      // occlusionOfCutin('quiz') = 'opaque'(読ませる演出なので粒子を上に漏らさない)。
+      quizHold.current ||
+      quizResultHold.current
     );
   }
   /**
@@ -1876,7 +2075,10 @@ export function MonitorView(): React.JSX.Element {
       // 結果カットシーンは据え置き(heldValue)を張らないが、幕は張る — 6 秒のあいだ
       // 次の演出を始めさせない・±N バナーを幕の上に出さない、の両方が要る。
       revolutionResultHold.current ||
-      tapLockHold.current
+      tapLockHold.current ||
+      // お題の前置きと結果発表(規約は revolution の導入・結果と同じ)。
+      quizHold.current ||
+      quizResultHold.current
     );
   }
   /** 着弾チェーンが飛行中。 */
@@ -2006,6 +2208,7 @@ export function MonitorView(): React.JSX.Element {
       pendingBoosts.current.length > 0 ||
       pendingBands.current.length > 0 ||
       pendingRevolutions.current.length > 0 ||
+      pendingQuizzes.current.length > 0 ||
       joinRouletteQueue.current.length > 0 ||
       hotRouletteQueue.current.length > 0 ||
       rouletteQueue.current.length > 0 ||
@@ -2025,6 +2228,7 @@ export function MonitorView(): React.JSX.Element {
       boosts: pendingBoosts.current,
       bands: pendingBands.current,
       revolutions: pendingRevolutions.current,
+      quizzes: pendingQuizzes.current,
       joinRoulettes: joinRouletteQueue.current,
       hotRoulettes: hotRouletteQueue.current,
       roulettes: rouletteQueue.current,
@@ -2045,6 +2249,7 @@ export function MonitorView(): React.JSX.Element {
       pendingBoosts.current.length > 0 ||
       pendingBands.current.length > 0 ||
       pendingRevolutions.current.length > 0 ||
+      pendingQuizzes.current.length > 0 ||
       joinRouletteQueue.current.length > 0 ||
       hotRouletteQueue.current.length > 0 ||
       rouletteQueue.current.length > 0;
@@ -2077,6 +2282,7 @@ export function MonitorView(): React.JSX.Element {
         rep: giftFxShots(e).rep,
       })),
       revolutions: pendingRevolutions.current.map((e) => ({ id: e.id, nickname: e.nickname })),
+      quizzes: pendingQuizzes.current.map((e) => ({ id: e.id, nickname: e.nickname })),
       joinRoulettes: joinRouletteQueue.current.map((w) => ({
         id: w.e.id,
         nickname: w.e.nickname,
@@ -2926,6 +3132,14 @@ export function MonitorView(): React.JSX.Element {
       playAchieved: (e) => playEffect(e),
       start: (next) => {
         if (next.kind === 'strike') {
+          // 飛行中チェーンの横取り禁止(2026-08-21 修正)。coalesce が queueStrike した
+          // 同一コミットの pumpStage がここまで届くと、startStrike 冒頭の
+          // clearStrikeTimers が前チェーンの着弾を無再生で潰していた(routeStrike
+          // 'coalesce' の規約「消化はチェーン終端の直結」・fx-drain.ts 冒頭の
+          // 「strike 経路は最後の網」に反して正常系を毎回横取り)。false で戻せば
+          // 後段の queueStrike マージで保留に残り、チェーン終端の continueStrikeChain が
+          // 規約どおり直結で消化する(取り残しはカットイン系の再訪タイマーが拾う)。
+          if (chainActive()) return false;
           // 縮退表示込みの判定は startStrikeFromPending が持つ。onNext(ルーレット
           // BGM の即断)は張れたときだけ後から撃つ — 断る相手のために撃つと、
           // 次のキューがルーレットだったとき BGM が頭から鳴り直す。
@@ -3006,6 +3220,17 @@ export function MonitorView(): React.JSX.Element {
           }
           hooks?.onNext?.('revolution');
           return startRevolutionFx(e);
+        }
+        if (next.kind === 'quiz') {
+          // quiz-start はこのキューに乗らない(バリア方式 — armed 監視が唯一の入口)。
+          // ここへ来るのは quiz-end(結果発表)の持ち越しだけ。
+          const e = next.effect;
+          if (!startQuizResultFx(e)) {
+            pushFloat(quizResultNode(e), quizResultClass(e), 'quiz-result');
+            return false;
+          }
+          hooks?.onNext?.('quiz');
+          return true;
         }
         // ブーストだけは「期限切れ」がある。ただし worker はギフト着弾で**予約する
         // だけ**(アーム)になったので、焼き込まれた boostEndsAtMs は
@@ -4065,6 +4290,16 @@ export function MonitorView(): React.JSX.Element {
     // null チェックが伝わらない)。判定の権威はあくまで tapLockWillStart 側。
     const url = TAP_LOCK_INTRO_CLIP_URL;
     if (url == null || !tapLockWillStart(e, cfg?.challenge.fxClipsEnabled ?? false)) return false;
+    // 舞台の排他(2026-08-21 修正)。worker はルーレット系では凍結しないので、
+    // リール回転中・着弾チェーン飛行中・バナー間合い中でも tap-lock effect は即時に
+    // 届く。ガード無しで始めると (1) 再生中カットインの上に第2の不透明幕が重なり
+    // (2) 下の flushStrike(true) → holdValue が回転中リールの出目込みの値で据え置きを
+    // 横取りして「据え置きの持ち主は常に1人」を破り (3) 5秒後の finishTapLockFx の
+    // setHeldValue(null) がリール停止前に最終値を露出する(出目の先漏れ — 激熱×10
+    // なら 5000 がネタバレ)。上の doc の設計どおり幕を諦めてバナーだけに縮退する
+    // (封印自体は worker 側で既に効いているので、持ち越して後から幕を上げる理由が
+    // 無い)。band/boost/革命が pending* キューで持ち越すのとは意図的に違う扱い。
+    if (anyCutinHold() || chainActive() || stageBusy()) return false;
     // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。
     flushStrike(true, occlusionOfCutin('tap-lock'));
     clearTapLockTimers();
@@ -4115,6 +4350,249 @@ export function MonitorView(): React.JSX.Element {
     tapLockHold.current = false;
     tapLockEffect.current = null;
     setHeldValue(null);
+  }
+
+  // ── お題ルーレット(前置き・結果発表) ───────────────────────────────────
+
+  function clearQuizTimers() {
+    for (const t of quizTimers.current) window.clearTimeout(t);
+    quizTimers.current = [];
+  }
+
+  /** 発動の告知バナー(プレーン発動・開始不可のフォールバックにも使う)。 */
+  function quizAnnounceNode(e: ChallengeEffect): React.JSX.Element {
+    return (
+      <>
+        <span className="f-amt">お題</span>
+        {nameLines({
+          ...(e.giftName ? { gift: e.giftName } : {}),
+          who: e.nickname ?? '',
+          act: 'がお題ルーレット!',
+        })}
+      </>
+    );
+  }
+
+  /**
+   * お題の前置き開始。導入全面カット(quizIntroMs・素材未設定は自動スキップ)→
+   * お題回転(全画面テキストの減速差し替え・QUIZ_SPIN_MS)→ 決定パンチ表示
+   * (QUIZ_REVEAL_MS)。窓は worker が quizCue の実再生時刻 + preMs から開く
+   * (革命の導入と同じ設計)。数字は前置きの間だけ据え置く — 窓・投票中は
+   * ホールドを取らない常設オーバーレイ(worker 側はタップ/いいねを破棄するので
+   * 数字は動かない)。尺は JS タイマーが権威(onEnded は使わない)。
+   * 戻り値 false = 開始不可(呼び出し側はバナーへフォールバック)。
+   */
+  function startQuizFx(e: ChallengeEffect): boolean {
+    if (!quizWillStart(e)) {
+      fxWarn('お題の前置き開始不可(尺不足 / 動きの抑制)', {
+        durationMs: e.fxDurationMs,
+        reducedMotion: prefersReducedMotion(),
+      });
+      if (!e.test) dropQuizCue(e.id);
+      return false;
+    }
+    const prompts = e.quizPrompts ?? [];
+    const winner = e.quizPromptIndex ?? 0;
+    if (prompts.length === 0) {
+      // 旧 worker 混在の保険 — 盤面が無ければ回しようがない。
+      if (!e.test) dropQuizCue(e.id);
+      return false;
+    }
+    const introMs = e.quizIntroMs ?? 0;
+    const introUrl = introMs > 0 ? fxClipUrl(e.quizIntroClip) : null;
+    // 素材が見つからない(未投入・'off'・fxClipsEnabled オフ)は導入だけスキップして
+    // 回転から始める — preMs は実際に再生する尺で cue に申告するので窓はズレない
+    // (「再生枠のみ実装・素材未設定なら自動スキップ」= 2026-08-21 ユーザー決定)。
+    const realIntroMs = introUrl !== null && (cfg?.challenge.fxClipsEnabled ?? false) ? introMs : 0;
+    const totalMs = realIntroMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS;
+    // ★アーム済みお題の発動合図。armed 監視(唯一の入口)と▶試写の両方がここを
+    // 通る。▶実演は撃たない(revolutionCue と同じ理由 — 実発動のアームが偶然
+    // 生きていると試写の時刻で本物をコミットしてしまう)。
+    if (!e.test) {
+      void rpc('challenge.quizCue', {
+        action: 'start',
+        effectId: e.id,
+        startedAtMs: Date.now(),
+        preMs: totalMs,
+      }).catch(() => undefined);
+    }
+    // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。
+    flushStrike(true, occlusionOfCutin('quiz'));
+    clearQuizTimers();
+    clearRepeatTimers();
+    quizHold.current = true;
+    fxHoldDeadlines.current.quiz = Date.now() + totalMs + 2000 + FX_HOLD_GRACE_MS;
+    quizEffect.current = e;
+    // トリガーギフト自体は値を動かさない(amount 0)が、式は heldValueFor に一本化。
+    // ▶実演は据え置かない(値を変えない契約)。
+    if (!e.test) holdValue(heldValueFor(e.amount));
+    if (e.flash) pushFlash('gift-t3');
+    playingFx.current = { kind: 'quiz', id: e.id, nickname: e.nickname, remaining: 1 };
+    refreshFxStock();
+    const push = (ms: number, fn: () => void) => {
+      quizTimers.current.push(window.setTimeout(fn, ms));
+    };
+    if (realIntroMs > 0 && introUrl !== null) {
+      setQuizClip({ key: ++fxKey, url: introUrl, out: false });
+      // 終端 0.4 秒前にフェード(.fx-clip-opaque の transition 400ms と一致)。
+      push(Math.max(0, realIntroMs - 400), () => setQuizClip((c) => (c ? { ...c, out: true } : c)));
+    }
+    // 回転 — コマ列は shared/quiz-spin.ts が権威(決定的・Math.random 不使用)。
+    push(realIntroMs, () => {
+      if (!quizHold.current) return;
+      setQuizClip(null);
+      const ticks = quizSpinTicks(prompts.length, winner, QUIZ_SPIN_MS);
+      setQuizSpin({ key: ++fxKey, prompts, show: ticks[0]?.show ?? winner });
+      // 回転開始音は既存のルーレットスロットを流用 — 新しい ChallengeSeSlot を
+      // 作らない(スロット追加は既定音・音量・miniFx・設定画面まで波及するため)。
+      playSeSlot('roulette');
+      for (const t of ticks) {
+        push(realIntroMs + t.atMs, () => {
+          if (quizHold.current) setQuizSpin((s) => (s ? { ...s, show: t.show } : s));
+        });
+      }
+    });
+    // 決定 — 全面パンチ表示(確定音もルーレットの確定スロットを流用)。
+    push(realIntroMs + QUIZ_SPIN_MS, () => {
+      if (!quizHold.current) return;
+      setQuizSpin(null);
+      setQuizReveal({ key: ++fxKey, prompt: prompts[winner] ?? '' });
+      playSeSlot('roulette-hit');
+      pushShake('shake');
+    });
+    push(totalMs, () => finishQuizIntro());
+    push(totalMs + 2000, () => finishQuizIntro()); // 二重安全弁
+    return true;
+  }
+
+  /** 前置き終了 — ここから60秒窓の常設オーバーレイ(ホールドなし)へ引き継ぐ。 */
+  function finishQuizIntro() {
+    if (!quizHold.current) return;
+    clearQuizTimers();
+    quizHold.current = false;
+    const e = quizEffect.current;
+    quizEffect.current = null;
+    setQuizClip(null);
+    setQuizSpin(null);
+    setQuizReveal(null);
+    setHeldValue(null);
+    playingFx.current = null;
+    // 発動の告知は演出の直後 = 「アニメーション → 通知」(finishRevolutionIntro と同じ)。
+    if (e && e.test !== true) pushFloat(quizAnnounceNode(e), 'bad banner-quiz', 'quiz-announce');
+    scheduleDrain();
+  }
+
+  /** reset/stop・番犬用の全破棄。据え置きもタイマーも捨てて worker 値へ戻す。 */
+  function abortQuizFx() {
+    clearQuizTimers();
+    if (playingFx.current?.kind === 'quiz' && quizHold.current) playingFx.current = null;
+    setQuizSpin(null);
+    setQuizReveal(null);
+    if (!quizHold.current) {
+      setQuizClip(null);
+      return;
+    }
+    quizHold.current = false;
+    quizEffect.current = null;
+    setQuizClip(null);
+    setHeldValue(null);
+  }
+
+  // ── お題ルーレットの結果発表(投票締切 → 票数 → 判定 → ±N) ───────────────
+
+  function clearQuizResultTimers() {
+    for (const t of quizResultTimers.current) window.clearTimeout(t);
+    quizResultTimers.current = [];
+  }
+
+  /** 結果バナー(発表を出さない経路でも票数と増減だけは残す)。 */
+  function quizResultNode(e: ChallengeEffect): React.JSX.Element {
+    const good = e.quizGood ?? 0;
+    const bad = e.quizBad ?? 0;
+    return (
+      <>
+        <span className="f-amt">
+          {e.amount < 0 ? `-${num(-e.amount)}` : e.amount > 0 ? `+${num(e.amount)}` : '±0'}
+        </span>
+        <span className="f-txt">お題終了 よかった{num(good)} / だめ{num(bad)}</span>
+      </>
+    );
+  }
+
+  /** 結果バナーの色クラス(増加=妨害系の赤、減算・±0=応援系の緑)。 */
+  function quizResultClass(e: ChallengeEffect): string {
+    return e.amount > 0 ? 'bad banner-quiz' : 'good banner-quiz';
+  }
+
+  /**
+   * 結果発表の開始。全画面 DOM(動画素材なし — 革命の結果と違い暗幕だけ)の上に
+   * 「票数 → 判定 → ±N」を planQuizResult のタイムラインで順に出す。
+   * 据え置きは張らない — ± は worker が quiz-end の瞬間に適用済みで、発表は
+   * 「なぜ動いたか」を読ませるだけ(revolution の結果と同じ判断)。
+   * 戻り値 false = 開始不可(呼び出し側はバナーへフォールバック)。
+   */
+  function startQuizResultFx(e: ChallengeEffect): boolean {
+    const plan = planQuizResult({ amount: e.amount, resultMs: e.quizResultMs ?? 0 });
+    if (plan.totalMs === 0 || prefersReducedMotion()) return false;
+    flushStrike(true, occlusionOfCutin('quiz'));
+    clearQuizResultTimers();
+    quizResultHold.current = true;
+    fxHoldDeadlines.current.quizResult = Date.now() + plan.totalMs + 2000 + FX_HOLD_GRACE_MS;
+    playingFx.current = { kind: 'quiz', id: e.id, nickname: e.nickname, remaining: 1 };
+    refreshFxStock();
+    quizResultEffect.current = e;
+    const qcfg = cfgRef.current?.challenge.quiz;
+    setQuizSettle({
+      key: ++fxKey,
+      stage: 'votes',
+      prompt: e.quizPrompt ?? '',
+      good: e.quizGood ?? 0,
+      bad: e.quizBad ?? 0,
+      goodLabel: qcfg?.goodWords[0] ?? 'よかった',
+      badLabel: qcfg?.badWords[0] ?? 'だめ',
+      amount: e.amount,
+    });
+    const push = (ms: number, fn: () => void) => {
+      quizResultTimers.current.push(window.setTimeout(fn, ms));
+    };
+    push(plan.verdictAtMs, () => {
+      if (!quizResultHold.current) return;
+      setQuizSettle((v) => (v ? { ...v, stage: 'verdict' } : v));
+      pushShake('shake');
+    });
+    push(plan.amountAtMs, () => {
+      if (!quizResultHold.current) return;
+      // ±0(引き分け・無投票)は判定止まり — 出す数字が無い(planQuizResult の契約)。
+      if (e.amount === 0) return;
+      setQuizSettle((v) => (v ? { ...v, stage: 'amount' } : v));
+      pushFlash(e.amount < 0 ? 'gift-t3' : 'follow');
+      pushShake('shake-strong');
+    });
+    push(plan.totalMs, () => finishQuizResultFx());
+    push(plan.totalMs + 2000, () => finishQuizResultFx()); // 二重安全弁
+    return true;
+  }
+
+  /** 結果発表の終了。バナーはここで出す(「アニメーション → 通知」の順)。 */
+  function finishQuizResultFx() {
+    if (!quizResultHold.current) return;
+    clearQuizResultTimers();
+    quizResultHold.current = false;
+    const e = quizResultEffect.current;
+    quizResultEffect.current = null;
+    setQuizSettle(null);
+    if (playingFx.current?.kind === 'quiz') playingFx.current = null;
+    if (e) pushFloat(quizResultNode(e), quizResultClass(e), 'quiz-result');
+    scheduleDrain();
+  }
+
+  /** reset/stop・idle 用の全破棄。前置き(abortQuizFx)とは独立の生存期間。 */
+  function abortQuizResultFx() {
+    clearQuizResultTimers();
+    if (playingFx.current?.kind === 'quiz' && quizResultHold.current) playingFx.current = null;
+    quizResultHold.current = false;
+    quizResultEffect.current = null;
+    setQuizSettle(null);
   }
 
   // ── タップブースト(フィーバー) ─────────────────────────────────────────
@@ -4552,7 +5030,15 @@ export function MonitorView(): React.JSX.Element {
     const travel2 = strikeTravelMs(stockRowRef.current);
     push(t1, () => {
       activeStrike.current = { like: 0, stock: stockDelta }; // いいね分は着弾済み
-      impactStrikePartial(held + likeDelta);
+      // 押下追従ぶん(holdPressApplied)を持ち越す(2026-08-21 修正・8/18見送り#4)。
+      // 捕獲時の held を素で渡すと、飛行中(発射420ms+飛翔)に followHoldWithPresses が
+      // 下げた押下ぶんが1段目着弾の瞬間に巻き戻り(数字が上がって見える)、しかも
+      // impactStrikePartial → holdValue が基準(holdPressBase)を採り直すのでその押下は
+      // チェーン終端の null 収束まで表示に戻らなかった — 恒久ルール「走行中のタップは
+      // 演出より優先(据え置きは押下に追従)」への違反。値を進めてから基準を採り直す
+      // ぶんには、以後の押下が新しい基準で追従するので二重引きにはならない。
+      // 0 クランプは followHoldWithPresses の表示クランプと対(worker も 0 で止まる)。
+      impactStrikePartial(Math.max(0, held - holdPressApplied.current) + likeDelta);
     });
     push(t1 + STOCK_PAUSE_MS, () => launchStock(travel2));
     push(t1 + STOCK_PAUSE_MS + travel2, () => impactStock(stockDelta));
@@ -5134,15 +5620,10 @@ export function MonitorView(): React.JSX.Element {
         // の差分駆動なので、この kind の effect は作られない。stock-full の実演と
         // 同じ条件で、現在値のまま着弾チェーンだけ試写する — held === prevV なので
         // 数字は動かず、弾の飛翔 → segフラッシュ/ジョルト → SE → 簡易演出が出る。
-        if (
-          e.test &&
-          strikeTimers.current.length === 0 &&
-          !rouletteHold.current &&
-          !bandHold.current &&
-          !stockCutinHold.current &&
-          !boostHold.current &&
-          !prefersReducedMotion()
-        ) {
+        // ホールドの列挙は anyCutinHold() に一本化(2026-08-21)— 個別列挙だと
+        // 後から増えたホールド(革命の導入/結果・お邪魔・お題)が漏れて、実演の
+        // startStrike が持ち主の据え置きを横取り→着弾の null 解放で先漏れしていた。
+        if (e.test && !chainActive() && !anyCutinHold() && !prefersReducedMotion()) {
           const held = Math.max(0, e.valueAfter - e.amount);
           startStrike(held, held, e.amount, 0);
         } else if (e.test) {
@@ -5166,27 +5647,15 @@ export function MonitorView(): React.JSX.Element {
         // ないので、カットインだけ試写する。据え置きは e.valueAfter - e.amount =
         // 現在値(testEffect は値を変えない)なので数字は動かず、reveal でパンチ
         // だけ出る。バナーは下の保留判定で保留 → reveal 時に出る。
-        if (
-          e.test &&
-          stockCutinReady() &&
-          strikeTimers.current.length === 0 &&
-          !rouletteHold.current &&
-          !bandHold.current &&
-          !stockCutinHold.current &&
-          !boostHold.current
-        ) {
+        // ホールドの列挙は anyCutinHold() に一本化(gauge-full の実演と同じ 2026-08-21 修正)。
+        if (e.test && stockCutinReady() && !chainActive() && !anyCutinHold()) {
           holdValue(Math.max(0, e.valueAfter - e.amount));
           startStockCutin(e.amount);
         } else if (e.test) {
           // カットインを出せない実演でも無反応にはしない — gauge-full の実演と
           // 同じく理由を残し、他演出が無ければ即時 reveal(据え置きなしなので
           // 数字は動かず、パンチ/シェイク/粒子/SE だけ試写される)。
-          const busy =
-            strikeTimers.current.length > 0 ||
-            rouletteHold.current ||
-            bandHold.current ||
-            stockCutinHold.current ||
-            boostHold.current;
+          const busy = chainActive() || anyCutinHold();
           fxWarn('stock-full 実演: カットイン不可 — 即時演出へフォールバック', {
             clipMissing: STOCK_CUTIN_CLIP_URL === null,
             clipsEnabled: cfg?.challenge.fxClipsEnabled ?? false,
@@ -5463,6 +5932,60 @@ export function MonitorView(): React.JSX.Element {
         }
         return;
       }
+      case 'quiz-start': {
+        // プレーン発動(fxDurationMs 0)・動きの抑制はバナーだけ — 窓は worker 側で
+        // 既に(または drop で)開くので、発動の事実は必ず残す。
+        if (!quizWillStart(e)) {
+          if (!e.test) dropQuizCue(e.id);
+          pushFloat(quizAnnounceNode(e), 'bad banner-quiz', 'quiz-announce');
+          return;
+        }
+        if (e.test) {
+          // ▶試写は armed 監視を通らない(worker はアームしていない)。舞台が
+          // 空いていれば前置きだけ流す(tapBoost 実演のスキップ規約と同じ)。
+          if (stageBusy() || anyCutinHold()) {
+            fxWarn('quiz 実演: 他演出の再生中 — スキップ');
+            return;
+          }
+          startQuizFx(e);
+          return;
+        }
+        // バリア方式(2026-08-21 ユーザー決定): ドレインキューには積まず、armed
+        // 監視(quiz.armed の 250ms tick)が「発動時点で溜まっていた演出キューの
+        // 消化」を待って startQuizFx を呼ぶ。ここでは預かるだけ。
+        pendingQuizStart.current = e;
+        return;
+      }
+      case 'quiz-end': {
+        // armed 待ちが残っていたら破棄(異常系 — worker は清算済みで cue は無視される)。
+        if (pendingQuizStart.current !== null && pendingQuizStart.current.id < e.id) {
+          pendingQuizStart.current = null;
+        }
+        // 前置きがまだ再生中に end が来た(機能OFF・強制清算の異常系)— 畳んで戻す。
+        if (quizHold.current) abortQuizFx();
+        // 発表を出さない経路(プレーン発動・reduced-motion)はバナー1枚。
+        if (!(e.quizResultMs ?? 0) || prefersReducedMotion()) {
+          pushFloat(quizResultNode(e), quizResultClass(e), 'quiz-result');
+          return;
+        }
+        // 舞台が塞がっていたら持ち越す(revolution-end と同型)。
+        if (stageBusy()) {
+          if (pendingQuizzes.current.length < PENDING_QUIZZES_MAX) {
+            pendingQuizzes.current.push(e);
+            refreshFxStock();
+          } else {
+            fxWarn('quiz-end: 持ち越しキュー満杯 — バナーへ倒す', {
+              queued: pendingQuizzes.current.length,
+            });
+            pushFloat(quizResultNode(e), quizResultClass(e), 'quiz-result');
+          }
+          return;
+        }
+        if (!startQuizResultFx(e)) {
+          pushFloat(quizResultNode(e), quizResultClass(e), 'quiz-result');
+        }
+        return;
+      }
       case 'achieved':
         // ルーレットのリール/カットインの再生中は持ち越す — 出目・演出を見せる前に
         // CLEAR のフラッシュが走ると何で達成したのか読めない。
@@ -5650,7 +6173,11 @@ export function MonitorView(): React.JSX.Element {
         (.result-screen / .fx-clip / .fx-layer)より必ず下に描かれる。それらは
         z-index ではなく DOM 順に依存しているので、この要素は必ずその手前に置くこと。
       */}
-      {wakeTime ? <WakeRow wakeTime={wakeTime} refMs={challenge.startedMs} /> : null}
+      {/* 錨は初回 start のラッチ(firstStartedMs)— startedMs だと stop→start・reset の
+          たびに張り直され、起床24時間超の徹夜配信でランを仕切り直した瞬間に
+          wakeAnchorMs が丸1日前進して経過表示が巻き戻る(2026-08-21 修正・8/18見送り#2。
+          ユーザー決定: worker が初回 start をラッチ)。旧 worker 混在は startedMs へ縮退。 */}
+      {wakeTime ? <WakeRow wakeTime={wakeTime} refMs={challenge.firstStartedMs ?? challenge.startedMs} /> : null}
 
       {/*
         CLEAR リザルト(全画面)。配置は monitor-root 直下・fx-clip より DOM 順で前。
@@ -6015,6 +6542,37 @@ export function MonitorView(): React.JSX.Element {
         />
       ) : null}
 
+      {/*
+        お題ルーレットの導入全面カット(再生枠 — 素材は giftFullCut のカタログから
+        introClip で選ぶ。'off'・未投入は startQuizFx が段ごとスキップするので、
+        このホルダーは url が確定しているときしかマウントされない)。配置の制約は
+        .fx-clip-opaque と同じ — .monitor-root 直下・z-index なし。全面カット素材は
+        音声焼き込みなので muted は seEnabled 連動、音量は giftFullCut と同じ絶対値の
+        流儀を quiz の bgmVolume に乗せる。再生失敗は導入だけ諦めて回転へ進む
+        (タイマーは startQuizFx が既に張ってある — 幕だけ下ろす)。
+      */}
+      {quizClip ? (
+        <video
+          key={quizClip.key}
+          className={`fx-clip fx-clip-opaque${quizClip.out ? ' out' : ''}`}
+          src={quizClip.url}
+          autoPlay
+          playsInline
+          preload="auto"
+          muted={!(cfg?.challenge.seEnabled ?? true)}
+          ref={(v) => {
+            if (v) {
+              v.volume = Math.min(1, Math.max(0, (cfg?.challenge.quiz.bgmVolume ?? 70) / 100));
+            }
+            return armVideoPlay(v, 'quiz-cutin', () => setQuizClip(null));
+          }}
+          onError={(ev) => {
+            fxWarn('お題の導入カットインの再生エラー — 回転へ縮退', ev.currentTarget.error);
+            setQuizClip(null);
+          }}
+        />
+      ) : null}
+
       {/* 演出レイヤ(クリックを拾わない)。重なりは 映像 < flash < 粒子 canvas < テキスト */}
       <div className="fx-layer">
         {flashes.map((f) => (
@@ -6278,6 +6836,84 @@ export function MonitorView(): React.JSX.Element {
                 <b>-{num(revSettle.like)}</b>
               </div>
             </div>
+          </div>
+        ) : null}
+        {/*
+          お題ルーレット一式。すべて .fx-layer 内・DOM 順で .roulette-screen より
+          後ろ = 不透明カットイン動画より必ず手前(z-index は付けない —
+          fx-backdrop.spec が凍結)。回転・決定・窓・投票・発表の5枚は生存期間が
+          排他なので同時に2枚出ることはない(回転→決定は quizTimers、窓→投票は
+          絶対時刻、発表は quizResultHold が権威)。
+        */}
+        {quizSpin ? (
+          <div className="quiz-screen quiz-spin">
+            <div className="qz-label">お題ルーレット</div>
+            <div className="qz-prompt" key={`${quizSpin.key}:${quizSpin.show}`}>
+              {quizSpin.prompts[quizSpin.show] ?? ''}
+            </div>
+          </div>
+        ) : null}
+        {quizReveal ? (
+          <div className="quiz-screen quiz-reveal" key={quizReveal.key}>
+            <div className="qz-label">お題 けってい!</div>
+            <div className="qz-prompt hit">{quizReveal.prompt}</div>
+          </div>
+        ) : null}
+        {quizWindowOn && quiz ? (
+          <div className="quiz-window-overlay">
+            <div className="qw-cap">お題に挑戦中!</div>
+            <div className="qw-prompt">{quiz.prompt}</div>
+            <div className="qw-timer" key={quizLeftSecs}>
+              {quizLeftSecs}
+            </div>
+          </div>
+        ) : null}
+        {quizVoteOn && quiz ? (
+          <div className="quiz-vote-overlay">
+            <div className="qv-cap">
+              コメントで投票!<em>残り{num(quizVoteLeftSecs)}秒</em>
+            </div>
+            <div className="qv-prompt">{quiz.prompt}</div>
+            <div className="qv-row">
+              <div className="qv-side good">
+                <span className="qv-word">{quiz.goodLabel}</span>
+                <b key={`g${quiz.good}`}>{num(quiz.good)}</b>
+              </div>
+              <div className="qv-vs">VS</div>
+              <div className="qv-side bad">
+                <span className="qv-word">{quiz.badLabel}</span>
+                <b key={`b${quiz.bad}`}>{num(quiz.bad)}</b>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {quizSettle ? (
+          <div
+            className={`quiz-settle ${quizSettle.stage}${
+              quizSettle.amount > 0 ? ' up' : quizSettle.amount < 0 ? ' down' : ' even'
+            }`}
+          >
+            <div className="qs-prompt">{quizSettle.prompt}</div>
+            <div className="qs-votes">
+              <span className="good">
+                {quizSettle.goodLabel} <b>{num(quizSettle.good)}</b>
+              </span>
+              <span className="bad">
+                {quizSettle.badLabel} <b>{num(quizSettle.bad)}</b>
+              </span>
+            </div>
+            <div className="qs-verdict">
+              {quizSettle.good > quizSettle.bad
+                ? 'だいせいこう!'
+                : quizSettle.bad > quizSettle.good
+                  ? 'ざんねん…'
+                  : 'ひきわけ'}
+            </div>
+            {quizSettle.amount !== 0 ? (
+              <div className="qs-amt" key={quizSettle.stage}>
+                {quizSettle.amount < 0 ? `-${num(-quizSettle.amount)}` : `+${num(quizSettle.amount)}`}
+              </div>
+            ) : null}
           </div>
         ) : null}
         <div className="floats">

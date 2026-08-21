@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHALLENGE,
@@ -9,17 +11,22 @@ import {
   ROULETTE_HOT_MULT_MAX,
   ROULETTE_HOT_MULT_MIN,
   ROULETTE_HOT_INTRO_PATTERNS,
+  ROULETTE_HOT_MULT_CANDIDATES_MAX,
   ROULETTE_HOT_PATTERNS,
   ROULETTE_HOT_QUEUE_MAX,
   clampRouletteHotMult,
+  clampRouletteHotWeight,
+  drawRouletteHotMult,
   rouletteAbortMs,
   rouletteBoardKey,
   rouletteDraws,
   rouletteHotIntroMs,
+  rouletteHotMultCandidates,
   rouletteHotMultOf,
   rouletteHotMultiplier,
   rouletteHotMults,
   rouletteHotPatternPool,
+  rouletteHotRepresentativeMult,
   rouletteRemainingAmount,
   rouletteRemainingCount,
   rouletteStockCount,
@@ -27,7 +34,13 @@ import {
   validateChallengeConfig,
 } from '@shared/challenge';
 import { ROULETTE_PATTERN_TIER } from '@shared/dto';
-import type { ChallengeConfig, ChallengeEffect, ChallengeRouletteConfig, RoulettePattern } from '@shared/dto';
+import type {
+  ChallengeConfig,
+  ChallengeEffect,
+  ChallengeRouletteConfig,
+  RouletteHotConfig,
+  RoulettePattern,
+} from '@shared/dto';
 import type { GiftEvent } from '@shared/events';
 import { ROULETTE_PATTERN_TIMING } from '@shared/roulette-fx';
 import { planRouletteSpin } from '@shared/roulette-spin';
@@ -228,6 +241,340 @@ describe('倍率の clamp は1本(検証・worker・復元・段が同じ式)', 
     expect(at(Number.NaN)).toBe(1);
     expect(at(Number.POSITIVE_INFINITY)).toBe(1);
     expect(at(50)).toBe(50);
+  });
+});
+
+describe('倍率候補(hot.multipliers)— 確率抽選の検証・正規形・消費規約', () => {
+  /**
+   * 倍率が確率で決まる激熱(2026-08-21)。effect へ焼くのは抽選後の単一値
+   * (rouletteHotMult)なので下流(段のはしご・boardKey・復元)は従来のまま。
+   * ここで凍結するのは3点:
+   *   (1) **正規形: multipliers キーが存在する ⇔ サニタイズ後の候補が2件以上**。
+   *       候補1件は従来形へ畳む — 出荷既定(DJ ×10)の validate 不動点の根拠。
+   *   (2) **消費規約: 候補列が実在するときだけ this.rand をちょうど1回**。
+   *       従来形・無効は消費 0 のまま — 既存テストの rand 固定を壊さない境界。
+   *   (3) 1 effect = 1 倍率(連打の全スピンで共有)。スピンごとに変えると
+   *       rouletteBoardKey が 1 effect 内で割れ、mergeRoulette と据え置き会計が壊れる。
+   */
+  const hotOf = (multipliers: unknown, multiplier = 50): RouletteHotConfig =>
+    ({ enabled: true, multiplier, multipliers }) as RouletteHotConfig;
+
+  it('validate: 2件以上は clamp して残り、multiplier に代表値(最大 weight・同率先勝ち)が焼かれる', () => {
+    const v = validateChallengeConfig(
+      cfg([
+        hotRow({
+          hot: hotOf([
+            { multiplier: 4, weight: 9 },
+            { multiplier: 999, weight: 3.4 },
+            { multiplier: 12.4, weight: -2 },
+          ]),
+        }),
+      ]) as unknown
+    );
+    expect(v.roulettes[0]!.hot).toEqual({
+      enabled: true,
+      multiplier: 5,
+      multipliers: [
+        { multiplier: 5, weight: 9 },
+        { multiplier: 50, weight: 3 },
+        { multiplier: 12, weight: 0 },
+      ],
+    });
+  });
+
+  it('validate: 正規形はキー存在 ⇔ 候補2件以上 — 1件・空・非配列・全weight0 はキーを出さない', () => {
+    const at = (multipliers: unknown): RouletteHotConfig | undefined =>
+      validateChallengeConfig(cfg([hotRow({ hot: hotOf(multipliers, 30) })]) as unknown)
+        .roulettes[0]!.hot;
+    // 1件 → その倍率の従来形へ畳む(multiplier の 30 ではなく候補の 20)。
+    expect(at([{ multiplier: 20, weight: 5 }])).toEqual({ enabled: true, multiplier: 20 });
+    // 空配列・非配列 → 従来形(multiplier を使う)。
+    expect(at([])).toEqual({ enabled: true, multiplier: 30 });
+    expect(at('x')).toEqual({ enabled: true, multiplier: 30 });
+    expect(at(undefined)).toEqual({ enabled: true, multiplier: 30 });
+    // 全 weight 0(2件)→ 抽選不能なので代表値(先勝ち=先頭)へ畳む。
+    expect(
+      at([
+        { multiplier: 20, weight: 0 },
+        { multiplier: 40, weight: 0 },
+      ])
+    ).toEqual({ enabled: true, multiplier: 20 });
+    // ゴミ要素は落ち、残り2件でキーが残る。
+    expect(
+      at([
+        { multiplier: 20, weight: 1 },
+        null,
+        { multiplier: '40', weight: 1 },
+        { multiplier: 40, weight: 2 },
+      ])
+    ).toEqual({
+      enabled: true,
+      multiplier: 40,
+      multipliers: [
+        { multiplier: 20, weight: 1 },
+        { multiplier: 40, weight: 2 },
+      ],
+    });
+  });
+
+  it('validate: 候補は上限件数で切られる', () => {
+    const many = Array.from({ length: ROULETTE_HOT_MULT_CANDIDATES_MAX + 3 }, (_, i) => ({
+      multiplier: 5 + i,
+      weight: 1,
+    }));
+    const v = validateChallengeConfig(cfg([hotRow({ hot: hotOf(many) })]) as unknown);
+    expect(v.roulettes[0]!.hot?.multipliers?.length).toBe(ROULETTE_HOT_MULT_CANDIDATES_MAX);
+  });
+
+  it('validate は冪等で、従来形に multipliers を生やさない(出荷既定 DJ 行の不動点)', () => {
+    const once = validateChallengeConfig(
+      cfg([
+        hotRow({
+          hot: hotOf([
+            { multiplier: 7, weight: 1 },
+            { multiplier: 50, weight: 2 },
+          ]),
+        }),
+      ]) as unknown
+    );
+    const twice = validateChallengeConfig(once as unknown);
+    expect(twice.roulettes[0]!.hot).toEqual(once.roulettes[0]!.hot);
+    // migrate の出力は再検証されないので、既定行の形がここで変わると
+    // boot-settings.spec の不動点検査が落ちる(= 絶対に生やさない)。
+    const dj = validateChallengeConfig(structuredClone(DEFAULT_CHALLENGE) as unknown);
+    expect(dj.roulettes.find((r) => r.id === DJ_GLASSES_ROULETTE.id)?.hot).toEqual({
+      enabled: true,
+      multiplier: 10,
+    });
+  });
+
+  it('clampRouletteHotWeight: 重みの丸めは1本(サニタイズと UI 入力が同じ式を通す)', () => {
+    // UI が丸めずに小数・負値を draft へ載せると、保存時の丸めで「weight>0 の有無」が
+    // 変わり、編集した候補行が保存の瞬間に黙って畳まれる(敵対レビューで実検出)。
+    expect(clampRouletteHotWeight(0.4)).toBe(0);
+    expect(clampRouletteHotWeight(1.5)).toBe(2);
+    expect(clampRouletteHotWeight(-3)).toBe(0);
+    expect(clampRouletteHotWeight(1e9)).toBe(999_999);
+    expect(clampRouletteHotWeight(Number.NaN)).toBe(0);
+  });
+
+  it('小数の重みだけの候補列は丸めで全 weight 0 になり、抽選対象にならない', () => {
+    expect(
+      rouletteHotMultCandidates(
+        hotOf([
+          { multiplier: 20, weight: 0.4 },
+          { multiplier: 40, weight: 0.45 },
+        ])
+      )
+    ).toBeNull();
+  });
+
+  it('UI の重み入力は clampRouletteHotWeight を通す(ソース不変条件)', () => {
+    // roulette-sound.spec の流儀。剥がすと「保存で候補行が黙って消える」が再発する。
+    const src = readFileSync(resolve('src/renderer/screens/Challenge.tsx'), 'utf8').replace(
+      /\r\n/g,
+      '\n'
+    );
+    expect(src.includes('clampRouletteHotWeight(Number(e.target.value))')).toBe(true);
+  });
+
+  it('rouletteHotMultCandidates: 抽選に使える列だけを返す(validate と同じゲート)', () => {
+    expect(rouletteHotMultCandidates(undefined)).toBeNull();
+    expect(rouletteHotMultCandidates({ enabled: true, multiplier: 10 })).toBeNull();
+    expect(rouletteHotMultCandidates(hotOf([{ multiplier: 20, weight: 1 }]))).toBeNull();
+    expect(
+      rouletteHotMultCandidates(
+        hotOf([
+          { multiplier: 20, weight: 0 },
+          { multiplier: 40, weight: 0 },
+        ])
+      )
+    ).toBeNull();
+    expect(
+      rouletteHotMultCandidates(
+        hotOf([
+          { multiplier: 20, weight: 1 },
+          { multiplier: 40, weight: 3 },
+        ])
+      )
+    ).toEqual([
+      { multiplier: 20, weight: 1 },
+      { multiplier: 40, weight: 3 },
+    ]);
+  });
+
+  it('rouletteHotRepresentativeMult: 最大 weight・同率先勝ち・clamp', () => {
+    expect(
+      rouletteHotRepresentativeMult([
+        { multiplier: 20, weight: 1 },
+        { multiplier: 40, weight: 3 },
+      ])
+    ).toBe(40);
+    expect(
+      rouletteHotRepresentativeMult([
+        { multiplier: 20, weight: 3 },
+        { multiplier: 40, weight: 3 },
+      ])
+    ).toBe(20);
+    expect(rouletteHotRepresentativeMult([{ multiplier: 999, weight: 1 }])).toBe(
+      ROULETTE_HOT_MULT_MAX
+    );
+    expect(rouletteHotRepresentativeMult([])).toBe(DEFAULT_ROULETTE_HOT.multiplier);
+  });
+
+  it('drawRouletteHotMult: 従来形・無効・候補1件相当は rand を消費しない(消費 0 の凍結)', () => {
+    let n = 0;
+    const rand = (): number => {
+      n++;
+      return 0;
+    };
+    expect(drawRouletteHotMult(undefined, rand)).toBe(1);
+    expect(drawRouletteHotMult({ enabled: false, multiplier: 50 }, rand)).toBe(1);
+    expect(drawRouletteHotMult({ enabled: true, multiplier: 50 }, rand)).toBe(50);
+    // 候補1件は正規形の外(validate が畳む)だが、手編集で届いても従来形へ縮退して消費 0。
+    expect(drawRouletteHotMult(hotOf([{ multiplier: 20, weight: 5 }], 30), rand)).toBe(30);
+    expect(n).toBe(0);
+  });
+
+  it('drawRouletteHotMult: 候補2件以上はちょうど1回消費し、境界は drawRouletteIndex と同じ切り方', () => {
+    const two = hotOf([
+      { multiplier: 20, weight: 1 },
+      { multiplier: 40, weight: 3 },
+    ]);
+    let n = 0;
+    const counted = (): number => {
+      n++;
+      return 0;
+    };
+    expect(drawRouletteHotMult(two, counted)).toBe(20);
+    expect(n).toBe(1);
+    // Σweight=4。r*4 が 1 を跨ぐところで候補が切り替わる。
+    expect(drawRouletteHotMult(two, () => 0.24)).toBe(20);
+    expect(drawRouletteHotMult(two, () => 0.25)).toBe(40);
+    expect(drawRouletteHotMult(two, () => 0.99)).toBe(40);
+    // weight 0 の候補は出ない(先頭が 0 でも消費は1回のまま)。
+    const zeroFirst = hotOf([
+      { multiplier: 20, weight: 0 },
+      { multiplier: 40, weight: 1 },
+      { multiplier: 50, weight: 1 },
+    ]);
+    expect(drawRouletteHotMult(zeroFirst, () => 0)).toBe(40);
+  });
+
+  it('engine: 候補列の行は倍率が抽選され、値・焼き込み・復元・据え置きが一致する', () => {
+    const row = hotRow({
+      hot: hotOf([
+        { multiplier: 20, weight: 1 },
+        { multiplier: 40, weight: 3 },
+      ]),
+    });
+    // rand=0 → 倍率 20(最初の正 weight)。ONE_SEGMENT なので出目は 100 固定。
+    const e = engine(cfg([row]));
+    e.start();
+    const before = e.get().value;
+    e.handleEvent(gift());
+    const rl = lastRoulette(e);
+    expect(rl.rouletteHotMult).toBe(20);
+    expect(rl.amount).toBe(100 * 20);
+    expect(e.get().value).toBe(before + 100 * 20);
+    expect(rouletteDraws(rl).map((d) => d.amount)).toEqual([100 * 20]);
+    expect(rouletteRemainingAmount(rl, 0)).toBe(rl.amount);
+    // rand=0.9 → 倍率 40(段のはしごの末項も抽選値)。
+    const e2 = engine(cfg([row]), 0.9);
+    e2.start();
+    e2.handleEvent(gift());
+    const rl2 = lastRoulette(e2);
+    expect(rl2.rouletteHotMult).toBe(40);
+    const steps = rouletteHotMults(rouletteHotMultOf(rl2));
+    expect(steps[steps.length - 1]!).toBe(40);
+  });
+
+  it('engine: 連打は1回の抽選を全スピンで共有する(消費順は 倍率 → 出目、計 1+個数 回)', () => {
+    // 数列 rand を注入して消費順そのものを凍結する — 順が変わると
+    // 同じ乱数列で別の結果になる(実演と本番の食い違いの温床)。
+    const seqRand = [0.9, 0, 0, 0];
+    let at = 0;
+    const c = cfg([
+      hotRow({
+        hot: hotOf([
+          { multiplier: 20, weight: 1 },
+          { multiplier: 40, weight: 3 },
+        ]),
+      }),
+    ]);
+    const e = new ChallengeEngine(
+      () => c,
+      () => NOW,
+      () => seqRand[at++] ?? 0,
+      () => 0
+    );
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
+    e.start();
+    e.handleEvent(gift({ repeatCount: 3, diamonds: 90 }));
+    const rl = lastRoulette(e);
+    expect(at).toBe(4);
+    expect(rl.rouletteHotMult).toBe(40);
+    expect(rl.rouletteIndexes!.length).toBe(3);
+    expect(rl.amount).toBe(100 * 40 * 3);
+  });
+
+  it('engine: 従来形(単一倍率)の行は数列 rand でも従来と同じに動く(消費 0 の回帰)', () => {
+    // 先頭に「倍率抽選が食うと出目がズレる」値を置く — 従来形が rand を
+    // 1回でも食うようになったらここが割れる。
+    const seqRand = [0.99, 0.99];
+    let at = 0;
+    const board = [
+      { amount: 100, weight: 1 },
+      { amount: 7, weight: 1 },
+    ];
+    const c = cfg([hotRow({ segments: board })]);
+    const e = new ChallengeEngine(
+      () => c,
+      () => NOW,
+      () => seqRand[at++] ?? 0,
+      () => 0
+    );
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
+    e.start();
+    e.handleEvent(gift());
+    const rl = lastRoulette(e);
+    expect(at).toBe(1);
+    expect(rl.rouletteHotMult).toBe(50);
+    expect(rl.amount).toBe(7 * 50);
+  });
+
+  it('testEffect(試写)でも候補から抽選され、消費順は本番と同じ 倍率 → 出目', () => {
+    const seqRand = [0.9, 0.99];
+    let at = 0;
+    const board = [
+      { amount: 100, weight: 1 },
+      { amount: 7, weight: 1 },
+    ];
+    const c = cfg([
+      hotRow({
+        segments: board,
+        hot: hotOf([
+          { multiplier: 20, weight: 1 },
+          { multiplier: 40, weight: 3 },
+        ]),
+      }),
+    ]);
+    const e = new ChallengeEngine(
+      () => c,
+      () => NOW,
+      () => seqRand[at++] ?? 0,
+      () => 0
+    );
+    e.setMonitorOpen(true);
+    e.setFxCaps(true);
+    e.start();
+    e.testEffect({ kind: 'roulette', rouletteId: c.roulettes[0]!.id });
+    const rl = lastRoulette(e);
+    expect(at).toBe(2);
+    expect(rl.rouletteHotMult).toBe(40);
+    expect(rl.amount).toBe(7 * 40);
   });
 });
 

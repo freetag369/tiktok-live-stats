@@ -17,6 +17,8 @@ import type {
   TapLockRule,
   RevolutionConfig,
   RevolutionRule,
+  QuizConfig,
+  QuizRule,
   FinalGateConfig,
   GiftBandFxConfig,
   GiftFullCutConfig,
@@ -25,6 +27,7 @@ import type {
   JoinRouletteConfig,
   RouletteCountView,
   RouletteHotConfig,
+  RouletteHotMultCandidate,
   RoulettePattern,
   RouletteSoundConfig,
   RouletteSpinKey,
@@ -292,6 +295,8 @@ export const ROULETTE_ABORT_MS = ROULETTE_SPIN_ULTRA_MS + ROULETTE_REVEAL_ULTRA_
 export const ROULETTE_HOT_MULT_MIN = 5;
 /** 激熱確定の倍率の上限(ユーザー決定 2026-08-18)。 */
 export const ROULETTE_HOT_MULT_MAX = 50;
+/** 倍率候補(hot.multipliers)の上限件数。盤面(ROULETTE_SEGMENTS_MAX)と同じ形式・同じ上限。 */
+export const ROULETTE_HOT_MULT_CANDIDATES_MAX = 12;
 /**
  * 激熱確定の導入動画の尺(ms)。**スロットに入る前**に全画面で流す(ユーザー指定 8 秒)。
  * スピン尺(rouletteSpinMs)の外側なので、据え置きの安全弁・ホールド番犬の期限は
@@ -393,11 +398,105 @@ export function clampRouletteHotMult(m: number): number {
 }
 
 /**
- * 設定 → 実際に掛ける倍率。無効・未設定は 1(= 通常のルーレット)。
- * worker の適用点はここだけを使う。
+ * 設定 → 実際に掛ける倍率(**従来形=単一倍率の縮退経路**)。無効・未設定は 1
+ * (= 通常のルーレット)。候補列(multipliers)対応の抽選は drawRouletteHotMult —
+ * worker の適用点はそちらの1本を使う(内部で従来形はここへ縮退する)。
  */
 export function rouletteHotMultiplier(hot: RouletteHotConfig | undefined): number {
   return hot?.enabled ? clampRouletteHotMult(hot.multiplier) : 1;
+}
+
+/**
+ * 倍率候補の重みの clamp(0..999,999 の整数)。**候補サニタイズと設定UIの入力の
+ * 両方がこの1本を通ること** — UI が丸めずに小数・負値を draft へ載せると、
+ * 保存時の丸めで「weight>0 の有無」や代表値の序列が変わり、編集した候補行が
+ * 保存の瞬間に黙って畳まれる(commit の出力 = validate の正規形、の前提が割れる)。
+ */
+export function clampRouletteHotWeight(w: number): number {
+  const r = Number.isFinite(w) ? Math.round(w) : 0;
+  return Math.min(999_999, Math.max(0, r));
+}
+
+/**
+ * 倍率候補列のサニタイズ(内部)。非配列は null、それ以外は有限数の要素だけ残して
+ * clamp した列を返す(0件もありうる)。**「2件以上」ゲートは掛けない** —
+ * validateRouletteHot が「ちょうど1件は従来形へ畳む」判定に列の長さを使うため。
+ * 仕様は sanitizeRouletteSegments と同型(multiplier は clampRouletteHotMult、
+ * weight は clampRouletteHotWeight)。
+ */
+function sanitizeRouletteHotMultList(raw: unknown): RouletteHotMultCandidate[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw
+    .filter(
+      (c): c is RouletteHotMultCandidate =>
+        !!c &&
+        typeof c === 'object' &&
+        typeof c.multiplier === 'number' &&
+        Number.isFinite(c.multiplier) &&
+        typeof c.weight === 'number' &&
+        Number.isFinite(c.weight)
+    )
+    .slice(0, ROULETTE_HOT_MULT_CANDIDATES_MAX)
+    .map((c) => ({
+      multiplier: clampRouletteHotMult(c.multiplier),
+      weight: clampRouletteHotWeight(c.weight),
+    }));
+}
+
+/**
+ * hot 設定 → 抽選に使える倍率候補列。**候補サニタイズの唯一の入口** —
+ * 検証(validateRouletteHot)と worker の抽選(drawRouletteHotMult)の両方がここを
+ * 通るので、検証を迂回した手編集の settings.json でも両者の答えが一致する
+ * (direction:'sub' の二重防御と同じ思想)。
+ *
+ * **null = 従来形(単一 multiplier)で動く**。null になるのは: multipliers キーが
+ * 無い / 非配列 / サニタイズ後 2 件未満 / 全 weight 0。「2件以上」を要求するのは
+ * 正規形(キー存在 ⇔ 候補2件以上)の抽選側の担保 — 1件の候補列は validate が
+ * 従来形へ畳むので、ここで受ける必要がない。全 weight 0 を落とすのは
+ * drawRouletteIndex が Σweight<=0 のとき **rand を消費せずに**最終行へ倒れるため —
+ * 通すと「候補列があるのに消費0」の経路が生まれ、消費規約(候補列が実在する
+ * ときだけちょうど1回)が壊れる。
+ */
+export function rouletteHotMultCandidates(
+  hot: RouletteHotConfig | null | undefined
+): RouletteHotMultCandidate[] | null {
+  const list = sanitizeRouletteHotMultList(hot?.multipliers);
+  if (!list || list.length < 2 || !list.some((c) => c.weight > 0)) return null;
+  return list;
+}
+
+/**
+ * 候補列 → 代表倍率(最大 weight・同率先勝ち)。validateRouletteHot が従来形の
+ * multiplier へ焼き直す値と、設定画面の要約表示が共用する。空列は既定倍率
+ * (呼び元が空を渡さないのが原則 — クラッシュ源を作らないための保険)。
+ */
+export function rouletteHotRepresentativeMult(cands: readonly RouletteHotMultCandidate[]): number {
+  if (cands.length === 0) return DEFAULT_ROULETTE_HOT.multiplier;
+  let best = cands[0]!;
+  for (const c of cands) if (c.weight > best.weight) best = c;
+  return clampRouletteHotMult(best.multiplier);
+}
+
+/**
+ * 設定 → 実際に掛ける倍率(**worker の適用点はこの1本だけ**)。
+ *
+ * 乱数消費の規約: **候補列が実在する(rouletteHotMultCandidates が非 null)とき
+ * だけ rand をちょうど1回消費**する。無効・従来形(単一 multiplier)は消費 0 —
+ * 既存テストの rand 固定(出目の再現性)を壊さないための境界で、テストが凍結する。
+ * 倍率は値に効くので rand は**出目側(this.rand)**を渡すこと(fxRand は演出専用)。
+ *
+ * 重み抽選の実装は drawRouletteIndex を流用する(二重実装しない)。effect ごとに
+ * 高々1回・最大12要素なので載せ替えの割り付けコストは無視できる。
+ */
+export function drawRouletteHotMult(hot: RouletteHotConfig | undefined, rand: () => number): number {
+  if (!hot?.enabled) return 1;
+  const cands = rouletteHotMultCandidates(hot);
+  if (!cands) return rouletteHotMultiplier(hot);
+  const idx = drawRouletteIndex(
+    cands.map((c) => ({ amount: c.multiplier, weight: c.weight })),
+    rand
+  );
+  return clampRouletteHotMult(cands[idx]!.multiplier);
 }
 
 /**
@@ -562,6 +661,11 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     ...(e.revolutionDownTotal != null ? { revolutionDownTotal: e.revolutionDownTotal } : {}),
     ...(e.revolutionTapCount != null ? { revolutionTapCount: e.revolutionTapCount } : {}),
     ...(e.revolutionLikeDown != null ? { revolutionLikeDown: e.revolutionLikeDown } : {}),
+    // お題ルーレットの本文・票数も同じ規約(quiz-start/-end の焼き込み値)。
+    // quizResultMs は演出の尺なので引き継がない(revolutionResultMs と同じ判断)。
+    ...(e.quizPrompt ? { quizPrompt: e.quizPrompt } : {}),
+    ...(e.quizGood != null ? { quizGood: e.quizGood } : {}),
+    ...(e.quizBad != null ? { quizBad: e.quizBad } : {}),
     // 凍結ドレインの合算件数 → 履歴の「×N」表示(press 畳み込みと同じ概念)。
     ...(e.coalesced != null && e.coalesced > 1 ? { count: e.coalesced } : {}),
   };
@@ -1018,6 +1122,14 @@ export const PENDING_BOOSTS_MAX = 4;
  * 窓の締めくくりが無言で捨てられる)。
  */
 export const PENDING_REVOLUTIONS_MAX = 3;
+
+/**
+ * 他演出中に届いたお題の結果発表(quiz-end)の持ち越し上限(モニター側)。
+ * quiz-start はこのキューを通らない(バリア方式 — armed 監視が唯一の入口)ので、
+ * 並ぶのは結果発表だけ。連続発動(予約 FIFO)でも結果は1本ずつしか出ないため 2 で足りる。
+ * **上げたら FX_DRAIN_MAX_STEPS の見積もりも更新すること。**
+ */
+export const PENDING_QUIZZES_MAX = 2;
 /**
  * フィーバーの「アーム」(発動予約)を保持する上限(ms)。worker はギフト着弾で
  * 予約するだけで、**モニターが起動カットインを再生し始めた瞬間**(challenge.boostCue)に
@@ -1711,6 +1823,121 @@ export const DEFAULT_REVOLUTION: RevolutionConfig = {
   rules: [structuredClone(DEFAULT_REVOLUTION_RULE)],
 };
 
+// ── お題ルーレット(quiz) ──────────────────────────────────────────────────
+
+/**
+ * 挑戦ウィンドウ(制限時間)の秒数の clamp。既定は 60(ユーザー要件「1分」)。
+ * 革命と同じくプレーン走行(凍結を張らない)なので、上限は「配信が壊れない線」。
+ */
+export const QUIZ_DURATION_MIN_SEC = 10;
+export const QUIZ_DURATION_MAX_SEC = 300;
+
+/** 投票タイムの秒数の clamp。既定は 30(ユーザー決定: 終了後に投票タイム)。 */
+export const QUIZ_VOTE_MIN_SEC = 5;
+export const QUIZ_VOTE_MAX_SEC = 120;
+
+/** 増減幅の clamp。既定は 5000。上限はルーレット出目(sanitizeRouletteSegments)と同じ。 */
+export const QUIZ_AMOUNT_MIN = 1;
+export const QUIZ_AMOUNT_MAX = 9_999_999;
+
+/** お題リストの上限。1件あたりの文字数はモニターの全画面表示に収まる線。 */
+export const QUIZ_PROMPTS_MAX = 50;
+export const QUIZ_PROMPT_LEN_MAX = 60;
+
+/** 判定ワードの上限(good/bad 各)。 */
+export const QUIZ_WORDS_MAX = 10;
+export const QUIZ_WORD_LEN_MAX = 20;
+
+/** 登録できるトリガー行の上限。REVOLUTION_RULES_MAX と同じ 8。 */
+export const QUIZ_RULES_MAX = 8;
+
+/**
+ * アーム(発動予約)の期限(ms)。モニターが「発動時点で溜まっていた演出キューを
+ * 消化し切る」のを待つ仕様なので、BOOST_ARM_MAX_MS(60s)より長い —
+ * ultra ルーレット(約32秒)の連鎖が数本残っていても完走を待てる線。
+ * 期限が切れたら worker がプレーン強制発動する(commitArmedQuizIfExpired)。
+ */
+export const QUIZ_ARM_MAX_MS = 120_000;
+
+/**
+ * 導入全面カット(introClip)の尺(ms)。全面カット素材(assets/fx/cut/)は
+ * 5 秒契約(giftFullCut の既定 durationSec: 5 と同じ)なのでそれに合わせる。
+ * モニターは onEnded ではなく JS タイマーで打ち切る(既存規約)。
+ */
+export const QUIZ_INTRO_MS = 5_000;
+
+/**
+ * お題回転演出(全画面テキストの減速差し替え)の尺(ms)。既存ルーレットの
+ * mid(7.5秒)より短めの一定尺 — お題は読ませる必要があるので焦らしはしない。
+ */
+export const QUIZ_SPIN_MS = 6_000;
+
+/** お題決定の全面パンチ表示の尺(ms)。この後 60 秒窓のオーバーレイへ引き継ぐ。 */
+export const QUIZ_REVEAL_MS = 2_500;
+
+/**
+ * 結果発表カットシーン(票数→判定→±のロールアップ)の尺(ms)。
+ * REVOLUTION_RESULT_MS と同じ 6 秒(全画面 DOM のみ・動画素材なし)。
+ */
+export const QUIZ_RESULT_MS = 6_000;
+
+/**
+ * バリア(発動〜清算に届いたイベントの後回し)で溜められる op の上限。
+ * pendingOps の GIFT_FX_PENDING_OPS_MAX(256)より大きいのは、窓+投票の
+ * 90 秒超を跨ぐため。溢れたら演出なしで値だけ即時適用(既存の溢れ弁哲学)。
+ */
+export const QUIZ_DEFERRED_OPS_MAX = 512;
+
+/**
+ * 判定ワードの既定。**先頭が投票画面の表示語**(goodLabel/badLabel)になる。
+ * 部分一致・大文字小文字無視なので表記ゆれはある程度この3語で拾える。
+ */
+export const DEFAULT_QUIZ_GOOD_WORDS: readonly string[] = ['よかった', '良かった', 'ヨカッタ'];
+export const DEFAULT_QUIZ_BAD_WORDS: readonly string[] = ['だめ', 'ダメ', '駄目'];
+
+/**
+ * お題ルーレット1行の既定。giftId / giftName が空なのは**未採取**だから —
+ * どのギフトを割り当てるかは企画ごとに違うので、既定では何にも一致しない行を
+ * 1行だけ配り、配信者が設定画面で埋めた瞬間から使える状態にしておく
+ * (DEFAULT_REVOLUTION_RULE の白鳥と同じ「実 giftId は推測で焼かない」規約)。
+ */
+export const DEFAULT_QUIZ_RULE: QuizRule = {
+  id: 'quiz-1',
+  label: 'お題ルーレット',
+  enabled: true,
+  giftId: '',
+  giftName: '',
+  canonical: '',
+  exactName: false,
+  flash: true,
+};
+
+/**
+ * お題ルーレットの既定。**機能そのものは既定で OFF**(DEFAULT_REVOLUTION と同じ
+ * 判断)— 全アクション停止+投票で±5000 はゲーム経済の大技なので、キー欠損の
+ * フォールバックで勝手に有効化されてはならない。旧 settings.json にこのキーは
+ * 無いので、**欠損時のフォールバックが移行の代わり**になる(SETTINGS_VERSION は
+ * 上げない)。お題は例を1件だけ配る — 空のままだと enabled にしても不発で、
+ * 初回の動作確認(▶実演)すらできないため。
+ */
+export const DEFAULT_QUIZ: QuizConfig = {
+  enabled: false,
+  rules: [structuredClone(DEFAULT_QUIZ_RULE)],
+  prompts: ['誰もやったことないものまね'],
+  durationSec: 60,
+  voteSec: 30,
+  amount: 5000,
+  goodWords: [...DEFAULT_QUIZ_GOOD_WORDS],
+  badWords: [...DEFAULT_QUIZ_BAD_WORDS],
+  // 発動の瞬間に BGM が変わること自体が「お題モードが来る」予告(ユーザー決定)
+  // なので、既定から実曲を割り当てる(DEFAULT_ROULETTE_SOUND の bgm:'off' とは
+  // 逆向きの判断 — こちらは曲が鳴らないと仕様が成立しない)。
+  bgm: 'bgm-roulette1',
+  bgmVolume: 70,
+  // 導入全面カットは再生枠のみ(ユーザー決定)。素材を選んだ人だけ流れる。
+  introClip: 'off',
+};
+
 /**
  * 最終ゲートの必要タップ数の範囲。下限 2 — taps: 1 は通常挙動と実質同じで
  * 無意味(1タップで1減算)なので、設定として許さない。
@@ -1820,6 +2047,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   tapBoost: structuredClone(DEFAULT_TAP_BOOST),
   tapLock: structuredClone(DEFAULT_TAP_LOCK),
   revolution: structuredClone(DEFAULT_REVOLUTION),
+  quiz: structuredClone(DEFAULT_QUIZ),
   finalGate: { ...DEFAULT_FINAL_GATE },
 };
 
@@ -1991,6 +2219,10 @@ export function rouletteDraws(
   if (segs.length === 0) return [];
   const idxs = e.rouletteIndexes ?? (e.rouletteIndex != null ? [e.rouletteIndex] : []);
   const pats = e.roulettePatterns ?? [];
+  // 残量クランプ発生時だけ worker が焼く実適用量(dto の rouletteAmounts 参照)。
+  // あれば名目式より**優先** — 名目のままだと据え置き会計が worker とズレて
+  // リール再生待ちの間の 7 セグが水増しされる。
+  const amts = e.rouletteAmounts;
   // 激熱確定の実倍率。載っていなければ 1 = 従来と 1 バイトも変わらない。
   // clamp は worker/検証/段のはしごと**同じ1本**(rouletteHotMultOf → clampRouletteHotMult)。
   const sign = (e.rouletteDirection === 'sub' ? -1 : 1) * rouletteHotMultOf(e);
@@ -2002,7 +2234,7 @@ export function rouletteDraws(
     out.push({
       index,
       pattern: pats[i] ?? e.roulettePattern ?? 'slow',
-      amount: segs[index]! * sign,
+      amount: amts?.[i] ?? segs[index]! * sign,
     });
   }
   return out;
@@ -2062,8 +2294,28 @@ export function mergeRoulette(
   b: ChallengeEffect,
   cfg?: ChallengeConfig | null
 ): ChallengeEffect {
-  const idxs = [...(a.rouletteIndexes ?? []), ...(b.rouletteIndexes ?? [])].slice(0, ROULETTE_DRAWS_MAX);
+  const rawIdxs = [...(a.rouletteIndexes ?? []), ...(b.rouletteIndexes ?? [])];
+  const idxs = rawIdxs.slice(0, ROULETTE_DRAWS_MAX);
   const pats = [...(a.roulettePatterns ?? []), ...(b.roulettePatterns ?? [])].slice(0, ROULETTE_DRAWS_MAX);
+  // 出目ごとの実適用量(位置は rouletteIndexes と対応)。片方でも rouletteAmounts を
+  // 持てば連結後も持ち越す必要があるので、持たない側は名目式で並びを補完する。
+  const hasAmts = a.rouletteAmounts != null || b.rouletteAmounts != null;
+  const amtsOf = (e: ChallengeEffect): number[] => {
+    const eIdxs = e.rouletteIndexes ?? [];
+    const segs = e.rouletteSegments ?? [];
+    const sign = (e.rouletteDirection === 'sub' ? -1 : 1) * rouletteHotMultOf(e);
+    return eIdxs.map((ix, i) => e.rouletteAmounts?.[i] ?? (segs[ix] ?? 0) * sign);
+  };
+  const rawAmts = [...amtsOf(a), ...amtsOf(b)];
+  // 切り詰め(ROULETTE_DRAWS_MAX 超過)で出目列から落ちる抽選ぶん。**値は worker が
+  // 全抽選ぶん適用済み**なので、amount(満額合算)と出目列の差をここで運ばないと、
+  // 超過分が据え置き会計(rouletteReelPlan の rest)から漏れてリール再生前に数字
+  // だけ動く(出目の先漏れ)。連結の連鎖(a か b が既に切り詰め済み)も引き継ぐ。
+  const cut = rawAmts.slice(ROULETTE_DRAWS_MAX);
+  const truncatedAmount =
+    (a.rouletteTruncatedAmount ?? 0) + (b.rouletteTruncatedAmount ?? 0) + cut.reduce((s, v) => s + v, 0);
+  const truncatedCount =
+    (a.rouletteTruncatedCount ?? 0) + (b.rouletteTruncatedCount ?? 0) + cut.length;
   const merged: ChallengeEffect = {
     ...b,
     id: Math.max(a.id, b.id),
@@ -2088,6 +2340,17 @@ export function mergeRoulette(
   // キーごと出さない」流儀で作られているため(JSON 比較を素直に保つ)。
   if (a.rouletteId != null) merged.rouletteId = a.rouletteId;
   else delete merged.rouletteId;
+  // 実適用量と切り詰め補償。`{...b}` ベースに b の古い値が残らないよう、無ければ
+  // キーごと落とす(rouletteId と同じ「載せないフィールドはキーごと出さない」流儀)。
+  if (hasAmts) merged.rouletteAmounts = rawAmts.slice(0, ROULETTE_DRAWS_MAX);
+  else delete merged.rouletteAmounts;
+  if (truncatedCount > 0) {
+    merged.rouletteTruncatedAmount = truncatedAmount;
+    merged.rouletteTruncatedCount = truncatedCount;
+  } else {
+    delete merged.rouletteTruncatedAmount;
+    delete merged.rouletteTruncatedCount;
+  }
   return merged;
 }
 
@@ -2178,10 +2441,14 @@ export function rouletteReelPlan(e: ChallengeEffect): {
   const n = Math.min(all.length, ROULETTE_REELS_MAX, Math.max(1, Math.round(e.rouletteReels ?? all.length)));
   const reels = all.slice(0, n);
   const rest = all.slice(n);
+  // 連結の切り詰め(ROULETTE_DRAWS_MAX)で出目列から落ちた超過分も rest に合算する
+  // (dto の rouletteTruncatedAmount 参照)。ここに足せば据え置き会計
+  // (rouletteRemainingAmount)・合算バナー・演出ストックの ×N が全部いっぺんに
+  // 整合する — 値は worker 適用済みなので、漏らすとその分が先漏れする。
   return {
     reels,
-    restAmount: rest.reduce((s, d) => s + d.amount, 0),
-    restCount: rest.length,
+    restAmount: rest.reduce((s, d) => s + d.amount, 0) + (e.rouletteTruncatedAmount ?? 0),
+    restCount: rest.length + (e.rouletteTruncatedCount ?? 0),
   };
 }
 
@@ -2902,6 +3169,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     tapBoost: validateTapBoost(c.tapBoost),
     tapLock: validateTapLock(c.tapLock),
     revolution: validateRevolution(c.revolution),
+    quiz: validateQuiz(c.quiz),
     finalGate: validateFinalGate(c.finalGate),
   };
 }
@@ -3390,6 +3658,105 @@ function validateRevolutionRule(raw: unknown): RevolutionRule {
   };
 }
 
+/**
+ * 文字列配列(お題・判定ワード)の検証。trim して空行を除去し、件数と長さを
+ * clamp する。validateCommentRules と同じ「throw せずサニタイズ」の流儀。
+ */
+function sanitizeStringList(raw: unknown, max: number, lenMax: number, fb: readonly string[]): string[] {
+  if (!Array.isArray(raw)) return [...fb];
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const s = v.trim().slice(0, lenMax);
+    if (s !== '') out.push(s);
+    if (out.length >= max) break;
+  }
+  // 明示的な空配列は空のまま通す(全行消したユーザーの意思を尊重 — rules と同じ)。
+  return out;
+}
+
+/**
+ * お題ルーレットの検証。validateRevolution の鏡像 — この機能にも出荷済みの
+ * 旧形式は存在しない。
+ *
+ * **キー欠損は既定へ倒れるだけで移行(migrate*)は要らない。** 既定の行は
+ * giftId / giftName とも空でどのギフトにも一致せず、機能 enabled も false なので、
+ * 既存の settings.json へ何も配らなくても挙動は 1 ミリも変わらない
+ * (revolution / tapLock / stockCutinVolume と同じ前例)。
+ */
+export function validateQuiz(raw: unknown): QuizConfig {
+  const d = DEFAULT_QUIZ;
+  const c = raw as Partial<QuizConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  const n = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  // 既定が false の真偽値なので `=== true` で読む(revolution と同じ向き)。
+  const enabled = c.enabled === true;
+
+  let rules: QuizRule[];
+  if (!Array.isArray(c.rules)) {
+    rules = structuredClone(d.rules);
+  } else {
+    rules = [];
+    const seen = new Set<string>();
+    for (const r of c.rules.slice(0, QUIZ_RULES_MAX)) {
+      const v = validateQuizRule(r);
+      // 重複・欠損 id は振り直す(validateRevolution と同じ理由・同じ式)。
+      const id =
+        v.id !== '' && !seen.has(v.id)
+          ? v.id
+          : v.id !== ''
+            ? `${v.id}-${rules.length}`
+            : `quiz-${rules.length}`;
+      seen.add(id);
+      rules.push({ ...v, id });
+    }
+  }
+
+  return {
+    enabled,
+    rules,
+    // お題は欠損時だけ既定(例1件)へ倒す。明示的な空配列は空のまま —
+    // 空だと発動しない(worker 側が不発 + giftDiag)ので破綻はしない。
+    prompts: sanitizeStringList(c.prompts, QUIZ_PROMPTS_MAX, QUIZ_PROMPT_LEN_MAX, d.prompts),
+    durationSec: n(c.durationSec, d.durationSec, QUIZ_DURATION_MIN_SEC, QUIZ_DURATION_MAX_SEC),
+    voteSec: n(c.voteSec, d.voteSec, QUIZ_VOTE_MIN_SEC, QUIZ_VOTE_MAX_SEC),
+    amount: n(c.amount, d.amount, QUIZ_AMOUNT_MIN, QUIZ_AMOUNT_MAX),
+    // 判定ワードが両方空だと全票が無効になるだけ(±0 で終わる)なので許す。
+    goodWords: sanitizeStringList(c.goodWords, QUIZ_WORDS_MAX, QUIZ_WORD_LEN_MAX, d.goodWords),
+    badWords: sanitizeStringList(c.badWords, QUIZ_WORDS_MAX, QUIZ_WORD_LEN_MAX, d.badWords),
+    // BGM はルーレットと同じカタログ(+custom:)。未知の id は既定へ戻す。
+    bgm:
+      c.bgm === 'off' || (typeof c.bgm === 'string' && CHALLENGE_ROULETTE_BGM_IDS.includes(c.bgm))
+        ? c.bgm
+        : isCustomSoundId(c.bgm)
+          ? c.bgm
+          : d.bgm,
+    bgmVolume: n(c.bgmVolume, d.bgmVolume, 0, 100),
+    introClip:
+      c.introClip === 'off' || (typeof c.introClip === 'string' && FULL_CUT_CLIP_IDS.includes(c.introClip))
+        ? c.introClip
+        : d.introClip,
+  };
+}
+
+/** お題ルーレット1行の検証。validateRevolutionRule と同じ流儀(数値項目なし)。 */
+function validateQuizRule(raw: unknown): QuizRule {
+  const dr = DEFAULT_QUIZ_RULE;
+  const r = raw as Partial<QuizRule> | null | undefined;
+  if (!r || typeof r !== 'object') return structuredClone(dr);
+  return {
+    id: typeof r.id === 'string' ? r.id.trim() : '',
+    label: typeof r.label === 'string' ? r.label.trim().slice(0, ROULETTE_LABEL_MAX) : '',
+    enabled: r.enabled !== false,
+    giftId: typeof r.giftId === 'string' ? r.giftId.trim() : dr.giftId,
+    giftName: typeof r.giftName === 'string' ? r.giftName.trim().toLowerCase() : dr.giftName,
+    canonical: typeof r.canonical === 'string' ? r.canonical.trim().toLowerCase() : dr.canonical,
+    exactName: typeof r.exactName === 'boolean' ? r.exactName : false,
+    flash: r.flash !== false,
+  };
+}
+
 /** ルーレット盤面の上限行数。UI とリール演出が破綻しない範囲で余裕を持たせる。 */
 export const ROULETTE_SEGMENTS_MAX = 12;
 
@@ -3493,6 +3860,24 @@ function validateRouletteHot(raw: unknown, direction: 'add' | 'sub'): RouletteHo
   if (direction === 'sub') return undefined;
   const c = raw as Partial<RouletteHotConfig> | null | undefined;
   if (!c || typeof c !== 'object' || c.enabled !== true) return undefined;
+  // 候補列(確率抽選)。**正規形はキー存在 ⇔ 候補2件以上** — 抽選側
+  // (rouletteHotMultCandidates)と同じゲートを通し、通ったときだけキーを出す。
+  // multiplier には代表値を焼き直す(旧バージョンで読んだときの縮退先)。
+  const cands = rouletteHotMultCandidates(c as RouletteHotConfig);
+  if (cands) {
+    return { enabled: true, multiplier: rouletteHotRepresentativeMult(cands), multipliers: cands };
+  }
+  // ちょうど1件だけ生き残った候補列は従来形へ**畳む**(キーを出さない)。UI も
+  // 1行のときは従来形を書くので、保存→読み直しの往復で形が揺れない。2件以上
+  // あるのに全 weight 0 で cands が null になった列も、代表値(先頭)へ畳む —
+  // どちらも2回目の validate ではキー欠損の従来経路に入るので冪等。
+  const list = sanitizeRouletteHotMultList(c.multipliers);
+  if (list && list.length > 0) {
+    return { enabled: true, multiplier: rouletteHotRepresentativeMult(list) };
+  }
+  // 従来形(キー欠損の旧 settings.json を含む)。multipliers を**生やさない** —
+  // 出荷既定(DJ_GLASSES_ROULETTE)の validate 不動点を守る(migrate の出力は
+  // 再検証されないので、ここで形が変わると不動点検査が落ちる)。
   const m = typeof c.multiplier === 'number' && Number.isFinite(c.multiplier) ? c.multiplier : NaN;
   return {
     enabled: true,
@@ -3837,6 +4222,46 @@ export function matchRevolution(
     if (matchGiftTrigger(r, g)) return r;
   }
   return null;
+}
+
+/**
+ * お題ルーレットのトリガー判定。matchRevolution と同じ先勝ち。評価順は
+ * **revolution の次・tapLock より先**(worker の gift 分岐)— 同じ giftId を
+ * 両方に登録した誤設定では革命が勝つ(先に登録された大技を尊重)。
+ * お題は空(prompts 0件)でも一致は返す — 不発の診断は worker 側(giftDiag)で
+ * 出す(ここで握りつぶすと「設定したのに無反応」の原因が追えない)。
+ */
+export function matchQuiz(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): QuizRule | null {
+  const q = cfg.quiz;
+  if (!q.enabled) return null;
+  for (const r of q.rules) {
+    if (!r.enabled) continue;
+    if (matchGiftTrigger(r, g)) return r;
+  }
+  return null;
+}
+
+/**
+ * 投票コメントの判定。matchCommentRule と同じ「小文字化して部分一致」。
+ * **good/bad の両方に一致したら無効票(null)** — 「よかったけどだめ」のような
+ * 曖昧票を数えないための設計判断。どちらにも一致しなければ null(投票ではない
+ * 通常コメントとして下流へ流す)。
+ */
+export function judgeQuizVote(
+  goodWords: readonly string[],
+  badWords: readonly string[],
+  content: string
+): 'good' | 'bad' | null {
+  const c = content.toLowerCase();
+  // 空文字ワードは何にでも一致する(''.includes 罠)ので弾く — validate 側でも
+  // 除去しているが、判定の唯一の実装として自衛する。
+  const good = goodWords.some((w) => w !== '' && c.includes(w.toLowerCase()));
+  const bad = badWords.some((w) => w !== '' && c.includes(w.toLowerCase()));
+  if (good && bad) return null;
+  return good ? 'good' : bad ? 'bad' : null;
 }
 
 /** matchStampTriggers の結果。1メッセージ内の一致スタンプを合算した値。 */

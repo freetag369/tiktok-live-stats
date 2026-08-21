@@ -40,6 +40,7 @@ export type FxStockKind =
   | 'boost' // フィーバー(pendingBoosts)
   | 'band' // ギフトカットイン(pendingBands — 帯/フルカットとも。表示ラベルは「ギフト」)
   | 'revolution' // 革命の導入カットイン(pendingRevolutions)
+  | 'quiz' // お題ルーレット(worker の予約 FIFO・quiz-end の持ち越し。表示は予告行が主)
   | 'join-roulette' // 初見(入室)ルーレット(joinRouletteQueue)
   | 'hot-roulette' // 激熱確定ルーレット(hotRouletteQueue)
   | 'roulette' // ギフトルーレット(rouletteQueue)
@@ -54,6 +55,7 @@ export const STOCK_KIND_PRIORITY = {
   boost: 'boost',
   band: 'band',
   revolution: 'revolution', // band と other(ギフトルーレット)の間(2026-08-20 ユーザー決定)
+  quiz: 'quiz', // revolution の直後(2026-08-21。実際の開始順はバリア方式が支配 — fx-priority.ts 参照)
   'join-roulette': 'join-roulette',
   'hot-roulette': 'hot-roulette',
   roulette: 'other',
@@ -93,7 +95,7 @@ export interface FxStockBandRef extends FxStockQueuedRef {
 
 /** 再生中の演出(先頭行)。remaining はいま回している1本を含む残数。 */
 export interface FxStockPlaying {
-  kind: 'roulette' | 'join-roulette' | 'hot-roulette' | 'band' | 'revolution';
+  kind: 'roulette' | 'join-roulette' | 'hot-roulette' | 'band' | 'revolution' | 'quiz';
   id: number;
   nickname?: string;
   remaining: number;
@@ -145,6 +147,12 @@ export interface FxStockSnapshot {
   bands: FxStockBandRef[];
   /** pendingRevolutions(積む側上限 PENDING_REVOLUTIONS_MAX)。 */
   revolutions: FxStockQueuedRef[];
+  /**
+   * お題ルーレットの持ち越し(pendingQuizzes = quiz-end の結果発表)。予約 FIFO
+   * (worker の quizQueue)は ChallengeState.quiz.queued の件数でしか届かないため
+   * ここには載らない — 予約の予告は workerQueue(fxQueue)の行が担う。
+   */
+  quizzes: FxStockQueuedRef[];
   /** joinRouletteQueue(積む側上限 JOIN_ROULETTE_QUEUE_MAX)。 */
   joinRoulettes: FxStockRouletteRef[];
   /** hotRouletteQueue(積む側上限 ROULETTE_HOT_QUEUE_MAX)。 */
@@ -189,6 +197,10 @@ export function buildFxStock(s: FxStockSnapshot): FxStockView {
     } else if (kind === 'revolution') {
       for (const b of s.revolutions) {
         all.push({ key: `revolution:${b.id}`, kind, name: b.nickname ?? '', count: 1, playing: false });
+      }
+    } else if (kind === 'quiz') {
+      for (const b of s.quizzes) {
+        all.push({ key: `quiz:${b.id}`, kind, name: b.nickname ?? '', count: 1, playing: false });
       }
     } else {
       const refs =

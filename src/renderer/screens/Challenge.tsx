@@ -16,6 +16,8 @@ import type {
   TapLockRule,
   RevolutionConfig,
   RevolutionRule,
+  QuizConfig,
+  QuizRule,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
@@ -24,6 +26,7 @@ import type {
   JoinRouletteConfig,
   RouletteCountView,
   RouletteHotConfig,
+  RouletteHotMultCandidate,
   RoulettePattern,
   RouletteTeaseConfig,
 } from '@shared/dto';
@@ -53,6 +56,7 @@ import {
   DEFAULT_ROULETTE_PATTERNS,
   DEFAULT_SE_VOLUMES,
   ROULETTE_FULL_REELS,
+  ROULETTE_HOT_MULT_CANDIDATES_MAX,
   ROULETTE_HOT_MULT_MAX,
   ROULETTE_HOT_MULT_MIN,
   ROULETTE_JACK_PATTERNS,
@@ -83,6 +87,22 @@ import {
   REVOLUTION_MULT_MAX,
   REVOLUTION_MULT_MIN,
   REVOLUTION_RULES_MAX,
+  DEFAULT_QUIZ,
+  DEFAULT_QUIZ_RULE,
+  QUIZ_AMOUNT_MAX,
+  QUIZ_AMOUNT_MIN,
+  QUIZ_DURATION_MAX_SEC,
+  QUIZ_DURATION_MIN_SEC,
+  QUIZ_INTRO_MS,
+  QUIZ_PROMPTS_MAX,
+  QUIZ_PROMPT_LEN_MAX,
+  QUIZ_REVEAL_MS,
+  QUIZ_RULES_MAX,
+  QUIZ_SPIN_MS,
+  QUIZ_VOTE_MAX_SEC,
+  QUIZ_VOTE_MIN_SEC,
+  QUIZ_WORDS_MAX,
+  QUIZ_WORD_LEN_MAX,
   TAP_BOOST_MULT_MIN,
   TAP_BOOST_RESULT_CLIPS,
   CUSTOM_SOUND_PREFIX,
@@ -93,8 +113,10 @@ import {
   rouletteHeadline,
   rouletteSoundOverrideToggle,
   clampRouletteHotMult,
+  clampRouletteHotWeight,
   rouletteHotMults,
   rouletteHotPatternPool,
+  rouletteHotRepresentativeMult,
 } from '@shared/challenge';
 import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { num } from '@shared/format';
@@ -331,10 +353,12 @@ type Tab =
   | 'se'
   | 'fx'
   | 'roulette'
+  | 'hotroulette'
   | 'gifts'
   | 'comment'
   | 'helper'
   | 'revolution'
+  | 'quiz'
   | 'boost'
   | 'taplock'
   | 'giftlist';
@@ -344,10 +368,14 @@ const TABS: Array<[Tab, string]> = [
   ['se', '効果音'],
   ['fx', '演出'],
   ['roulette', 'ルーレット'],
+  // 激熱確定は行(ルーレットタブ)にぶら下がる設定だが、倍率の確率分布まで持つと
+  // 1行のカードが縦に伸びすぎるので専用タブへ分離した(ユーザー要望 2026-08-21)。
+  ['hotroulette', '激熱ルーレット'],
   ['gifts', 'ギフト増減'],
   ['comment', 'コメント'],
   ['helper', 'お助け'],
   ['revolution', '革命'],
+  ['quiz', 'お題ルーレット'],
   ['boost', 'ブースト'],
   ['taplock', 'お邪魔'],
   // 設定ではなく**参照用**の1枚(受信済みギフトの giftId 対応表)なので最後尾。
@@ -585,6 +613,15 @@ export function Challenge(): React.JSX.Element {
           </>
         ) : null}
         {tab === 'roulette' ? <RouletteSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} /> : null}
+        {tab === 'hotroulette' ? (
+          <RouletteHotSection
+            cfg={draft}
+            onPatch={patch}
+            onTest={onTest}
+            testBusy={testBusy}
+            onGoRoulette={() => setTab('roulette')}
+          />
+        ) : null}
         {tab === 'gifts' ? <GiftRulesSection cfg={draft} onPatch={patch} /> : null}
         {tab === 'comment' ? (
           <CommentRulesSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
@@ -594,6 +631,9 @@ export function Challenge(): React.JSX.Element {
         ) : null}
         {tab === 'revolution' ? (
           <RevolutionSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+        ) : null}
+        {tab === 'quiz' ? (
+          <QuizSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
         ) : null}
         {tab === 'boost' ? (
           <BoostSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
@@ -2521,87 +2561,292 @@ function RouletteSegmentsEditor({
   );
 }
 
-/** ルーレット1件ぶんの設定行。トリガー・出目・確率・行別サウンドをここで完結させる。 */
 /**
- * 激熱確定(hot)の編集ブロック。**「増やす(妨害)」の行にだけ出す** —
- * 検証(validateRouletteHot)が direction:'sub' の hot をキーごと落とすので、
- * sub で出すと「チェックしても保存すると消える」死んだコントロールになる。
+ * 激熱倍率の分布エディタ(倍率・重み・確率%)。形式は盤面の RouletteSegmentsEditor と
+ * 同じ「候補+重み」。従来形(単一倍率)は1行の候補列として見せる。
+ *
+ * **onChange が正規形を作る**(validateRouletteHot の出力と形まで一致させること —
+ * 保存後に cfg.get で読み直して draft を差し替えるので、形がズレると保存のたびに
+ * 値が跳ねて見える):
+ *   - 1行 → { enabled: true, multiplier: その値 }(multipliers キーを出さない)
+ *   - 2行以上 → { enabled: true, multiplier: 代表値, multipliers: rows }
+ * 1行のときは重み入力を disabled にする(保存で weight が捨てられる形を入力させない)。
+ */
+function RouletteHotMultsEditor({
+  hot,
+  topAmount,
+  onChange,
+}: {
+  hot: RouletteHotConfig;
+  /** 額の見本に使う盤面の最大出目(一番効く場所で見せる)。 */
+  topAmount: number;
+  onChange: (hot: RouletteHotConfig) => void;
+}): React.JSX.Element {
+  // 重み 1 は従来形を1行表示するための placeholder — 1行のままなら commit が
+  // 従来形へ畳むので保存には載らない。
+  const rows: RouletteHotMultCandidate[] = hot.multipliers ?? [
+    { multiplier: hot.multiplier, weight: 1 },
+  ];
+  const single = rows.length <= 1;
+  const totalWeight = rows.reduce((s, x) => s + Math.max(0, x.weight), 0);
+  const commit = (next: RouletteHotMultCandidate[]): void => {
+    if (next.length <= 1) {
+      onChange({
+        enabled: true,
+        multiplier: next[0]?.multiplier ?? DEFAULT_ROULETTE_HOT.multiplier,
+      });
+    } else {
+      onChange({
+        enabled: true,
+        multiplier: rouletteHotRepresentativeMult(next),
+        multipliers: next,
+      });
+    }
+  };
+  const patchRow = (i: number, p: Partial<RouletteHotMultCandidate>): void =>
+    commit(rows.map((r, j) => (j === i ? { ...r, ...p } : r)));
+
+  return (
+    <>
+      {rows.map((r, i) => (
+        <div className="row" key={i} style={{ gap: 8, alignItems: 'center' }}>
+          <label className="field" style={{ width: 130 }}>
+            {i === 0 ? `倍率(×${ROULETTE_HOT_MULT_MIN}〜${ROULETTE_HOT_MULT_MAX})` : ''}
+            <input
+              type="number"
+              min={ROULETTE_HOT_MULT_MIN}
+              max={ROULETTE_HOT_MULT_MAX}
+              step={1}
+              value={r.multiplier}
+              onChange={(e) =>
+                // 入力中は clamp しない(2026-08-21 修正)— 制御コンポーネントで
+                // キーストロークごとに clampRouletteHotMult(下限5)を通すと、
+                // '20' を打つ途中の '2' が即 5 へ丸まり '0' で 50 になる = 2桁の
+                // 10〜49 がタイプ入力不能だった。他の数値フィールドと同じく生の
+                // Number を draft に持ち、確定は onBlur と保存時の検証に任せる。
+                patchRow(i, { multiplier: Number(e.target.value) })
+              }
+              onBlur={(e) =>
+                // フォーカスが離れた時点で正規形へ(commit の形の規約は維持 —
+                // 保存前に必ず blur が走るので、範囲外・NaN が保存に載ることはない。
+                // 載っても cfg.set の sanitize が同じ clamp で受け止める)。
+                patchRow(i, { multiplier: clampRouletteHotMult(Number(e.target.value)) })
+              }
+            />
+          </label>
+          <label className="field" style={{ width: 110 }} title={single ? '候補が1つのときは常に100%です' : undefined}>
+            {i === 0 ? '重み' : ''}
+            <input
+              type="number"
+              min="0"
+              value={single ? 1 : r.weight}
+              disabled={single}
+              onChange={(e) =>
+                // 保存時の丸め(sanitizeRouletteHotMultList)と同じ式を入力時に通す —
+                // 小数・負値を draft に残すと、保存の瞬間に「weight>0 の有無」が変わって
+                // 候補行が黙って畳まれる(倍率側の clampRouletteHotMult と同じ対称)。
+                patchRow(i, { weight: clampRouletteHotWeight(Number(e.target.value)) })
+              }
+            />
+          </label>
+          <span className="faint" style={{ fontSize: 11, minWidth: 54, textAlign: 'right' }}>
+            {single
+              ? '100%'
+              : totalWeight > 0
+                ? `${((Math.max(0, r.weight) / totalWeight) * 100).toFixed(1)}%`
+                : '—'}
+          </span>
+          <span className="faint" style={{ fontSize: 11, flex: 1 }}>
+            {rouletteHotMults(r.multiplier)
+              .map((v) => `×${v}`)
+              .join('→')}
+            ・最大 {num(topAmount)} → <b>{num(topAmount * r.multiplier)}</b>
+          </span>
+          <button
+            className="btn small danger"
+            disabled={rows.length <= 1}
+            onClick={() => commit(rows.filter((_, j) => j !== i))}
+          >
+            削除
+          </button>
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 8 }}>
+        <button
+          className="btn small"
+          disabled={rows.length >= ROULETTE_HOT_MULT_CANDIDATES_MAX}
+          onClick={() =>
+            commit([...rows, { multiplier: DEFAULT_ROULETTE_HOT.multiplier, weight: 1 }])
+          }
+        >
+          倍率を追加
+        </button>
+        <button
+          className="btn small"
+          onClick={() =>
+            onChange({ enabled: true, multiplier: DEFAULT_ROULETTE_HOT.multiplier })
+          }
+        >
+          ×{DEFAULT_ROULETTE_HOT.multiplier} だけに戻す
+        </button>
+      </div>
+      {!single && totalWeight <= 0 ? (
+        <div style={{ fontSize: 11, marginTop: 4, color: 'rgba(255, 180, 0, 0.9)' }}>
+          ⚠ 重みが全て 0 だと抽選できないため、保存すると先頭の倍率1つ(候補なし)に
+          畳まれます。残したい倍率に 1 以上の重みを付けてください。
+        </div>
+      ) : null}
+      <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+        確率 = 重み ÷ 重みの合計。重み 0 の倍率は出ません。候補が2つ以上あるとき、
+        どの倍率になるかはギフトが届いた瞬間に抽選されます(出目の抽選とは別)。
+        連打(コンボ)は1回の抽選を全スピンで共有します。
+      </div>
+    </>
+  );
+}
+
+/**
+ * 激熱ルーレット(激熱確定)の専用タブ。行本体(トリガー・盤面・演出パターン・音)は
+ * ルーレットタブの RouletteRow に残し、ここには**激熱の ON/OFF と倍率の確率分布だけ**を
+ * 一覧で出す(二重管理をしない)。
+ *
+ * 「増やす(妨害)」の行だけ出す — 検証(validateRouletteHot)が direction:'sub' の
+ * hot をキーごと落とすので、sub で出すと「チェックしても保存すると消える」死んだ
+ * コントロールになる(RouletteRow の direction select が 'sub' へ切り替えた瞬間に
+ * hot を消すのと同じ対応関係)。
  *
  * 倍率は 5〜50。下限が 5 なのは、ドンが4発あって相異なる4段が要るため
  * (5 のときちょうど従来の超激アツと同じ ×2→×3→×4→×5 の段になる)。
  */
-function RouletteHotEditor({
-  hot,
-  segments,
-  trigger,
-  onChange,
-}: {
-  hot: RouletteHotConfig | undefined;
-  /** 段の見本に使う盤面(一番大きい出目で「いくらになるか」を出す)。 */
-  segments: ChallengeRouletteSegment[];
-  /** 絵柄の説明を出し分けるための行のトリガー。worker と同じ rouletteHotPatternPool を通す。 */
-  trigger: { giftId: string; giftName: string; canonical: string };
-  onChange: (hot: RouletteHotConfig | undefined) => void;
-}): React.JSX.Element {
-  const on = hot?.enabled === true;
-  const mult = hot?.multiplier ?? DEFAULT_ROULETTE_HOT.multiplier;
-  // 絵柄は worker と同じ関数から出す — ギフト連動の行(DJメガネ)は1種に固定される。
-  const pool = rouletteHotPatternPool(trigger);
-  // 見本は盤面の最大の出目 — 一番効く場所で額を見せる。空盤面は 1000 で代用。
-  const top = segments.reduce((m, sg) => Math.max(m, sg.amount), 0) || 1000;
-  const steps = rouletteHotMults(mult);
+function RouletteHotSection({
+  cfg,
+  onPatch,
+  onTest,
+  testBusy,
+  onGoRoulette,
+}: SectionProps & { onGoRoulette: () => void }): React.JSX.Element {
+  const list = cfg.roulettes;
+  // RouletteSection の patchAt と同じ式 — cfg.roulettes の**元 index** で書き戻す
+  // (add 行だけ抜き出した配列の index で書くと別の行を潰す)。
+  const patchAt = (i: number, p: Partial<ChallengeRouletteConfig>): void =>
+    onPatch({ roulettes: list.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  const rows = list.map((rl, i) => [rl, i] as const).filter(([rl]) => rl.direction === 'add');
   return (
-    <div style={{ marginTop: 8 }}>
-      <label className="row" style={{ cursor: 'pointer', gap: 4 }}>
-        <input
-          type="checkbox"
-          checked={on}
-          onChange={(e) =>
-            onChange(e.target.checked ? { enabled: true, multiplier: mult } : undefined)
-          }
-        />
-        <span>激熱確定にする(数字が倍になったまま決まる)</span>
-      </label>
-      {on ? (
+    <>
+      <h3>激熱ルーレット</h3>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 10 }}>
+        激熱確定にしたルーレット行は、そのギフトが来ると<b>100%</b>発動し、出目に倍率を
+        掛けた値が<b>そのまま確定</b>します(見せかけではなく実際の増減)。倍率は候補を
+        複数登録して<b>確率で抽選</b>させることもできます。スロットに入る前に8秒の
+        全画面動画が流れ、1本あたり約43秒かかります(連打で届くと回した本数ぶん時間が
+        かかります)。他の演出より先に消化されます(ギフトのカットインより優先)。
+        ギフト条件や盤面(出目)の編集は「ルーレット」タブで行います。
+      </div>
+      {rows.length === 0 ? (
         <>
-          <div className="row" style={{ gap: 8, marginTop: 6, alignItems: 'flex-end' }}>
-            <label className="field" style={{ width: 120 }}>
-              倍率(×{ROULETTE_HOT_MULT_MIN}〜{ROULETTE_HOT_MULT_MAX})
-              <input
-                type="number"
-                min={ROULETTE_HOT_MULT_MIN}
-                max={ROULETTE_HOT_MULT_MAX}
-                step={1}
-                value={mult}
-                onChange={(e) =>
-                  onChange({
-                    enabled: true,
-                    multiplier: clampRouletteHotMult(Number(e.target.value)),
-                  })
-                }
-              />
-            </label>
-            <div className="faint" style={{ fontSize: 11, paddingBottom: 6 }}>
-              盤面の最大 {num(top)} が <b>{num(top * mult)}</b> になります。
-              数字は {steps.map((v) => `×${v}`).join(' → ')} と上がって、
-              <b>そのまま確定</b>します。
-            </div>
+          <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>
+            「増やす(妨害)」のルーレット行がありません。激熱確定は増やす行にだけ
+            設定できます(減らす行は対象外)。
           </div>
-          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-            この行のギフトが来ると<b>100%</b>発動します。演出は
-            <b>{pool.map((p) => ROULETTE_PATTERN_LABELS[p].label).join('・')}</b>
-            {pool.length === 1 ? 'に固定され' : `の${pool.length}種に固定され`}
-            (上の演出パターンのチェックはこの行では使われません)、スロットに入る前に
-            8秒の全画面動画が流れます。
-            1本あたり約43秒かかるので、連打で届くと回した本数ぶん時間がかかります。
-            他の演出より先に消化されます(ギフトのカットインより優先)。
-          </div>
+          <button className="btn small" onClick={onGoRoulette}>
+            ルーレットタブで行を作る
+          </button>
         </>
-      ) : null}
-    </div>
+      ) : (
+        rows.map(([rl, i]) => {
+          const on = rl.hot?.enabled === true;
+          // 絵柄は worker と同じ関数から出す — ギフト連動の行(DJメガネ)は1種に固定される。
+          const pool = rouletteHotPatternPool({
+            giftId: rl.giftId,
+            giftName: rl.giftName,
+            canonical: rl.canonical,
+          });
+          // 見本は盤面の最大の出目 — 一番効く場所で額を見せる。空盤面は 1000 で代用。
+          const top = rl.segments.reduce((m, sg) => Math.max(m, sg.amount), 0) || 1000;
+          const name =
+            rl.label.trim() !== '' ? rl.label : rl.giftName !== '' ? rl.giftName : rl.giftId;
+          return (
+            <div
+              key={rl.id}
+              style={{
+                border: '1px solid rgba(255,255,255,.12)',
+                borderRadius: 8,
+                padding: '10px 12px',
+                marginBottom: 10,
+              }}
+            >
+              <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <b>{name !== '' ? name : '(名称未設定)'}</b>
+                <span className="faint" style={{ fontSize: 11 }}>
+                  giftId: {rl.giftId !== '' ? rl.giftId : '—'} / ギフト名:{' '}
+                  {rl.giftName !== '' ? rl.giftName : '—'}
+                  {rl.enabled ? '' : '(行そのものが無効 — ルーレットタブ)'}
+                </span>
+                <div className="spacer" />
+                <MonitorTestBtn
+                  spec={{ kind: 'roulette', rouletteId: rl.id }}
+                  onTest={onTest}
+                  busy={testBusy}
+                  label="▶ モニターで回す"
+                  title="この盤面で抽選してモニターのルーレットを実演再生します(カウントは変わりません)"
+                />
+              </div>
+              <label className="row" style={{ cursor: 'pointer', gap: 4, marginTop: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={(e) =>
+                    // OFF は hot: undefined(キーごと落とす)— validateRouletteHot と
+                    // 形を揃えて保存往復で draft が揺れないようにする。
+                    patchAt(
+                      i,
+                      e.target.checked
+                        ? {
+                            hot: {
+                              enabled: true,
+                              multiplier: rl.hot?.multiplier ?? DEFAULT_ROULETTE_HOT.multiplier,
+                            },
+                          }
+                        : { hot: undefined }
+                    )
+                  }
+                />
+                <span>激熱確定にする(数字が倍になったまま決まる)</span>
+              </label>
+              {on && rl.hot ? (
+                <>
+                  <div style={{ marginTop: 6 }}>
+                    <RouletteHotMultsEditor
+                      hot={rl.hot}
+                      topAmount={top}
+                      onChange={(hot) => patchAt(i, { hot })}
+                    />
+                  </div>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+                    演出は
+                    <b>{pool.map((p) => ROULETTE_PATTERN_LABELS[p].label).join('・')}</b>
+                    {pool.length === 1 ? 'に固定されます' : `の${pool.length}種に固定されます`}
+                    (ルーレットタブの演出パターンのチェックはこの行では使われません)。
+                  </div>
+                </>
+              ) : null}
+            </div>
+          );
+        })
+      )}
+    </>
   );
 }
 
+/** 行の激熱状態の1行要約(設定本体は「激熱ルーレット」タブ)。 */
+function rouletteHotSummary(hot: RouletteHotConfig | undefined): string {
+  if (hot?.enabled !== true) return 'OFF';
+  const cands = (hot.multipliers ?? []).filter((c) => c.weight > 0);
+  if (cands.length >= 2) return `${cands.map((c) => `×${c.multiplier}`).join('・')} から抽選`;
+  return `×${hot.multiplier}`;
+}
+
+/** ルーレット1件ぶんの設定行。トリガー・出目・確率・行別サウンドをここで完結させる。 */
 function RouletteRow({
   rl,
   commonSound,
@@ -2701,14 +2946,13 @@ function RouletteRow({
           ? ' 減らす(応援)の行は、モニターの盤面もバナーも「お助け」と同じ緑になります。'
           : ''}
       </div>
-      {/* 激熱確定は「増やす」の行だけ(検証が sub の hot を落とすので UI も揃える)。 */}
+      {/* 激熱確定の設定本体は「激熱ルーレット」タブへ分離した(倍率の確率分布まで
+          持つと1行のカードが伸びすぎるため)。'sub' への切替で hot を消す対応関係は
+          上の direction select に残っている。要約だけここに出す。 */}
       {rl.direction === 'add' ? (
-        <RouletteHotEditor
-          hot={rl.hot}
-          segments={rl.segments}
-          trigger={{ giftId: rl.giftId, giftName: rl.giftName, canonical: rl.canonical }}
-          onChange={(hot) => onPatch({ hot })}
-        />
+        <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
+          激熱確定: <b>{rouletteHotSummary(rl.hot)}</b>(設定は「激熱ルーレット」タブ)
+        </div>
       ) : null}
       <RoulettePatternPicker
         patterns={rl.patterns}
@@ -3944,6 +4188,349 @@ function RevolutionSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
           onClick={() => onPatch({ revolution: structuredClone(DEFAULT_REVOLUTION) })}
         >
           革命設定を既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** QuizSection の行 id 採番(clipSeq と同じ「時刻 + 連番」方式)。 */
+let quizSeq = 0;
+
+/**
+ * お題リスト・判定ワードの共通エディタ(1行1項目の text input + 追加/削除)。
+ * CommentRulesSection の行 UI から「規則」の部分を抜いた形。
+ */
+function QuizStringList({
+  values,
+  placeholder,
+  max,
+  lenMax,
+  addLabel,
+  onChange,
+}: {
+  values: string[];
+  placeholder: string;
+  max: number;
+  lenMax: number;
+  addLabel: string;
+  onChange: (next: string[]) => void;
+}): React.JSX.Element {
+  return (
+    <>
+      {values.map((v, i) => (
+        // お題は本文の編集で key が変わると input がフォーカスを失うので index key。
+        // 並び替え UI は持たない(順序は表示順でしかない)ため index で安定する。
+        <div className="row" style={{ gap: 6, marginTop: 4 }} key={i}>
+          <input
+            type="text"
+            style={{ flex: 1 }}
+            maxLength={lenMax}
+            placeholder={placeholder}
+            value={v}
+            onChange={(e) => onChange(values.map((x, j) => (j === i ? e.target.value : x)))}
+          />
+          <button className="btn small danger" onClick={() => onChange(values.filter((_, j) => j !== i))}>
+            削除
+          </button>
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 6, gap: 8 }}>
+        <button className="btn small" disabled={values.length >= max} onClick={() => onChange([...values, ''])}>
+          {addLabel}
+        </button>
+        <span className="faint" style={{ fontSize: 11 }}>
+          最大 {max} 件(現在 {values.length} 件)
+        </span>
+      </div>
+    </>
+  );
+}
+
+/**
+ * お題ルーレット。指定ギフトでお題を抽選 → 1分の挑戦 → コメント投票で ±。
+ * トリガー行は RevolutionSection の鏡像(倍率・秒数を持たない)、お題と判定ワードは
+ * 文字列リスト。既定は OFF(全アクション停止+投票で±はゲーム経済の大技なので、
+ * キー欠損フォールバックで勝手に有効化しない)。
+ */
+function QuizSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+  const qz = cfg.quiz;
+  const patchQz = (p: Partial<QuizConfig>): void => {
+    onPatch({ quiz: { ...qz, ...p } });
+  };
+  const patchRule = (i: number, p: Partial<QuizRule>): void => {
+    patchQz({ rules: qz.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+  const preSec = Math.round((QUIZ_INTRO_MS + QUIZ_SPIN_MS + QUIZ_REVEAL_MS) / 1000);
+
+  return (
+    <>
+      <h3>お題ルーレット</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={qz.enabled} onChange={(e) => patchQz({ enabled: e.target.checked })} />
+        <span>指定ギフトでお題ルーレットを回し、制限時間つきの挑戦+コメント投票で増減する</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        ギフトが届いた瞬間に<b>BGM が切り替わり</b>、その時点で溜まっていた演出を消化してから
+        <b>導入カット(素材を選んだ場合・約{Math.round(QUIZ_INTRO_MS / 1000)}秒)→
+        お題ルーレット → お題決定</b>(前置き 最大約{preSec}秒)→
+        <b>制限時間(既定 {DEFAULT_QUIZ.durationSec}秒・お題を画面いっぱいに表示)→
+        投票タイム(既定 {DEFAULT_QUIZ.voteSec}秒)</b>と進みます。
+        投票は<b>コメントの「よかった」「だめ」</b>(下の判定ワード・1人1票で最後の投票が有効)で、
+        よかった多数なら<b>減算</b>、だめ多数なら<b>増加</b>、引き分け・無投票は±0です。
+        <b>発動中は他の全アクションが一時停止</b>し、ギフト・コメント妨害などは終了後にまとめて
+        清算されます(<b>いいねだけは蓄積されず捨てられます</b>)。フィーバー・革命の窓が
+        進行中に届いたときは窓の終了を待って発動し、発動中に届いたお題ギフトは順番待ちで
+        連続実行されます。
+      </div>
+
+      {qz.enabled ? (
+        <>
+          <h4 style={{ marginTop: 12 }}>トリガーギフト</h4>
+          {qz.rules.map((r, i) => (
+            <div className="challenge-rule" key={r.id}>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 60 }}
+                title="この行だけ一時的に止めます(下の行の判定は続きます)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.enabled}
+                  onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  有効
+                </span>
+              </label>
+              <label className="field" style={{ width: 130 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="お題ルーレット"
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                対象 giftId
+                <input
+                  type="text"
+                  placeholder="実受信で確認"
+                  value={r.giftId}
+                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
+                />
+              </label>
+              <div style={{ width: 150 }}>
+                <label className="field">
+                  ギフト名(IDの保険)
+                  <input
+                    type="text"
+                    value={r.giftName}
+                    placeholder="ローマ字の実受信名"
+                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                  />
+                </label>
+                <label
+                  className="row"
+                  style={{ cursor: 'pointer', marginTop: 2 }}
+                  title="オンにするとギフト名が完全に一致したときだけ発動します。短い名前は必ずオンに — 部分一致だと別のギフト名にも誤爆します。"
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.exactName}
+                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    完全一致
+                  </span>
+                </label>
+              </div>
+              <label className="row" style={{ cursor: 'pointer', width: 76 }}>
+                <input
+                  type="checkbox"
+                  checked={r.flash}
+                  onChange={(e) => patchRule(i, { flash: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  フラッシュ
+                </span>
+              </label>
+              <MonitorTestBtn
+                spec={{ kind: 'quiz', quizId: r.id }}
+                onTest={onTest}
+                busy={testBusy}
+                label="▶ この行"
+                title="モニターウィンドウで、お題の回転〜決定表示だけを実演再生します(giftId 未設定でも確認できます)。制限時間も投票も始まりません・カウント値も変わりません"
+              />
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchQz({ rules: qz.rules.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={qz.rules.length >= QUIZ_RULES_MAX}
+              onClick={() =>
+                patchQz({
+                  rules: [
+                    ...qz.rules,
+                    {
+                      ...structuredClone(DEFAULT_QUIZ_RULE),
+                      id: `quiz-${Date.now().toString(36)}-${quizSeq++}`,
+                    },
+                  ],
+                })
+              }
+            >
+              トリガーを追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {QUIZ_RULES_MAX} 件(現在 {qz.rules.length} 件)。上から順に判定し、最初に一致した1行だけが発動します。
+            </span>
+          </div>
+
+          <h4 style={{ marginTop: 16 }}>お題リスト</h4>
+          <div className="faint" style={{ fontSize: 11 }}>
+            発動のたびにこの中から<b>等確率で1件</b>抽選されます(1件あたり最大 {QUIZ_PROMPT_LEN_MAX} 文字)。
+            <b>0件のままだとトリガーが一致しても発動しません。</b>
+          </div>
+          <QuizStringList
+            values={qz.prompts}
+            placeholder="例: 誰もやったことないものまね"
+            max={QUIZ_PROMPTS_MAX}
+            lenMax={QUIZ_PROMPT_LEN_MAX}
+            addLabel="お題を追加"
+            onChange={(prompts) => patchQz({ prompts })}
+          />
+
+          <h4 style={{ marginTop: 16 }}>投票の判定ワード</h4>
+          <div className="faint" style={{ fontSize: 11 }}>
+            投票タイム中のコメントに<b>含まれていたら</b>(部分一致・大文字小文字無視)票として数えます。
+            両方に一致したコメントは無効票です。
+          </div>
+          <div className="row" style={{ gap: 16, alignItems: 'flex-start', marginTop: 6 }}>
+            <div style={{ flex: 1 }}>
+              <div className="faint" style={{ fontSize: 11 }}>
+                「よかった」側(減算 — 先頭が投票画面の表示語)
+              </div>
+              <QuizStringList
+                values={qz.goodWords}
+                placeholder="よかった"
+                max={QUIZ_WORDS_MAX}
+                lenMax={QUIZ_WORD_LEN_MAX}
+                addLabel="ワードを追加"
+                onChange={(goodWords) => patchQz({ goodWords })}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div className="faint" style={{ fontSize: 11 }}>
+                「だめ」側(増加 — 先頭が投票画面の表示語)
+              </div>
+              <QuizStringList
+                values={qz.badWords}
+                placeholder="だめ"
+                max={QUIZ_WORDS_MAX}
+                lenMax={QUIZ_WORD_LEN_MAX}
+                addLabel="ワードを追加"
+                onChange={(badWords) => patchQz({ badWords })}
+              />
+            </div>
+          </div>
+
+          <h4 style={{ marginTop: 16 }}>時間と増減幅</h4>
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+            <label className="field" style={{ width: 130 }}>
+              制限時間(秒)
+              <input
+                type="number"
+                min={QUIZ_DURATION_MIN_SEC}
+                max={QUIZ_DURATION_MAX_SEC}
+                value={qz.durationSec}
+                onChange={(e) => patchQz({ durationSec: Number(e.target.value) })}
+              />
+            </label>
+            <label className="field" style={{ width: 130 }}>
+              投票タイム(秒)
+              <input
+                type="number"
+                min={QUIZ_VOTE_MIN_SEC}
+                max={QUIZ_VOTE_MAX_SEC}
+                value={qz.voteSec}
+                onChange={(e) => patchQz({ voteSec: Number(e.target.value) })}
+              />
+            </label>
+            <label
+              className="field"
+              style={{ width: 130 }}
+              title={`よかった多数で減算、だめ多数で増加する量(${num(QUIZ_AMOUNT_MIN)}〜${num(QUIZ_AMOUNT_MAX)})`}
+            >
+              増減幅
+              <input
+                type="number"
+                min={QUIZ_AMOUNT_MIN}
+                max={QUIZ_AMOUNT_MAX}
+                value={qz.amount}
+                onChange={(e) => patchQz({ amount: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+
+          <h4 style={{ marginTop: 16 }}>音と導入カット</h4>
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+            <label className="field" style={{ width: 240 }} title="発動の瞬間からモニターで流れる BGM(お題モードの予告)。">
+              発動中の BGM
+              <select value={qz.bgm} onChange={(e) => patchQz({ bgm: e.target.value })}>
+                <option value="off">off(鳴らさない)</option>
+                {[...ROULETTE_BGM, ...BAND_BGM].map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label}
+                  </option>
+                ))}
+                {isCustomSoundId(qz.bgm) ? (
+                  <option value={qz.bgm}>取込み: {customSoundFileName(qz.bgm)}</option>
+                ) : null}
+              </select>
+            </label>
+            <label className="field" style={{ width: 110 }}>
+              BGM 音量
+              <input
+                type="number"
+                min="0"
+                max="100"
+                value={qz.bgmVolume}
+                onChange={(e) => patchQz({ bgmVolume: Number(e.target.value) })}
+              />
+            </label>
+            <label
+              className="field"
+              style={{ width: 240 }}
+              title="お題ルーレットの前に流す全面カット動画。off なら回転から始まります(再生枠 — 素材は全面カットのカタログから選びます)。"
+            >
+              導入の全面カット
+              <select value={qz.introClip} onChange={(e) => patchQz({ introClip: e.target.value })}>
+                <option value="off">off(導入なし — 回転から開始)</option>
+                <FxClipOptions />
+              </select>
+            </label>
+          </div>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            発動中はモニターにお題と残り秒が全画面で出ます。モニターを閉じているときは演出なしで
+            即座に制限時間が始まります(投票と増減は必ず実行されます)。停止・リセット・達成・
+            この機能を OFF にすると進行中のお題は打ち切られます(増減は適用されません)。
+          </div>
+        </>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn small" onClick={() => onPatch({ quiz: structuredClone(DEFAULT_QUIZ) })}>
+          お題ルーレット設定を既定に戻す
         </button>
       </div>
     </>

@@ -33,6 +33,7 @@ function snap(over: Partial<FxStockSnapshot> = {}): FxStockSnapshot {
     boosts: [],
     bands: [],
     revolutions: [],
+    quizzes: [],
     joinRoulettes: [],
     hotRoulettes: [],
     roulettes: [],
@@ -354,13 +355,14 @@ describe('monitor.css との整合(テキスト検査)', () => {
 });
 
 describe('fx-priority 序列との整合(v0.8.0)', () => {
-  it('STOCK_SECTION_ORDER は優先度表から導出される(boost→join→hot→band→roulette)', () => {
+  it('STOCK_SECTION_ORDER は優先度表から導出される(boost→join→hot→band→revolution→quiz→roulette)', () => {
     expect(STOCK_SECTION_ORDER).toEqual([
       'boost',
       'join-roulette',
       'hot-roulette',
       'band',
       'revolution',
+      'quiz',
       'roulette',
     ]);
   });

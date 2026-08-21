@@ -55,6 +55,9 @@ describe('MonitorView の <video> ホルダー(ソース不変条件)', () => {
         'rl-hot-intro',
         'stock-cutin',
         'tap-lock-cutin',
+        // お題ルーレットの導入全面カット(2026-08-21 追加)。再生枠のみ —
+        // 素材(introClip)未設定なら startQuizFx が段ごとスキップする。
+        'quiz-cutin',
       ].sort()
     );
   });

@@ -64,6 +64,13 @@ export type RpcMap = {
    * カウントダウン5秒)から開く。drop はプレーン即発動へ倒す(効果は破棄しない)。
    */
   'challenge.revolutionCue': { p: D.ChallengeRevolutionCue; r: void };
+  /**
+   * アーム済みお題ルーレットの合図(revolutionCue の鏡像)。worker はギフト着弾で
+   * 予約するだけで、窓はモニターが「発動時点の演出キューを消化し切った」あと
+   * 前置き(導入カット+回転+決定表示)を再生し始めた瞬間 + preMs から開く。
+   * drop はプレーン即発動へ倒す(投票と±の効果は破棄しない)。
+   */
+  'challenge.quizCue': { p: D.ChallengeQuizCue; r: void };
 
   // queries
   'q.viewerTable': { p: { sessionId: number | null } & D.ViewerTableQuery; r: D.Page<D.ViewerTableRow> };
@@ -210,6 +217,7 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'challenge.fxCaps': 'worker',
   'challenge.boostCue': 'worker',
   'challenge.revolutionCue': 'worker',
+  'challenge.quizCue': 'worker',
   'q.viewerTable': 'worker',
   'q.viewer': 'worker',
   'q.recallCard': 'worker',

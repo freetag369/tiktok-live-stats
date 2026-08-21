@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { BrowserWindow, screen, type Display } from 'electron';
+import { boundsOnAnyDisplay } from './monitor-geometry';
 import { hardenWebContents, revealWhenReady } from './window';
 
 /**
@@ -115,12 +116,24 @@ export function getMonitorWindowPid(): number | null {
 }
 
 /** 配信中の HDMI 抜け対策 — ディスプレイ構成が変わったら置き直す。 */
-export function repositionMonitor(displayId: number | null, windowed: boolean): void {
+export function repositionMonitor(displayId: number | null, windowed: boolean, force = false): void {
   const win = getMonitorWindow();
   if (!win) return;
   const picked = pickDisplay(displayId);
   const fullscreen = picked.fullscreen && !windowed;
   const useSimpleFs = process.platform === 'darwin';
+  // display-added/removed は無関係なディスプレイの増減(キャプチャ用の仮想
+  // ディスプレイ・ドッキング・一部環境のモニタースリープ復帰)でも発火する。
+  // ウィンドウ表示で現にどこかの画面に掛かっている窓を無条件に既定位置
+  // (+50,+50 506×900)へ戻すと、配信者の手動配置(OBS の構図)がイベントの
+  // たびに壊れる。動かしてよいのは (a) 設定変更などの明示指示(force)
+  // (b) 全画面との行き来が要る遷移 (c) 消えたディスプレイに取り残されて
+  // どの画面にも掛かっていないとき、だけ。
+  if (!force && !fullscreen) {
+    const winFullscreen = win.isFullScreen() || (useSimpleFs && win.isSimpleFullScreen());
+    const displays = screen.getAllDisplays().map((d) => d.bounds);
+    if (!winFullscreen && boundsOnAnyDisplay(win.getBounds(), displays)) return;
+  }
   if (useSimpleFs) win.setSimpleFullScreen(false);
   else win.setFullScreen(false);
   win.setBounds(

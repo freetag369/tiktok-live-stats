@@ -146,6 +146,11 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       // がモニター(HUD・終了カウントダウン)へ届いている必要がある。
       if (challenge.revolutionCue(p)) session.nudgeChallenge();
     },
+    'challenge.quizCue': async (p) => {
+      // revolutionCue と同じ理由で即時 nudge — 窓が開くより先に ChallengeState.quiz
+      // (お題・絶対時刻)がモニターの常設オーバーレイへ届いている必要がある。
+      if (challenge.quizCue(p)) session.nudgeChallenge();
+    },
 
     'q.viewerTable': async (p) => store.getSessionViewerTable(p.sessionId, p),
     'q.viewer': async (p) => store.getViewer(p.userId, p.sessionId),
@@ -251,6 +256,7 @@ type HandlerMap = {
   'challenge.fxCaps': (p: { bandFx: boolean }) => Promise<void>;
   'challenge.boostCue': (p: D.ChallengeBoostCue) => Promise<void>;
   'challenge.revolutionCue': (p: D.ChallengeRevolutionCue) => Promise<void>;
+  'challenge.quizCue': (p: D.ChallengeQuizCue) => Promise<void>;
   'q.viewerTable': (p: { sessionId: number | null } & D.ViewerTableQuery) => Promise<unknown>;
   'q.viewer': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;
   'q.recallCard': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;

@@ -10,6 +10,15 @@ import {
   type FxDrainQueues,
 } from '@shared/fx-drain';
 import { fxRank } from '@shared/fx-priority';
+import {
+  JOIN_ROULETTE_QUEUE_MAX,
+  PENDING_BANDS_MAX,
+  PENDING_BOOSTS_MAX,
+  PENDING_QUIZZES_MAX,
+  PENDING_REVOLUTIONS_MAX,
+  ROULETTE_HOT_QUEUE_MAX,
+  ROULETTE_QUEUE_MAX,
+} from '@shared/challenge';
 
 /**
  * ドレイン順序の凍結。順序の権威は fx-priority.ts の FX_PRIORITY_ORDER
@@ -27,6 +36,7 @@ function q(over: Partial<Q> = {}): Q {
     boosts: [],
     bands: [],
     revolutions: [],
+    quizzes: [],
     joinRoulettes: [],
     hotRoulettes: [],
     roulettes: [],
@@ -35,7 +45,7 @@ function q(over: Partial<Q> = {}): Q {
 }
 
 describe('FX_DRAIN_SEQ — 走査順は優先度表から導出される', () => {
-  it('strike → boost → join → hot → band → revolution → roulette(序列②③④⑥⑥.5⑦⑦.5⑧の写像)', () => {
+  it('strike → boost → join → hot → band → revolution → quiz → roulette(序列②③④⑥⑥.5⑦⑦.5⑦.6⑧の写像)', () => {
     expect(FX_DRAIN_SEQ).toEqual([
       'strike',
       'boost',
@@ -43,6 +53,7 @@ describe('FX_DRAIN_SEQ — 走査順は優先度表から導出される', () =>
       'hot-roulette',
       'band',
       'revolution',
+      'quiz',
       'roulette',
     ]);
   });
@@ -165,14 +176,31 @@ describe('runFxDrain — 「何かが始まるまで」のドライバ', () => {
     expect(queues.achieved).toBeNull(); // 2周目で再度拾わない
   });
 
-  it('満杯キューを全部断ると呼び出しは 37 回(= 1+4+4+4+24。上限の到達不能性の凍結)', () => {
+  it('満杯キューを全部断っても FX_DRAIN_MAX_STEPS に届かない(定数から導出して凍結)', () => {
+    // 旧版は 1+4+4+4+24=37 のハードコードで revolutions / quizzes / hotRoulettes を
+    // 数え漏れており、キュー上限のドリフト(PENDING_REVOLUTIONS_MAX 2→3)を検出
+    // できなかった。**全キューを実際の上限どおり満杯にし、期待値も定数から導く** —
+    // どれかの上限を上げてこの不等式が破れたら FX_DRAIN_MAX_STEPS も上げること。
+    const fill = (n: number, p: string): string[] => Array.from({ length: n }, (_, i) => `${p}${i}`);
     const queues = q({
       strike: { like: 1, stock: 1 },
-      boosts: ['b1', 'b2', 'b3', 'b4'],
-      bands: ['c1', 'c2', 'c3', 'c4'],
-      joinRoulettes: ['j1', 'j2', 'j3', 'j4'],
-      roulettes: Array.from({ length: 24 }, (_, i) => `r${i}`),
+      boosts: fill(PENDING_BOOSTS_MAX, 'b'),
+      bands: fill(PENDING_BANDS_MAX, 'c'),
+      revolutions: fill(PENDING_REVOLUTIONS_MAX, 'v'),
+      quizzes: fill(PENDING_QUIZZES_MAX, 'q'),
+      joinRoulettes: fill(JOIN_ROULETTE_QUEUE_MAX, 'j'),
+      hotRoulettes: fill(ROULETTE_HOT_QUEUE_MAX, 'h'),
+      roulettes: fill(ROULETTE_QUEUE_MAX, 'r'),
     });
+    const expected =
+      1 +
+      PENDING_BOOSTS_MAX +
+      PENDING_BANDS_MAX +
+      PENDING_REVOLUTIONS_MAX +
+      PENDING_QUIZZES_MAX +
+      JOIN_ROULETTE_QUEUE_MAX +
+      ROULETTE_HOT_QUEUE_MAX +
+      ROULETTE_QUEUE_MAX;
     let calls = 0;
     const r = runFxDrain(queues, {
       start: () => {
@@ -180,7 +208,7 @@ describe('runFxDrain — 「何かが始まるまで」のドライバ', () => {
         return false;
       },
     });
-    expect(calls).toBe(37);
+    expect(calls).toBe(expected);
     expect(calls).toBeLessThan(FX_DRAIN_MAX_STEPS);
     expect(r.started).toBeNull();
   });
@@ -200,6 +228,7 @@ describe('runFxDrain — 「何かが始まるまで」のドライバ', () => {
       boosts: [],
       bands: [],
       revolutions: [],
+      quizzes: [],
       joinRoulettes: [],
       hotRoulettes: [],
       roulettes: [{ e: 'R1', resumeAt: 3 }],
