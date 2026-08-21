@@ -32,8 +32,8 @@ import {
   JOIN_ROULETTE_MIN_GAP_MS,
   LIKE_FX_WINDOW_MS,
   ROULETTE_DRAWS_MAX,
-  ROULETTE_HOT_PATTERNS,
   rouletteHotMultiplier,
+  rouletteHotPatternPool,
   drawRouletteIndex,
   rouletteRarity,
   giftFxRepeat,
@@ -62,6 +62,7 @@ import {
   REVOLUTION_MAX_MS,
 } from '@shared/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
+import { REVOLUTION_RESULT_MS, REVOLUTION_SETTLE_BUDGET_MS } from '@shared/revolution-settle';
 import { clampFutureMs } from '@shared/time';
 import { drawRoulettePattern } from '@shared/roulette-fx';
 import { BoundedSet } from '@shared/bounded-set';
@@ -501,6 +502,32 @@ export class ChallengeEngine {
     flash: boolean;
   } | null = null;
   /**
+   * 結果カットシーンの尺の焼き込み(0 = 発表なし)。boostResultMs と同じ流儀で
+   * commit 時に確定する — プレーン発動(モニター不在・reduced-motion)は 0。
+   */
+  private revolutionResultMs = 0;
+  /**
+   * ── 窓単位の戦果カウンタ4本 ──
+   * revolution-end に載せて結果カットシーンで発表する。**stats の差分では取れない**:
+   * ①導入(11秒)中に溜めた等倍タップは窓オープン+凍結余白の後にドレインされるので、
+   *   commit 時スナップショットとの差分に必ず混ざる(しかも「まだ押す時間ではない」
+   *   合図で溜めさせたぶんなので、戦果として数えるのは仕様に反する)
+   * ②フィーバー窓は革命窓と排他ではない(activateBoost が延期するのは tapLock だけ)。
+   *   シネマティックのフィーバーは settleBoost で stats.presses だけを増やし
+   *   pressDownTotal を増やさないので、差分方式だと「タップ回数だけ増えて減算合計は
+   *   増えない」食い違いになる
+   * そこで press の**革命枝だけ**・いいねの**反転枝だけ**で直接数える。
+   * 窓の重ねがけ(期限の加算)は commitRevolutionState を通らないので、
+   * カウンタは1本の窓として継続する(= 窓1本につき結果カットシーン1回)。
+   */
+  private revTapCount = 0;
+  /** 窓中のタップによる実減少量(残量クランプ後 — 画面上で実際に減った量)。 */
+  private revTapDown = 0;
+  /** 窓中の反転いいね(ゲージ満タン)による減算。 */
+  private revLikeDown = 0;
+  /** 窓中の反転いいね(ストック満杯)による減算。 */
+  private revStockDown = 0;
+  /**
    * ゲージ満タンのうち革命(反転)中に着弾した回数の累計。likeFills と同じ
    * 単調増加規約(reset でも巻き戻さない)— モニターの据え置き会計が
    * `(fills−prevF) − (downFills−prevDF)` で符号を復元する唯一のソース。
@@ -865,6 +892,11 @@ export class ChallengeEngine {
       this.pressDownTotal += revApplied;
       this.value -= revApplied;
       this.stats.presses++;
+      // 窓の戦果(結果カットシーンで発表する)。**この枝だけで数える**のが肝 —
+      // フィーバー枝は上で return 済み、導入中の溜めタップは下の専用枝なので、
+      // ここに来たものだけが「窓の中で押されて倍率が効いたタップ」になる。
+      this.revTapCount++;
+      this.revTapDown += revApplied;
       this.pushEffect({
         kind: 'press',
         amount: revApplied === 0 ? 0 : -revApplied,
@@ -921,6 +953,10 @@ export class ChallengeEngine {
         this.value -= introApplied;
         this.stats.presses++;
         this.pressDownTotal += introApplied;
+        // **revTapCount / revTapDown には足さない。** ここは「まだ押す時間ではない」と
+        // 合図しておいて溜めたぶんで、倍率も効いていない(等倍)。結果カットシーンの
+        // 「タップ N回」に混ぜると、フライングを戦果として褒めることになり、
+        // 溜めさせた判断(すぐ上のコメント)と矛盾する。
         this.pushEffect({
           kind: 'press',
           amount: introApplied === 0 ? 0 : -introApplied,
@@ -1138,7 +1174,13 @@ export class ChallengeEngine {
           amount: m?.amount ?? 0,
           ...(m?.flash ? { flash: true } : {}),
           nickname: 'テスト',
-          giftName: 'テストギフト',
+          // 角括弧付きなのは実データと見分けるため — モニターは実名の無いギフトを
+          // 素の「ギフト」と表示する(MonitorView の `e.giftName ?? 'ギフト'`)ので、
+          // 括弧を外すと本物のギフトカードと区別が付かなくなる。
+          // **括弧は半角**。ギフトカードの名前欄(.gc-name)は max-width 134px ÷
+          // font-size 30px で全角 4.4 文字しか入らず、全角の ［ ］ だと5文字ぶんに
+          // なって閉じ括弧が ellipsis で落ちる(旧「テストギフト」も6文字で切れていた)。
+          giftName: '[ギフト]',
           // カットインは effect 1件で自己完結の流儀(handleEvent と同じ)。
           // fxFreezeUntilMs は張らない — テストで実イベントの適用を止めない。
           ...(cutClip ? { fxBandClip: cutClip, fxDurationMs } : {}),
@@ -1248,13 +1290,15 @@ export class ChallengeEngine {
         // 弾くと試し見ができなくなる。抽選に任せる経路だけ許可リストへ従う
         // (rarity の条件付けもライブ経路と同じ — 実演と本番で分布を変えない)。
         // 激熱確定は入室ルーレットには無い(RouletteHotConfig の解説)ので gr 側だけ見る。
-        // 実演でも本番と同じ倍率・同じ絵柄3種を通す — 「実演では出るのに本番で違う」を作らない。
+        // 実演でも本番と同じ倍率・同じ絵柄を通す — 「実演では出るのに本番で違う」を作らない。
+        // **絵柄の候補は gr(ギフト行)から引く** — rl は JoinRouletteConfig との合併型で
+        // giftId を持たない。hotMult > 1 は gr?.hot 由来なので、そのとき gr は必ず非 null。
         const hotMult = rl.direction === 'sub' ? 1 : rouletteHotMultiplier(gr?.hot);
         const pat =
           spec.pattern ??
           drawRoulettePattern(
             this.fxRand,
-            hotMult > 1 ? ROULETTE_HOT_PATTERNS : rl.patterns,
+            hotMult > 1 ? rouletteHotPatternPool(gr) : rl.patterns,
             rouletteRarity(rl.segments, idx)
           );
         // 実演は常に1スピン。ライブ経路と同じ配列形で積む(モニターの再生経路を
@@ -1587,6 +1631,9 @@ export class ChallengeEngine {
           this.value -= applied;
           this.stats.likeDown += applied;
           this.likeDownFills += units;
+          // 窓の戦果(結果カットシーンの「いいね反転」)。stats.likeDown は
+          // チャレンジ通算なので窓単位では使えない — ここで別に数える。
+          this.revLikeDown += applied;
           this.likeFxPending -= applied;
         } else {
           this.value += amount; // 加算方向はクランプ不要
@@ -1634,13 +1681,14 @@ export class ChallengeEngine {
               this.value -= appliedBonus;
               this.stats.likeStockDown += appliedBonus;
               this.stockDownFills += stockUnits;
-              // -0 を作らない(settleBoost の boost-end と同じ理由)。
-              if (allowFx) {
-                this.pushEffect({
-                  kind: 'stock-full',
-                  amount: appliedBonus === 0 ? 0 : -appliedBonus,
-                  atMs: nowMs,
-                });
+              // 窓の戦果(ゲージ側 revLikeDown と合算して発表する)。
+              this.revStockDown += appliedBonus;
+              // 額 0 は積まない(いいね側の `likeFxPending !== 0` と同じ規約)。
+              // -0 を作らないだけでなく **0 そのものを出さない** — モニターの
+              // 反転バナーは `e.amount < 0` で分岐するので、0 を積むと通常の
+              // 加算枝へ落ちて赤い「+0 いいねストック満杯!」が出てしまう。
+              if (allowFx && appliedBonus > 0) {
+                this.pushEffect({ kind: 'stock-full', amount: -appliedBonus, atMs: nowMs });
               }
             } else {
               this.value += bonus; // 加算方向はクランプ不要
@@ -1875,13 +1923,14 @@ export class ChallengeEngine {
             // レア出目ほど激アツが出やすいがガセもある(結果の確定予告にはならない。
             // 詳細は roulette-fx.ts の ROULETTE_TIER_WEIGHTS)。fxRand の消費は
             // 従来どおり1抽選1回 — 出目(this.rand)の再現性には影響しない。
-            // 激熱確定は絵柄を3種(獅子・黄金龍・不死鳥)に固定する — 導入動画と
-            // スピンの絵を対にする仕様なので、行の patterns(チェック)は見ない。
+            // 激熱確定は絵柄を固定する — 導入動画とスピンの絵を対にする仕様なので、
+            // 行の patterns(チェック)は見ない。ギフト連動の行(DJメガネ)は候補が
+            // 1件になって 100% その絵柄、それ以外は3種(獅子・黄金龍・不死鳥)の抽選。
             // **fxRand の消費はどちらの枝でもちょうど1回**(drawRoulettePattern の規約)。
             pats.push(
               drawRoulettePattern(
                 this.fxRand,
-                hotMult > 1 ? ROULETTE_HOT_PATTERNS : rl.patterns,
+                hotMult > 1 ? rouletteHotPatternPool(rl) : rl.patterns,
                 rouletteRarity(rl.segments, idx)
               )
             );
@@ -2142,7 +2191,9 @@ export class ChallengeEngine {
       // 窓が実際に開いていた(コミット済み)ときだけ終了の合図を積む。**アーム止まり
       // では積まない** — settleBoost がアーム止まりの boost-end を積まないのと同じで、
       // 一度も開いていない窓の「終了」は履歴でも演出でも嘘になる。
-      this.pushRevolutionEnd(this.now());
+      // cinematic:false — 機能OFF は逃げ道であって祝う場面ではない
+      // (結果カットシーンの 6 秒を挟むと「切ったのに黙る」になる)。
+      this.pushRevolutionEnd(this.now(), { cinematic: false });
       this.clearRevolution();
       if (armed && this.fxFreezeUntilMs !== null) {
         this.fxFreezeUntilMs = this.now();
@@ -2164,7 +2215,9 @@ export class ChallengeEngine {
         this.armFreezeTimer();
       }
       // 革命も逃げ道に含める(チャレンジ全体 OFF — stop() と同じ判断で窓ごと破棄)。
-      this.pushRevolutionEnd(this.now());
+      // cinematic:false — 機能OFF は逃げ道であって祝う場面ではない
+      // (結果カットシーンの 6 秒を挟むと「切ったのに黙る」になる)。
+      this.pushRevolutionEnd(this.now(), { cinematic: false });
       this.clearRevolution();
       // フィーバーと凍結も逃げ道に含める — 封印だけ解除しても、アーム済みの
       // フィーバーが 60 秒後の期限切れで「無効化済み機能の全画面演出」を強制発動し、
@@ -3371,7 +3424,9 @@ export class ChallengeEngine {
       };
     } else {
       // プレーンモードは待つ理由がない(映像が無い)ので即窓オープン。
-      this.commitRevolutionState(atMs, durationMs, rv.multiplier, pressStep, nickname, rv.label);
+      // 結果カットシーンは 0 — 映像が無いモードなので発表する舞台も無い
+      // (boostResultMs をプレーンで 0 にするのと同じ)。
+      this.commitRevolutionState(atMs, durationMs, rv.multiplier, pressStep, nickname, rv.label, 0);
     }
     const effectId = this.pushEffect({
       kind: 'revolution-start',
@@ -3413,11 +3468,19 @@ export class ChallengeEngine {
     multiplier: number,
     pressStep: number,
     nickname: string,
-    label: string
+    label: string,
+    resultMs: number
   ): void {
     // コミット時にも破棄する(commitBoost と同じ二重の防御)— アームしてから
     // 窓が開くまでの最長 60 秒の間に ▶実演を張られる経路があるため。
     this.clearTestBoost();
+    // 戦果カウンタは窓単位。clearRevolution でも落とすが、ここでも落とす
+    // (二重の防御 — 「窓が開くたびに 0 から」の意図を明示する)。
+    this.revTapCount = 0;
+    this.revTapDown = 0;
+    this.revLikeDown = 0;
+    this.revStockDown = 0;
+    this.revolutionResultMs = resultMs;
     this.revolutionStartMs = startMs;
     this.revolutionUntilMs = startMs + durationMs;
     this.revolutionMultiplier = multiplier;
@@ -3448,7 +3511,8 @@ export class ChallengeEngine {
       a.multiplier,
       a.pressStep,
       a.nickname,
-      a.label
+      a.label,
+      cinematic ? REVOLUTION_RESULT_MS : 0
     );
     if (cinematic) {
       // 暫定期限(deadlineMs 起点)から実際の再生に合わせて張り直す = 必ず短縮方向。
@@ -3530,7 +3594,21 @@ export class ChallengeEngine {
       REVOLUTION_MAX_MS + REVOLUTION_INTRO_MS + REVOLUTION_COUNT_MS
     );
     if (nowMs < this.revolutionUntilMs) return;
-    this.pushRevolutionEnd(nowMs);
+    const resultMs = this.pushRevolutionEnd(nowMs, { cinematic: true });
+    if (resultMs > 0) {
+      // 結果カットシーン(6秒の全面カット)の上に他演出を重ねない。
+      // **据え置き(heldValue)は張らない** — 革命は窓中に即時反映済みで清算 lump が
+      // 無いため。したがって押下は従来どおり凍結を素通しして即時に効き(通常経路)、
+      // 数字は幕の裏で正しく動き続ける = 幕明けに飛ばない。恒久ルール
+      // 「走行中のタップは演出より優先」と矛盾しない。
+      // **ベストエフォート**: 他演出の最中に revolution-end が届くとモニターは
+      // 持ち越すので、凍結のほうが先に切れうる。値の正しさには影響しない。
+      // Math.max は必須(帯域カットインなどの既存の凍結を短縮しない)。
+      this.fxFreezeUntilMs = Math.max(
+        this.fxFreezeUntilMs ?? nowMs,
+        nowMs + resultMs + REVOLUTION_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
+      );
+    }
     this.clearRevolution();
     // 窓の符号境界(閉じる側)。開く側(commitRevolutionState)と対。
     this.forceFlushLikeFx();
@@ -3551,15 +3629,29 @@ export class ChallengeEngine {
    * stop / reset / 達成はこれを呼ばない — あちらは status 遷移そのものが合図で、
    * モニターは idle/achieved の監視で全演出を畳む(clearTapLock も同じ扱い)。
    */
-  private pushRevolutionEnd(nowMs: number): void {
-    if (this.revolutionUntilMs === null) return;
+  private pushRevolutionEnd(nowMs: number, opts: { cinematic: boolean }): number {
+    if (this.revolutionUntilMs === null) return 0;
+    const likeDown = this.revLikeDown + this.revStockDown;
+    const downTotal = this.revTapDown + likeDown;
+    // 結果カットシーンは「窓が満了して、実際に減らせた」ときだけ。
+    // 機能OFF は逃げ道であって祝う場面ではない(切った直後に9秒黙るのは契約違反)。
+    // 減らせなかった窓(誰も押さずいいねも来なかった)も発表する物が無い。
+    const resultMs = opts.cinematic && downTotal > 0 ? this.revolutionResultMs : 0;
     this.pushEffect({
       kind: 'revolution-end',
+      // **0 のまま**。窓中に即時反映済みで清算 lump が無く、ここを負にすると
+      // valueAfter の会計とモニターの据え置き計算が壊れる。数字は専用フィールドで運ぶ。
       amount: 0,
       revolutionMultiplier: this.revolutionMultiplier,
       revolutionMs: this.revolutionUntilMs - this.revolutionStartMs,
+      revolutionDownTotal: downTotal,
+      revolutionTapCount: this.revTapCount,
+      revolutionLikeDown: likeDown,
+      ...(resultMs > 0 ? { revolutionResultMs: resultMs } : {}),
+      ...(this.revolutionNickname !== '' ? { nickname: this.revolutionNickname } : {}),
       atMs: nowMs,
     });
+    return resultMs;
   }
 
   /** 革命の破棄(start/stop/reset/達成/機能OFFの共通出口 — 予約ごと落とす)。 */
@@ -3571,6 +3663,11 @@ export class ChallengeEngine {
     this.revolutionPressStep = 1;
     this.revolutionNickname = '';
     this.revolutionLabel = '';
+    this.revolutionResultMs = 0;
+    this.revTapCount = 0;
+    this.revTapDown = 0;
+    this.revLikeDown = 0;
+    this.revStockDown = 0;
   }
 
   /** stop 用の強制適用。保留分を残さず適用する(ドレイン中の再凍結は無視)。 */

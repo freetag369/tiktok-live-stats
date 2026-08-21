@@ -11,6 +11,7 @@ import * as QV from './queries/viewers';
 import * as QS from './queries/sessions';
 import * as QC from './queries/comments';
 import * as QA from './queries/analytics';
+import * as QG from './queries/gifts';
 import { backupTo, exportCsv, purge, rebuildLifetime } from './export';
 
 /**
@@ -480,6 +481,11 @@ export class Store {
 
   getViewerLikeSeries(userId: UserId, limitSessions: number): D.LikeSeriesPoint[] {
     return QC.getViewerLikeSeries(this.db, userId, limitSessions);
+  }
+
+  /** 受信済み全ギフトの一覧(設定画面「ギフトリスト」タブ)。全走査なので都度呼びしない。 */
+  listGiftCatalog(): D.GiftCatalogRow[] {
+    return QG.listGiftCatalog(this.db);
   }
 
   // ── P1 analytics ──────────────────────────────────────────────────────────

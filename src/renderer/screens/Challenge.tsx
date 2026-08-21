@@ -27,7 +27,7 @@ import type {
   RoulettePattern,
   RouletteTeaseConfig,
 } from '@shared/dto';
-import { ROULETTE_PATTERNS } from '@shared/dto';
+import { ROULETTE_SELECTABLE_PATTERNS } from '@shared/dto';
 import {
   CHALLENGE_MINI_IDS,
   CHALLENGE_SE_SLOTS,
@@ -48,7 +48,9 @@ import {
   DEFAULT_MINI_FX,
   DEFAULT_JOIN_ROULETTE,
   DEFAULT_ROULETTE,
+  DEFAULT_ROULETTES,
   DEFAULT_ROULETTE_HOT,
+  DEFAULT_ROULETTE_PATTERNS,
   DEFAULT_SE_VOLUMES,
   ROULETTE_FULL_REELS,
   ROULETTE_HOT_MULT_MAX,
@@ -92,6 +94,7 @@ import {
   rouletteSoundOverrideToggle,
   clampRouletteHotMult,
   rouletteHotMults,
+  rouletteHotPatternPool,
 } from '@shared/challenge';
 import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { num } from '@shared/format';
@@ -103,6 +106,7 @@ import { useLive } from '../state/liveStore';
 import { playSe, SE_SOUNDS } from '../lib/se';
 import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
 import { FX_CLIPS, FX_CLIP_GROUPS, isFullCutClip } from '../lib/fx';
+import { GiftListSection } from './ChallengeGiftList';
 
 /**
  * クリップ選択の <option> 群。**2箇所(全面カット / ダイヤ数帯)で共有**する
@@ -332,7 +336,8 @@ type Tab =
   | 'helper'
   | 'revolution'
   | 'boost'
-  | 'taplock';
+  | 'taplock'
+  | 'giftlist';
 
 const TABS: Array<[Tab, string]> = [
   ['basic', '基本設定'],
@@ -345,6 +350,8 @@ const TABS: Array<[Tab, string]> = [
   ['revolution', '革命'],
   ['boost', 'ブースト'],
   ['taplock', 'お邪魔'],
+  // 設定ではなく**参照用**の1枚(受信済みギフトの giftId 対応表)なので最後尾。
+  ['giftlist', 'ギフトリスト'],
 ];
 
 /**
@@ -594,6 +601,7 @@ export function Challenge(): React.JSX.Element {
         {tab === 'taplock' ? (
           <TapLockSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
         ) : null}
+        {tab === 'giftlist' ? <GiftListSection cfg={draft} /> : null}
       </div>
     </div>
   );
@@ -1326,14 +1334,21 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                   />
                 </label>
                 <MonitorTestBtn
-                  spec={r.clip !== 'off' ? { kind: 'gift', fullCutId: r.id, diamonds: 1 } : null}
+                  // クリップが 'off'(無演出)でも実演できる。カットインが無いギフトにも
+                  // ギフトカード・簡易演出・ジングルという見た目があり、むしろジングルは
+                  // カットインが無いときにしか鳴らない(useChallengeSe の gift 節)ので、
+                  // ここを塞ぐと t1〜t4 の音をこの行の文脈で確かめる手段が無くなる。
+                  // 「チェックする前に見てみたい」の試写規約(fanStamp / tapLock / roulette)と同じ扱い。
+                  // worker 側は clip='off' の行 id を渡されても usableFullCut が null になるだけで
+                  // 落ちない(testEffect の case 'gift' に早期 return は無い)。
+                  spec={{ kind: 'gift', fullCutId: r.id, diamonds: 1 }}
                   onTest={onTest}
                   busy={testBusy}
                   label="▶ モニター"
                   title={
                     r.clip !== 'off'
                       ? 'この行の全面カット(動画+音声)をモニターで実演再生。テスト中はカウントを止めません。'
-                      : 'カットイン動画を選ぶと実演再生できます'
+                      : 'カットイン無しの見た目(ギフトカード・簡易演出・効果音)をモニターで実演再生。この行は動画が「出さない」なので、本番でこの行のカットインは再生されません。'
                   }
                   style={{ alignSelf: 'flex-end' }}
                 />
@@ -1412,7 +1427,9 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
             giftId を入れるとそちらが優先され、確実に1つのギフトだけに絞れます(ライブのギフト履歴で確認できます)。
             ギフト名・giftId がどちらも空の行はどのギフトにも一致しません。音量は<b>効果音がオフのときは無音</b>になります。
             行の左の番号は<b>判定される順番</b>です(上の行が先勝ち)。上の絞り込みは<b>表示だけ</b>を変えるもので、
-            順番も設定も変えません。
+            順番も設定も変えません。「▶ モニター」は<b>カットイン動画が「出さない」の行でも押せます</b> —
+            そのときは動画と音声の代わりに、ギフトカード・簡易演出・効果音だけが出ます(動画を割り当てる前に、
+            無演出の見た目と見比べるためです)。
           </div>
 
           {preview ? (
@@ -1602,14 +1619,18 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
                   {auditionId === b.bgm ? '■' : '♪'}
                 </button>
                 <MonitorTestBtn
-                  spec={b.clip !== 'off' ? { kind: 'gift', bandId: b.id, diamonds: b.min } : null}
+                  // クリップが 'off'(無演出)でも実演できる — 理由は全面カット行の同じ
+                  // ボタンのコメントを参照。BGM だけ設定してある帯は実演でも鳴らない:
+                  // ライブ経路の matchGiftBand が clip !== 'off' の帯しか返さないので、
+                  // 本番でも鳴らないほうへ揃える(「実演では出るのに本番で出ない」を作らない)。
+                  spec={{ kind: 'gift', bandId: b.id, diamonds: b.min }}
                   onTest={onTest}
                   busy={testBusy}
                   label="▶ モニター"
                   title={
                     b.clip !== 'off'
                       ? 'この帯域のカットイン(動画+BGM)をモニターで実演再生。テスト中はカウントを止めません。'
-                      : 'カットイン動画を選ぶと実演再生できます'
+                      : `カットイン無しの見た目(ギフトカード・簡易演出・効果音)を💎${b.min} 相当でモニターに実演再生。BGM はカットインと一緒でないと鳴りません。`
                   }
                   style={{ alignSelf: 'flex-end' }}
                 />
@@ -1649,6 +1670,8 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
           </div>
           <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginTop: 2 }}>
             BGM中はそのギフトの効果音(ジングル)は鳴りません。音量は効果音の設定とは独立です。
+            「▶ モニター」は<b>カットイン動画が「出さない」の帯域でも押せます</b> — そのときはカットインとBGMを
+            抜いた見た目(ギフトカード・簡易演出・効果音)だけが、その帯域の💎下限ぶんで出ます。
           </div>
           <div className="row" style={{ gap: 8, marginTop: 8 }}>
             <label className="field" style={{ flex: 1 }}>
@@ -2075,7 +2098,10 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
                   canonical: '',
                   segments: structuredClone(DEFAULT_ROULETTE.segments),
                   direction: 'add',
-                  patterns: [...ROULETTE_PATTERNS],
+                  // 既定と同じ配り方にする — ROULETTE_PATTERNS を配ると
+                  // オプトイン(ハート系)と激熱専用まで入り、保存時に
+                  // sanitizeRoulettePatterns が落として「未保存」表示が残る。
+                  patterns: [...DEFAULT_ROULETTE_PATTERNS],
                 },
               ],
             })
@@ -2085,9 +2111,9 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
         </button>
         <button
           className="btn small"
-          onClick={() => onPatch({ roulettes: [structuredClone(DEFAULT_ROULETTE)] })}
+          onClick={() => onPatch({ roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[] })}
         >
-          既定(ハートミー1件)に戻す
+          既定(ハートミー・DJメガネ)に戻す
         </button>
       </div>
       <JoinRouletteSection cfg={cfg} onPatch={onPatch} onTest={onTest} testBusy={testBusy} audition={audition} />
@@ -2339,6 +2365,13 @@ const ROULETTE_PATTERN_LABELS: Record<RoulettePattern, { label: string; hint: st
     label: '花咲ハート',
     hint: 'ハート型の花が満開に開く。動画3本(超激アツ・約24秒・動画演出)',
   },
+  // 激熱確定専用。ROULETTE_SELECTABLE_PATTERNS に居ないので下のチェック一覧には
+  // 出ないが、Record の網羅は残す — 次にパターンを足す人のラベル漏れを型で捕まえる
+  // 仕掛けを壊さないため(説明文の出し分けでもこの表を引いている)。
+  djglasses: {
+    label: 'DJメガネ',
+    hint: 'DJメガネのギフトで回る激熱確定の専用演出。通常のルーレットでは出ません',
+  },
 };
 
 /**
@@ -2376,7 +2409,7 @@ function RoulettePatternPicker({
         </span>
       </div>
       <div className="row" style={{ flexWrap: 'wrap', gap: '6px 14px', alignItems: 'center' }}>
-        {ROULETTE_PATTERNS.map((p) => {
+        {ROULETTE_SELECTABLE_PATTERNS.map((p) => {
           const checked = patterns.includes(p);
           // 全部外すと回れない(保存側は sanitizeRoulettePatterns が全許可へ倒すが、
           // UI では最後の1つを外せなくして「なぜか全部戻った」の混乱を防ぐ)。
@@ -2399,7 +2432,7 @@ function RoulettePatternPicker({
                       // 揃え、保存後に draft と差分が出る「保存したのに未保存
                       // マーク」を防ぐ。
                       e.target.checked
-                        ? ROULETTE_PATTERNS.filter((q) => q === p || patterns.includes(q))
+                        ? ROULETTE_SELECTABLE_PATTERNS.filter((q) => q === p || patterns.includes(q))
                         : patterns.filter((q) => q !== p)
                     )
                   }
@@ -2500,15 +2533,20 @@ function RouletteSegmentsEditor({
 function RouletteHotEditor({
   hot,
   segments,
+  trigger,
   onChange,
 }: {
   hot: RouletteHotConfig | undefined;
   /** 段の見本に使う盤面(一番大きい出目で「いくらになるか」を出す)。 */
   segments: ChallengeRouletteSegment[];
+  /** 絵柄の説明を出し分けるための行のトリガー。worker と同じ rouletteHotPatternPool を通す。 */
+  trigger: { giftId: string; giftName: string; canonical: string };
   onChange: (hot: RouletteHotConfig | undefined) => void;
 }): React.JSX.Element {
   const on = hot?.enabled === true;
   const mult = hot?.multiplier ?? DEFAULT_ROULETTE_HOT.multiplier;
+  // 絵柄は worker と同じ関数から出す — ギフト連動の行(DJメガネ)は1種に固定される。
+  const pool = rouletteHotPatternPool(trigger);
   // 見本は盤面の最大の出目 — 一番効く場所で額を見せる。空盤面は 1000 で代用。
   const top = segments.reduce((m, sg) => Math.max(m, sg.amount), 0) || 1000;
   const steps = rouletteHotMults(mult);
@@ -2551,8 +2589,10 @@ function RouletteHotEditor({
           </div>
           <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
             この行のギフトが来ると<b>100%</b>発動します。演出は
-            <b>獅子・黄金龍・不死鳥</b>の3種に固定され(上の演出パターンのチェックは
-            この行では使われません)、スロットに入る前に8秒の全画面動画が流れます。
+            <b>{pool.map((p) => ROULETTE_PATTERN_LABELS[p].label).join('・')}</b>
+            {pool.length === 1 ? 'に固定され' : `の${pool.length}種に固定され`}
+            (上の演出パターンのチェックはこの行では使われません)、スロットに入る前に
+            8秒の全画面動画が流れます。
             1本あたり約43秒かかるので、連打で届くと回した本数ぶん時間がかかります。
             他の演出より先に消化されます(ギフトのカットインより優先)。
           </div>
@@ -2666,6 +2706,7 @@ function RouletteRow({
         <RouletteHotEditor
           hot={rl.hot}
           segments={rl.segments}
+          trigger={{ giftId: rl.giftId, giftName: rl.giftName, canonical: rl.canonical }}
           onChange={(hot) => onPatch({ hot })}
         />
       ) : null}

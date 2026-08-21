@@ -57,6 +57,9 @@ describe('occlusionOfCutin — カットイン種別 → 幕の濃さ', () => {
       'stock-cutin': 'opaque',
       boost: 'opaque',
       revolution: 'opaque',
+      // お邪魔は 2026-08-20 に導入全面カット(5秒・音声焼き込み)を得て登録側へ移った。
+      // それまでは「幕を張らない常設 HUD だけ」だったので、意図的に未登録だった。
+      'tap-lock': 'opaque',
     };
     for (const [kind, expected] of Object.entries(table)) {
       expect(occlusionOfCutin(kind as FxCutinKind), kind).toBe(expected);

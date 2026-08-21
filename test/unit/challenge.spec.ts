@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { BOOST_ARM_MAX_MS, CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTE_PATTERNS, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, rouletteRemainingCount, rouletteStockCount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
+import { BOOST_ARM_MAX_MS, CHALLENGE_EFFECTS_MAX, CHALLENGE_SE_SLOTS, CHALLENGE_MONITOR_TOP_N, CHALLENGE_RESULT_TOP_N, COMMENT_RULES_MAX, DEFAULT_CHALLENGE, DEFAULT_FAN_STAMP, DEFAULT_GIFT_BAND_FX, DEFAULT_GIFT_FULL_CUT, DEFAULT_GIFT_REPEAT_FX, DEFAULT_MINI_FX, DEFAULT_ROULETTE, DEFAULT_ROULETTES, DEFAULT_ROULETTE_PATTERNS, DEFAULT_ROULETTE_SOUND, DEFAULT_SE_SOUNDS, DEFAULT_SE_VOLUMES, DEFAULT_TAP_BOOST, DEFAULT_TAP_BOOST_RULE, drawRouletteIndex, effectiveSeVolume, GIFT_FX_FREEZE_MARGIN_MS, GIFT_FX_FREEZE_MAX_MS, GIFT_FX_FREEZE_MAX_TOTAL_MS, GIFT_FX_REPEAT_MAX, GIFT_FX_REPEAT_MIN_MS, LIKE_FX_WINDOW_MS, matchFanStamp, matchGiftBand, matchGiftFullCut, matchGiftRule, matchTapBoost, migrateChallengeConfig, migrateChallengeGiftFullCut, migrateChallengeGiftFullCutTriggers, migrateChallengeGiftFullCutTriggersV5, migrateChallengeSeSounds, matchGiftTrigger, matchRoulette, matchRouletteTrigger, miniForSlot, ROULETTE_DRAWS_MAX, ROULETTE_LABEL_MAX, ROULETTE_REELS_MAX, ROULETTE_SEGMENTS_MAX, rouletteDrawCount, rouletteDraws, rouletteHeadline, rouletteRarity, rouletteBoardKey, rouletteReelCount, rouletteReelPlan, rouletteRemainingAmount, rouletteRemainingCount, rouletteStockCount, sameRouletteBoard, mergeRoulette, ROULETTES_MAX, TAP_BOOST_ACTIVATIONS_MAX, TAP_BOOST_COUNT_MS, TAP_BOOST_INTRO_MS, tapBoostActivationCount, tierForDiamonds, validateChallengeConfig } from '@shared/challenge';
 import type {
   ChallengeConfig,
   ChallengeEffect,
@@ -2139,10 +2139,14 @@ describe('validateChallengeConfig — hideRouletteResultInLog', () => {
 });
 
 describe('validateChallengeConfig — roulettes', () => {
-  it('roulettes/roulette どちらも無い(新規)は既定(ハートミー1件)へ', () => {
+  it('roulettes/roulette どちらも無い(新規)は既定(ハートミー + DJメガネ)へ', () => {
     const bare = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
     delete bare.roulettes;
-    expect(validateChallengeConfig(bare).roulettes).toEqual([DEFAULT_ROULETTE]);
+    expect(validateChallengeConfig(bare).roulettes).toEqual([...DEFAULT_ROULETTES]);
+    // 既定は validate の不動点 — ここが崩れると boot-settings の冪等検査も落ちる。
+    expect(validateChallengeConfig(structuredClone(DEFAULT_CHALLENGE)).roulettes).toEqual([
+      ...DEFAULT_ROULETTES,
+    ]);
   });
 
   it('旧 settings.json の単一 roulette は1件の配列へ移行し、盤面を保持する', () => {
@@ -4108,6 +4112,99 @@ describe('ChallengeEngine — 全面カットはダイヤ数帯より優先さ�
     const s = e.get();
     expect(s.value).toBe(1000); // 値は動かない
     expect(s.recentEffects[0]).toMatchObject({ amount: 0, fxBandClip: 'cut-rose', fxFullCut: true });
+  });
+});
+
+describe('ChallengeEngine — 設定画面の「▶ モニター」(testEffect の gift)', () => {
+  const V0 = DEFAULT_CHALLENGE.initialValue;
+
+  /** 全面カット行1本だけの設定。clip に 'off' を渡すと「無演出の行」になる。 */
+  function oneFullCut(clip: string): ChallengeConfig {
+    const c = fullCutCfg({ giftRules: [], giftDefault: null, flashMinDiamonds: null });
+    c.giftFullCut.rules = [
+      {
+        id: 'fc1',
+        label: 'バラ',
+        giftId: '',
+        giftName: 'rose',
+        canonical: '',
+        exactName: false,
+        clip,
+        durationSec: 5,
+        enabled: true,
+      },
+    ];
+    return c;
+  }
+
+  /** 帯域1本だけの設定。clip に 'off' を渡すと「無演出の帯」になる。 */
+  function oneBand(clip: string): ChallengeConfig {
+    const c = bandCfg({ giftRules: [], giftDefault: null, flashMinDiamonds: null });
+    c.giftBandFx.bands = [{ id: 'b1', min: 1, max: 50, clip, durationSec: 6, enabled: true, bgm: 'bgm-band1' }];
+    return c;
+  }
+
+  it('カットイン未設定(clip=off)の全面カット行でも実演は流れる — カットインだけが付かない', () => {
+    const e = engine(oneFullCut('off'));
+    e.start();
+    e.testEffect({ kind: 'gift', fullCutId: 'fc1', diamonds: 1 });
+    const s = e.get();
+    expect(s.value).toBe(V0); // 実演は値・統計に触らない
+    expect(s.fxFreezeUntilMs).toBeNull(); // 凍結も張らない
+    const fx = s.recentEffects[0]!;
+    expect(fx.kind).toBe('gift');
+    expect(fx.test).toBe(true);
+    // 帯域へは落ちない — bandId を渡していないので評価する帯そのものが無い。
+    expect(fx.fxBandClip).toBeUndefined();
+    expect(fx.fxFullCut).toBeUndefined();
+  });
+
+  it('カットイン未設定(clip=off)の帯域行は BGM も載せない(ライブ経路と同じ)', () => {
+    const e = engine(oneBand('off'));
+    e.start();
+    e.testEffect({ kind: 'gift', bandId: 'b1', diamonds: 1 });
+    const fx = e.get().recentEffects[0]!;
+    expect(fx.kind).toBe('gift');
+    expect(fx.fxBandClip).toBeUndefined();
+    expect(fx.fxBandBgm).toBeUndefined();
+  });
+
+  it('クリップを選んである行は従来どおりカットインが載る', () => {
+    const e = engine(oneFullCut('cut-rose'));
+    e.start();
+    e.testEffect({ kind: 'gift', fullCutId: 'fc1', diamonds: 1 });
+    expect(e.get().recentEffects[0]).toMatchObject({ fxBandClip: 'cut-rose', fxFullCut: true });
+
+    const b = engine(oneBand('gift-band1'));
+    b.start();
+    b.testEffect({ kind: 'gift', bandId: 'b1', diamonds: 1 });
+    expect(b.get().recentEffects[0]).toMatchObject({ fxBandClip: 'gift-band1', fxBandBgm: 'bgm-band1' });
+  });
+
+  it('行が消えていても落ちない — 印なしで積むだけ(削除直後に押せる導線がある)', () => {
+    const e = engine(oneFullCut('cut-rose'));
+    e.start();
+    e.testEffect({ kind: 'gift', fullCutId: 'no-such-row', diamonds: 1 });
+    e.testEffect({ kind: 'gift', bandId: 'no-such-band', diamonds: 1 });
+    const fx = e.get().recentEffects;
+    expect(fx).toHaveLength(2);
+    expect(fx[0]!.fxBandClip).toBeUndefined();
+    expect(fx[1]!.fxBandClip).toBeUndefined();
+  });
+
+  it('ギフト実演のカード名は [ギフト](実名の無い本物のギフトは「ギフト」と出る)', () => {
+    const e = engine(cfg({ giftRules: [], giftDefault: { mode: 'fixed', amount: 7 }, flashMinDiamonds: null }));
+    e.start();
+    e.testEffect({ kind: 'gift', diamonds: 1 });
+    const s = e.get();
+    expect(s.value).toBe(V0);
+    const fx = s.recentEffects[0]!;
+    // 括弧が半角なのは .gc-name(全角4.4文字)で閉じ括弧が落ちないため — worker 側の解説を参照。
+    expect(fx.giftName).toBe('[ギフト]');
+    expect(fx.nickname).toBe('テスト');
+    expect(fx.amount).toBe(7);
+    // ラッチ開始値 = 現在値になるよう valueAfter は value + amount(testEffect の規約)。
+    expect(fx.valueAfter).toBe(V0 + 7);
   });
 });
 

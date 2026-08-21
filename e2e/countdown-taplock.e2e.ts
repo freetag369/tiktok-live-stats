@@ -138,3 +138,71 @@ test.describe('お邪魔(タップ封じ)', () => {
     await expect.poll(() => segValue(monitor)).toBe(98);
   });
 });
+
+/**
+ * 導入カットイン(全面動画・5秒・音声焼き込み)を出す版。**封印は 15 秒**にする —
+ * 下限の 5 秒だと動画が明けるのと封印が解けるのが同時で、「幕の裏で減っていた」も
+ * 「明けてから HUD が出る」も観測できない。
+ */
+const CLIP_LOCK_SEC = 15;
+
+const CLIP_SETTINGS = {
+  challenge: {
+    ...LOCK_SETTINGS.challenge,
+    tapLock: {
+      enabled: true,
+      rules: [{ ...LOCK_SETTINGS.challenge.tapLock.rules[0], durationSec: CLIP_LOCK_SEC }],
+    },
+    // 動画のマスタースイッチ。tapLockWillStart はこれを見る(革命の導入が見ないのとは
+    // 意図的に違う — あちらは仮流用素材で「動画OFF でも段の尺は要る」ため)。
+    fxClipsEnabled: true,
+    // 音声は素材に焼き込み。鳴らす設定のときに muted が外れることまで見る。
+    seEnabled: true,
+  },
+};
+
+test.describe('お邪魔の導入カットイン(全面動画)', () => {
+  test.use({ reducedMotion: false, settingsPatch: CLIP_SETTINGS });
+
+  test('5秒の全面動画 → 明けてから告知バナーと残り秒 HUD。封印は幕の裏で減っている', async ({
+    app,
+    main,
+  }) => {
+    await rpc(main, 'challenge.start', undefined);
+    const monitor = await openMonitor(app, main);
+    expect(await segValue(monitor)).toBe(100);
+
+    await rpc(main, 'conn.startReplay', { file: FIXTURE, speed: 0 });
+
+    // ① 不透明フルフレームのホルダーに素材が載る。**バンドルを通って実際に解決する**
+    //    こと自体がここでしか取れない事実 — import.meta.glob は 0 件でも落ちないので、
+    //    素材の取り違え・置き忘れは unit のソース検査では見えない。
+    const clip = monitor.locator('video.fx-clip-opaque');
+    await expect(clip).toHaveCount(1, { timeout: 20_000 });
+
+    // ② 導入中は残り秒 HUD も告知バナーも出さない(2026-08-20 ユーザー決定 —
+    //    「5秒の見せ場に文字を被せない」)。HUD は .fx-layer の中 = 不透明動画より
+    //    必ず手前なので、抑制を外すと帯が重なる。
+    await expect(monitor.locator('.tap-lock-overlay')).toHaveCount(0);
+    await expect(monitor.locator('.banner-tap-lock')).toHaveCount(0);
+
+    // ③ 素材の同一性と音声。seEnabled のとき muted が外れる(別 BGM は無い)。
+    expect(await clip.evaluate((v: HTMLVideoElement) => v.currentSrc.includes('intro'))).toBe(true);
+    expect(await clip.evaluate((v: HTMLVideoElement) => v.muted)).toBe(false);
+
+    // ④ 明けたら幕が上がり、告知バナーと HUD が出る。
+    await expect(clip).toHaveCount(0, { timeout: 20_000 });
+    await expect(monitor.locator('.tap-lock-overlay')).toHaveCount(1, { timeout: 10_000 });
+    await expect(monitor.locator('.banner-tap-lock')).toHaveCount(1, { timeout: 10_000 });
+
+    // ⑤ **封印は導入を待たない** — worker は一致した瞬間に絶対期限をラッチしており、
+    //    幕の裏で残り時間は普通に減る。だから明けた時点の残りは必ず 15 秒未満。
+    const left = Number(await monitor.locator('.tap-lock-count').innerText());
+    expect(left).toBeGreaterThan(0);
+    expect(left).toBeLessThan(CLIP_LOCK_SEC);
+
+    // ⑥ 封印そのものは従来どおり効いている(幕を足しても本体は壊れていない)。
+    await monitor.locator('.stage-viewport').click({ position: { x: 10, y: 10 } });
+    expect(await segValue(monitor)).toBe(100);
+  });
+});

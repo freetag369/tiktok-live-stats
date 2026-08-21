@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHALLENGE,
   DEFAULT_ROULETTE,
+  DJ_GLASSES_ROULETTE,
   DEFAULT_ROULETTE_HOT,
   ROULETTE_HOT_DON_STEPS,
   ROULETTE_HOT_INTRO_MS,
   ROULETTE_HOT_MULT_MAX,
   ROULETTE_HOT_MULT_MIN,
+  ROULETTE_HOT_INTRO_PATTERNS,
   ROULETTE_HOT_PATTERNS,
   ROULETTE_HOT_QUEUE_MAX,
   clampRouletteHotMult,
@@ -17,6 +19,7 @@ import {
   rouletteHotMultOf,
   rouletteHotMultiplier,
   rouletteHotMults,
+  rouletteHotPatternPool,
   rouletteRemainingAmount,
   rouletteRemainingCount,
   rouletteStockCount,
@@ -112,9 +115,17 @@ describe('validateRoulette — 激熱確定の互換と clamp', () => {
   it('キー欠損(既存の settings.json)は無効 — キーごと生えない', () => {
     const raw = structuredClone(DEFAULT_CHALLENGE) as unknown as Record<string, unknown>;
     const v = validateChallengeConfig(raw);
-    for (const r of v.roulettes) expect(r.hot).toBeUndefined();
-    // 既定の出荷行も hot を持たない(オプトインで出す)。
+    // 出荷既定の DJメガネ行だけは hot を持つ(v10 で追加した激熱確定の既定)。
+    // それ以外の行に hot が生えないことが「キー欠損 = 無効」の担保。
+    for (const r of v.roulettes) {
+      if (r.id === DJ_GLASSES_ROULETTE.id) continue;
+      expect(r.hot, r.id).toBeUndefined();
+    }
     expect(DEFAULT_ROULETTE.hot).toBeUndefined();
+    expect(v.roulettes.find((r) => r.id === DJ_GLASSES_ROULETTE.id)?.hot).toEqual({
+      enabled: true,
+      multiplier: 10,
+    });
   });
 
   it('enabled:false はキーごと落ちる(無意味な既定値を保存済み JSON に生やさない)', () => {
@@ -148,7 +159,7 @@ describe('validateRoulette — 激熱確定の互換と clamp', () => {
 describe('rouletteHotMults — ドンの段のはしご', () => {
   it('段数はドンの拍数(donAts)と一致する', () => {
     // 段が拍より少ないと最後のドンで数字が動かず、多いと使われない段が出る。
-    for (const p of ROULETTE_HOT_PATTERNS) {
+    for (const p of ROULETTE_HOT_INTRO_PATTERNS) {
       expect(ROULETTE_PATTERN_TIMING[p].donAts, `${p} に donAts が無い`).toBeTruthy();
       expect(ROULETTE_PATTERN_TIMING[p].donAts!.length, p).toBe(ROULETTE_HOT_DON_STEPS);
     }
@@ -242,7 +253,7 @@ describe('ChallengeEngine — 激熱確定ギフトルーレット', () => {
     expect(rl.amount).toBe(100);
   });
 
-  it('演出パターンは獅子・黄金龍・不死鳥の3種に固定される(行のチェックは見ない)', () => {
+  it('ギフト連動でない激熱行は獅子・黄金龍・不死鳥の3種に固定される(行のチェックは見ない)', () => {
     // 行の patterns は「軽い演出だけ」に絞っておく — 激熱がそれを無視することの確認。
     const row = hotRow({ patterns: ['slow'] as RoulettePattern[] });
     for (const fxRand of [0, 0.34, 0.5, 0.67, 0.99]) {
@@ -254,6 +265,75 @@ describe('ChallengeEngine — 激熱確定ギフトルーレット', () => {
       // 3種はどれも ultra 段位 = donAts を持つ(倍率の段が乗る唯一の段位)。
       expect(ROULETTE_PATTERN_TIER[rl.roulettePattern!]).toBe('ultra');
     }
+  });
+
+  it('DJメガネ(giftId 11583)の激熱行は fxRand に依らず 100% djglasses', () => {
+    // ギフト連動の絵柄。ここが抽選に戻ると、DJメガネを投げても DJ の導入動画は
+    // 4回に1回しか出ない(= ユーザー要件「必ず DJ 演出」が壊れる)。
+    const row: ChallengeRouletteConfig = {
+      ...structuredClone(DJ_GLASSES_ROULETTE),
+      segments: structuredClone(ONE_SEGMENT),
+      // 行のチェックを軽い演出だけに絞っても無視されること(激熱の既存規約)。
+      patterns: ['slow'] as RoulettePattern[],
+    };
+    for (const fxRand of [0, 0.34, 0.5, 0.67, 0.99]) {
+      const e = engine(cfg([row]), 0, fxRand);
+      e.start();
+      e.handleEvent(gift({ giftId: '11583', giftName: 'DJ Glasses', diamondEach: 500, diamonds: 500 }));
+      const rl = lastRoulette(e);
+      expect(rl.roulettePattern, `fxRand=${fxRand}`).toBe('djglasses');
+      expect(rl.rouletteHotMult, `fxRand=${fxRand}`).toBe(10);
+      expect(rl.amount, `fxRand=${fxRand}`).toBe(100 * 10);
+    }
+  });
+
+  it('**fxRand の消費回数はギフト連動でも変わらない**(出目の再現性の前提)', () => {
+    // 「1抽選 = 1消費」。固定パターンを早期 return で返すとここが 0 回になり、
+    // 同じ seed の再生が別物になる(drawRoulettePattern を必ず通すことの凍結)。
+    const count = (row: ChallengeRouletteConfig): number => {
+      let n = 0;
+      const e = new ChallengeEngine(
+        () => cfg([row]),
+        () => NOW,
+        () => 0,
+        () => {
+          n++;
+          return 0.5;
+        }
+      );
+      e.setMonitorOpen(true);
+      e.setFxCaps(true);
+      e.start();
+      e.handleEvent(gift({ giftId: row.giftId, giftName: row.giftName }));
+      return n;
+    };
+    const plain = count(hotRow());
+    const dj = count({ ...structuredClone(DJ_GLASSES_ROULETTE), segments: structuredClone(ONE_SEGMENT) });
+    expect(dj).toBe(plain);
+    expect(plain).toBeGreaterThan(0);
+  });
+
+  it('giftName が部分一致してもギフト連動にはならない(exactName の回帰)', () => {
+    // 'dj' は 'dj glasses'.includes('dj') で当たってしまう。完全一致でなければ
+    // 無関係な激熱行が DJ の絵柄に化ける。
+    const row = hotRow({ giftId: '', giftName: 'dj', canonical: '' });
+    const e = engine(cfg([row]), 0, 0.5);
+    e.start();
+    e.handleEvent(gift({ giftId: '999', giftName: 'dj' }));
+    const rl = lastRoulette(e);
+    expect(rl.roulettePattern).not.toBe('djglasses');
+    expect(ROULETTE_HOT_PATTERNS).toContain(rl.roulettePattern!);
+  });
+
+  it('rouletteHotPatternPool: ギフト連動は1件、それ以外は3種、null は3種', () => {
+    expect(rouletteHotPatternPool(DJ_GLASSES_ROULETTE)).toEqual(['djglasses']);
+    expect(rouletteHotPatternPool(DEFAULT_ROULETTE)).toBe(ROULETTE_HOT_PATTERNS);
+    expect(rouletteHotPatternPool(null)).toBe(ROULETTE_HOT_PATTERNS);
+    expect(rouletteHotPatternPool(undefined)).toBe(ROULETTE_HOT_PATTERNS);
+    // giftId を消して名前だけにしても、完全一致なら拾う(ID 変更の保険)。
+    expect(
+      rouletteHotPatternPool({ giftId: '', giftName: 'dj glasses', canonical: '' })
+    ).toEqual(['djglasses']);
   });
 
   it('連打は個数ぶん倍率が掛かる(抽選回数は削らない既存規約のまま)', () => {
@@ -390,7 +470,7 @@ describe('尺 — 導入 8 秒ぶんを安全弁が知っていること', () =>
   it('**導入 + スピン + 確定見せ < 安全弁**(足し忘れるとリールが途中で消える)', () => {
     // モニターの startRoulette が張る式と同じ形。ここが崩れると、番犬と安全弁が
     // 導入ぶん早く発火してリールが回りきる前に数字が最終値へ飛ぶ。
-    for (const p of ROULETTE_HOT_PATTERNS) {
+    for (const p of ROULETTE_HOT_INTRO_PATTERNS) {
       const abortAfterMs = rouletteHotIntroMs(hotFx) + rouletteAbortMs(p);
       const real = ROULETTE_HOT_INTRO_MS + ROULETTE_PATTERN_TIMING[p].donAts!.length * 0; // 拍は尺の内側
       expect(abortAfterMs, p).toBeGreaterThan(real + rouletteAbortMs(p) - 1500);

@@ -207,19 +207,20 @@ export function rouletteHotIntroUrl(pattern: string): string | null {
 }
 
 /**
- * 革命の導入全面カット(6秒 = REVOLUTION_INTRO_MS・不透明)。専用素材は
- * assets/fx/revolution/intro.mp4(将来生成 — 専用サブディレクトリなのは rl/hot と
- * 同じ理由: 既存カタログの孤児検査を踏まない)。素材を置くだけでコード変更ゼロで
- * 差し替わる。
+ * 革命の導入全面カット(8秒 = REVOLUTION_INTRO_MS・不透明・音声焼き込み)。
+ * 専用素材は assets/fx/revolution/intro.mp4(白鳥の戦闘モード突入・192フレーム)。
+ * 専用サブディレクトリなのは rl/hot と同じ理由: 既存カタログの孤児検査を踏まない。
+ * 素材を置くだけでコード変更ゼロで差し替わる。
  *
- * **未投入の間は激熱確定の導入(rl/hot/dragon.mp4・8秒)を仮流用**する
- * (2026-08-20 ユーザー選択)。用途が同型 — 「山場に入る前の全画面導入」。
- * 8秒素材を6秒で打ち切るが、モニターは loop 属性 + JS タイマーで畳むので
- * 途中で黒画面にはならない(尺の権威はタイマー = startBandFx と同じ流儀)。
- * 素材が両方無ければ gift-band1(6秒・不透明)へ落ちる。
+ * フォールバックは**素材を消したときの保険としてだけ**残してある(2026-08-20 に
+ * 専用素材を投入したので通常は使われない)。激熱確定の導入 rl/hot/dragon.mp4 は
+ * 同じ 8 秒・同じ「山場に入る前の全画面導入」なので尺の辻褄も合う。
+ * どちらも無ければ gift-band1(6秒・不透明)へ落ちる — こちらは尺が足りないが、
+ * モニターは loop 属性 + JS タイマーで畳むので黒画面にはならない
+ * (尺の権威はタイマー = startBandFx と同じ流儀)。
  *
  * gift-t1〜t4 で代用してはいけない: あちらは screen 合成前提の黒背景素材で、
- * 不透明ホルダー(.fx-clip-opaque)に出すと黒画面6秒になる。
+ * 不透明ホルダー(.fx-clip-opaque)に出すと黒画面になる。
  */
 const revolutionGlob = import.meta.glob('../assets/fx/revolution/*.mp4', {
   eager: true,
@@ -231,6 +232,40 @@ export const REVOLUTION_INTRO_CLIP_URL: string =
   revolutionGlob['../assets/fx/revolution/intro.mp4'] ??
   rlHotGlob['../assets/fx/rl/hot/dragon.mp4'] ??
   giftBand1Url;
+
+/**
+ * 革命の結果カットシーン(6秒 = REVOLUTION_RESULT_MS・不透明)。窓が満了したとき、
+ * この動画の**上に**戦果(減算合計・タップ回数・いいね反転)を重ねて発表する。
+ *
+ * 導入と違い**フォールバックを持たない**(null = 同尺の暗幕 `.revolution-screen` を
+ * 出し、数字だけは必ず出し切る — boost の result-* が url null で `.boost-screen` へ
+ * 落ちるのと同型)。仮素材を当てないのは、導入と同じ絵が終了で流れると
+ * 「もう1回始まった」に見えてしまうため。
+ */
+export const REVOLUTION_RESULT_CLIP_URL: string | null =
+  revolutionGlob['../assets/fx/revolution/result.mp4'] ?? null;
+
+/**
+ * お邪魔(タップ封じ)の導入全面カット(5秒 = TAP_LOCK_INTRO_MS・不透明・音声焼き込み)。
+ * 素材は assets/fx/tap-lock/intro.mp4(専用サブディレクトリなのは rl/hot・revolution と
+ * 同じ理由: 既存カタログの「id ⇄ ファイル 1:1」の孤児検査を踏まない)。
+ *
+ * **無ければ null**。革命のような仮流用は置かない — お邪魔の導入は「殴られて封じられた」
+ * という筋書き専用の絵で、他機能の素材を当てても意味が通らないうえ、
+ * 素材が無いときは 2026-08-20 以前とまったく同じ「告知バナー1枚+常設 HUD」へ
+ * 縮退するのが正しい退避先だから(STOCK_CUTIN_CLIP_URL と同じ 0 件許容の流儀)。
+ *
+ * gift-t1〜t4 で代用してはいけない: あちらは screen 合成前提の黒背景素材で、
+ * 不透明ホルダー(.fx-clip-opaque)に出すと黒画面5秒になる。
+ */
+const tapLockGlob = import.meta.glob('../assets/fx/tap-lock/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+export const TAP_LOCK_INTRO_CLIP_URL: string | null =
+  tapLockGlob['../assets/fx/tap-lock/intro.mp4'] ?? null;
 
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 

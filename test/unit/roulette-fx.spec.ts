@@ -12,7 +12,11 @@ import {
   rouletteSpinMs,
 } from '@shared/challenge';
 import type { RoulettePattern, RouletteSpinKey, RouletteTier } from '@shared/dto';
-import { ROULETTE_PATTERN_TIER } from '@shared/dto';
+import {
+  ROULETTE_HOT_ONLY_PATTERNS,
+  ROULETTE_PATTERN_TIER,
+  ROULETTE_SELECTABLE_PATTERNS,
+} from '@shared/dto';
 import {
   RL_CLIP_FADE_MS,
   RL_CLIP_REMOVE_MS,
@@ -133,8 +137,14 @@ describe('走行距離と幾何の不変条件', () => {
 });
 
 describe('drawRoulettePattern — 終盤パターンの抽選', () => {
-  it('パターンは18種', () => {
-    expect(ROULETTE_PATTERNS).toHaveLength(22);
+  it('パターンは23種、うち通常抽選に乗るのは22種(激熱確定専用の1種を除く)', () => {
+    expect(ROULETTE_PATTERNS).toHaveLength(23);
+    expect(ROULETTE_SELECTABLE_PATTERNS).toHaveLength(22);
+    // 激熱専用は一覧に居るが、選べる集合には居ない(通常スピンに混ざらないことの凍結)。
+    for (const p of ROULETTE_HOT_ONLY_PATTERNS) {
+      expect(ROULETTE_PATTERNS, p).toContain(p);
+      expect(ROULETTE_SELECTABLE_PATTERNS, p).not.toContain(p);
+    }
   });
 
   it('rand=0 は先頭、rand→1 は末尾', () => {
@@ -142,15 +152,17 @@ describe('drawRoulettePattern — 終盤パターンの抽選', () => {
     expect(drawRoulettePattern(() => 0.999999)).toBe('heartbloom');
   });
 
-  it('全パターンが出る', () => {
-    const n = ROULETTE_PATTERNS.length;
-    const seen = new Set(ROULETTE_PATTERNS.map((_, i) => drawRoulettePattern(() => i / n + 0.001)));
-    expect(seen).toEqual(new Set(ROULETTE_PATTERNS));
+  it('全パターンが出る(激熱確定専用は抽選に乗らないので対象外)', () => {
+    const n = ROULETTE_SELECTABLE_PATTERNS.length;
+    const seen = new Set(
+      ROULETTE_SELECTABLE_PATTERNS.map((_, i) => drawRoulettePattern(() => i / n + 0.001))
+    );
+    expect(seen).toEqual(new Set(ROULETTE_SELECTABLE_PATTERNS));
   });
 
   it('rand が範囲外を返しても既知のパターンに収まる(クラッシュ源を作らない)', () => {
-    expect(ROULETTE_PATTERNS).toContain(drawRoulettePattern(() => 1));
-    expect(ROULETTE_PATTERNS).toContain(drawRoulettePattern(() => -1));
+    expect(ROULETTE_SELECTABLE_PATTERNS).toContain(drawRoulettePattern(() => 1));
+    expect(ROULETTE_SELECTABLE_PATTERNS).toContain(drawRoulettePattern(() => -1));
   });
 
   it('許可リストを渡すとその中からだけ出る', () => {
@@ -172,7 +184,7 @@ describe('drawRoulettePattern — 終盤パターンの抽選', () => {
     }
   });
 
-  it('許可リストが空・未指定・全滅なら全パターンへ倒す(スピンを止めない)', () => {
+  it('許可リストが空・未指定・全滅なら選べる全パターンへ倒す(スピンを止めない)', () => {
     expect(drawRoulettePattern(() => 0, [])).toBe('slow');
     expect(drawRoulettePattern(() => 0, undefined)).toBe('slow');
     expect(drawRoulettePattern(() => 0.999999, ['bogus'] as unknown as RoulettePattern[])).toBe(
@@ -182,7 +194,7 @@ describe('drawRoulettePattern — 終盤パターンの抽選', () => {
 });
 
 describe('段位(tier)と尺 — 信頼度方式の骨格', () => {
-  it('全22パターンに段位があり、heavy/ultra の顔ぶれが固定されている', () => {
+  it('全23パターンに段位があり、heavy/ultra の顔ぶれが固定されている', () => {
     for (const p of ROULETTE_PATTERNS) {
       expect(['light', 'mid', 'heavy', 'ultra']).toContain(ROULETTE_PATTERN_TIER[p]);
     }
@@ -193,6 +205,7 @@ describe('段位(tier)と尺 — 信頼度方式の骨格', () => {
       new Set([
         'dragon', 'unicorn', 'whale', 'phoenix', 'lion',
         'heartme', 'hearttouch', 'heartbday', 'heartbloom',
+        'djglasses',
       ])
     );
   });

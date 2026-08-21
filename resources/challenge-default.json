@@ -86,6 +86,45 @@
         }
       ],
       "direction": "add"
+    },
+    {
+      "id": "rl-dj_glasses",
+      "label": "DJメガネ",
+      "enabled": true,
+      "giftId": "11583",
+      "giftName": "dj glasses",
+      "canonical": "",
+      "segments": [
+        {
+          "amount": 500,
+          "weight": 17
+        },
+        {
+          "amount": 500,
+          "weight": 17
+        },
+        {
+          "amount": 500,
+          "weight": 17
+        },
+        {
+          "amount": 500,
+          "weight": 17
+        },
+        {
+          "amount": 500,
+          "weight": 16
+        },
+        {
+          "amount": 500,
+          "weight": 16
+        }
+      ],
+      "direction": "add",
+      "hot": {
+        "enabled": true,
+        "multiplier": 10
+      }
     }
   ],
   "rouletteSound": {

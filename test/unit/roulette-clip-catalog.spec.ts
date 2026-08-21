@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { ROULETTE_PATTERN_TIMING, rouletteUltraClipIds } from '@shared/roulette-fx';
 import type { RoulettePattern } from '@shared/dto';
 import { ROULETTE_PATTERN_TIER } from '@shared/dto';
-import { ROULETTE_HOT_PATTERNS } from '@shared/challenge';
+import { ROULETTE_HOT_INTRO_PATTERNS, ROULETTE_HOT_PATTERNS } from '@shared/challenge';
+import { ROULETTE_HOT_ONLY_PATTERNS, ROULETTE_PATTERNS, ROULETTE_SELECTABLE_PATTERNS } from '@shared/dto';
 
 /**
  * 超激アツ動画クリップの id ⇄ 実ファイルの結合検査(fx-catalog.spec.ts の cut/ と
@@ -52,20 +53,39 @@ describe.skipIf(!existsSync(RL_DIR))('超激アツクリップの実ファイル
 });
 
 describe.skipIf(!existsSync(RL_HOT_DIR))('激熱確定の導入動画(assets/fx/rl/hot/)', () => {
-  it('素材ファイルと ROULETTE_HOT_PATTERNS が一対一', () => {
+  it('素材ファイルと ROULETTE_HOT_INTRO_PATTERNS が一対一', () => {
     const files = readdirSync(RL_HOT_DIR)
       .filter((f) => f.endsWith('.mp4'))
       .map((f) => f.replace(/\.mp4$/, ''))
       .sort();
-    expect(files).toEqual([...ROULETTE_HOT_PATTERNS].sort());
+    // 抽選の3種だけでなく**ギフト連動の絵柄も導入動画が要る** — 比較先は合併の1本。
+    expect(files).toEqual([...ROULETTE_HOT_INTRO_PATTERNS].sort());
   });
 });
 
 describe('激熱確定の絵柄は超激アツ(ultra)であること', () => {
-  it('3種とも ultra 段位 = donAts を持つ(倍率の段が乗る唯一の段位)', () => {
-    for (const p of ROULETTE_HOT_PATTERNS) {
+  it('導入動画が要る絵柄は全部 ultra 段位 = donAts を持つ(倍率の段が乗る唯一の段位)', () => {
+    expect(ROULETTE_HOT_INTRO_PATTERNS.length).toBeGreaterThanOrEqual(ROULETTE_HOT_PATTERNS.length);
+    for (const p of ROULETTE_HOT_INTRO_PATTERNS) {
       expect(ROULETTE_PATTERN_TIER[p], p).toBe('ultra');
       expect(ROULETTE_PATTERN_TIMING[p].donAts, p).toBeTruthy();
+    }
+  });
+});
+
+describe('激熱確定専用の絵柄は通常の抽選・設定一覧から締め出されている', () => {
+  it('ROULETTE_PATTERNS には居るが ROULETTE_SELECTABLE_PATTERNS には居ない', () => {
+    // 一覧に居ないと drawRoulettePattern の pool が空になり、1要素で指名したつもりが
+    // 全パターンへフォールバックして激熱が 'slow' を引く(いちばん怖い壊れ方)。
+    for (const p of ROULETTE_HOT_ONLY_PATTERNS) {
+      expect(ROULETTE_PATTERNS, p).toContain(p);
+      expect(ROULETTE_SELECTABLE_PATTERNS, p).not.toContain(p);
+    }
+  });
+
+  it('激熱専用の絵柄は導入動画が要る側に載っている(素材の孤児を作らない)', () => {
+    for (const p of ROULETTE_HOT_ONLY_PATTERNS) {
+      expect(ROULETTE_HOT_INTRO_PATTERNS, p).toContain(p);
     }
   });
 });

@@ -72,6 +72,12 @@ export type RpcMap = {
   'q.comments': { p: D.CommentSearchQuery; r: D.Page<D.CommentHit> };
   'q.gifts': { p: { userId: UserId } & D.Paged; r: D.Page<D.GiftRow> };
   'q.likeSeries': { p: { userId: UserId; limitSessions: number }; r: D.LikeSeriesPoint[] };
+  /**
+   * 受信済み全ギフトの一覧(giftId ↔ ギフト名)。カウントダウンチャレンジ設定の
+   * 「ギフトリスト」タブが引く。ページング無し・全件返し(数百行のオーダー)。
+   * worker 側は gift_event の全走査を含むので、開いたときと「更新」のときだけ叩く。
+   */
+  'q.giftCatalog': { p: void; r: D.GiftCatalogRow[] };
   'q.sessions': { p: D.Paged; r: D.Page<D.SessionListRow> };
   'q.sessionDetail': { p: { sessionId: number }; r: D.SessionDetail | null };
   'q.sessionTotals': { p: { sessionId: number }; r: D.SessionTotals | null };
@@ -210,6 +216,7 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'q.comments': 'worker',
   'q.gifts': 'worker',
   'q.likeSeries': 'worker',
+  'q.giftCatalog': 'worker',
   'q.sessions': 'worker',
   'q.sessionDetail': 'worker',
   'q.sessionTotals': 'worker',

@@ -485,8 +485,14 @@ function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
       const gift = e.giftName ? `(${e.giftName})` : '';
       return `革命発動 ×${num(e.revolutionMultiplier ?? 1)} ${num(secs)}秒${gift}`;
     }
-    case 'revolution-end':
-      return `革命終了 ×${num(e.revolutionMultiplier ?? 1)}`;
+    case 'revolution-end': {
+      // 窓の戦果も effect の焼き込み値をそのまま出す(設定を引き直さない規約)。
+      const down = e.revolutionDownTotal ?? 0;
+      if (down <= 0) return `革命終了 ×${num(e.revolutionMultiplier ?? 1)}`;
+      const tap = e.revolutionTapCount ?? 0;
+      const like = e.revolutionLikeDown ?? 0;
+      return `革命終了 ×${num(e.revolutionMultiplier ?? 1)} -${num(down)}(タップ${num(tap)}回 / いいね反転 -${num(like)})`;
+    }
     case 'achieved':
       return 'カウント 0 に到達';
   }

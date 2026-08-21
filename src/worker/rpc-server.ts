@@ -153,6 +153,7 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
     'q.comments': async (p) => store.searchComments(p),
     'q.gifts': async (p) => store.listViewerGifts(p.userId, p),
     'q.likeSeries': async (p) => store.getViewerLikeSeries(p.userId, p.limitSessions),
+    'q.giftCatalog': async () => store.listGiftCatalog(),
     'q.sessions': async (p) => store.listSessions(p),
     'q.sessionDetail': async (p) => store.getSessionDetail(p.sessionId),
     'q.sessionTotals': async (p) => store.getSessionTotals(p.sessionId),
@@ -256,6 +257,7 @@ type HandlerMap = {
   'q.comments': (p: D.CommentSearchQuery) => Promise<unknown>;
   'q.gifts': (p: { userId: string } & D.Paged) => Promise<unknown>;
   'q.likeSeries': (p: { userId: string; limitSessions: number }) => Promise<unknown>;
+  'q.giftCatalog': () => Promise<D.GiftCatalogRow[]>;
   'q.sessions': (p: D.Paged) => Promise<unknown>;
   'q.sessionDetail': (p: { sessionId: number }) => Promise<unknown>;
   'q.sessionTotals': (p: { sessionId: number }) => Promise<unknown>;

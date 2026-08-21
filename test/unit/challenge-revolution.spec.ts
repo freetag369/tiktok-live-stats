@@ -34,6 +34,7 @@ import {
   matchRevolution,
   revolutionActivationCount,
 } from '@shared/challenge';
+import { REVOLUTION_RESULT_MS } from '@shared/revolution-settle';
 import type { ChallengeConfig } from '@shared/dto';
 import type { GiftEvent, LikeEvent } from '@shared/events';
 import { ChallengeEngine } from '@worker/challenge';
@@ -44,7 +45,7 @@ const REV_GIFT_ID = '698698';
 const DUR_SEC = DEFAULT_REVOLUTION_RULE.durationSec; // 既定 60 秒
 const DUR_MS = DUR_SEC * 1000;
 /** シネマの前置き = 導入全面カット + 5..1 カウントダウン。窓はこのぶん後ろで開く。 */
-const PRE_MS = REVOLUTION_INTRO_MS + REVOLUTION_COUNT_MS; // 11_000
+const PRE_MS = REVOLUTION_INTRO_MS + REVOLUTION_COUNT_MS; // 13_000(導入8秒 + カウント5秒)
 const MULT = DEFAULT_REVOLUTION_RULE.multiplier; // 既定 ×3
 
 let seq = 0;
@@ -488,6 +489,27 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     expect(s.revolution).toBeUndefined();
   });
 
+  it('満杯ボーナスが 0 に潰れたら stock-full を積まない(赤い「+0」バナー避け)', () => {
+    // 同じ1件のいいねで「ゲージ満タンが残り値を全部削る → 続く満杯ボーナスの
+    // 取り分が 0」が起きる(満杯はゲージ満タンの従属イベントで、maybeAchieve は
+    // その後ろ)。ここで額 0 の effect を積むと、モニターの反転バナーは
+    // `e.amount < 0` で分岐するので**加算枝へ落ちて赤い「+0 いいねストック満杯!」**が
+    // 出る — お助けの真っ最中に妨害の色で ±0 が出る最悪の見え方。
+    // いいね側の `likeFxPending !== 0` ガードと同じ扱いに揃える。
+    const e = plain(likeCfg({ initialValue: 10 }));
+    openPlain(e);
+    e.handleEvent(like(10)); // 満タン1回目 — 10 → 5(ストック 1/2)
+    e.handleEvent(like(10)); // 満タン2回目 — 5 → 0 で使い切り、満杯の取り分が無い
+    const s = e.get();
+    expect(s.value).toBe(0);
+    expect(s.status).toBe('achieved');
+    expect(s.stats.likeStockDown).toBe(0); // 実減少量は 0(名目 25 ではない)
+    expect(s.recentEffects.filter((x) => x.kind === 'stock-full')).toHaveLength(0);
+    // 満杯そのものは起きているので累計は進む(据え置き会計の符号復元のソース)。
+    expect(s.likeGauge?.stock?.fills).toBe(1);
+    expect(s.likeGauge?.stock?.downFills).toBe(1);
+  });
+
   it('窓が閉じたあとのいいねは元どおり妨害(加算)へ戻る', () => {
     let t = NOW;
     // ストックは切る(2回目の満タンで満杯ボーナスが乗ると符号の検算が濁る)。
@@ -590,6 +612,14 @@ describe('期限切れ — 2Hz tick が無くても armFreezeTimer で必ず切�
       expect(end).toBeDefined();
       expect(end!.revolutionMultiplier).toBe(MULT);
       expect(end!.revolutionMs).toBe(DUR_MS);
+      // 戦果は必ず載る(誰も押さなかった窓は 0)。amount は 0 のまま —
+      // 窓中に即時反映済みで清算 lump が無く、負にすると valueAfter の会計が壊れる。
+      expect(end!.amount).toBe(0);
+      expect(end!.revolutionDownTotal).toBe(0);
+      expect(end!.revolutionTapCount).toBe(0);
+      expect(end!.revolutionLikeDown).toBe(0);
+      // 減らせなかった窓は結果カットシーンも出さない(発表する物が無い)。
+      expect(end!.revolutionResultMs).toBeUndefined();
       // 窓明けのタップは等倍へ戻る。
       e.press();
       expect(e.get().value).toBe(1000 - 1);
@@ -888,3 +918,262 @@ describe('ギフト評価の先勝ち列: fanStamp → tapBoost → 革命 → t
   });
 });
 
+
+describe('窓の戦果 — 減算合計 / タップ回数 / いいね反転', () => {
+  const likeCfg = (over: Partial<ChallengeConfig> = {}): ChallengeConfig =>
+    cfg({ likeEvery: 10, likeStep: 5, likeStockCount: 2, likeStockStep: 25, ...over });
+
+  /** 窓を満了させて revolution-end を取り出す。 */
+  function endOf(e: ChallengeEngine, advance: () => void) {
+    advance();
+    const end = e.get().recentEffects.find((x) => x.kind === 'revolution-end');
+    expect(end, 'revolution-end が積まれていない').toBeDefined();
+    return end!;
+  }
+
+  /** シネマ経路で窓を開く(アーム → cue → 前置き明け)。 */
+  function openCinema(e: ChallengeEngine, at: (ms: number) => void): void {
+    e.start();
+    e.handleEvent(revGift());
+    e.revolutionCue({ action: 'start', effectId: startFxId(e), startedAtMs: NOW, preMs: PRE_MS });
+    at(NOW + PRE_MS + 1000);
+    e.drainIfChanged();
+  }
+
+  it('窓中のタップだけを数える(回数と実減少量の両方)', () => {
+    let t = NOW;
+    const e = plain(cfg(), () => t);
+    openPlain(e);
+    e.press();
+    e.press();
+    e.press();
+    const end = endOf(e, () => {
+      t = NOW + DUR_MS;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionTapCount).toBe(3);
+    expect(end.revolutionDownTotal).toBe(3 * MULT); // ×3 が効いている
+    expect(end.revolutionLikeDown).toBe(0);
+  });
+
+  it('★導入(11秒)中に溜めた等倍タップは数えない', () => {
+    // 差分方式(stats.presses / pressDownTotal のスナップショット差分)だとここが必ず
+    // 落ちる — 溜めたタップは窓オープン + 凍結余白の後にドレインされるため。
+    // しかも「まだ押す時間ではない」と合図して溜めさせたぶんなので、戦果として
+    // 褒めるのは worker 側の判断(press の導入枝のコメント)と矛盾する。
+    let t = NOW;
+    const e = engine(cfg(), () => t);
+    e.start();
+    e.handleEvent(revGift());
+    e.revolutionCue({ action: 'start', effectId: startFxId(e), startedAtMs: NOW, preMs: PRE_MS });
+    t = NOW + 3000; // 導入中(窓オープン前)
+    e.press();
+    e.press();
+    t = NOW + PRE_MS + 1000; // 窓オープン後
+    e.drainIfChanged();
+    e.press();
+    const end = endOf(e, () => {
+      t = NOW + PRE_MS + DUR_MS + 10;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionTapCount).toBe(1);
+    expect(end.revolutionDownTotal).toBe(MULT);
+    // 通算の presses には溜めたぶんも載る(= 差分方式では分離できない)。
+    expect(e.get().stats.presses).toBe(3);
+  });
+
+  it('★フィーバー窓と重なってもタップ数が汚染されない', () => {
+    // activateBoost が延期するのは tapLock だけで革命は見ていないので、窓は重なりうる。
+    // press の分岐はフィーバーが先に return するため、革命枝のフックには入らない。
+    const c = cfg();
+    c.tapBoost = {
+      ...structuredClone(DEFAULT_TAP_BOOST),
+      enabled: true,
+      rules: [
+        { ...structuredClone(DEFAULT_TAP_BOOST_RULE), giftId: '9999', introClip: 'off', countClip: 'off' },
+      ],
+    };
+    let t = NOW;
+    const e = plain(c, () => t);
+    openPlain(e);
+    e.press(); // 革命の窓のタップ(数える)
+    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' }));
+    e.press(); // フィーバー窓のタップ(数えない)
+    e.press();
+    const end = endOf(e, () => {
+      t = NOW + DUR_MS * 4;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionTapCount).toBe(1);
+    expect(end.revolutionDownTotal).toBe(MULT);
+  });
+
+  it('残量クランプは名目ではなく実減少量で数える(press effect の amount と一致)', () => {
+    // 0 到達で達成が優先され revolution-end は積まれない(clearRevolution が
+    // maybeAchieve 経由で呼ばれる仕様)ので、戦果は press effect 側で検算する。
+    const e = plain(cfg({ initialValue: 2 }));
+    openPlain(e);
+    e.press(); // ×3 の名目だが残り 2 しかない
+    const s = e.get();
+    expect(s.value).toBe(0);
+    const press = s.recentEffects.find((x) => x.kind === 'press')!;
+    expect(press.amount).toBe(-2); // 名目 -3 ではなく実減少量
+  });
+
+  it('反転で 0 到達 → CLEAR が優先され、結果カットシーンは出ない', () => {
+    // 窓の締めくくりより達成の祝祭が上。ここが割れると CLEAR の上に戦果が生える。
+    let t = NOW;
+    const e = plain(likeCfg({ initialValue: 3 }), () => t);
+    openPlain(e);
+    e.handleEvent(like(10)); // 満タン1回 = -5 → 0 クランプ
+    expect(e.get().value).toBe(0);
+    expect(e.get().status).toBe('achieved');
+    t = NOW + DUR_MS;
+    e.drainIfChanged();
+    expect(e.get().recentEffects.filter((x) => x.kind === 'revolution-end')).toHaveLength(0);
+  });
+
+  it('反転いいねはゲージとストックの両方を合算する', () => {
+    let t = NOW;
+    const e = plain(likeCfg(), () => t);
+    openPlain(e);
+    e.handleEvent(like(20));
+    const s0 = e.get();
+    const expected = s0.stats.likeDown + s0.stats.likeStockDown;
+    expect(expected).toBeGreaterThan(0);
+    const end = endOf(e, () => {
+      t = NOW + DUR_MS;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionLikeDown).toBe(expected);
+    expect(end.revolutionDownTotal).toBe(expected); // タップ 0 なので総計 = 反転ぶん
+  });
+
+  it('減算合計 = タップ由来 + いいね反転 が常に成り立つ', () => {
+    let t = NOW;
+    const e = plain(likeCfg(), () => t);
+    openPlain(e);
+    e.press();
+    e.press();
+    e.handleEvent(like(10));
+    const end = endOf(e, () => {
+      t = NOW + DUR_MS;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionDownTotal).toBe(2 * MULT + end.revolutionLikeDown!);
+  });
+
+  it('重ねがけ(延長)ではカウンタがリセットされない — 窓1本ぶんの合計', () => {
+    let t = NOW;
+    const e = plain(cfg(), () => t);
+    openPlain(e);
+    e.press();
+    t = NOW + 10_000;
+    e.handleEvent(revGift()); // 延長(commitRevolutionState を通らない)
+    e.press();
+    const end = endOf(e, () => {
+      t = NOW + 2 * DUR_MS + 10;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionTapCount).toBe(2);
+  });
+
+  it('2本目の窓は1本目の戦果を持ち越さない', () => {
+    let t = NOW;
+    const e = plain(cfg(), () => t);
+    openPlain(e);
+    e.press();
+    e.press();
+    t = NOW + DUR_MS;
+    e.drainIfChanged();
+    e.handleEvent(revGift()); // 2本目
+    e.press();
+    t = NOW + DUR_MS * 3;
+    e.drainIfChanged();
+    // recentEffects は**新しい順**。先頭が2本目の窓(1タップ)。
+    const taps = e
+      .get()
+      .recentEffects.filter((x) => x.kind === 'revolution-end')
+      .map((x) => x.revolutionTapCount ?? -1);
+    expect(taps).toEqual([1, 2]);
+  });
+
+  it('結果カットシーンの尺は「シネマ かつ 減算あり」のときだけ載る', () => {
+    let t = NOW;
+    const e = engine(cfg(), () => t);
+    openCinema(e, (ms) => {
+      t = ms;
+    });
+    e.press();
+    const end = endOf(e, () => {
+      t = NOW + PRE_MS + DUR_MS + 10;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionResultMs).toBe(REVOLUTION_RESULT_MS);
+  });
+
+  it('プレーン発動(モニター不在)は結果カットシーンを出さない', () => {
+    let t = NOW;
+    const e = plain(cfg(), () => t);
+    openPlain(e);
+    e.press();
+    const end = endOf(e, () => {
+      t = NOW + DUR_MS;
+      e.drainIfChanged();
+    });
+    expect(end.revolutionResultMs).toBeUndefined();
+    expect(end.revolutionDownTotal).toBe(MULT); // 数字自体はバナー用に載る
+  });
+
+  it('機能OFF は逃げ道 — 戦果は載せるが結果カットシーンは出さない', () => {
+    let t = NOW;
+    const c = cfg();
+    const e = engine(c, () => t);
+    openCinema(e, (ms) => {
+      t = ms;
+    });
+    e.press();
+    c.revolution.enabled = false;
+    e.onConfigChanged();
+    const end = e.get().recentEffects.find((x) => x.kind === 'revolution-end')!;
+    expect(end.revolutionResultMs).toBeUndefined();
+    expect(end.revolutionTapCount).toBe(1);
+  });
+
+  it('自然満了 + 結果カットシーンありのときだけ凍結を上乗せする', () => {
+    let t = NOW;
+    const e = engine(cfg(), () => t);
+    openCinema(e, (ms) => {
+      t = ms;
+    });
+    e.press();
+    t = NOW + PRE_MS + DUR_MS + 10;
+    e.drainIfChanged();
+    const freeze = e.get().fxFreezeUntilMs;
+    expect(freeze).not.toBeNull();
+    expect(freeze!).toBeGreaterThanOrEqual(t + REVOLUTION_RESULT_MS);
+  });
+
+  it('減算ゼロの窓では凍結を上乗せしない', () => {
+    let t = NOW;
+    const e = engine(cfg(), () => t);
+    openCinema(e, (ms) => {
+      t = ms;
+    });
+    t = NOW + PRE_MS + DUR_MS + 10;
+    e.drainIfChanged();
+    const end = e.get().recentEffects.find((x) => x.kind === 'revolution-end')!;
+    expect(end.revolutionResultMs).toBeUndefined();
+    expect(e.get().fxFreezeUntilMs).toBeNull();
+  });
+
+  it('アーム止まりでは戦果も出ない(revolution-end 自体が積まれない)', () => {
+    const c = cfg();
+    const e = engine(c);
+    e.start();
+    e.handleEvent(revGift()); // cue を撃たない = アーム止まり
+    c.revolution.enabled = false;
+    e.onConfigChanged();
+    expect(e.get().recentEffects.filter((x) => x.kind === 'revolution-end')).toHaveLength(0);
+  });
+});

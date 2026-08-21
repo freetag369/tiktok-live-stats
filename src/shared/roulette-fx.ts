@@ -1,5 +1,5 @@
 import type { RoulettePattern, RouletteSpinKey, RouletteTier } from './dto';
-import { ROULETTE_PATTERNS, ROULETTE_PATTERN_TIER } from './dto';
+import { ROULETTE_PATTERNS, ROULETTE_PATTERN_TIER, ROULETTE_SELECTABLE_PATTERNS } from './dto';
 import { ROULETTE_SEGMENTS_MAX, ROULETTE_SPIN_ULTRA_MS, ROULETTE_ULTRA_BEATS } from './challenge';
 
 /**
@@ -179,7 +179,9 @@ export function roulettePatternWeights(
  * rarity は当選 index の出現確率(challenge.ts の rouletteRarity)。未指定なら一様。
  *
  * allowed は設定(ルーレット行のチェック)による許可リスト。未知値は無視し、
- * 空・未指定・全滅なら全パターンへ倒す — 設定不備でスピンを止めない。
+ * 空・未指定・全滅なら **ROULETTE_SELECTABLE_PATTERNS** へ倒す — 設定不備でスピンを
+ * 止めないが、激熱確定専用の絵柄(ROULETTE_HOT_ONLY_PATTERNS)は通常抽選に混ぜない。
+ * **明示 allowed は素通し** — 激熱の経路は1要素の allowed で専用の絵柄を指名する。
  * **rand() の消費は常にちょうど1回** — fxRand の消費数を分岐で変えない
  * (rarity の有無・allowed の形に依らず。worker の出目再現性の前提)。
  * 境界の規約は drawRouletteIndex と同じ: rand=0 は先頭(canonical 順で最初の
@@ -191,7 +193,7 @@ export function drawRoulettePattern(
   rarity?: number
 ): RoulettePattern {
   const pool = allowed?.length ? ROULETTE_PATTERNS.filter((p) => allowed.includes(p)) : [];
-  const src: readonly RoulettePattern[] = pool.length > 0 ? pool : ROULETTE_PATTERNS;
+  const src: readonly RoulettePattern[] = pool.length > 0 ? pool : ROULETTE_SELECTABLE_PATTERNS;
   const weights = roulettePatternWeights(src, rouletteRarityBand(rarity));
   const total = weights.reduce((s, x) => s + x, 0);
   let r = rand() * total;
@@ -278,7 +280,7 @@ export const RL_CLIP_FADE_MS = ROULETTE_ULTRA_BEATS.fadeMs;
 export const RL_CLIP_REMOVE_MS = 600;
 
 /**
- * 超激アツ(ultra)の振り付けを割合(0..1)へ落とす。**9パターン全部がこの1本を使う** —
+ * 超激アツ(ultra)の振り付けを割合(0..1)へ落とす。**10パターン全部がこの1本を使う** —
  * 個別に書き並べると「同じ動きのはずが1つだけズレている」を型でも値でも検出できない。
  *
  * 拍の割り当て(ROULETTE_ULTRA_BEATS の解説と対):
@@ -343,7 +345,7 @@ export const ROULETTE_PATTERN_TIMING: Record<RoulettePattern | 'fast', RouletteP
   jackstop: { nearAt: 0.66, quietAt: 0.48, kickAts: [0.88], stepAts: [0.58] },
   jackslip: { nearAt: 0.7, quietAt: 0.48, kickAts: [], stepAts: [0.76, 0.82, 0.88] },
   jackback: { nearAt: 0.68, quietAt: 0.5, kickAts: [0.88], stepAts: [0.74] },
-  // ── 超激アツ(ultra)。**9パターンとも同じ振り付け**(カウントダウン式の激アツ)。
+  // ── 超激アツ(ultra)。**10パターンとも同じ振り付け**(カウントダウン式の激アツ)。
   //    尺・拍・動画枠はすべて ROULETTE_ULTRA_BEATS から ultraTiming() が起こす。
   //    パターンごとに違うのは **流す動画の絵** だけ(assets/fx/rl/<pattern>-<n>.mp4)。
   //    monitor.css 側も rl-run-ultra 1本を全パターンで共有する。
@@ -356,6 +358,7 @@ export const ROULETTE_PATTERN_TIMING: Record<RoulettePattern | 'fast', RouletteP
   hearttouch: ultraTiming(),
   heartbday: ultraTiming(),
   heartbloom: ultraTiming(),
+  djglasses: ultraTiming(),
   fast: { nearAt: 1, quietAt: 1, kickAts: [], stepAts: [] },
 };
 

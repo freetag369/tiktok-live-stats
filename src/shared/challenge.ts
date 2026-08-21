@@ -31,7 +31,12 @@ import type {
   RouletteTeaseConfig,
   GiftRepeatFxConfig,
 } from './dto';
-import { ROULETTE_COUNT_VIEWS, ROULETTE_PATTERNS, ROULETTE_PATTERN_TIER } from './dto';
+import {
+  ROULETTE_COUNT_VIEWS,
+  ROULETTE_PATTERNS,
+  ROULETTE_PATTERN_TIER,
+  ROULETTE_SELECTABLE_PATTERNS,
+} from './dto';
 import { WAKE_TIME_RE } from './time';
 import {
   FULL_CUT_CLIPS,
@@ -299,8 +304,71 @@ export const ROULETTE_HOT_INTRO_MS = 8000;
  * ❶ライオン→獅子 ❷ドラゴンの炎→黄金龍 ❸フェニックス→不死鳥。
  * 導入動画は assets/fx/rl/hot/<pattern>.mp4 で、スピン本体は既存の ultra 素材を流用する。
  * **行の patterns(設定のチェック)は激熱行では見ない** — 3種に固定するのが仕様。
+ *
+ * **ギフト連動の行はここを見ない**(下の ROULETTE_HOT_GIFT_PATTERNS)。この配列は
+ * 「絵柄を指定していない激熱行が抽選で引く候補」であって、激熱の絵柄の全体ではない
+ * — 全体が要るところ(素材カタログの突合)は ROULETTE_HOT_INTRO_PATTERNS を使うこと。
  */
 export const ROULETTE_HOT_PATTERNS: readonly RoulettePattern[] = ['lion', 'dragon', 'phoenix'];
+
+/**
+ * ギフト連動で絵柄が **100% 固定**される激熱行の表。
+ *
+ * 「DJメガネを投げたら DJメガネの演出」をユーザー設定なしで成立させるためのもの
+ * (設定項目を増やさないのがユーザー決定)。ここに載ったギフトの激熱行は、抽選を
+ * 通さず必ずその絵柄になる。
+ *
+ * **giftId が権威**(ライブ経路では canonical が未代入で、giftName は配信の言語設定で
+ * 変わる — matchGiftTrigger の解説を参照)。giftName / canonical は「ユーザーが ID を
+ * 消して名前トリガーに変えた行」も拾うための保険で、**完全一致でしか当てない**
+ * (exactName: true)。部分一致にすると giftName:'a' のような短いトリガーを持つ
+ * 無関係な激熱行が DJ の絵柄に化ける。
+ */
+export const ROULETTE_HOT_GIFT_PATTERNS: readonly {
+  /** 固定する絵柄。ROULETTE_HOT_ONLY_PATTERNS(激熱専用)である必要はない。 */
+  pattern: RoulettePattern;
+  /** 照合に使うギフトの指紋。matchGiftTrigger の g 側に渡す形。 */
+  gift: { giftId: string; giftName: string; canonical: string };
+  /** 設定画面の説明文に出す名前。 */
+  label: string;
+}[] = [
+  {
+    pattern: 'djglasses',
+    gift: { giftId: '11583', giftName: 'dj glasses', canonical: 'dj_glasses' },
+    label: 'DJメガネ',
+  },
+];
+
+/**
+ * 激熱行 → 絵柄の候補。**worker の抽選点はこの1本だけを使うこと。**
+ *
+ * ギフト連動なら**1要素の配列**を返す。呼び出し側は今までどおり drawRoulettePattern に
+ * 渡すので、**fxRand の消費はちょうど1回のまま**(「1抽選 = 1消費」は出目の再現性の
+ * 前提で、テストが固定している)。早期 return で drawRoulettePattern を飛ばすと
+ * 消費数が変わって同じ seed の再生が別物になる。
+ *
+ * rl が null/undefined(入室ルーレットの試写など、ギフト行が引けない経路)は
+ * 従来どおり3種の抽選へ倒す。
+ */
+export function rouletteHotPatternPool(
+  rl: { giftId: string; giftName: string; canonical: string } | null | undefined
+): readonly RoulettePattern[] {
+  if (rl != null) {
+    for (const g of ROULETTE_HOT_GIFT_PATTERNS) {
+      if (matchGiftTrigger({ ...rl, exactName: true }, g.gift)) return [g.pattern];
+    }
+  }
+  return ROULETTE_HOT_PATTERNS;
+}
+
+/**
+ * 激熱で**導入動画が要る絵柄の全体** = 抽選の3種 + ギフト連動の絵柄。
+ * assets/fx/rl/hot/<pattern>.mp4 と 1:1 になる(roulette-clip-catalog.spec.ts が突合)。
+ * 並びは ROULETTE_PATTERNS の正順。
+ */
+export const ROULETTE_HOT_INTRO_PATTERNS: readonly RoulettePattern[] = ROULETTE_PATTERNS.filter(
+  (p) => ROULETTE_HOT_PATTERNS.includes(p) || ROULETTE_HOT_GIFT_PATTERNS.some((g) => g.pattern === p)
+);
 /**
  * 激熱確定の専用キュー(モニターの優先度⑧)の上限。1本が導入 8 秒 + スピン 31.9 秒 +
  * 確定見せ 3 秒 ≒ 43 秒なので、8 件で約 5.7 分。溢れは捨てず末尾の同一盤面へ
@@ -489,6 +557,11 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     // 革命の倍率・尺も同じ規約(revolution-start/-end の焼き込み値)。
     ...(e.revolutionMultiplier != null ? { revolutionMultiplier: e.revolutionMultiplier } : {}),
     ...(e.revolutionMs != null ? { revolutionMs: e.revolutionMs } : {}),
+    // 窓の戦果(revolution-end のみ)。revolutionResultMs は**引き継がない** —
+    // あれは演出の尺で履歴の情報ではない(boostResultMs をログに載せないのと同じ)。
+    ...(e.revolutionDownTotal != null ? { revolutionDownTotal: e.revolutionDownTotal } : {}),
+    ...(e.revolutionTapCount != null ? { revolutionTapCount: e.revolutionTapCount } : {}),
+    ...(e.revolutionLikeDown != null ? { revolutionLikeDown: e.revolutionLikeDown } : {}),
     // 凍結ドレインの合算件数 → 履歴の「×N」表示(press 畳み込みと同じ概念)。
     ...(e.coalesced != null && e.coalesced > 1 ? { count: e.coalesced } : {}),
   };
@@ -715,6 +788,11 @@ export const DEFAULT_SE_VOLUMES: Record<ChallengeSeSlot, number> = {
  * 保存済み settings.json は既に明示配列を持つので、新パターンはそこにも現れない
  * (= 既存ユーザーの配信も勝手に変わらない)。オプトインを解除して全員に出したく
  * なったら、この配列から除外を外すだけでよい。
+ *
+ * **激熱確定専用(dto の ROULETTE_HOT_ONLY_PATTERNS)はここに入れないこと。**
+ * オプトインは「チェックすれば出る」= 設定画面に**チェックが出る**の意味だが、
+ * 激熱専用は一覧そのものに出さない。除外は ROULETTE_SELECTABLE_PATTERNS の側で
+ * 済んでおり、DEFAULT_ROULETTE_PATTERNS はその差集合をさらに絞ったもの。
  */
 export const ROULETTE_OPT_IN_PATTERNS: readonly RoulettePattern[] = [
   'heartme',
@@ -722,9 +800,8 @@ export const ROULETTE_OPT_IN_PATTERNS: readonly RoulettePattern[] = [
   'heartbday',
   'heartbloom',
 ];
-export const DEFAULT_ROULETTE_PATTERNS: readonly RoulettePattern[] = ROULETTE_PATTERNS.filter(
-  (p) => !ROULETTE_OPT_IN_PATTERNS.includes(p)
-);
+export const DEFAULT_ROULETTE_PATTERNS: readonly RoulettePattern[] =
+  ROULETTE_SELECTABLE_PATTERNS.filter((p) => !ROULETTE_OPT_IN_PATTERNS.includes(p));
 export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
   id: 'rl-heart_me',
   // モニターの見出しは「ハートミー ○○がルーレット」。TikTok から届く実名は
@@ -748,10 +825,55 @@ export const DEFAULT_ROULETTE: ChallengeRouletteConfig = {
 };
 
 /**
- * ルーレット群の既定。出荷時はハートミー1件 — 設定画面から何件でも足せる。
- * 複数ある場合は**上から順に評価し、最初に一致した1件だけ**が回る(matchRoulette)。
+ * 激熱確定の既定行(DJメガネ / giftId 11583 / 500💎)。**倍率 ×10・盤面は全マス 500**
+ * なので、どこに止まっても 500 → **5000** で確定する(ユーザー決定 2026-08-21)。
+ *
+ * ⚠ **この定数は「validate を通した後」と同じ形でなければならない。**
+ * loadSettings / loadChallengeDefault はどちらも validate → migrate の順で走り、
+ * **migrate の出力は再検証されない**。patterns キーを落とすと1回目の読込と
+ * 保存後の形が食い違い、boot-settings.spec の不動点検査が落ちる。
+ * 同じ理由で giftName は小文字・trim 済み、sound キーは持たせない。
+ *
+ * 絵柄は ROULETTE_HOT_GIFT_PATTERNS により 100% 'djglasses'(設定項目は無い)。
  */
-export const DEFAULT_ROULETTES: readonly ChallengeRouletteConfig[] = [DEFAULT_ROULETTE];
+export const DJ_GLASSES_ROULETTE: ChallengeRouletteConfig = {
+  id: 'rl-dj_glasses',
+  label: 'DJメガネ',
+  enabled: true,
+  // 指定は giftId が本線。giftName は ID が変わったときの保険で、日本語名
+  // 「DJメガネ」は使えない(配信イベントの giftName は英語で届く)。
+  giftId: '11583',
+  giftName: 'dj glasses',
+  // gift-aliases に dj_glasses の名寄せ規則は無いので空のまま(推測で足さない規約)。
+  canonical: '',
+  // 全マス同額。倍率が本物なので素の出目は動かさず、どこに止まっても同じ額で確定する。
+  // weight は合計 100 = そのまま % 表示(全マス同額なので確率表示にしか効かない)。
+  segments: [
+    { amount: 500, weight: 17 },
+    { amount: 500, weight: 17 },
+    { amount: 500, weight: 17 },
+    { amount: 500, weight: 17 },
+    { amount: 500, weight: 16 },
+    { amount: 500, weight: 16 },
+  ],
+  direction: 'add',
+  // 激熱行では読まれないキーだが、**省略しない**(上の ⚠ の理由)。
+  patterns: [...DEFAULT_ROULETTE_PATTERNS],
+  hot: { enabled: true, multiplier: 10 },
+};
+
+/**
+ * ルーレット群の既定。出荷時はハートミーと DJメガネ(激熱確定)の2件 —
+ * 設定画面から何件でも足せる。
+ * 複数ある場合は**上から順に評価し、最初に一致した1件だけ**が回る(matchRoulette)。
+ *
+ * **DJメガネは必ず末尾**。先頭に入れるとテストや呼び元の `roulettes[0]` /
+ * `DEFAULT_ROULETTES[0]`(= 従来ハートミーを指していた)が別人を掴む。
+ */
+export const DEFAULT_ROULETTES: readonly ChallengeRouletteConfig[] = [
+  DEFAULT_ROULETTE,
+  DJ_GLASSES_ROULETTE,
+];
 
 /**
  * 入室ルーレットの既定。**無効で出荷** — 既存ユーザーの配信を勝手に変えない
@@ -889,11 +1011,13 @@ export const PENDING_BANDS_MAX = 4;
 export const PENDING_BOOSTS_MAX = 4;
 
 /**
- * 他演出中に届いた革命の導入(revolution-start)の持ち越し上限(モニター側)。
- * 重ねがけは worker が延長へ畳む(activateRevolution)ので、キューに同時に並ぶのは
- * 「アーム中の1本 + 稀な再アーム」程度 — 2 で足りる(fx-drain の見積もこの値)。
+ * 他演出中に届いた革命(revolution-start の導入 / revolution-end の結果)の
+ * 持ち越し上限(モニター側)。重ねがけは worker が延長へ畳む(activateRevolution)ので、
+ * キューに同時に並ぶのは「アーム中の1本 + 稀な再アーム」程度。
+ * **結果カットシーン1本ぶんの枠を足して 3**(2 のままだと、他演出で渋滞した瞬間に
+ * 窓の締めくくりが無言で捨てられる)。
  */
-export const PENDING_REVOLUTIONS_MAX = 2;
+export const PENDING_REVOLUTIONS_MAX = 3;
 /**
  * フィーバーの「アーム」(発動予約)を保持する上限(ms)。worker はギフト着弾で
  * 予約するだけで、**モニターが起動カットインを再生し始めた瞬間**(challenge.boostCue)に
@@ -1440,6 +1564,19 @@ export function tapLockActivationCount(repeatCount: number): number {
 export const TAP_LOCK_RULES_MAX = 8;
 
 /**
+ * 発動時に出す導入全面カット(不透明・音声焼き込み)の尺(ms)。
+ * 素材は assets/fx/tap-lock/intro.mp4 で、この尺の契約で作る。
+ * モニターは onEnded ではなく JS タイマーで打ち切る(REVOLUTION_INTRO_MS と同じ規約)。
+ *
+ * **封印そのものはこの5秒を待たない。** worker は一致した瞬間に絶対期限をラッチし、
+ * 導入が流れている裏で残り時間は普通に減る(fx-priority.ts の④.5 の理由と同じ —
+ * 「封印は worker の絶対時刻で走り、モニターが何を再生していようが時間は減る」)。
+ * だから導入は封印より長くなってはいけない: モニターの入口ガードは
+ * 「実尺(tapLockMs)がこの値以上」を要求する(最小設定 5 秒でちょうど等しい)。
+ */
+export const TAP_LOCK_INTRO_MS = 5_000;
+
+/**
  * お邪魔1行の既定 = **進撃グローブ**(gift 6007 / 実受信の giftName は `boxing gloves`)。
  *
  * giftId を本線にするのは tapBoost / fanStamp と同じ規約。giftName は ID 変更時の保険で、
@@ -1495,13 +1632,27 @@ export const REVOLUTION_MULT_MIN = 1;
 export const REVOLUTION_MULT_MAX = 100;
 
 /**
- * 導入全面カットの尺(ms)。仮素材(gift-band1)も本番素材もこの尺の契約で作る。
- * モニターは onEnded ではなく JS タイマーで打ち切る(startBandFx と同じ規約)。
+ * 導入全面カットの尺(ms)。素材 assets/fx/revolution/intro.mp4 はこの尺の契約で作る
+ * (24fps で **192 フレームちょうど**)。モニターは onEnded ではなく JS タイマーで
+ * 打ち切る(startBandFx と同じ規約)。
+ *
+ * **結果カットシーン(REVOLUTION_RESULT_MS = 6秒)とは別の尺**。導入は「戦闘モードに
+ * 入る」山場なので長く、結果は戦果を読ませるだけなので短い(2026-08-20 ユーザー決定で
+ * 6秒 → 8秒へ変更)。前置き合計は導入8秒 + カウントダウン5秒 = **13秒**。
  */
-export const REVOLUTION_INTRO_MS = 6_000;
+export const REVOLUTION_INTRO_MS = 8_000;
 
 /** 開始カウントダウン(5..1、DOM の大型数字)の尺(ms)。1秒刻み×5。 */
 export const REVOLUTION_COUNT_MS = 5_000;
+
+/**
+ * 窓オープンから何ms間、中央上の大きな告知ボックス(.revolution-overlay)を出すか。
+ * これを過ぎたら「革命 残りN秒 ×N」の小さなピル(.revolution-timer)へ引き継ぎ、
+ * 盤面(タイトル・いいねゲージ)を1分間ふさぎ続けないようにする(2026-08-20 ユーザー決定)。
+ * 起点は ChallengeState.revolution.startsAtMs の**絶対時刻**なので、窓の途中で
+ * モニターを開き直しても告知は復活しない。
+ */
+export const REVOLUTION_HUD_INTRO_MS = 5_000;
 
 /**
  * 窓の残り時間のハード上限(ms)。TAP_LOCK_MAX_MS と同じ二段構えの安全弁 —
@@ -2379,12 +2530,15 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeTapBoostNebaaru(
-    migrateChallengeStampTriggers(
-      migrateChallengeTapBoostCorgi(
-        migrateChallengeGiftFullCutTriggersV5(
-          migrateChallengeGiftFullCutTriggers(
-            migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+  return migrateChallengeRouletteDjGlasses(
+    migrateChallengeTapBoostNebaaru(
+      migrateChallengeStampTriggers(
+        migrateChallengeTapBoostCorgi(
+          migrateChallengeGiftFullCutTriggersV5(
+            migrateChallengeGiftFullCutTriggers(
+              migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+              fromVersion
+            ),
             fromVersion
           ),
           fromVersion
@@ -2395,6 +2549,37 @@ export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number
     ),
     fromVersion
   );
+}
+
+/**
+ * v10: 激熱確定の DJメガネ行(gift 11583)を**まだ無ければ1回だけ**足す。
+ * migrateChallengeTapBoostCorgi と同型。
+ *
+ * roulettes キーは保存済み設定が必ず持っている(旧単数 roulette も validateRoulettes が
+ * 配列へ包み直す)ので、**既定を直しても既存ユーザーには一生届かない** — 足す移行が要る。
+ *
+ * ⚠ validateChallengeConfig の中に入れてはいけない。あちらは UI の cfg.set も通るので、
+ *   ユーザーが消した DJメガネ行がその場で復活する(giftFullCut / コーギーと同じ理由)。
+ *
+ * - giftId 一致で「自分で 11583 の行を作っていた人」に二重に配らない。
+ * - id 一致も見る: 同梱 resources/challenge-default.json には明示行が入っているので、
+ *   そこから来た行でユーザーが giftId を空にしていても足さない(足すと id が重複して
+ *   validateRoulettes の振り直しで 'rl-dj_glasses-1' に化ける)。
+ * - 上限 ROULETTES_MAX に達している設定には足さない。
+ * - **末尾へ append**。matchRoulette は先勝ちなので、ユーザーが並べた優先度を壊さない。
+ * - 行を消した人には二度と配らない(世代印が上がるのは1回だけ)。
+ */
+export function migrateChallengeRouletteDjGlasses(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 10) return cfg;
+  const has = cfg.roulettes.some(
+    (r) => r.giftId === DJ_GLASSES_ROULETTE.giftId || r.id === DJ_GLASSES_ROULETTE.id
+  );
+  if (has) return cfg;
+  if (cfg.roulettes.length >= ROULETTES_MAX) return cfg;
+  return { ...cfg, roulettes: [...cfg.roulettes, structuredClone(DJ_GLASSES_ROULETTE)] };
 }
 
 /**
@@ -3261,7 +3446,9 @@ function sanitizeRoulettePatterns(raw: unknown): RoulettePattern[] {
   // 勝手に有効になる(= 既定オフの意味が無くなる)。
   if (!Array.isArray(raw)) return [...DEFAULT_ROULETTE_PATTERNS];
   // 明示配列にオプトインが入っていれば尊重する — ユーザーが選んだものは通す。
-  const out = ROULETTE_PATTERNS.filter((p) => raw.includes(p));
+  // ただし激熱確定専用(ROULETTE_HOT_ONLY_PATTERNS)は SELECTABLE に居ないので、
+  // 手編集の settings.json で紛れ込んでいてもここで必ず落ちる。
+  const out = ROULETTE_SELECTABLE_PATTERNS.filter((p) => raw.includes(p));
   return out.length > 0 ? out : [...DEFAULT_ROULETTE_PATTERNS];
 }
 

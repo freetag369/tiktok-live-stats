@@ -274,6 +274,36 @@ export interface LikeSeriesPoint {
   comments: number;
 }
 
+/**
+ * ギフトリスト(カウントダウンチャレンジ設定の「ギフトリスト」タブ)の1行。
+ *
+ * 出所は **gift_catalog(受信のたびに自動で育つ実測テーブル)** で、創作値は無い。
+ * チャレンジの各機能(giftFullCut / roulettes / tapBoost / tapLock / fanStamp /
+ * stampTriggers / revolution / giftRules)は giftId 完全一致が本線なので、
+ * 「この配信に実際に届いた giftId はどれか」を一覧で引けることが設定作業の前提になる。
+ * ギフト名は同名別ID・前後スペース・綴り揺れがあり、名前では特定できない。
+ */
+export interface GiftCatalogRow {
+  giftId: string;
+  /** 受信原文ママ(前後スペースを含むことがある — trim しないこと)。 */
+  name: string;
+  /** 単価💎(= diamond_count = イベントの diamondEach)。総額ではない。 */
+  diamonds: number;
+  /** 1 == 連打(コンボ)あり。2・4 は単発系。未受信で不明なら null。 */
+  giftType: number | null;
+  iconUrl: string | null;
+  /** gift_alias の canonical('heart' など粒度が粗い。個別指定には使わない)。 */
+  canonical: string | null;
+  /** gift_event の行数(= 受信回数。連打は1行にまとまる)。 */
+  count: number;
+  /** 実測の最大連打(MAX(repeat_count))。type だけでは分からない実際の上限。 */
+  maxRepeat: number;
+  /** 累計💎(SUM(diamonds) = 単価×連打の総和)。 */
+  totalDiamonds: number;
+  firstSeenMs: Ms | null;
+  lastSeenMs: Ms | null;
+}
+
 // ── Analytics (P1) ───────────────────────────────────────────────────────────
 
 export interface ScoringConfig {
@@ -476,8 +506,31 @@ export const ROULETTE_PATTERNS = [
   'hearttouch', //  ハートタッチ — 2つのハートが触れ合って融合する。振り付けは unicorn と同一値の流用
   'heartbday', //   ハートの誕生日 — ハート型ケーキのロウソクが爆ぜる。振り付けは dragon と同一値の流用
   'heartbloom', //  花咲ハート — ハート型の花が満開に開く。振り付けは lion と同一値の流用
+  // ── 激熱確定専用(ギフト連動)。設定画面のチェック一覧には出さず、通常の抽選にも乗らない。
+  //    ROULETTE_HOT_ONLY_PATTERNS / ROULETTE_SELECTABLE_PATTERNS を参照。
+  'djglasses', //   DJメガネ — ターンテーブル・ミラーボール・スピーカーの一撃。振り付けは ultra 共通
 ] as const;
 export type RoulettePattern = (typeof ROULETTE_PATTERNS)[number];
+
+/**
+ * 激熱確定(hot)でだけ出る絵柄。**通常のルーレットでは絶対に出さない。**
+ *
+ * オプトイン(ROULETTE_OPT_IN_PATTERNS)とは別概念 — あちらは「ユーザーがチェックすれば
+ * 出る」、こちらは「チェック自体を見せない」。ギフト連動で 100% その絵柄になるので、
+ * 通常スピンに混ざると 43 秒級の演出が意図せず出てしまう。
+ *
+ * 締め出しは3点セット: ①この配列から ROULETTE_SELECTABLE_PATTERNS を作る
+ * ②sanitizeRoulettePatterns が保存時に除去 ③設定画面の一覧が SELECTABLE を回す。
+ */
+export const ROULETTE_HOT_ONLY_PATTERNS: readonly RoulettePattern[] = ['djglasses'];
+
+/**
+ * 設定画面で選べる = 通常抽選に乗りうるパターン。ROULETTE_PATTERNS から激熱専用を抜いたもの。
+ * **並び順は ROULETTE_PATTERNS のまま**(正順への正規化がこの順に依存している)。
+ */
+export const ROULETTE_SELECTABLE_PATTERNS: readonly RoulettePattern[] = ROULETTE_PATTERNS.filter(
+  (p) => !ROULETTE_HOT_ONLY_PATTERNS.includes(p)
+);
 
 /**
  * パターンの段位。スピン尺と走行距離は**段位のみの関数**(rouletteSpinMs /
@@ -514,6 +567,7 @@ export const ROULETTE_PATTERN_TIER: Record<RoulettePattern, RouletteTier> = {
   hearttouch: 'ultra',
   heartbday: 'ultra',
   heartbloom: 'ultra',
+  djglasses: 'ultra',
 };
 /** スピン尺・走行距離の引数キー。'fast' は 16 本目以降(と合算 effect)の短縮スピン。 */
 export type RouletteSpinKey = RoulettePattern | 'fast';
@@ -1573,6 +1627,28 @@ export interface ChallengeEffect {
   /** kind='revolution-start'/'revolution-end': 窓の尺(ms)。バナー文言用の焼き込み。 */
   revolutionMs?: number;
   /**
+   * kind='revolution-end': 窓の**総減算量**(タップ由来 + 反転いいね由来)。
+   * クランプ後の実減少量の合計で、`amount` とは別物 — `amount` は 0 のままにする
+   * (革命は窓中に即時反映済みで清算 lump が無く、ここを負にすると valueAfter の
+   * 会計とモニターの据え置き計算が壊れる)。結果カットシーンの主役の数字。
+   */
+  revolutionDownTotal?: number;
+  /**
+   * kind='revolution-end': 窓中の実タップ数。**導入(11秒)の間に溜めた等倍タップと、
+   * 窓に重なったフィーバー窓のタップは含まない** — worker が press の革命枝だけで
+   * 数えているため(stats.presses の差分では両方が混ざる)。
+   */
+  revolutionTapCount?: number;
+  /** kind='revolution-end': 反転いいねによる減算(ゲージ満タン + ストック満杯の合計)。 */
+  revolutionLikeDown?: number;
+  /**
+   * kind='revolution-end': 結果カットシーン(全面動画+数字の発表)の尺(ms)。
+   * 0/未指定 = 発表なし(バナーだけ)。boostResultMs と同じ焼き込みの流儀で、
+   * **窓が自然満了 かつ 減算があった ときだけ**載る(機能OFF は逃げ道であって
+   * 祝う場面ではない / stop・reset・達成はそもそも revolution-end を積まない)。
+   */
+  revolutionResultMs?: number;
+  /**
    * カットイン凍結の解除ドレインで同種の保留演出を1件に畳んだとき、元の件数
    * (2以上のときだけ載る)。amount 等は合算済み。ダッシュボードの履歴ログは
    * これを「×N」として1行にまとめる。省略 = 畳んでいない(1件そのまま)。
@@ -1654,9 +1730,16 @@ export type ChallengeTestEffectSpec =
       kind: 'gift';
       /** tier(小〜特大)判定とフラッシュ判定に使うダイヤ数。 */
       diamonds: number;
-      /** 帯演出行のテスト用。指定時はこのバンドのカットインを強制する(帯域一致は評価しない)。 */
+      /**
+       * 帯演出行のテスト用。指定時はこのバンドのカットインを強制する(帯域一致は評価しない)。
+       * **clip が 'off' の行(無演出)も渡せる** — カットイン抜きの見た目(ギフトカード・
+       * 簡易演出・ジングル)だけを実演する。BGM は clip と一緒でないと載らない。
+       */
       bandId?: string;
-      /** 全面カット行のテスト用。指定時はこの行のカットインを強制する(トリガー一致は評価しない)。 */
+      /**
+       * 全面カット行のテスト用。指定時はこの行のカットインを強制する(トリガー一致は評価しない)。
+       * bandId と同じく **clip が 'off' の行も渡せる**(カットイン抜きの見た目だけを実演)。
+       */
       fullCutId?: string;
       /** 連打反復のテスト用。未指定は1回。bandId 併用時は 1 に倒す(testEffect は凍結を張らないため)。 */
       repeat?: number;
@@ -2076,6 +2159,12 @@ export interface ChallengeLogEntry {
   revolutionMultiplier?: number;
   /** kind='revolution-start'/'revolution-end': 窓の尺 ms(tapLockMs と同じ規約)。 */
   revolutionMs?: number;
+  /** kind='revolution-end': 窓の総減算量(effect からそのまま引き継ぐ)。 */
+  revolutionDownTotal?: number;
+  /** kind='revolution-end': 窓中の実タップ数(同上)。 */
+  revolutionTapCount?: number;
+  /** kind='revolution-end': 反転いいねによる減算(同上)。 */
+  revolutionLikeDown?: number;
 }
 
 // ── Settings / export ────────────────────────────────────────────────────────
@@ -2117,8 +2206,12 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  *    足す移行ではなく寄せ替えなので、旧既定と完全に同じ boost-1 行だけを触り、
  *    倍率・ウィンドウ秒・並び順・ユーザーが編集した行には一切触れない。
  *    黒豹のクリップはカタログに残るので設定画面から選び直せる。
+ * 10: 激熱確定の DJメガネ行(gift 11583・倍率 ×10・盤面は全マス 500)を**まだ無ければ
+ *    1回だけ**追加(migrateChallengeRouletteDjGlasses)。roulettes キーは既存の保存済み
+ *    設定が必ず持っているので、既定(DEFAULT_ROULETTES / 同梱 challenge-default.json)を
+ *    直しても届かない — v7 のコーギー行と同じ「足す移行」。
  */
-export const SETTINGS_VERSION = 9;
+export const SETTINGS_VERSION = 10;
 
 export interface AppSettings {
   eulerApiKey: string;

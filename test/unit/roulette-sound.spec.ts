@@ -5,6 +5,7 @@ import {
   DEFAULT_CHALLENGE,
   DEFAULT_JOIN_ROULETTE,
   DEFAULT_ROULETTE,
+  DEFAULT_ROULETTES,
   DEFAULT_ROULETTE_SOUND,
   mergeRoulette,
   resolveRouletteSound,
@@ -129,9 +130,10 @@ describe('validateChallengeConfig — 行ごとの回転サウンド上書き', 
     // `toEqual(DEFAULT_ROULETTE)` `toEqual(DEFAULT_JOIN_ROULETTE)` が落ちる。
     // 常に `sound: null` を出すと、toEqual は undefined と違って null を無視しない。
     expect('sound' in DEFAULT_ROULETTE).toBe(false);
+    for (const r of DEFAULT_ROULETTES) expect('sound' in r, r.id).toBe(false);
     expect('sound' in DEFAULT_JOIN_ROULETTE).toBe(false);
     const v = validateChallengeConfig(structuredClone(DEFAULT_CHALLENGE));
-    expect(v.roulettes).toEqual([DEFAULT_ROULETTE]);
+    expect(v.roulettes).toEqual([...DEFAULT_ROULETTES]);
     expect(v.joinRoulette).toEqual(DEFAULT_JOIN_ROULETTE);
   });
 

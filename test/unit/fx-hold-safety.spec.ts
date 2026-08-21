@@ -372,12 +372,14 @@ describe('着弾の背面再生 — 遮蔽 occlusion(2026-08-17 ユーザー決�
     }
   });
 
-  it('横取り 4 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
+  it('横取り 6 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
     const calls = SRC.split('flushStrike(true, ').length - 1;
-    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(4);
+    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(6);
     // revolution は 2026-08-20 追加(導入カットインが不透明フルフレームなので
-    // band / boost と同じ 'opaque' の横取りが要る)。
-    for (const kind of ['roulette', 'band', 'boost', 'revolution']) {
+    // band / boost と同じ 'opaque' の横取りが要る)。tap-lock も同日・同じ理由で追加。
+    // 6 箇所目は同日追加の革命の**結果**カットシーン(導入と同じ 'revolution' の遮蔽を
+    // 渡す — occlusionOfCutin は種別→遮蔽の 1:1 対応なので新しい種別は作らない)。
+    for (const kind of ['roulette', 'band', 'boost', 'revolution', 'tap-lock']) {
       expect(SRC, `${kind} の横取りが遮蔽を渡していない`).toContain(
         `flushStrike(true, occlusionOfCutin('${kind}'));`
       );
@@ -416,5 +418,68 @@ describe('着弾の背面再生 — 遮蔽 occlusion(2026-08-17 ユーザー決�
     // 4 ホールドを直接読み直す実装に戻していないこと。
     expect(fn).not.toContain('bandHold');
     expect(fn).not.toContain('boostHold');
+  });
+});
+
+
+describe('革命: 導入と結果は別の生存期間(結果カットシーンを殺さない)', () => {
+  // 実配信で壊れると「699💎 を撃った窓の結末が無言で消える」だけなので、症状が
+  // 静かで気付けない。ソース不変条件で固定する(レンダラの DOM テスト環境が無い)。
+
+  it('abortRevolutionFx は結果の state に一切触れない', () => {
+    // 導入の破棄が結果を巻き添えにすると、窓が閉じた瞬間(= 結果が始まる瞬間)に
+    // 消える。両者は最大 REVOLUTION_MAX_MS(180秒)離れた別の生存期間。
+    const fn = fnBody('abortRevolutionFx');
+    expect(fn).not.toContain('revolutionResult');
+    expect(fn).not.toContain('revSettle');
+  });
+
+  it('startRevolutionResultFx は専用のホールドとタイマーを使う', () => {
+    const fn = fnBody('startRevolutionResultFx');
+    expect(fn).toContain('revolutionResultHold.current = true');
+    expect(fn).toContain('fxHoldDeadlines.current.revolutionResult =');
+    // 導入のホールド/タイマーを触ったら混線している。
+    expect(fn).not.toContain('revolutionHold.current = true');
+    expect(fn).not.toContain('clearRevolutionTimers()');
+  });
+
+  it('startRevolutionResultFx は据え置き(holdValue)を張らない', () => {
+    // 革命は窓中に即時反映済みで清算 lump が無い。据え置くと幕明けに数字が飛ぶ。
+    expect(fnBody('startRevolutionResultFx')).not.toContain('holdValue(');
+  });
+
+  it('startRevolutionResultFx の二重安全弁(totalMs と totalMs+2000)がある', () => {
+    const fn = fnBody('startRevolutionResultFx');
+    expect([...fn.matchAll(/finishRevolutionResultFx\(\)/g)].length).toBe(2);
+  });
+
+  it('番犬は revolutionResult も見て、出口は締め関数を通る', () => {
+    const at = SRC.indexOf('FX_HOLD_WATCHDOG_MS);');
+    const effect = SRC.slice(SRC.lastIndexOf('useEffect', at), at);
+    expect(effect).toContain('revolutionResultHold.current');
+    expect(effect).toContain('finishRevolutionResultFx()');
+  });
+
+  it('窓の消滅で畳むのは導入だけ — revolution-end の持ち越しは残す', () => {
+    // [revActive] の effect は playEffect ループより先に走る。ここで一律に
+    // pendingRevolutions を空にすると、渋滞中に届いた結果が無言で消える。
+    const at = SRC.indexOf('革命の窓が worker 側で畳まれた');
+    expect(at, '窓消滅の片付け effect が見つからない').toBeGreaterThanOrEqual(0);
+    const around = SRC.slice(at - 700, at + 700);
+    expect(around).toContain("x.kind === 'revolution-start'");
+    expect(around).toContain("x.kind === 'revolution-end'");
+  });
+
+  it('最前面オーバーレイの一覧(fxHoldBusy)に結果の2つが並んでいる', () => {
+    // 落とすと CLEAR のリザルト画面が発表の上に生える(boostSettle が漏れた事故)。
+    const at = SRC.indexOf('const fxHoldBusy =');
+    const expr = SRC.slice(at, SRC.indexOf(';', at));
+    expect(expr).toContain('revolutionResult !== null');
+    expect(expr).toContain('revSettle !== null');
+  });
+
+  it('遮蔽と舞台の述語にも結果ホールドが入っている', () => {
+    expect(fnBody('opaqueCutinActive')).toContain('revolutionResultHold.current');
+    expect(fnBody('anyCutinHold')).toContain('revolutionResultHold.current');
   });
 });

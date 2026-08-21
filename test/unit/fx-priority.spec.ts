@@ -40,7 +40,7 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
 
   it('革命は band の直後・通常ギフトルーレットの直前(2026-08-20 ユーザー決定)', () => {
     // ユーザー決定は「通常ルーレットの前だけ」— 初見(⑥)と激熱確定(⑥.5)は
-    // 革命より上のまま。band(⑦)より下なのは、革命が 11 秒の導入を持つ山場でも
+    // 革命より上のまま。band(⑦)より下なのは、革命が 13 秒の導入を持つ山場でも
     // カットインの列を追い越すほどではないという位置づけ。
     expect(fxRank('revolution')).toBe(fxRank('band') + 1);
     expect(fxRank('revolution')).toBeLessThan(fxRank('other'));

@@ -398,9 +398,9 @@ ffmpeg -i raw.mp4 -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v 
 - 音声も再エンコード(`-c:a copy` にしない)— 40本の音圧がバラつくと、
   `giftFullCut.volume` 一つで音量を決めるこの経路では耳に付くため。
 
-# ルーレット超激アツ動画(`rl/` サブフォルダ・36本)
+# ルーレット超激アツ動画(`rl/` サブフォルダ・40本)
 
-ギフトルーレットの超激アツ(ultra)9パターン用。**動画とリールのマス移動が交互に進み、
+ギフトルーレットの超激アツ(ultra)10パターン用。**動画とリールのマス移動が交互に進み、
 動画終端の「一撃」がリールを1マス押す**演出文法で作ってある — 各クリップは
 最後の約1秒にカメラ/画面へ向かう一撃(尾撃ち・火炎・角の突き・飛び掛かり等)で終わる。
 id ⇄ ウィンドウの対応は `src/shared/roulette-fx.ts` の `ROULETTE_PATTERN_TIMING.clips`
@@ -449,7 +449,7 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 
 > ## 2026-08-18: 窓は**全パターン共通の4枠**になった(カウントダウン式の激熱化)
 >
-> ultra 9パターンが同じ振り付け(`shared/challenge.ts` の `ROULETTE_ULTRA_BEATS`)を
+> ultra 10パターンが同じ振り付け(`shared/challenge.ts` の `ROULETTE_ULTRA_BEATS`)を
 > 共有するようになったので、窓の長さもパターンに依らず 4枠で固定:
 >
 > | 枠 | フレーム N | 窓ms | 用途 |
@@ -471,7 +471,7 @@ ffmpeg -y -i raw.mp4 -filter_complex \
   19.5 LU もばらついており、音量スライダー1本で決めるこの経路では耳に付くため
   (全面カット40本で音圧を再エンコードした理由と同じ)。
 - 末尾 150ms だけ `afade` — 音の「プツッ」を防ぐ。一撃の音そのものは削らない長さ。
-- `rl/` 全36本の合計は ≒ **24.5MB**(`app.asar` と AGPL ソース zip の両方に載る)。
+- `rl/` 全40本の合計は ≒ **27MB**(DJメガネ4本 +2.1MB)(`app.asar` と AGPL ソース zip の両方に載る)。
   枠へ切り直して短くなったぶんと、本数が 28 → 36 に増えたぶんがほぼ相殺している。
   **`-crf 28 -preset slow` は落とさないこと** — crf 23 で焼き直したら 28.7MB まで膨れた。
 - 検証(再トリムのたびに回すこと): 全36本で `nb_read_frames == N` / `r_frame_rate == 24/1` /
@@ -489,16 +489,28 @@ ffmpeg -y -i raw.mp4 -filter_complex \
   本リポジトリは AGPL で配布されるため、**再配布前に規約上の再配布可否を必ず確認すること**。
 
 
-## 激熱確定の導入動画3本 — `rl/hot/` ・Higgsfield(Seedance 2.5)製・2026-08-18 追加
+## 激熱確定の導入動画4本 — `rl/hot/` ・2026-08-18 追加(DJメガネのみ 2026-08-21)
 
 激熱確定(hot)ルーレットが**スロットに入る前**に流す 8 秒の全画面動画。
 1本流し切ってから、同じ絵柄の超激アツスピン(既存素材)へつながる。
 
-| ファイル | 絵柄 | 続くスピンのパターン |
-|---|---|---|
-| `rl/hot/lion.mp4` | ライオン → 獅子の激熱 | `lion` |
-| `rl/hot/dragon.mp4` | ドラゴンの炎 → 黄金龍の激熱 | `dragon` |
-| `rl/hot/phoenix.mp4` | フェニックス → 不死鳥の激熱 | `phoenix` |
+| ファイル | 絵柄 | 続くスピンのパターン | 選ばれ方 |
+|---|---|---|---|
+| `rl/hot/lion.mp4` | ライオン → 獅子の激熱 | `lion` | 抽選(3種) |
+| `rl/hot/dragon.mp4` | ドラゴンの炎 → 黄金龍の激熱 | `dragon` | 抽選(3種) |
+| `rl/hot/phoenix.mp4` | フェニックス → 不死鳥の激熱 | `phoenix` | 抽選(3種) |
+| `rl/hot/djglasses.mp4` | DJメガネ → ネオンDJの激熱 | `djglasses` | **ギフト連動(100%)** |
+
+**絵柄は2通りの選ばれ方がある。** 既定は `ROULETTE_HOT_PATTERNS` の3種からの抽選だが、
+`ROULETTE_HOT_GIFT_PATTERNS`(`shared/challenge.ts`)に載ったギフトの激熱行は
+**抽選を通さず必ずその絵柄**になる(DJメガネ = giftId 11583 → `djglasses`)。
+実装は `rouletteHotPatternPool()` の1本で、**候補が1件の配列**になるだけ —
+呼び元は今までどおり `drawRoulettePattern` を通すので **fxRand の消費は1回のまま**。
+早期 return で飛ばすと同じ seed の再生が別物になる。
+
+素材カタログ(`roulette-clip-catalog.spec.ts`)の突合先は
+**`ROULETTE_HOT_INTRO_PATTERNS`**(抽選の3種 ∪ ギフト連動の絵柄)。`ROULETTE_HOT_PATTERNS`
+で突き合わせると `djglasses.mp4` が孤児として弾かれる。
 
 **置き場所は `rl/` 直下ではなくサブディレクトリ `rl/hot/`。** 直下に置くと
 `test/unit/roulette-clip-catalog.spec.ts` の「id ⇄ ファイルが 1:1」が孤児として弾く
@@ -554,6 +566,63 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 **素材を消しても壊れない** — `rouletteHotIntroUrl` が null を返し、`startRoulette` が
 `introMs = 0` で即リールへ入る(値も尺の安全弁もそのぶん正しく短くなる)。
 
+### DJメガネ 5本(導入1 + スピン4)— Dreamina(Seedance 2.0)製・2026-08-21 追加
+
+TikTok ギフト **DJメガネ**(giftId `11583` / `DJ Glasses` / 500💎)専用の激熱確定。
+**このギフトの激熱行だけは抽選を通さず 100% この絵柄**になる(上の表)。
+導入 8 秒 → 同じ絵柄の超激アツスピン(専用の4本)→ ×10 で確定、が一続きになっている。
+
+| ファイル | 枠 | モチーフ | 契約 | S | 実測音量 | サイズ |
+|---|---|---|---|---|---|---|
+| `rl/hot/djglasses.mp4` | 導入 | 暗闇 → バイザー点灯・ミラーボール・レーザー → ドロップの衝撃波 | 192f / 8.000s | 1 | -16.00 LUFS / -5.96 dBTP | 0.87 MB |
+| `rl/djglasses-1.mp4` | 1 | ターンテーブルにレコードが落ちて回り、肉球でスクラッチ → レンズへ叩き付け | 93f / 3875ms | 28 | -16.15 LUFS / -4.20 dBTP | 0.47 MB |
+| `rl/djglasses-2.mp4` | 2 | ミラーボールが割れ、光線が束になってレンズを撃つ | 72f / 3000ms | 49 | -16.16 LUFS / -5.16 dBTP | 0.56 MB |
+| `rl/djglasses-3.mp4` | 3 | バイザーのイコライザーが振り切れ、音の衝撃波がレンズへ抜ける | 57f / 2375ms | 64 | -16.10 LUFS / -5.11 dBTP | 0.37 MB |
+| `rl/djglasses-4.mp4` | 4 | スピーカーのコーンがキャビネットを突き破ってレンズへ | 52f / 2167ms | 69 | -16.01 LUFS / -6.44 dBTP | 0.63 MB |
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.0`(モード **オムニリファレンス**・参照画像あり) |
+| 生成日 | 2026-08-21 |
+| 参照画像 | TikTok ギフト「DJメガネ」のサムネ(278×328)から**下端のギフト名+コインの帯を切り落とし**(上 210px)、Lanczos で 1668×1260 へ拡大 + `unsharp` |
+| 生成パラメータ | `16:9` / `720P` / 導入 `8s`・スピン `5s` / 音声は `Audio:` 句から自動で焼き込み |
+| 素の出力 | 1280×720 / **60fps を名乗る容器に真の 24fps・(尺×24+1) フレーム**(導入 193f / スピン 121f)/ H.264 / AAC 44.1kHz |
+| コスト | ✦192(8秒)+ ✦120×4(5秒)= **✦672** |
+| ウォーターマーク | 左上に "AI" の焼き込みあり(既存の Dreamina 製素材と同じくそのまま出荷) |
+
+加工は `rl/` 共通レシピ(`trim=start_frame=S,settb=1/24,setpts=N` + 2パス loudnorm −16 LUFS
++ 末尾 150ms `afade` + 48kHz + `-crf 28 -preset slow` + `+faststart`)。
+**S はすべて頭側**(`S = 素のフレーム数 − 契約フレーム数`)— 見せ場が末尾にあるので詰めるのは頭。
+
+> ## ⚠️ 導入とスピンで**終わり方の要件が逆**
+> - **導入**は次のリールへ繋ぐので **終端が完全な静止画**でなければならない。
+>   実測の終端フレーム間差分は **0.024**(合格実績 dragon 0.013 / phoenix 0.59 / lion 0.89)。
+>   末尾フレーム輝度 59.4 は目安(70〜230)をわずかに下回るが、暗いネオンの絵なので意図どおり
+>   (`revolution/result.mp4` の 68.85 と同じ扱い)。
+> - **スピン4本**は逆で、**最後の約1秒がカメラへ向かう一撃**で終わる(その一撃がリールを
+>   1マス押す既存の演出文法)。動画が尽きたら一撃ポーズの最終フレームで静止し、そこへ
+>   `.rl-clip.out` の溶暗が被る。だから終端フレーム間差分が大きくても正しい
+>   (実測 3.49 / 32.05 / 0.02 / 9.93)。
+
+プロンプトは5本とも同じ骨格で、被写体の固定句と禁止句を共有している:
+
+> 〈本ごとのモチーフ〉. A glossy 3D cat-like DJ character **exactly matching the reference
+> image**, a deep lavender cat-shaped head with glowing cyan neon-outlined cat ears,
+> oversized neon cyan and green visor sunglasses with scrolling equalizer scan-lines,
+> a violet and blue DJ headphone over one ear. 〈導入は「最後の3秒は完全な静止画」/
+> スピンは「IN THE FINAL SECOND … STRAIGHT TOWARD THE CAMERA」〉.
+> **Ignore the flat dark grey backdrop of the reference image; it is not part of the character.**
+> Pure black background with drifting light motes. Glossy 3D render in the style of a TikTok
+> live gift animation, centered composition with the subject inside the middle third of the
+> frame, safe for a vertical center crop, high contrast, vivid saturated neon colors.
+> Audio: 〈本ごとの音〉.
+> **No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI, no people.**
+
+> 著作権の注意は `cut/` / `boost/` / `revolution/` と同じ — TikTok 本家のギフト演出の
+> 再現ではなく、ギフトアイコンの題材を参照した完全オリジナル。生成物の利用条件は
+> Dreamina (CapCut) の利用規約に従う(**CC0 ではない**)。**再配布可否は未了**。
+> 再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
+
 ## ハート系4パターン12本 — Higgsfield 製・2026-08-17 追加
 
 ギフト4種をテーマにした**独立した超激アツ4パターン**。パターンごとに動画が2〜4本で、
@@ -576,6 +645,13 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 (patterns キーを持たない)・`DEFAULT_ROULETTE`・`DEFAULT_JOIN_ROULETTE`・「既定に戻す」・
 `sanitizeRoulettePatterns` の欠損フォールバックの**全経路の結論**。出すには設定画面
 「ルーレット」タブの焦らしパターンで該当のチェックを入れる。
+
+> **`djglasses` はオプトインではない。** あちらは「チェックすれば出る」= 設定画面に
+> チェックが**出る**の意味だが、`djglasses` は**激熱確定専用でギフト連動**なので
+> 一覧そのものに出さない。締め出しは dto の `ROULETTE_HOT_ONLY_PATTERNS` →
+> `ROULETTE_SELECTABLE_PATTERNS` の差集合1本で、①既定の導出 ②`sanitizeRoulettePatterns`
+> の保存時除去 ③設定画面の一覧 ④`drawRoulettePattern` の空フォールバック、の4箇所が
+> そこから導かれる。`ROULETTE_OPT_IN_PATTERNS` に入れると (b) チェックが出てしまう。
 
 | 項目 | 値 |
 |---|---|
@@ -603,7 +679,7 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 
 ## 2026-08-18 追加の8本(Higgsfield 製) — 全パターンを4枠に揃えるため
 
-カウントダウン式の激熱化で **ultra 全9パターンが動画4本を要求する**ようになり、
+カウントダウン式の激熱化で **ultra 全パターンが動画4本を要求する**ようになり、
 手持ちが足りない5パターンぶんを追加生成した。
 
 | ファイル | パターン | モチーフ | 枠 | 実測 |
@@ -964,3 +1040,177 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 > コンテンツ来歴(`uuid`/`jumb` ボックス)が落ちている**点に注意
 > (Dreamina の3本 + ねば〜る君の intro / count / result。`loop-nebaaru` は映像
 > ストリームコピーだが `-map_metadata -1` を通しているので同様)。
+
+---
+
+# お邪魔(タップ封じ)の導入カットイン — `tap-lock/intro.mp4`・Dreamina(Seedance 2.5)製・2026-08-20 追加
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス | Dreamina / CapCut (https://dreamina.capcut.com) |
+| モデル | `Dreamina Seedance 2.5`、モード = **オムニリファレンス**(参照画像1枚 + テキスト) |
+| 参照画像 | TikTok ギフト **Boxing Gloves**(giftId 6007 / 299💎)のアイコン |
+| 生成日 | 2026-08-20 |
+| 出力(素の状態) | 1280×720 / 121フレーム / **AAC 音声あり**(44.1kHz stereo) / 5.056 秒 |
+| 同梱の実尺 | **5.000 秒ちょうど**(120フレーム @ 真の 24fps CFR) |
+
+用途スロット: **お邪魔(tapLock)の発動直後に1回だけ流す不透明フルフレーム**。
+尺の契約は `shared/challenge.ts` の `TAP_LOCK_INTRO_MS`(5000)。
+
+## 参照画像の前処理(必須だった)
+
+ギフトアイコンの原寸は **215×181** で、Dreamina は「素材が小さすぎます」で受け付けない。
+lanczos で 6 倍に上げてから渡した(参照は形と色しか読まれないので、拡大のボケは実害なし):
+
+```
+-vf "scale=1290:1086:flags=lanczos,unsharp=5:5:0.8:5:5:0.0" -q:v 2
+```
+
+## 加工内容(尺を契約値ちょうどに詰める再エンコード)
+
+Seedance は `duration` 秒の注文に対し **`duration×24+1` フレーム**で返す
+(`rl/` の8本・ねば〜る君セットと同じ挙動)。**頭を1フレーム落として 120f = 5.000 秒**
+にした — 見せ場(ガラスが割れて暗く沈む)が末尾にあるので、詰めるのは必ず頭側。
+
+> ⚠ **Dreamina のこの出力は 60fps コンテナに載った VFR**(pts が 0, 0.050, 0.0833,
+> 0.1333 … と 1/60 の飛び飛び)で、`r_frame_rate` を素直に読むと 60 に見える。
+> 中身は 24fps なので、`-ss` の秒指定ではなく **`trim=start_frame=` + `settb=1/24`
+> + `setpts=N` で打ち直す**こと(CREDITS の `rl/` 節と同じ罠)。
+
+```
+ffmpeg -i <raw>.mp4 \
+  -filter_complex "[0:v]trim=start_frame=1,settb=1/24,setpts=N[v];[0:a]atrim=start=0.0416667,asetpts=PTS-STARTPTS[a]" \
+  -map "[v]" -map "[a]" -t 5 \
+  -c:v libx264 -crf 18 -pix_fmt yuv420p -r 24 -fps_mode cfr \
+  -c:a aac -b:a 192k -ar 44100 -ac 2 -movflags +faststart intro.mp4
+```
+
+音声も同じ 1/24 秒だけ頭を落として A/V のズレを作らない(実測 mean -21.7dB / peak -3.1dB)。
+
+## ⚠️ 不透明フルフレーム — screen 禁止・`.fx-clip-opaque`・音声は素材のもの
+
+`cut/*.mp4` と同族。黒背景発光体ではないので `mix-blend-mode: screen` 禁止、
+`.fx-clip-opaque` で重ねる(配置は `.monitor-root` 直下・z-index なし)。
+
+**段の長さは素材ではなく定数が決める**(`TAP_LOCK_INTRO_MS`)。モニターは `onEnded` を
+使わず JS タイマーで打ち切る。
+
+音声は**素材に焼き込まれたもの**をそのまま鳴らす(別 BGM は無い)。モニターは
+`seEnabled` のとき `muted` を外し、音量は
+`effectiveSeVolume(seVolume, seVolumes['comment'])` を当てる —
+**お邪魔が元から使っている `comment` スロットの流用**で、専用スロットは足していない
+(新キーは保存済み `settings.json` に届かないため)。
+
+> **封印はこの5秒を待たない。** worker はギフト一致の瞬間に絶対期限をラッチするので、
+> 幕の裏で残り時間は普通に減る(既定 30 秒なら明けた時点で残り 25 秒)。
+> だから入口ガード(`tapLockWillStart`)は「実尺 ≥ 5 秒」を要求する —
+> 封印より導入が長いと、動画が明けた時点でもう解けていて何が起きたか分からない。
+> 凍結は `test/unit/tap-lock-cutin.spec.ts`。
+
+左上に Dreamina の **"AI" ウォーターマーク**が焼き込まれている(黒豹4本 + コーギー4本と
+同じ扱い)。Web UI に非表示オプションが見当たらないためそのまま出荷している。
+
+## 生成プロンプト(全文)
+
+共通ガード: widescreen 16:9 / 参照画像の被写体を `exactly matching the reference image` で固定 /
+`Pure cinematic motion graphics` / 文字・数字・ロゴ・人物 禁止 / 末尾に `Audio:` 句。
+参照画像の背景(濃いグレーの地)は被写体ではないと明示するのは `intro-nebaaru` と同じ手口。
+
+- **tap-lock/intro.mp4**(画面を殴って封印) — Epic cinematic first-person impact animation, widescreen 16:9. Deep dark violet and near-black background with swirling smoke and crackling purple energy. A pair of glossy 3D cartoon boxing gloves exactly matching the reference image, a crimson red glove and a bright blue glove with a white wrist wrap and violet striped cuff, swing in from the sides, then the red glove lunges straight at the camera and lands a heavy punch directly into the lens. The impact snaps the frame with violent camera shake, a white-hot shockwave ring bursts outward, and jagged cracks spread across the whole screen like shattering glass. Purple and magenta energy floods through the cracks, the light drains away, and the frame settles into a dark sealed violet glow with the two gloves crossed in the center. Ignore the flat dark grey backdrop of the reference image, it is not part of the subject. Pure cinematic motion graphics, no people, no logos, no text, no numbers, no captions. Audio: a fast whoosh of air, one heavy bone-deep punch impact with a glass-shatter crack, then a low descending buzzer drone that decays to silence.
+
+> 著作権の注意は `cut/` / `boost/` と同じ — TikTok 本家のギフト演出の再現ではなく、
+> アイコンの題材を参照した完全オリジナル。生成物の利用条件は Dreamina (CapCut) の
+> 利用規約に従う(CC0 ではない)。再エンコードにより生成サービスの C2PA
+> コンテンツ来歴ボックスは落ちている。
+
+
+## 革命の導入と結果の全画面動画2本 — `revolution/` ・Dreamina (CapCut) 製・2026-08-20 追加
+
+カウントダウンチャレンジのお助け「革命」(白鳥 / Swan 699💎)の山場を挟む2本。
+**導入**は窓が開く前の 8 秒(このあと画面一杯の 5..1 カウントダウンが 5 秒続く)、
+**結果**は窓が満了した瞬間の 6 秒で、この動画の**上に**戦果(減算合計 / タップ回数 /
+いいね反転)を重ねて発表する。**導入と結果は尺が違う**(導入は山場、結果は数字を読ませるだけ)。
+
+| ファイル | 段 | モチーフ | 尺 | N | S | 実尺 | 出力音量 | サイズ |
+|---|---|---|---|---|---|---|---|---|
+| `revolution/intro.mp4` | 導入(`REVOLUTION_INTRO_MS`) | 闇の中の白鳥に装甲が飛来して装着され、完全武装の戦闘態勢へ(戦闘モード突入) | 8.000秒 | 192 | 1 | 8.000秒 | -16.55 LUFS / -1.24 dBTP | 1.13 MB |
+| `revolution/result.mp4` | 結果(`REVOLUTION_RESULT_MS`) | 白鳥が翼を畳み、深紅の残光へ静かに沈む | 6.000秒 | 144 | 1 | 6.000秒 | -16.32 LUFS / -1.44 dBTP | 0.41 MB |
+
+> **導入は 2026-08-20 に 6 秒 → 8 秒へ差し替えた**(ユーザー要件「戦闘モードに入るような演出」)。
+> 初版は「翼を広げて放射状の光」の 6 秒(144f・-16.76 LUFS / 0.43 MB)。尺の権威は
+> `REVOLUTION_INTRO_MS` なので、**定数と素材のフレーム数は必ず一緒に変えること**
+> (前置き合計も 11 秒 → 13 秒になる — 設定画面の説明文は定数から導出しているので自動追随)。
+
+**置き場所は `revolution/` サブディレクトリ。** 理由は `rl/hot/` と同じで、直下に置くと
+既存カタログの孤児検査を踏む。読み込みは専用 glob(`renderer/lib/fx.ts` の
+`REVOLUTION_INTRO_CLIP_URL` / `REVOLUTION_RESULT_CLIP_URL`)で、**0件許容**なので
+ファイルを置くだけで差し替わる(intro 投入前は `rl/hot/dragon.mp4` を 6 秒で打ち切って
+仮流用していた。この節の追加でその仮流用は終了)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.5`(モード **オムニリファレンス**・参照画像あり) |
+| 生成日 | 2026-08-20 |
+| 参照画像 | TikTok ギフト「白鳥」のサムネ(272×231)から下端のギフト名の帯を切り落とし、被写体を寄せて Lanczos で 1020×900 へ拡大したもの |
+| 生成パラメータ | `16:9` / `720P` / 尺は本ごと(導入 `8s` / 結果 `6s`)/ 音声は Seedance 2.5 が `Audio:` 句から自動で焼き込む(専用トグルは無い) |
+| 素の出力 | 1280×720 / **60fps を名乗る容器に真の 24fps・(尺×24+1) フレーム**(導入 193f = 8.0167秒 / 結果 145f = 6.0167秒)/ H.264 / AAC 44.1kHz |
+| コスト | 288 クレジット(6秒)/ 384 クレジット(8秒)。導入は 6 秒版と 8 秒版で2回生成している |
+| ウォーターマーク | 左上に "AI" の焼き込みあり(非表示オプションが見当たらず、既存の Dreamina 製素材と同じくそのまま出荷) |
+
+加工内容: **上の `rl/hot` と同一のレシピ**(頭 1 フレームを落としてフレーム数ちょうど —
+導入は 192f = 8.000 秒、結果は 144f = 6.000 秒)。
+
+```
+# S=1(頭を1フレーム落とす)、N は本ごと(導入 192 / 結果 144)。
+# measured_* は本ごとに2パス loudnorm で実測した値
+ffmpeg -y -i raw.mp4 -filter_complex \
+ "[0:v]trim=start_frame=1:end_frame=1+N,settb=1/24,setpts=N[v];\
+  [0:a]atrim=start=0.041667:duration=N/24,asetpts=PTS-STARTPTS,\
+       loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=<II>:measured_TP=<ITP>:measured_LRA=<ILRA>:measured_thresh=<ITH>:offset=<OFF>:linear=true,\
+       afade=t=out:st=N/24-0.15:d=0.15,aresample=48000[a]" \
+ -map "[v]" -map "[a]" -map_metadata -1 \
+ -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v high -fps_mode cfr -r 24 \
+ -c:a aac -b:a 128k -ac 2 -ar 48000 -movflags +faststart out.mp4
+```
+
+実測: intro(8秒版)が `input_i=-21.63 / input_tp=-2.30`、result が
+`input_i=-33.07 / input_tp=-15.59`(6秒版 intro は `-22.07 / -3.24` だった)。
+どれもピーク余裕が十分あるので `linear=true` がそのまま効き、前段の
+`volume=…,alimiter=…` は要らなかった。
+
+> ## ⚠️ 頭を詰める(末尾ではない)
+> 余分な 1 フレームは**先頭**から落とす。どの本も見せ場と締めが末尾にあり、
+> `THE LAST TWO SECONDS ARE A COMPLETELY FROZEN STILL IMAGE` で終端を静止させてあるため
+> (末尾を削るとその静止が痩せる)。終端フレーム間差分の実測は
+> **intro(8秒版)0.084** / result 0.141(6秒版 intro は 0.140)。
+> `rl/hot` の合格実績は lion 0.89 / phoenix 0.59 / dragon 0.013。
+> 末尾フレーム輝度は intro 96.96 / result 68.85(目安 70〜230 — result は
+> `ending dark and quiet` の指定どおりなので下振れは意図どおり)。
+> 後処理後の末尾フレームは元素材と一致(PSNR 39.7 dB — crf 28 の再エンコードぶんの差)。
+
+> ## ⚠️ `result.mp4` は「中央を空ける」指定が効いていない
+> `count-*.mp4` と同じ `THE CENTER OF THE FRAME STAYS CLEAR, DEEP AND DARK AND UNCLUTTERED`
+> を入れたが、生成物は白鳥が中央に来た。**そのまま採用している** — 数字は
+> `.revolution-settle .rs-main` の暗いパネル(`rgba(20,2,6,.72)` + 内側リング)の上に
+> 置くので可読性は担保される(`boost/result-*.mp4` も被写体は中央で、同じ作りで出荷済み)。
+> 撮り直すなら、この句だけでは足りないので `rl/hot` の終端指定と同じく
+> **「中央に置かないもの」を列挙する**書き方へ変えること。
+
+## 生成プロンプト(全文)
+
+共通ガード: `centered composition, subject inside the middle third of the frame,
+safe for a vertical center crop` / 文字・数字・ロゴ・人物・ウォーターマーク 禁止 /
+末尾に `Audio:` 句 / 参照画像の背景(フラットな暗いグレーの板)は被写体ではないと明示
+(`intro-nebaaru` / `result-nebaaru` と同じ手口)。
+
+- **revolution/intro.mp4**(8秒・戦闘モード突入 — 出荷版) — A regal white swan with a small golden crown and a glowing green clover at its breast stands in darkness, head bowed. Crimson alarm light sweeps across the frame twice and the swan snaps its head up, eyes flaring white. Shards of luminous armour plating rush in from off-screen and lock onto its wings and breast with hard metallic impacts, a banner of light unfurls behind it, and the swan slams into a wide-winged battle stance as red and white energy blazes outward in a shockwave. Fast aggressive push-in with two hard shutter flashes, like a fighting game entering battle mode. THE LAST TWO SECONDS ARE A COMPLETELY FROZEN STILL IMAGE: absolutely no motion of any kind, the wings stop moving, the armour stops glinting, no flickering, no embers drifting, no particles floating, no camera movement, the swan held in a battle-ready pose facing the viewer head-on, filling the center of the frame, exactly like a paused freeze-frame. Ignore the flat grey backdrop of the reference image; it is not part of the character. Pure black background with drifting embers and crimson volumetric god rays. Glossy 3D render in the style of a TikTok live gift animation, centered composition with the subject inside the middle third of the frame, safe for a vertical center crop, high contrast, vivid saturated colors. Audio: a rising alarm siren and pounding war drums building to a huge metallic clang and a brass battle horn blast, then a low rolling boom. No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI, no people.
+
+- **revolution/intro.mp4**(6秒・初版 — 差し替え済み。記録として残す) — A regal white swan with a small golden crown and a glowing green clover at its breast stands in darkness. It slowly lifts its head, then sweeps its huge feathered wings wide open, releasing a radial shockwave of white and blue light that floods the frame. Slow steady push-in. THE LAST TWO SECONDS ARE A COMPLETELY FROZEN STILL IMAGE: … (以下、終端指定と共通ガードは 8 秒版と同じ). Audio: a rush of beating wings building to one huge brass fanfare hit and a low rolling boom.
+
+- **revolution/result.mp4** — A regal white swan with a small golden crown and a glowing green clover at its breast settles LOW at the BOTTOM of the frame, slowly folding its huge wings closed while fine points of light drift down along the edges. The spectacle peaks in the first half, then the light dims and the frame settles into a calm deep crimson and pearl glow, ending dark and quiet rather than bright. THE CENTER OF THE FRAME STAYS CLEAR, DEEP AND DARK AND UNCLUTTERED: the swan is lit only from the rim and from behind, and all bright light is pushed out toward the edges of the frame, because a large bright overlay will be composited over the exact center. THE LAST TWO SECONDS ARE A COMPLETELY FROZEN STILL IMAGE: absolutely no motion of any kind, the wings stop moving, no flickering, no particles drifting, no camera movement, exactly like a paused freeze-frame. Ignore the flat grey backdrop of the reference image; it is not part of the character. Glossy 3D render in the style of a TikTok live gift animation, safe for a vertical center crop, high contrast, volumetric light. Audio: soft chimes and one closing bell impact, decaying to silence in the final half second. No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI, no people.
+
+> 著作権の注意は `cut/` / `boost/` と同じ — TikTok 本家のギフト演出の再現ではなく、
+> ギフトアイコンの題材を参照した完全オリジナル。生成物の利用条件は Dreamina (CapCut) の
+> 利用規約に従う(**CC0 ではない**)。**再配布可否は未了** — `rl/` の Dreamina 製16本や
+> `boost/` と同じ扱いで、Higgsfield 製ハート系12本の「2026-08-17 に判断済み」とは
+> 混同しないこと。再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。

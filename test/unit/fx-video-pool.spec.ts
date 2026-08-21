@@ -42,7 +42,20 @@ describe('MonitorView の <video> ホルダー(ソース不変条件)', () => {
     expect(videoTags(MONITOR)).toBe(labels.length);
     // ラベルは diag.log の識別子。ホルダーを増減したらこの一覧も更新すること。
     expect(labels.sort()).toEqual(
-      ['band-cutin', 'boost-cutin', 'fx-clip', 'fx-strike', 'revolution-cutin', 'rl-hot-intro', 'stock-cutin'].sort()
+      [
+        'band-cutin',
+        'boost-cutin',
+        'fx-clip',
+        'fx-strike',
+        'revolution-cutin',
+        // 革命の結果カットシーンは**導入とは別ホルダー**(2026-08-20 追加)。
+        // 導入と結果は最大180秒離れた別の生存期間で、共有すると abortRevolutionFx や
+        // 次の startRevolutionFx が結果を殺す。
+        'revolution-result',
+        'rl-hot-intro',
+        'stock-cutin',
+        'tap-lock-cutin',
+      ].sort()
     );
   });
 

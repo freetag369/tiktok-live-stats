@@ -97,7 +97,10 @@ describe('小窓の DOM 順(MonitorView の JSX)', () => {
   });
 
   it('設定 off で出さない / large で lg が付く', () => {
-    expect(view).toMatch(/roulette && countView !== 'off' \?/);
+    // 出現条件は mirrorOn 1本(革命の残り時間ピルが同じ変数を見て位置を切り替える —
+    // ここを JSX へ直書きに戻すと、ピルだけ小窓と食い違って重なる)。
+    expect(view).toMatch(/const mirrorOn = roulette && countView !== 'off';/);
+    expect(view).toMatch(/\{mirrorOn \? \(/);
     expect(view).toMatch(/countView === 'large' \? ' lg' : ''/);
   });
 });
@@ -190,5 +193,45 @@ describe('横ステージの詳細度上書き', () => {
     // 引きずられる。(0,4,0) で明示上書きする。
     expect(css).toContain('.stage-scale.landscape .count-mirror .seg-digit {');
     expect(css).toContain('.stage-scale.landscape .count-mirror .seg-row {');
+  });
+});
+
+describe('革命の残り時間ピル(.revolution-timer)は小窓と場所を取り合わない', () => {
+  it('z-index を持たない(小窓と同じ理由)', () => {
+    expect(ruleBody('.revolution-timer')).not.toContain('z-index');
+  });
+
+  it('横ステージでは小窓の右端より右に置く', () => {
+    // 小窓は left:14 / width:460(横長上書き)。ピルの left がその右端より小さいと
+    // 残数の桁の上に文字が乗る。.count-mirror の幅を変えたらここが落ちる。
+    const mirror = ruleBody('.stage-scale.landscape .count-mirror');
+    const width = px(mirror, 'width');
+    const left = px(ruleBody('.count-mirror'), 'left');
+    const pill = px(ruleBody('.stage-scale.landscape .revolution-timer.at-mirror'), 'left');
+    expect(width, '横長の .count-mirror の width が px で読めない').not.toBeNull();
+    expect(left, '.count-mirror の left が px で読めない').not.toBeNull();
+    expect(pill, 'ピルの left が px で読めない').not.toBeNull();
+    expect(pill!, `ピルの left ${pill}px が小窓の右端 ${left! + width!}px に食い込んでいる`).toBeGreaterThanOrEqual(
+      left! + width!,
+    );
+  });
+
+  it('横ステージで演出ストックと重ならない(ピルの左端 < ストックの左端)', () => {
+    const stage = /const STAGE_LW = (\d+);/.exec(view);
+    expect(stage, 'STAGE_LW が MonitorView.tsx に無い').not.toBeNull();
+    const stock = ruleBody('.fx-stock');
+    const stockLeftEdge = Number(stage![1]) - px(stock, 'right')! - px(stock, 'width')!;
+    const pill = px(ruleBody('.stage-scale.landscape .revolution-timer.at-mirror'), 'left')!;
+    expect(pill).toBeLessThan(stockLeftEdge);
+  });
+
+  it('縦ステージでは右へ逃がさず小窓の真上へ置く', () => {
+    // 縦は小窓(right:258)とストック(left端 296)の隙間が 14px しかないので、
+    // 右隣に置く余地は無い。left は据え置き、bottom で小窓を跨ぐ。
+    const body = ruleBody('.revolution-timer.at-mirror');
+    expect(px(body, 'left')).toBe(px(ruleBody('.count-mirror'), 'left'));
+    const bottom = px(body, 'bottom');
+    expect(bottom, 'ピルの bottom が px で読めない').not.toBeNull();
+    expect(bottom!, 'ピルが小窓(bottom:12)に重なっている').toBeGreaterThan(px(ruleBody('.count-mirror'), 'bottom')!);
   });
 });

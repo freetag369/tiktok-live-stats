@@ -185,15 +185,16 @@ test.describe('革命(シネマ・導入 → カウントダウン → 窓オー
 
     await rpc(main, 'conn.startReplay', { file: FIXTURE, speed: 0 });
 
-    // ① 導入の全面カット(不透明フルフレーム)。素材は未生成なので激熱確定の導入を
-    //    仮流用しているが、ホルダー(.fx-clip-opaque)と尺の権威(JS タイマー)は本番と同じ。
+    // ① 導入の全面カット(不透明フルフレーム・音声焼き込み)。素材は
+    //    assets/fx/revolution/intro.mp4(白鳥の戦闘モード突入・8秒)。
+    //    尺の権威は素材ではなく JS タイマー(REVOLUTION_INTRO_MS)。
     await expect(monitor.locator('video.fx-clip-opaque')).toHaveCount(1, { timeout: 20_000 });
 
-    // ② 導入(6秒)明けの画面一杯カウントダウン。**動画より手前**に出ること自体が
+    // ② 導入(8秒)明けの画面一杯カウントダウン。**動画より手前**に出ること自体が
     //    「fx-layer 内・DOM 順で後ろ」の配置が効いている証拠(z-index は付けていない)。
     await expect(monitor.locator('.revolution-count')).toHaveCount(1, { timeout: 20_000 });
 
-    // ③ 前置き(導入6秒 + カウント5秒)が明けると窓が開く。worker 側の
+    // ③ 前置き(導入8秒 + カウント5秒 = 13秒)が明けると窓が開く。worker 側の
     //    ChallengeState.revolution は revolutionCue(モニターの実再生開始)を原点に張る。
     await expect
       .poll(async () => (await challengeGet(main)).revolution?.multiplier ?? null, { timeout: 30_000 })
@@ -205,7 +206,15 @@ test.describe('革命(シネマ・導入 → カウントダウン → 窓オー
     await expect(monitor.locator('.revolution-mult')).toHaveText(`×${REV_MULT}`);
     await expect(monitor.locator('.revolution-count')).toHaveCount(0);
 
-    // ⑤ 窓オープンで、導入中に凍結キューへ積まれていたいいねが一括ドレインされる。
+    // ⑤ 告知ボックスは REVOLUTION_HUD_INTRO_MS(5秒)だけ。以後は7セグ脇のピルが
+    //    残り時間を引き継ぐ(2026-08-20 ユーザー決定 — 盤面を1分間ふさぎ続けない)。
+    //    引き継ぎは 250ms の tick + 描画時 Date.now() 駆動なので、リプレイが
+    //    終わって worker の 2Hz tick が死んでいても必ず進む(ここが取れる唯一の場所)。
+    await expect(monitor.locator('.revolution-overlay')).toHaveCount(0, { timeout: 20_000 });
+    await expect(monitor.locator('.revolution-timer')).toHaveCount(1);
+    await expect(monitor.locator('.rt-mult')).toHaveText(`×${REV_MULT}`);
+
+    // ⑥ 窓オープンで、導入中に凍結キューへ積まれていたいいねが一括ドレインされる。
     //    **press の前に終端値まで待つ** — ドレインは 2Hz tick か次の RPC が引き金なので、
     //    HUD が出た時点ではまだ流れ切っていないことがある(待たないと press の減算と
     //    ドレインの減算が同じ窓に入り、期待値がズレる)。
@@ -246,7 +255,7 @@ test.describe('革命の期限切れ(窓が閉じて通常挙動へ戻る)', () 
   test('尺が切れると revolution が消え、タップが等倍へ戻る', async ({ app, main }) => {
     await rpc(main, 'challenge.start', undefined);
     // モニターは**開く**(終了5秒前カウントダウンの表示まで見たいため)。ただし
-    // 開くとシネマになり前置き 11 秒が乗るので、窓は着弾の 11 秒後から 10 秒間。
+    // 開くとシネマになり前置き 13 秒が乗るので、窓は着弾の 13 秒後から 10 秒間。
     // 下の待ちのタイムアウトはそれを織り込んである。
     const monitor = await openMonitor(app, main);
 
@@ -276,6 +285,25 @@ test.describe('革命の期限切れ(窓が閉じて通常挙動へ戻る)', () 
       .toBe(null);
     await expect(monitor.locator('.revolution-overlay')).toHaveCount(0);
     await expect(monitor.locator('.revolution-count')).toHaveCount(0, { timeout: 10_000 });
+
+    // ── 結果カットシーン(窓の締めくくり)──────────────────────────────
+    // 窓が閉じた瞬間に「6秒の全面動画 + 戦果の発表」が出る。ここが出ない =
+    // 1分かけた窓の結末が無言で消える(バナー1枚だけだった v0.11.0 の状態)。
+    // この fixture は反転いいねだけで 15 減らし、タップは窓の中で1度も押していない。
+    const end = (await challengeGet(main)).recentEffects.find((x) => x.kind === 'revolution-end');
+    expect(end, 'revolution-end が積まれていない').toBeDefined();
+    expect(end!.revolutionDownTotal).toBe(LIKE_DOWN_TOTAL);
+    expect(end!.revolutionTapCount).toBe(0);
+    expect(end!.revolutionLikeDown).toBe(LIKE_DOWN_TOTAL);
+
+    const settle = monitor.locator('.revolution-settle');
+    await expect(settle).toHaveCount(1, { timeout: 10_000 });
+    // ロールアップが確定したら実数が出る(回転中は別の桁が出ているので poll する)。
+    await expect(settle.locator('.rs-amt')).toHaveText(`-${LIKE_DOWN_TOTAL}`, { timeout: 10_000 });
+    // ②タップ回数 →③いいね反転 の順に出そろう。
+    await expect(settle.locator('.rs-tile:not(.hidden)')).toHaveCount(2, { timeout: 10_000 });
+    // 尺は REVOLUTION_RESULT_MS(6秒)— タイマーが権威なので必ず自分で畳む。
+    await expect(settle).toHaveCount(0, { timeout: 15_000 });
 
     // タップが等倍へ戻る(×3 のままなら 87 になる)。
     await rpc(main, 'challenge.press', undefined);

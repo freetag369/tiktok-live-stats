@@ -47,18 +47,22 @@ export function maxOcclusion(a: FxOcclusion, b: FxOcclusion): FxOcclusion {
 }
 
 /**
- * 据え置きを持つカットインの種別(MonitorView の 5 ホールドと 1 対 1)。
+ * 据え置きを持つカットインの種別(MonitorView の 6 ホールドと 1 対 1)。
  *
- * お邪魔(タップ封じ)は**ここに登録しない**のが意図的な判断 — 封印の見た目は
- * ChallengeState.tapLock から引く常設 HUD で、幕を張らないしホールドも取らない。
- * 幕を持たないものを足すとこの 1 対 1 の対応が崩れる。革命は**登録する** —
- * 導入カットイン+カウントダウンの 11 秒はホールドを取る幕(不透明)で、
- * 窓中の常設 HUD(ChallengeState.revolution から引く)だけが tapLock と同型。
+ * 革命とお邪魔は**どちらも同じ形**で登録されている — 「導入だけが幕を張る
+ * ホールド付きのカットインで、そのあとの窓/封印は幕を張らない常設 HUD」。
+ * HUD の側(ChallengeState.revolution / .tapLock から引く残り時間表示)は
+ * ホールドを取らないので、ここには出てこない。
+ *
+ * > 【履歴】2026-08-20 以前、お邪魔は**ここに登録しないのが意図的な判断**だった —
+ * > 当時の封印は告知バナー1枚と常設 HUD だけで、幕を張らずホールドも取らなかった。
+ * > 同日 `TAP_LOCK_INTRO_MS`(5秒)の導入全面カットを入れた時点で前提が変わり、
+ * > 革命と同じ「導入は幕・窓は常設 HUD」の形になったので登録側へ移した。
  */
-export type FxCutinKind = 'roulette' | 'band' | 'stock-cutin' | 'boost' | 'revolution';
+export type FxCutinKind = 'roulette' | 'band' | 'stock-cutin' | 'boost' | 'revolution' | 'tap-lock';
 
 /**
- * カットイン種別 → 遮蔽。ルーレットだけが半透明の暗幕で、残り 4 種は
+ * カットイン種別 → 遮蔽。ルーレットだけが半透明の暗幕で、残り 5 種は
  * 不透明フルフレーム(`.fx-clip-opaque` = opacity .96 + `background:#000`)。
  */
 export function occlusionOfCutin(kind: FxCutinKind): FxOcclusion {
