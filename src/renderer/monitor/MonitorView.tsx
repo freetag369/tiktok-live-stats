@@ -21,8 +21,13 @@ import {
   PENDING_BOOSTS_MAX,
   PENDING_REVOLUTIONS_MAX,
   PENDING_QUIZZES_MAX,
+  QUIZ_ANNOUNCE_MS,
   QUIZ_SPIN_MS,
   QUIZ_REVEAL_MS,
+  QUIZ_THRESHOLD_SUFFIX,
+  QUIZ_THRESHOLD_SOUND_SLOT,
+  QUIZ_THRESHOLD_FALLBACK_SLOT,
+  quizThresholdNum,
   QUIZ_BGM_XFADE_MS,
   QUIZ_INTRO_SELF,
   JOIN_ROULETTE_QUEUE_MAX,
@@ -115,7 +120,8 @@ import {
 } from '@shared/boost-settle';
 import { planRevolutionResult } from '@shared/revolution-settle';
 import { quizSpinTicks, type QuizSpinCue } from '@shared/quiz-spin';
-import { quizPromptFontPx, type QuizFitOpts } from '@shared/quiz-type';
+import { quizBoxPx, quizFit, quizLabelWidthPx, type QuizFitWhere } from '@shared/quiz-fit';
+import { quizPromptFontPx } from '@shared/quiz-type';
 import { planQuizResult } from '@shared/quiz-settle';
 import { quizBgmForPhase, quizOutroBgmFor, type QuizBgmPhase } from '@shared/quiz-bgm';
 import { rpc } from '../ipc/client';
@@ -137,7 +143,7 @@ import {
   fxClipUrl,
   rouletteHotIntroUrl,
 } from '../lib/fx';
-import { playSe } from '../lib/se';
+import { playSe, playSeAny } from '../lib/se';
 import { noteMediaLatency } from '../lib/frame-meter';
 import { playBandBgm, type BgmHandle } from '../lib/bgm';
 import { MiniFx } from './MiniFx';
@@ -550,52 +556,27 @@ const STAGE_LW = 1280;
 const STAGE_LH = 720;
 
 /**
- * お題本文を出す5つの場所。めくり札の見た目は monitor.css、**大きさはここ**。
- * (2026-08-22 ユーザー要件「文字が小さいので画面一杯でわかりやすく」)
- */
-type QuizFitWhere = 'spin' | 'reveal' | 'prep' | 'window' | 'vote' | 'settle';
-
-/**
- * 文字の自動拡大の枠。`maxW` は **monitor.css の max-width から左右 padding を
- * 引いた実値**(box-sizing は冒頭の * で border-box)、`maxH` は同じ画面に載る
- * 見出し・残り秒・座布団を除いた残り。`lineHeight` は CSS と一致させること —
- * ズレると行数の見積もりが外れて枠からはみ出す。
- *
- * 上限(maxPx)が場所ごとに違うのは主役の差。回転と決定はお題そのものが主役なので
- * 大きく、投票と結果発表は票数と ±N が主役なので控えめにする。
- */
-const QUIZ_FIT_PORTRAIT: Record<QuizFitWhere, QuizFitOpts> = {
-  // .qz-prompt: max-width 500 - padding 24×2 = 452
-  spin: { maxW: 452, maxH: 620, maxPx: 140, minPx: 30, lineHeight: 1.18 },
-  // 決定は座布団(下端 22 + 高さ 138)を避けるぶん maxH が小さい。
-  reveal: { maxW: 452, maxH: 520, maxPx: 156, minPx: 30, lineHeight: 1.18 },
-  // 準備は残り秒(92px)ぶん引く。
-  prep: { maxW: 452, maxH: 440, maxPx: 112, minPx: 26, lineHeight: 1.18 },
-  // .qw-prompt: max-width 500 - padding 22×2 = 456。残り秒 200px ぶん引く。
-  window: { maxW: 456, maxH: 300, maxPx: 116, minPx: 26, lineHeight: 1.18 },
-  // .qv-prompt: max-width 500 - padding 18×2 = 464
-  vote: { maxW: 464, maxH: 200, maxPx: 86, minPx: 22, lineHeight: 1.2 },
-  // .qs-prompt: max-width 500 - padding 18×2 = 464
-  settle: { maxW: 464, maxH: 140, maxPx: 64, minPx: 20, lineHeight: 1.2 },
-};
-
-/** 横ステージ(1280×720)。幅は広いが高さが足りないので上限を下げる。 */
-const QUIZ_FIT_LANDSCAPE: Record<QuizFitWhere, QuizFitOpts> = {
-  spin: { maxW: 1032, maxH: 330, maxPx: 112, minPx: 26, lineHeight: 1.18 },
-  reveal: { maxW: 1032, maxH: 270, maxPx: 120, minPx: 26, lineHeight: 1.18 },
-  prep: { maxW: 1032, maxH: 240, maxPx: 88, minPx: 24, lineHeight: 1.18 },
-  window: { maxW: 1036, maxH: 200, maxPx: 88, minPx: 24, lineHeight: 1.18 },
-  vote: { maxW: 964, maxH: 140, maxPx: 64, minPx: 20, lineHeight: 1.2 },
-  settle: { maxW: 964, maxH: 100, maxPx: 52, minPx: 20, lineHeight: 1.2 },
-};
-
-/**
- * お題本文の font-size(px)。**CSS の font-size 宣言はここを通らない経路の据わり値**で、
- * 実表示はこの戻り値をインライン style に流したものが勝つ。決定は shared の純関数
+ * お題本文の font-size(px)。**CSS の font-size 宣言は据わり値**で、実表示はこの
+ * 戻り値をインライン style に流したものが勝つ。決定は shared の純関数
  * (quizPromptFontPx)— レンダラのテスト環境が無いので、算術は node で凍結する。
+ *
+ * 枠の実寸(QUIZ_FIT_PORTRAIT / QUIZ_FIT_LANDSCAPE / QUIZ_PAD)は
+ * **shared/quiz-fit.ts が権威**。札の外形もそこから出す(quizBoxPx)ので、
+ * 「内寸だけ直して外形を直し忘れる」が構造的に起きない。
  */
 function quizFontPx(text: string, where: QuizFitWhere, landscape: boolean): number {
-  return quizPromptFontPx(text, (landscape ? QUIZ_FIT_LANDSCAPE : QUIZ_FIT_PORTRAIT)[where]);
+  return quizPromptFontPx(text, quizFit(where, landscape));
+}
+
+/**
+ * 札の外形をインライン style で当てるための小物。**文字数に依存しない** —
+ * これを CSS 側の max-width 任せに戻すと、親が align-items:center なので
+ * 札が中身に追従して伸縮し、回転中は候補が入れ替わるたびに外形が暴れる
+ * (2026-08-22 ユーザー指摘「文字数によって囲いのサイズが変わる」の原因)。
+ */
+function quizBoxStyle(where: QuizFitWhere, landscape: boolean): { width: number; height: number } {
+  const box = quizBoxPx(where, landscape);
+  return { width: box.w, height: box.h };
 }
 
 /** CLEAR 演出(フラッシュ/紙吹雪/クリップ)を見せてからリザルトへ切り替えるまで。 */
@@ -2127,6 +2108,39 @@ export function MonitorView(): React.JSX.Element {
     quiz != null ? Math.max(0, Math.ceil((quiz.voteEndsAtMs - quizNowMs) / 1000)) : 0;
   const quizPrepLeftSecs =
     quizPrep != null ? Math.max(0, Math.ceil((quizPrep.endsAtMs - quizNowMs) / 1000)) : 0;
+
+  // ── 数値到達の告知(2026-08-22 ユーザー決定「告知だけ先に割り込む」) ──────
+  // **ホールドを取らない常設オーバーレイ**(窓・投票と同じ規約)。舞台キューにも
+  // ドレインキューにも載らないので、演出が渋滞していても跨いだ瞬間に出て、
+  // その裏では溜まっていたキューが流れ続ける。`quizHold` を見ないのが要点 —
+  // 前置き(導入カット)は告知が消えてから始まるので、両方出る瞬間は無い。
+  const quizAnnounceOn =
+    quiz != null && quiz.announceUntilMs != null && quizNowMs < quiz.announceUntilMs;
+  const quizAnnounceKey = quizAnnounceOn ? (quiz?.announceUntilMs ?? 0) : 0;
+  // 発動した行が焼き込んだ音。**id ではなく値が state に載っている**ので cfg を
+  // 引き直さない(cfg は 120 秒ポーリングで古くなりうる)。
+  const quizAnnounceSound = quiz?.announceSound ?? QUIZ_THRESHOLD_SOUND_SLOT;
+  const quizAnnounceSoundVolume = quiz?.announceSoundVolume ?? 100;
+  // 初出で1回だけ音と揺れ。**新しい ChallengeSeSlot は作らない** — 行が音の id を
+  // 直接持つ形にしてある(スロット追加は既定音・音量・miniFx・設定画面・validate まで
+  // 波及するため。お題の回転音・確定音は既存スロット流用の流儀)。
+  // 番兵 'slot' は 2026-08-22 版と同じ「効果音タブのルーレット確定に従う」。
+  useEffect(() => {
+    if (quizAnnounceKey === 0) return;
+    if (quizAnnounceSound === QUIZ_THRESHOLD_SOUND_SLOT) {
+      playSeSlot(QUIZ_THRESHOLD_FALLBACK_SLOT);
+    } else if (quizAnnounceSound !== 'off') {
+      // 行ごとの音量は全体音量と掛け合わせる(スロットごとの個別音量と同じ扱い)。
+      playSeAny(
+        quizAnnounceSound,
+        effectiveSeVolume(cfgRef.current?.challenge.seVolume ?? 100, quizAnnounceSoundVolume)
+      );
+    }
+    pushShake('shake');
+    // 音と音量は告知1件のあいだ不変(worker が焼いた値)なので依存に足さない —
+    // 足すと配信中の設定変更で同じ告知の音がもう一度鳴る。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quizAnnounceKey]);
 
   // ── 区間別BGM(2026-08-22 ユーザー決定) ────────────────────────────────
   // いま鳴らすべき区間。前置きの段(発表・準備)は state の生存期間が権威で、
@@ -4589,6 +4603,18 @@ export function MonitorView(): React.JSX.Element {
 
   /** 発動の告知バナー(プレーン発動・開始不可のフォールバックにも使う)。 */
   function quizAnnounceNode(e: ChallengeEffect): React.JSX.Element {
+    // 数値到達で来たときは贈り主が居ない — 「誰が」ではなく「いくつを超えたか」を出す。
+    if (e.quizThreshold != null) {
+      return (
+        <>
+          <span className="f-amt">お題</span>
+          {nameLines({
+            who: quizThresholdNum(e.quizThreshold),
+            act: `${QUIZ_THRESHOLD_SUFFIX} お題ルーレット!`,
+          })}
+        </>
+      );
+    }
     return (
       <>
         <span className="f-amt">お題</span>
@@ -4643,7 +4669,20 @@ export function MonitorView(): React.JSX.Element {
     // 決めるのに使った値と一致していなければならない(cfg は 120 秒ポーリングで
     // 古くなりうるので直読みしない。quizPrompts と同じ理由)。0 なら段ごとスキップ。
     const prepMs = Math.max(0, e.quizPrepMs ?? 0);
-    const totalMs = realIntroMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + prepMs;
+    // 数値到達の告知(「○○を超えました!」)。**画は state 駆動のオーバーレイが
+    // 出している**(ChallengeState.quiz.announceUntilMs)ので、ここでやるのは
+    // 「残りの告知尺だけ待ってから導入カットへ入る」こと。
+    //
+    // 残り時間で数えるのが要点 — 演出が渋滞して告知を先に見せ切っていたら 0 になり、
+    // 待たずに導入へ入る(「告知だけ先に割り込む」= 2026-08-22 ユーザー決定)。
+    // キューが空なら丸ごと 4 秒待つので、告知 → 全面カットが切れ目なく繋がる。
+    // 上限で押さえるのは worker とモニターの時計がずれた異常系の保険。
+    const announceLeftMs =
+      e.quizAnnounceEndsAtMs != null
+        ? Math.min(QUIZ_ANNOUNCE_MS, Math.max(0, e.quizAnnounceEndsAtMs - Date.now()))
+        : 0;
+    const introAtMs = announceLeftMs + realIntroMs;
+    const totalMs = announceLeftMs + realIntroMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + prepMs;
     // ★アーム済みお題の発動合図。armed 監視(唯一の入口)と▶試写の両方がここを
     // 通る。▶実演は撃たない(revolutionCue と同じ理由 — 実発動のアームが偶然
     // 生きていると試写の時刻で本物をコミットしてしまう)。
@@ -4672,12 +4711,18 @@ export function MonitorView(): React.JSX.Element {
       quizTimers.current.push(window.setTimeout(fn, ms));
     };
     if (realIntroMs > 0 && introUrl !== null) {
-      setQuizClip({ key: ++fxKey, url: introUrl, out: false });
+      // 導入カットの開始も告知ぶん後ろへ。**announceLeftMs を足し忘れると
+      // 告知の上に全面カット動画が被さる**(告知は .fx-layer なので動画の手前に
+      // 残り、音だけ先に鳴り始める)。
+      push(announceLeftMs, () => {
+        if (!quizHold.current) return;
+        setQuizClip({ key: ++fxKey, url: introUrl, out: false });
+      });
       // 終端 0.4 秒前にフェード(.fx-clip-opaque の transition 400ms と一致)。
-      push(Math.max(0, realIntroMs - 400), () => setQuizClip((c) => (c ? { ...c, out: true } : c)));
+      push(Math.max(0, introAtMs - 400), () => setQuizClip((c) => (c ? { ...c, out: true } : c)));
     }
     // 回転 — コマ列は shared/quiz-spin.ts が権威(決定的・Math.random 不使用)。
-    push(realIntroMs, () => {
+    push(introAtMs, () => {
       if (!quizHold.current) return;
       setQuizClip(null);
       const ticks = quizSpinTicks(prompts.length, winner, QUIZ_SPIN_MS);
@@ -4690,13 +4735,20 @@ export function MonitorView(): React.JSX.Element {
       // いると回転が決定表示(同期予約の realIntroMs + QUIZ_SPIN_MS)に追い越されて
       // 最後まで見えない。革命の同等ループは同期スコープにあるので絶対オフセットで
       // 正しい — 形を揃えてコピペしないこと。
-      for (const t of ticks) {
+      for (let i = 0; i < ticks.length; i++) {
+        const t = ticks[i]!;
+        // **cue の変化点だけ**効果音を鳴らす。減速拍(crawl)は 5 秒ぶんの全コマに
+        // cue が付いている(見得を出しっぱなしにするため)ので、素直に cue を見ると
+        // 9 連発になる。'settle'(当選を掴んだ静止)は意図的に無音 — 1.4 秒後の
+        // 決定パンチが roulette-hit を鳴らす。
+        const fresh = t.cue != null && t.cue !== ticks[i - 1]?.cue;
         push(t.atMs, () => {
           if (!quizHold.current) return;
           setQuizSpin((s) => (s ? { ...s, show: t.show, cue: t.cue } : s));
           // 焦らしの合図。**新しい ChallengeSeSlot は作らない** — 既存のルーレット用
           // スロットを流用する(スロット追加は既定音・音量・miniFx・設定画面・
           // validate まで波及する)。配信者は設定画面の音グリッドから差し替えられる。
+          if (!fresh) return;
           if (t.cue === 'fake') playSeSlot('roulette-kick');
           else if (t.cue === 'near') playSeSlot('roulette-near');
           else if (t.cue === 'crawl') playSeSlot('roulette-hype');
@@ -4704,7 +4756,7 @@ export function MonitorView(): React.JSX.Element {
       }
     });
     // 決定 — 全面パンチ表示(確定音もルーレットの確定スロットを流用)。
-    push(realIntroMs + QUIZ_SPIN_MS, () => {
+    push(introAtMs + QUIZ_SPIN_MS, () => {
       if (!quizHold.current) return;
       setQuizSpin(null);
       setQuizReveal({ key: ++fxKey, prompt: prompts[winner] ?? '' });
@@ -4720,7 +4772,7 @@ export function MonitorView(): React.JSX.Element {
     // ※ ここは同期スコープの push なので**絶対オフセット**で正しい。回転コマの
     // ループだけがコールバック相対(上のコメント参照)— 形を揃えてコピペしないこと。
     if (prepMs > 0) {
-      push(realIntroMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS, () => {
+      push(introAtMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS, () => {
         if (!quizHold.current) return;
         setQuizReveal(null);
         setQuizPrep({
@@ -4742,7 +4794,6 @@ export function MonitorView(): React.JSX.Element {
     if (!quizHold.current) return;
     clearQuizTimers();
     quizHold.current = false;
-    const e = quizEffect.current;
     quizEffect.current = null;
     setQuizClip(null);
     setQuizSpin(null);
@@ -4750,9 +4801,12 @@ export function MonitorView(): React.JSX.Element {
     setQuizPrep(null);
     setHeldValue(null);
     playingFx.current = null;
-    // 発動の告知は演出の直後 = 「アニメーション → 通知」(finishRevolutionIntro と同じ)。
-    // ▶実演も出す(revolution と同じ理由 — 実演でも窓と投票が本当に始まる)。
-    if (e) pushFloat(quizAnnounceNode(e), 'bad banner-quiz', 'quiz-announce');
+    // 2026-08-23: **発動の告知バナー(±N 浮上)はここでは出さない**(ユーザー指定)。
+    // 前置きを最後まで見せた経路では、告知・回転・決定・準備で何が起きたかは
+    // 既に全画面で伝わっており、そのうえ帯が浮くと発表直後の画面が騒がしい。
+    // `quizAnnounceNode` を捨てないのは、**演出を出せなかった経路では
+    // バナーだけが唯一の告知**だから(プレーン発動・動きの抑制・尺不足・
+    // 開始不可のフォールバック)。そちらの pushFloat は残してある。
     scheduleDrain();
   }
 
@@ -7129,19 +7183,49 @@ export function MonitorView(): React.JSX.Element {
         {/*
           お題ルーレット一式。すべて .fx-layer 内・DOM 順で .roulette-screen より
           後ろ = 不透明カットイン動画より必ず手前(z-index は付けない —
-          fx-backdrop.spec が凍結)。回転・決定・窓・投票・発表の5枚は生存期間が
-          排他なので同時に2枚出ることはない(回転→決定→準備は quizTimers、
-          窓→投票は絶対時刻、発表は quizResultHold が権威)。
+          fx-backdrop.spec が凍結)。告知・回転・決定・窓・投票・発表の6枚は生存期間が
+          排他なので同時に2枚出ることはない(告知は worker の絶対時刻、
+          回転→決定→準備は quizTimers、窓→投票は絶対時刻、発表は quizResultHold が権威)。
+          **告知だけは .count-mirror より前**に置くこと — 「数字が最前」はこの層の
+          唯一の例外で、告知に追い越させてはいけない(count-mirror.spec が凍結)。
         */}
+        {quizAnnounceOn && quiz ? (
+          <div className="quiz-screen quiz-threshold" key={quizAnnounceKey}>
+            <div className="qz-label" style={{ width: quizLabelWidthPx(landscape) }}>
+              大台突破!
+            </div>
+            <div
+              className="qz-th-num"
+              style={{
+                fontSize: quizFontPx(
+                  quizThresholdNum(quiz.announceThreshold ?? 0),
+                  'announce',
+                  landscape
+                ),
+              }}
+            >
+              {quizThresholdNum(quiz.announceThreshold ?? 0)}
+            </div>
+            <div className="qz-th-suffix">{QUIZ_THRESHOLD_SUFFIX}</div>
+            <div className="qz-lanterns">
+              <i />
+              <i />
+              <i />
+            </div>
+          </div>
+        ) : null}
         {quizSpin ? (
           <div className={`quiz-screen quiz-spin${quizSpin.cue ? ` qz-${quizSpin.cue}` : ''}`}>
-            <div className="qz-label">大喜利</div>
+            <div className="qz-label" style={{ width: quizLabelWidthPx(landscape) }}>
+              大喜利
+            </div>
             <div
               className="qz-prompt"
               // cue も key に混ぜる — className だけの変化では再マウントしないので、
               // フェイクストップの見得が一度も再生されない。
               key={`${quizSpin.key}:${quizSpin.show}:${quizSpin.cue ?? ''}`}
               style={{
+                ...quizBoxStyle('spin', landscape),
                 fontSize: quizFontPx(quizSpin.prompts[quizSpin.show] ?? '', 'spin', landscape),
               }}
             >
@@ -7164,19 +7248,23 @@ export function MonitorView(): React.JSX.Element {
         ) : null}
         {quizReveal ? (
           <div className="quiz-screen quiz-reveal" key={quizReveal.key}>
-            <div className="qz-label">お題 けってい!</div>
+            <div className="qz-label" style={{ width: quizLabelWidthPx(landscape) }}>
+              お題 けってい!
+            </div>
             <div
               className="qz-prompt"
-              style={{ fontSize: quizFontPx(quizReveal.prompt, 'reveal', landscape) }}
+              style={{
+                ...quizBoxStyle('reveal', landscape),
+                fontSize: quizFontPx(quizReveal.prompt, 'reveal', landscape),
+              }}
             >
               {quizReveal.prompt}
             </div>
-            {/* 座布団は決定の瞬間だけ。点数には一切紐づかない飾り。 */}
-            <div className="qz-zabuton">
-              <i />
-              <i />
-              <i />
-            </div>
+            {/*
+              2026-08-23: 座布団(.qz-zabuton の赤い3枚)はユーザー指定で撤去。
+              点数にも票数にも紐づかない飾りで、画面下部を占めるぶん本文の枠
+              (QUIZ_FIT_*.reveal の maxH)を削っていた。戻さないこと。
+            */}
             <div className="qz-lanterns">
               <i />
               <i />
@@ -7191,10 +7279,15 @@ export function MonitorView(): React.JSX.Element {
         */}
         {quizPrep ? (
           <div className="quiz-screen quiz-prep" key={quizPrep.key}>
-            <div className="qz-label">準備してください</div>
+            <div className="qz-label" style={{ width: quizLabelWidthPx(landscape) }}>
+              準備してください
+            </div>
             <div
               className="qz-prompt"
-              style={{ fontSize: quizFontPx(quizPrep.prompt, 'prep', landscape) }}
+              style={{
+                ...quizBoxStyle('prep', landscape),
+                fontSize: quizFontPx(quizPrep.prompt, 'prep', landscape),
+              }}
             >
               {quizPrep.prompt}
             </div>
@@ -7213,7 +7306,10 @@ export function MonitorView(): React.JSX.Element {
             <div className="qw-cap">お題に挑戦中!</div>
             <div
               className="qw-prompt"
-              style={{ fontSize: quizFontPx(quiz.prompt, 'window', landscape) }}
+              style={{
+                ...quizBoxStyle('window', landscape),
+                fontSize: quizFontPx(quiz.prompt, 'window', landscape),
+              }}
             >
               {quiz.prompt}
             </div>
@@ -7227,9 +7323,21 @@ export function MonitorView(): React.JSX.Element {
             <div className="qv-cap">
               コメントで投票!<em>残り{num(quizVoteLeftSecs)}秒</em>
             </div>
+            {/*
+              投票の書き方(2026-08-23 ユーザー指定「わかりやすくする」)。集計札には
+              語が出ているが「そう書けば票になる」とは読めなかった。
+              **語は必ず state の goodLabel / badLabel から作る** — ベタ書きすると
+              設定で判定ワードを変えたときに案内と判定が食い違う。
+            */}
+            <div className="qv-howto">
+              「<b>{quiz.goodLabel}</b>」 or 「<b>{quiz.badLabel}</b>」 とコメントで回答してください
+            </div>
             <div
               className="qv-prompt"
-              style={{ fontSize: quizFontPx(quiz.prompt, 'vote', landscape) }}
+              style={{
+                ...quizBoxStyle('vote', landscape),
+                fontSize: quizFontPx(quiz.prompt, 'vote', landscape),
+              }}
             >
               {quiz.prompt}
             </div>
@@ -7256,7 +7364,10 @@ export function MonitorView(): React.JSX.Element {
           >
             <div
               className="qs-prompt"
-              style={{ fontSize: quizFontPx(quizSettle.prompt, 'settle', landscape) }}
+              style={{
+                ...quizBoxStyle('settle', landscape),
+                fontSize: quizFontPx(quizSettle.prompt, 'settle', landscape),
+              }}
             >
               {quizSettle.prompt}
             </div>

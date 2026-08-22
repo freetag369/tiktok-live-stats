@@ -35,6 +35,7 @@ import hypeKiitenaiyoUrl from '../assets/se/hype-kiitenaiyo.mp3';
 import backKuhUrl from '../assets/se/back-kuh.mp3';
 import backUhUrl from '../assets/se/back-uh.mp3';
 import backIteUrl from '../assets/se/back-ite.mp3';
+import { customSoundFileName, isCustomSoundId } from '@shared/challenge';
 
 /**
  * チャレンジ演出の効果音カタログ(素材の由来は assets/se/CREDITS.md)。Kenney の CC0 と
@@ -199,5 +200,37 @@ export function playSe(id: string, volume: number): void {
   }
   a.volume = Math.min(1, v);
   // デコード失敗や autoplay ポリシー変更で reject し得る — 演出は視覚が主なので握りつぶす。
+  void a.play().catch(() => {});
+}
+
+/**
+ * カタログ音でも**取込み済みカスタム音**(`custom:<ファイル名>`)でも鳴らせる
+ * ワンショット再生(2026-08-23・お題の数値到達トリガーの行ごとの音のために新設)。
+ *
+ * カスタム音を `playBandBgm` で鳴らせないのは、あちらが `a.loop = true` 固定の
+ * **ループ音専用**だから(回転音・BGM 用)。告知音は1発なのでここで別に扱う。
+ *
+ * - URL は main の `app-sound://` プロトコル経由(CSP の media-src が許可済み)。
+ * - **gain は 1** — カタログの gain は素材間の音圧差を測って詰めた値で、未知の
+ *   ユーザー素材に当てられる基準が無い(playBandBgm と同じ判断)。
+ * - プールは持たない。告知は 4 秒に1回の単発なので、`playSe` のような使い回しの
+ *   価値が無く、ファイル名ごとに要素を常駐させるほうが無駄になる。再生し終えたら
+ *   参照を捨てて GC に任せる。
+ * - ファイル欠損(config/sounds/ を手で掃除した等)は**無音のまま進める**。
+ *   既定音へのフォールバックはしない — 「選んだ覚えのない音が本番で鳴る」ほうが重い。
+ */
+export function playSeAny(id: string, volume: number): void {
+  if (!id || id === 'off') return;
+  if (!isCustomSoundId(id)) {
+    playSe(id, volume);
+    return;
+  }
+  const v = Math.min(1, Math.max(0, volume / 100));
+  if (v <= 0) return;
+  const a = new Audio(`app-sound:///${encodeURIComponent(customSoundFileName(id))}`);
+  a.volume = v;
+  a.addEventListener('error', () => {
+    console.warn(`[se] 音声の読込に失敗: ${id}(ファイルが移動・削除された可能性)`);
+  });
   void a.play().catch(() => {});
 }

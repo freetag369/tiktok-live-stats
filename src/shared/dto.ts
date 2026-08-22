@@ -1170,6 +1170,48 @@ export interface QuizRule {
 }
 
 /**
+ * お題ルーレットの**数値到達トリガー**1行(2026-08-22 ユーザー決定)。ギフトではなく
+ * チャレンジのカウント値を監視し、`value` が `value` フィールドの数を**下から上へ
+ * 跨いだ瞬間**に発動する(「○○を超えました!」)。
+ *
+ * **ヒステリシス**: 一度発動したら、カウントがしきい値を**下回るまで再発動しない**。
+ * 判定の唯一の実装は shared/challenge.ts の stepQuizThresholds。
+ */
+export interface QuizThresholdRule {
+  /** 行の識別子。UI の key と行ごとの実演(ChallengeTestEffectSpec.quizThresholdId)に使う。 */
+  id: string;
+  /** 設定画面の行見出し。表示専用でマッチには使わない(QuizRule.label と同じ)。 */
+  label: string;
+  enabled: boolean;
+  /**
+   * しきい値。カウント値がこの数**以上**へ跨いだ瞬間に発動する(「達した時」なので
+   * 厳密には `>=`)。clamp は QUIZ_THRESHOLD_MIN〜MAX。
+   */
+  value: number;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+  /**
+   * 告知(「○○を超えました!」)の瞬間に鳴らす効果音(2026-08-23 ユーザー決定
+   * 「数値トリガーの行ごとに音を指定」)。
+   *
+   * - `QUIZ_THRESHOLD_SOUND_SLOT`(`'slot'`)= **既定**。「効果音」タブの
+   *   『ルーレット確定』スロットに従う(2026-08-22 版とまったく同じ挙動)。
+   *   既定がこの番兵なので、**キー欠損のフォールバックが移行の代わり**になり
+   *   SETTINGS_VERSION は上げなくてよい。
+   * - `'off'` = 無音。
+   * - `CHALLENGE_SE_SOUND_IDS` のカタログ id、または取込み済みカスタム音
+   *   (`custom:<ファイル名>` — RouletteSoundConfig.spinSe と同じ規約)。
+   */
+  sound: string;
+  /**
+   * 上の音の音量(0-100)。全体音量(seVolume)と掛け合わせる
+   * (effectiveSeVolume 経由 — スロットごとの個別音量と同じ扱い)。
+   * `sound === 'slot'` のときは**無視**され、スロット側の音量が効く。
+   */
+  soundVolume: number;
+}
+
+/**
  * お題ルーレットの設定。トリガー行は**上から順に評価し、最初に一致した1行だけ**
  * (revolution と同じ先勝ち)。
  *
@@ -1183,6 +1225,14 @@ export interface QuizConfig {
   /** 機能全体のスイッチ。false で全行が止まる(行ごとの enabled とは別)。 */
   enabled: boolean;
   rules: QuizRule[];
+  /**
+   * 数値到達トリガー(カウント値がしきい値を上へ跨いだら発動)。**既定は空配列**で、
+   * 旧 settings.json にこのキーは無い — 欠損 → `[]` = 発動なし、が**そのまま移行の
+   * 代わり**になる(SETTINGS_VERSION は上げない。revolution / tapLock と同じ前例)。
+   * rules と同じく上から順に評価するが、同じ判定 tick で複数行が跨いだときは
+   * **最初の1行だけ発動し、跨いだ他の行も再武装待ちへ落とす**(発動をスタックさせない)。
+   */
+  thresholds: QuizThresholdRule[];
   /**
    * お題の候補(表示順)。arm 時に worker が等確率で1件抽選する。
    * 空配列のままでは発動しない(トリガー一致しても不発 + giftDiag に記録)。
@@ -1870,6 +1920,23 @@ export interface ChallengeEffect {
    * (権威は ChallengeState.quiz)。
    */
   quizEndsAtMs?: Ms;
+  /**
+   * kind='quiz-start': **数値到達で発動した**ときのしきい値。ギフト発動では載らない
+   * (キーの有無が「どちらのトリガーで来たか」の唯一の印)。告知の文言は
+   * shared/challenge.ts の quizThresholdText がここから組む — 発動時に焼き込むのは
+   * quizAmount と同じ理由で、モニターの cfg ポーリング(120秒)が古くても文言がズレないため。
+   */
+  quizThreshold?: number;
+  /**
+   * kind='quiz-start': 数値到達の**告知の満了時刻(絶対 ms)**。quizThreshold と対で載る。
+   *
+   * ChallengeState.quiz.announceUntilMs が「告知を今出すか」を決めるのに対し、
+   * こちらは**前置きを何ミリ秒待ってから始めるか**をモニターに決めさせるためのもの。
+   * `max(0, quizAnnounceEndsAtMs - now)` が残りの告知尺で、
+   * 演出が渋滞して告知を見せ切ったあとに前置きが始まる場合は 0 になる
+   * (= 待たずに導入カットへ入る)。両方 worker の同じ瞬間から導出される。
+   */
+  quizAnnounceEndsAtMs?: Ms;
   /** kind='quiz-end': 「よかった」の票数(userId 重複排除済み)。 */
   quizGood?: number;
   /** kind='quiz-end': 「だめ」の票数(同上)。 */
@@ -2012,6 +2079,11 @@ export type ChallengeTestEffectSpec =
       kind: 'quiz';
       /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
       quizId?: string;
+      /**
+       * 数値到達トリガー行の id。指定すると告知(「○○を超えました!」)から始まる
+       * **数値発動と同じ通し**で実演する。quizId より優先。
+       */
+      quizThresholdId?: string;
     }
   | { kind: 'achieved' }
   /**
@@ -2403,6 +2475,27 @@ export interface ChallengeState {
     label?: string;
     queued?: number;
     /**
+     * 数値到達の**告知オーバーレイ**の期限(絶対時刻)。載っている間だけモニターが
+     * 「{announceThreshold} を超えました!」を全画面で出す。ギフト発動では載らない。
+     *
+     * この告知は**幕(ホールド)ではなく常設オーバーレイ** — ドレインキューにも
+     * 舞台キューにも載らないので、演出が渋滞していても跨いだ瞬間に割り込んで出る
+     * (2026-08-22 ユーザー決定「告知だけ先に割り込む」)。裏では溜まっていた
+     * キューが流れ続け、モニターは告知が終わってから quizCue{start} を撃つ。
+     */
+    announceUntilMs?: Ms;
+    /** 告知に出すしきい値。announceUntilMs と対で載る。 */
+    announceThreshold?: number;
+    /**
+     * 告知の瞬間に鳴らす音(発動した `QuizThresholdRule.sound` の**焼き込み**)と、
+     * その音量。**id ではなく値を載せる**のが要点 — モニター側の cfg は 120 秒
+     * ポーリングで古くなりうるので、行を引き直させると「設定を変えた直後の
+     * 1 発だけ古い音」になる(quizPrompts / quizPrepMs と同じ判断)。
+     * `'slot'` はスロット流用、`'off'` は無音。
+     */
+    announceSound?: string;
+    announceSoundVolume?: number;
+    /**
      * ▶テスト実演の窓(testEffect 'quiz')。値・統計・凍結には触れず、投票は
      * ダミー。**armed とは併存しない**(実演はバリアを持たない — 入口は
      * quiz-start effect で、armed 監視に本物の cue を撃たせてはいけない)。
@@ -2580,8 +2673,20 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  *    roulettes キーは保存済み設定が必ず持っているので既定を直しても届かない。
  *    2行あるので **ROULETTES_MAX の残数は行ごとに確認する**(1回だけ見て2行
  *    push すると上限を超える)。倍率は両行とも確率抽選(×5 60% / ×10 30% / ×20 10%)。
+ * 14: お題ルーレットの区間BGM を実素材へ寄せ替え(migrateChallengeQuizBgm)。
+ *    区間①(発動〜導入の全面カット〜回転)を bgm-quiz-chase、区間⑤(コメント受付)を
+ *    bgm-quiz-think にする。**この段だけは現在値を見ずに上書きする** — 他の寄せ替えは
+ *    「旧既定ちょうど」を条件にするが、実運用の settings.json は bgm:'off' /
+ *    bgmVolume:0(お題の音が丸ごと無音)に倒してあり、その条件では届かないため
+ *    (2026-08-22 ユーザー決定)。触るのは quiz の4キーだけで、音量は 0 のときだけ
+ *    既定 70 へ戻す(自分で絞っている人の値は残す)。
+ * 15: お題ルーレットの「お題考え時(挑戦ウィンドウ)」の区間BGM を keep → off へ
+ *    寄せ替え(migrateChallengeQuizThinkBgm)。v14 で区間①に実曲を入れた結果、keep の
+ *    連鎖で導入の全面カットから挑戦中までBGMが鳴り続け、「回転が終わって挑戦の時間に
+ *    なった」区切りが音で分からなくなったため(2026-08-22 ユーザー決定)。v14 と違い
+ *    **keep ちょうどのときだけ**触る — 自分で曲を選んだ人の設定は残す。
  */
-export const SETTINGS_VERSION = 13;
+export const SETTINGS_VERSION = 15;
 
 export interface AppSettings {
   eulerApiKey: string;

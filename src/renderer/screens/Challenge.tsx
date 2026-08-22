@@ -18,6 +18,7 @@ import type {
   RevolutionRule,
   QuizConfig,
   QuizRule,
+  QuizThresholdRule,
   GiftBandFxConfig,
   GiftFullCutConfig,
   GiftFullCutRule,
@@ -105,6 +106,12 @@ import {
   QUIZ_RESULT_MS,
   QUIZ_REVEAL_MS,
   QUIZ_RULES_MAX,
+  QUIZ_ANNOUNCE_MS,
+  QUIZ_THRESHOLDS_MAX,
+  QUIZ_THRESHOLD_MAX,
+  QUIZ_THRESHOLD_MIN,
+  QUIZ_THRESHOLD_SOUND_SLOT,
+  quizThresholdText,
   QUIZ_SPIN_MS,
   QUIZ_VOTE_MAX_SEC,
   QUIZ_VOTE_MIN_SEC,
@@ -132,7 +139,7 @@ import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { useConfirm } from '../components/ConfirmDialog';
 import { setSettings, toast } from '../state/uiStore';
 import { useLive } from '../state/liveStore';
-import { playSe, SE_SOUNDS } from '../lib/se';
+import { playSe, playSeAny, SE_SOUNDS } from '../lib/se';
 import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
 import { FX_CLIPS, FX_CLIP_GROUPS, isFullCutClip } from '../lib/fx';
 import { GiftListSection } from './ChallengeGiftList';
@@ -337,7 +344,11 @@ function testKeyOf(spec: ChallengeTestEffectSpec): string {
     case 'revolution':
       return `revolution:${spec.revolutionId ?? ''}`;
     case 'quiz':
-      return `quiz:${spec.quizId ?? ''}`;
+      // しきい値行の▶は別の名前空間へ — 同じ 'quiz:' に混ぜると、id 未設定の
+      // ギフト行と「■ 停止」の対象が入れ替わる。
+      return spec.quizThresholdId != null
+        ? `quiz-th:${spec.quizThresholdId}`
+        : `quiz:${spec.quizId ?? ''}`;
     case 'tapBoost':
       return `tapBoost:${spec.boostId ?? ''}`;
     default:
@@ -4362,6 +4373,92 @@ let quizSeq = 0;
  * keep=true のスロットは番兵「前の区間の曲を続ける」を選べる(既定)。
  * 先頭区間(ルーレット時)だけは継続元が無いので false で呼ぶ。
  */
+/**
+ * 数値トリガー1行ぶんの**告知効果音**エディタ(2026-08-23)。
+ *
+ * BGM(QuizBgmRow)と違ってワンショットの短音なので、カタログは効果音タブと同じ
+ * `SE_SOUNDS`、試聴は `playSeAny`(ハンドルを持たない = 停止ボタンが要らない)。
+ * カスタム取込みは回転音・BGM とまったく同じ `sound.importCustom` 経路。
+ *
+ * 既定は番兵 `QUIZ_THRESHOLD_SOUND_SLOT` で、選ぶと「効果音」タブの
+ * 『ルーレット確定』の音と音量に従う(2026-08-22 以前の挙動)。
+ */
+function QuizThresholdSoundRow({
+  rule,
+  seVolume,
+  onPatch,
+}: {
+  rule: QuizThresholdRule;
+  seVolume: number;
+  onPatch: (p: Partial<QuizThresholdRule>) => void;
+}): React.JSX.Element {
+  // 番兵と 'off' は「この行では音を選んでいない」ので音量スライダーも試聴も無効。
+  const silent = rule.sound === QUIZ_THRESHOLD_SOUND_SLOT || rule.sound === 'off';
+  const pickCustom = (): void => {
+    void rpc('sound.importCustom', undefined)
+      .then((r) => {
+        if (r) onPatch({ sound: CUSTOM_SOUND_PREFIX + r.file });
+      })
+      .catch((e: Error) => {
+        toast({ level: 'error', msgJa: `効果音の取込みに失敗しました: ${e.message}` });
+      });
+  };
+  return (
+    <div className="row" style={{ gap: 8, alignItems: 'flex-end', width: '100%', marginTop: 6 }}>
+      <label
+        className="field"
+        style={{ width: 230 }}
+        title="このしきい値を超えた瞬間、全画面の告知と同時に鳴らす音です"
+      >
+        告知の効果音
+        <select value={rule.sound} onChange={(e) => onPatch({ sound: e.target.value })}>
+          <option value={QUIZ_THRESHOLD_SOUND_SLOT}>
+            「効果音」タブの『ルーレット確定』に従う(既定)
+          </option>
+          <option value="off">鳴らさない</option>
+          {SE_SOUNDS.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+            </option>
+          ))}
+          {/* 現在値がカスタムのときだけ動的に足す — 無いと controlled select が空表示になる。 */}
+          {isCustomSoundId(rule.sound) ? (
+            <option value={rule.sound}>カスタム: {customSoundFileName(rule.sound)}</option>
+          ) : null}
+        </select>
+      </label>
+      <button
+        className="btn small"
+        disabled={silent}
+        title="この音を試聴(全体×この行の音量で鳴ります)"
+        onClick={() => playSeAny(rule.sound, effectiveSeVolume(seVolume, rule.soundVolume))}
+      >
+        ♪
+      </button>
+      <button
+        className="btn small"
+        title="自分の音声ファイル(mp3 / ogg / wav / m4a)を取り込んで告知音にする"
+        onClick={pickCustom}
+      >
+        参照…
+      </button>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        style={{ width: 84 }}
+        value={rule.soundVolume}
+        disabled={silent}
+        title="この行の音量(全体音量に対する割合)"
+        onChange={(e) => onPatch({ soundVolume: Number(e.target.value) })}
+      />
+      <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>
+        音量 {rule.soundVolume}
+      </span>
+    </div>
+  );
+}
+
 function QuizBgmRow({
   label,
   title,
@@ -4528,6 +4625,9 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
   const patchRule = (i: number, p: Partial<QuizRule>): void => {
     patchQz({ rules: qz.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
   };
+  const patchThreshold = (i: number, p: Partial<QuizThresholdRule>): void => {
+    patchQz({ thresholds: qz.thresholds.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
   // 前置きの尺の案内。お題発表準備(prepSec・0 で無し)も前置きの一部。
   const preSec = Math.round(
     (QUIZ_INTRO_MS + QUIZ_SPIN_MS + QUIZ_REVEAL_MS) / 1000 + qz.prepSec
@@ -4538,7 +4638,9 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
       <h3>お題ルーレット</h3>
       <label className="row" style={{ cursor: 'pointer' }}>
         <input type="checkbox" checked={qz.enabled} onChange={(e) => patchQz({ enabled: e.target.checked })} />
-        <span>指定ギフトでお題ルーレットを回し、制限時間つきの挑戦+コメント投票で増減する</span>
+        <span>
+          指定ギフト<b>またはカウントの数値到達</b>でお題ルーレットを回し、制限時間つきの挑戦+コメント投票で増減する
+        </span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
         ギフトが届いた瞬間に<b>BGM が切り替わり</b>、その時点で溜まっていた演出を消化してから
@@ -4554,6 +4656,11 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
         清算されます(<b>いいねだけは蓄積されず捨てられます</b>)。フィーバー・革命の窓が
         進行中に届いたときは窓の終了を待って発動し、発動中に届いたお題ギフトは順番待ちで
         連続実行されます。
+        <br />
+        <b>数値到達で発動したとき</b>は、跨いだ瞬間に<b>「○○を超えました!」の全画面告知
+        (約{Math.round(QUIZ_ANNOUNCE_MS / 1000)}秒)</b>が
+        <b>他の演出に割り込んで</b>出ます。そのあとの導入カット以降は上と同じで、
+        溜まっていた演出を消化してから始まります。
       </div>
 
       {qz.enabled ? (
@@ -4665,6 +4772,129 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
             </button>
             <span className="faint" style={{ fontSize: 11 }}>
               最大 {QUIZ_RULES_MAX} 件(現在 {qz.rules.length} 件)。上から順に判定し、最初に一致した1行だけが発動します。
+            </span>
+          </div>
+
+          <h4 style={{ marginTop: 16 }}>数値トリガー(カウント到達)</h4>
+          <div className="faint" style={{ fontSize: 11 }}>
+            モニターの<b>カウントがしきい値を下から上へ跨いだ瞬間</b>に発動します(妨害で
+            数字が増えたとき)。<b>一度発動したら、カウントがしきい値を下回るまで再発動しません</b> —
+            下回ってから再び超えれば何度でも鳴ります。チャレンジ開始時点で<b>すでに初期値より
+            下にあるしきい値は鳴りません</b>(一度下回ってから戻ってきたときだけ)。
+            同じ瞬間に複数行を跨いだときは<b>上の1行だけ</b>が発動します。
+          </div>
+          {qz.thresholds.map((r, i) => (
+            <div className="challenge-rule" key={r.id} style={{ flexWrap: 'wrap' }}>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 60 }}
+                title="この行だけ一時的に止めます(下の行の判定は続きます)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.enabled}
+                  onChange={(e) => patchThreshold(i, { enabled: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  有効
+                </span>
+              </label>
+              <label className="field" style={{ width: 130 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="大台突破"
+                  onChange={(e) => patchThreshold(i, { label: e.target.value })}
+                />
+              </label>
+              <label
+                className="field"
+                style={{ width: 130 }}
+                title={`カウントがこの数以上へ跨いだ瞬間に発動します(${num(QUIZ_THRESHOLD_MIN)}〜${num(QUIZ_THRESHOLD_MAX)})`}
+              >
+                しきい値
+                <input
+                  type="number"
+                  min={QUIZ_THRESHOLD_MIN}
+                  max={QUIZ_THRESHOLD_MAX}
+                  value={r.value}
+                  onChange={(e) => patchThreshold(i, { value: Number(e.target.value) })}
+                />
+              </label>
+              <div className="faint" style={{ fontSize: 11, width: 200 }}>
+                告知の文言
+                <div style={{ fontSize: 13, color: 'var(--fg)' }}>{quizThresholdText(r.value)}</div>
+              </div>
+              <label className="row" style={{ cursor: 'pointer', width: 76 }}>
+                <input
+                  type="checkbox"
+                  checked={r.flash}
+                  onChange={(e) => patchThreshold(i, { flash: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  フラッシュ
+                </span>
+              </label>
+              <MonitorTestBtn
+                spec={{ kind: 'quiz', quizThresholdId: r.id }}
+                onTest={onTest}
+                busy={testBusy}
+                running={testRunning === `quiz-th:${r.id}`}
+                label="▶ この行"
+                title="モニターウィンドウで、告知(○○を超えました!)→導入カット→お題の回転→決定表示→制限時間→投票タイム→結果発表まで通しで実演再生します。本番と同じ尺なので、制限時間+投票時間ぶんかかります。投票はダミーの票で進みます・カウント値は変わりません。途中でやめるときは同じボタン(■ 停止)を押してください"
+              />
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchQz({ thresholds: qz.thresholds.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+              {/*
+                告知の効果音(2026-08-23 ユーザー決定「行ごとに音を指定」)。
+                行が音の id を直接持つ形にしてある(新しい効果音スロットは作らない)。
+              */}
+              <QuizThresholdSoundRow
+                rule={r}
+                seVolume={cfg.seVolume}
+                onPatch={(p) => patchThreshold(i, p)}
+              />
+            </div>
+          ))}
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={qz.thresholds.length >= QUIZ_THRESHOLDS_MAX}
+              onClick={() =>
+                patchQz({
+                  thresholds: [
+                    ...qz.thresholds,
+                    {
+                      id: `quiz-th-${Date.now().toString(36)}-${quizSeq++}`,
+                      label: '',
+                      enabled: true,
+                      // 初期値そのものを既定にする — 「いまの数字より上」でないと
+                      // 一度も鳴らないので、配信者が調整する起点として一番迷わない。
+                      value: Math.min(
+                        QUIZ_THRESHOLD_MAX,
+                        Math.max(QUIZ_THRESHOLD_MIN, cfg.initialValue)
+                      ),
+                      flash: true,
+                      // 既定は番兵 = 「効果音」タブの『ルーレット確定』に従う
+                      // (2026-08-22 以前と同じ音。行ごとに変えたい人だけ触る)。
+                      sound: QUIZ_THRESHOLD_SOUND_SLOT,
+                      soundVolume: 100,
+                    },
+                  ],
+                })
+              }
+            >
+              しきい値を追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {QUIZ_THRESHOLDS_MAX} 件(現在 {qz.thresholds.length} 件)。
+              {qz.thresholds.length === 0 ? '1件も無いので数値では発動しません。' : ''}
             </span>
           </div>
 

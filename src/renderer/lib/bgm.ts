@@ -3,6 +3,8 @@ import bgmBand1Url from '../assets/se/band/bgm-band1.mp3';
 import bgmBand2Url from '../assets/se/band/bgm-band2.mp3';
 import bgmBand3Url from '../assets/se/band/bgm-band3.mp3';
 import bgmBand4Url from '../assets/se/band/bgm-band4.mp3';
+import bgmQuizChaseUrl from '../assets/se/quiz/bgm-quiz-chase.mp3';
+import bgmQuizThinkUrl from '../assets/se/quiz/bgm-quiz-think.mp3';
 import bgmRoulette1Url from '../assets/se/roulette/bgm-roulette1.ogg';
 // 回転中BGM枠(bgm-roulette2)とリール回転音枠(spin-slot)の両方で使う同一素材。
 // ファイルは1本・カタログのエントリが2つ(BY_ID の都合で id は分ける)。
@@ -50,6 +52,15 @@ export const ROULETTE_BGM: readonly BandBgm[] = [
   { id: 'bgm-roulette1', label: 'サスペンス — ドラムロール', url: bgmRoulette1Url, gain: 0.85 },
   // gain 0.85: bgm-roulette1(mean -13.0dB)と 0.7dB 差しかないので同値でよい。
   { id: 'bgm-roulette2', label: 'スロット — リール回転', url: slotUrl, gain: 0.85 },
+  // お題ルーレットの出荷既定2曲(2026-08-22)。区間①と区間⑤の既定で、ここに
+  // 置いてあるので回転中BGMの選択肢にも並ぶ(逆は無し — 帯域の select には出ない)。
+  // gain 0.6: 素材が -8.9 LUFS と熱く、bgm-roulette1(-12.8 LUFS × gain 0.85 =
+  // 実効 -14.2)に並べるには 4.4dB 落とす必要がある(実効 -13.3 LUFS)。
+  { id: 'bgm-quiz-chase', label: 'お題 — 追いかけっこ(既定)', url: bgmQuizChaseUrl, gain: 0.6 },
+  // gain 1: 素材が小さかったぶんは取り込み時に増幅済み(-14.1 LUFS / peak -1.3dB)。
+  // カタログの gain は減衰しかできないので、持ち上げは ffmpeg 側でやる規約
+  // (assets/se/CREDITS.md の reel-stop と同じ事情)。
+  { id: 'bgm-quiz-think', label: 'お題 — 考え中(既定)', url: bgmQuizThinkUrl, gain: 1 },
 ];
 
 /**

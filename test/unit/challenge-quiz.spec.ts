@@ -3,17 +3,23 @@ import {
   DEFAULT_CHALLENGE,
   DEFAULT_QUIZ,
   DEFAULT_QUIZ_RULE,
+  QUIZ_ANNOUNCE_MS,
   QUIZ_ARM_MAX_MS,
   QUIZ_INTRO_MS,
   QUIZ_INTRO_SELF,
   QUIZ_REVEAL_MS,
   QUIZ_RESULT_MS,
   QUIZ_SPIN_MS,
+  QUIZ_THRESHOLDS_MAX,
+  QUIZ_THRESHOLD_MAX,
+  QUIZ_THRESHOLD_MIN,
   judgeQuizVote,
   matchQuiz,
   migrateChallengeQuizIntro,
   validateChallengeConfig,
   validateQuiz,
+  QUIZ_THRESHOLD_SOUND_SLOT,
+  CHALLENGE_SE_SOUND_IDS,
 } from '@shared/challenge';
 import type { ChallengeConfig, QuizConfig } from '@shared/dto';
 import type { CommentEvent, GiftEvent, LikeEvent } from '@shared/events';
@@ -634,5 +640,314 @@ describe('アーム待ちの穴', () => {
     const after = e.get().fxQueue ?? [];
     expect(after.length).toBeGreaterThan(0);
     expect(after.some((x) => x.barrier === true)).toBe(false);
+  });
+});
+
+// ── 数値到達トリガー(2026-08-22 ユーザー決定) ──────────────────────────────
+
+/**
+ * カウントがしきい値を上へ跨いだら発動する。ギフト経路と違い
+ * **flushFxFreeze の2出口が唯一の判定点**なので、値を上げたあと次に時計が
+ * 進む経路(handleEvent / press / drainIfChanged / 凍結タイマー)で拾われる。
+ */
+function thresholdCfg(value: number, over: Partial<ChallengeConfig> = {}): ChallengeConfig {
+  const c = cfg(
+    {
+      thresholds: [
+        {
+          id: 'th1',
+          label: '大台',
+          enabled: true,
+          value,
+          flash: true,
+          sound: QUIZ_THRESHOLD_SOUND_SLOT,
+          soundVolume: 100,
+        },
+      ],
+    },
+    // 妨害ギフトは 1 件 = 固定 100 増加。跨ぎの回数を数えやすくするため。
+    { giftDefault: { mode: 'fixed', amount: 100 }, ...over }
+  );
+  return c;
+}
+
+/** 妨害ギフト(quiz のトリガーではない giftId)を n 件流して値を上げる。 */
+function bump(e: ChallengeEngine, n: number): void {
+  for (let i = 0; i < n; i++) e.handleEvent(gift({ giftId: '8888' }));
+  // 値を上げたイベント自身より**後**に判定が来る(flushFxFreeze は handleEvent の
+  // 頭で走る)ので、時計をもう一度回して拾わせる。実機では 2Hz tick が担う。
+  e.drainIfChanged();
+}
+
+describe('数値到達トリガー — 跨いだ瞬間に発動する', () => {
+  it('しきい値を上へ跨ぐとお題ルーレットがアームされる', () => {
+    const { e } = quizEngine(thresholdCfg(1200));
+    e.start();
+    expect(e.get().value).toBe(1000);
+    bump(e, 1); // 1100 — まだ下
+    expect(e.get().quiz).toBeUndefined();
+    bump(e, 1); // 1200 — 跨いだ
+    const s = e.get();
+    expect(s.quiz?.armed).toBe(true);
+    // 告知(4秒)のラッチが載る。ギフト発動では載らないキー。
+    expect(s.quiz?.announceThreshold).toBe(1200);
+    expect(s.quiz?.announceUntilMs).toBe(NOW + QUIZ_ANNOUNCE_MS);
+  });
+
+  it('quiz-start effect にしきい値と告知の満了時刻が焼かれる(バナーと前置きの権威)', () => {
+    const { e } = quizEngine(thresholdCfg(1100));
+    e.start();
+    bump(e, 1);
+    const start = e.get().recentEffects.find((x) => x.kind === 'quiz-start');
+    expect(start?.quizThreshold).toBe(1100);
+    expect(start?.quizAnnounceEndsAtMs).toBe(NOW + QUIZ_ANNOUNCE_MS);
+    // 前置きの総尺にも告知が入る(モニターはこの尺で開始可否を判断する)。
+    expect(start?.fxDurationMs).toBe(QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS);
+  });
+
+  /**
+   * 2026-08-23: 告知音は**発動した行の値を state に焼く**。id を渡してモニターに
+   * cfg を引かせると、設定を変えた直後の 1 発だけ古い音で鳴る(cfg は 120 秒
+   * ポーリング)。quizPrompts / quizPrepMs と同じ焼き込みの流儀。
+   */
+  it('告知音は発動した行の値が state に載る(モニターは cfg を引き直さない)', () => {
+    const cfg = thresholdCfg(1200);
+    cfg.quiz.thresholds[0]!.sound = 'custom:my-fanfare.mp3';
+    cfg.quiz.thresholds[0]!.soundVolume = 42;
+    const { e } = quizEngine(cfg);
+    e.start();
+    bump(e, 2); // 1200 — 跨いだ
+    const s = e.get();
+    expect(s.quiz?.announceSound).toBe('custom:my-fanfare.mp3');
+    expect(s.quiz?.announceSoundVolume).toBe(42);
+  });
+
+  it('ギフト発動では告知もしきい値も載らない(キーの有無がトリガーの印)', () => {
+    const { e } = quizEngine();
+    e.start();
+    e.handleEvent(gift({ giftId: '777' }));
+    const s = e.get();
+    expect(s.quiz?.armed).toBe(true);
+    expect(s.quiz?.announceUntilMs).toBeUndefined();
+    const start = s.recentEffects.find((x) => x.kind === 'quiz-start');
+    expect(start?.quizThreshold).toBeUndefined();
+    expect(start?.quizAnnounceEndsAtMs).toBeUndefined();
+  });
+
+  it('**下回るまで再発動しない** — 上に居続けても二度は鳴らない', () => {
+    const { e, tick, now } = quizEngine(thresholdCfg(1100));
+    e.start();
+    bump(e, 1); // 1100 で発動
+    expect(e.get().quiz?.armed).toBe(true);
+    // 窓を最後まで進めて清算(バリアを解く)。
+    const startId = e.get().recentEffects[0]!.id;
+    e.quizCue({ action: 'start', effectId: startId, startedAtMs: now(), preMs: QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS });
+    tick(QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS + (DEFAULT_QUIZ.durationSec + DEFAULT_QUIZ.voteSec) * 1000 + 100);
+    e.drainIfChanged();
+    tick(QUIZ_RESULT_MS + 500);
+    e.drainIfChanged();
+    expect(e.get().quiz).toBeUndefined();
+    // まだ 1100 以上に居る(投票ゼロ = ±0 なので値は据え置き)。何件足しても鳴らない。
+    bump(e, 3);
+    expect(e.get().quiz).toBeUndefined();
+  });
+
+  it('タップで下回ってから再度超えれば、もう一度鳴る', () => {
+    const { e, tick, now } = quizEngine(thresholdCfg(1100));
+    e.start();
+    bump(e, 1);
+    expect(e.get().quiz?.armed).toBe(true);
+    const startId = e.get().recentEffects[0]!.id;
+    e.quizCue({ action: 'start', effectId: startId, startedAtMs: now(), preMs: QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS });
+    tick(QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS + (DEFAULT_QUIZ.durationSec + DEFAULT_QUIZ.voteSec) * 1000 + 100);
+    e.drainIfChanged();
+    tick(QUIZ_RESULT_MS + 500);
+    e.drainIfChanged();
+    // タップで 1100 未満へ(1タップ 1 減算 × 1 件 = 1099)。
+    for (let i = 0; i < 1; i++) e.press();
+    expect(e.get().value).toBe(1099);
+    e.drainIfChanged(); // 再武装
+    bump(e, 1); // 1199 — 再び跨いだ
+    expect(e.get().quiz?.armed).toBe(true);
+  });
+
+  it('開始時点で既に初期値より下のしきい値は鳴らない(開始した瞬間の誤爆ゼロ)', () => {
+    const { e } = quizEngine(thresholdCfg(500));
+    e.start();
+    expect(e.get().value).toBe(1000);
+    e.drainIfChanged();
+    expect(e.get().quiz).toBeUndefined();
+    bump(e, 5); // 1500 — 500 は跨いでいない(ずっと上に居る)
+    expect(e.get().quiz).toBeUndefined();
+  });
+
+  it('お題が0件なら不発(ギフト経路と同じ規約)', () => {
+    const c = thresholdCfg(1100);
+    c.quiz.prompts = [];
+    const { e } = quizEngine(c);
+    e.start();
+    bump(e, 1);
+    expect(e.get().quiz).toBeUndefined();
+  });
+
+  it('機能OFF・行OFF では鳴らない', () => {
+    const off = thresholdCfg(1100);
+    off.quiz.enabled = false;
+    const a = quizEngine(off);
+    a.e.start();
+    bump(a.e, 1);
+    expect(a.e.get().quiz).toBeUndefined();
+
+    const rowOff = thresholdCfg(1100);
+    rowOff.quiz.thresholds[0]!.enabled = false;
+    const b = quizEngine(rowOff);
+    b.e.start();
+    bump(b.e, 1);
+    expect(b.e.get().quiz).toBeUndefined();
+  });
+
+  it('お題の進行中に跨いだら予約 FIFO へ積む(ギフト経路と同じゲート)', () => {
+    const { e } = quizEngine(thresholdCfg(1100));
+    e.start();
+    // 先にギフトでお題を開始しておく。
+    e.handleEvent(gift({ giftId: '777' }));
+    expect(e.get().quiz?.armed).toBe(true);
+    // バリア中の妨害ギフトは quizDeferredOps 行きで値が動かないので、
+    // 跨がせるにはタップ以外の即時経路が要る — ここでは reset せずに
+    // 「予約に積まれること」だけを見る(値はバリア解除後に動く)。
+    bump(e, 3);
+    // まだ1本目が走っているので、跨いでも即発動はしない。
+    expect(e.get().quiz?.armed).toBe(true);
+  });
+
+  it('reset で再武装が現在値(= initialValue)から作り直される', () => {
+    const { e } = quizEngine(thresholdCfg(1100));
+    e.start();
+    bump(e, 1);
+    expect(e.get().quiz?.armed).toBe(true);
+    e.reset();
+    expect(e.get().value).toBe(1000);
+    expect(e.get().quiz).toBeUndefined();
+    e.start();
+    // 1000 → 1100 でまた鳴る(前ランの disarm を持ち越さない)。
+    bump(e, 1);
+    expect(e.get().quiz?.armed).toBe(true);
+  });
+
+  it('告知は満了で DTO から消える(前置きが始まる前でも時計だけで畳む)', () => {
+    const { e, tick } = quizEngine(thresholdCfg(1100));
+    e.start();
+    bump(e, 1);
+    expect(e.get().quiz?.announceUntilMs).toBe(NOW + QUIZ_ANNOUNCE_MS);
+    tick(QUIZ_ANNOUNCE_MS + 50);
+    e.drainIfChanged();
+    const s = e.get();
+    expect(s.quiz?.armed).toBe(true); // アーム自体はまだ生きている
+    expect(s.quiz?.announceUntilMs).toBeUndefined();
+  });
+
+  it('quizCue の preMs は告知ぶんを含めて受け付ける(窓の頭が前へずれない)', () => {
+    const { e, now } = quizEngine(thresholdCfg(1100));
+    e.start();
+    bump(e, 1);
+    const startId = e.get().recentEffects[0]!.id;
+    const preMs = QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS;
+    expect(e.quizCue({ action: 'start', effectId: startId, startedAtMs: now(), preMs })).toBe(true);
+    expect(e.get().quiz?.startsAtMs).toBe(now() + preMs);
+  });
+});
+
+describe('validateQuiz — 数値トリガー行', () => {
+  it('キー欠損は空配列(= 数値では発動しない)。既定の不動点も壊さない', () => {
+    const raw = { ...structuredClone(DEFAULT_QUIZ) } as Record<string, unknown>;
+    delete raw.thresholds;
+    expect(validateQuiz(raw).thresholds).toEqual([]);
+    // 既定そのものを通しても変わらない(validate の不動点)。
+    expect(validateQuiz(structuredClone(DEFAULT_QUIZ))).toEqual(DEFAULT_QUIZ);
+  });
+
+  it('しきい値は clamp され、重複・欠損 id は振り直される', () => {
+    const v = validateQuiz({
+      ...structuredClone(DEFAULT_QUIZ),
+      thresholds: [
+        { id: 'dup', label: 'a', enabled: true, value: 0, flash: true },
+        { id: 'dup', label: 'b', enabled: true, value: 1e12, flash: false },
+        { label: 'c', enabled: false, value: 1234.6, flash: true },
+      ],
+    });
+    expect(v.thresholds.map((r) => r.id)).toEqual(['dup', 'dup-1', 'quiz-th-2']);
+    expect(v.thresholds[0]!.value).toBe(QUIZ_THRESHOLD_MIN);
+    expect(v.thresholds[1]!.value).toBe(QUIZ_THRESHOLD_MAX);
+    expect(v.thresholds[2]!.value).toBe(1235);
+    expect(v.thresholds[2]!.enabled).toBe(false);
+  });
+
+  /**
+   * 2026-08-23: 行ごとの告知音。**既定は番兵 'slot'** なので、キーの無い
+   * 保存済み settings.json はそこへ倒れて 2026-08-22 版と同じ音のまま動く
+   * (= 移行を書かなくてよい。SETTINGS_VERSION も上げない)。
+   */
+  it('告知音はキー欠損なら番兵(効果音タブに従う)へ倒れる', () => {
+    const v = validateQuiz({
+      ...structuredClone(DEFAULT_QUIZ),
+      thresholds: [{ id: 't', label: '', enabled: true, value: 100, flash: true }],
+    });
+    expect(v.thresholds[0]!.sound).toBe(QUIZ_THRESHOLD_SOUND_SLOT);
+    expect(v.thresholds[0]!.soundVolume).toBe(100);
+  });
+
+  it('告知音は off・カタログ id・custom: を通し、未知 id は番兵へ倒す', () => {
+    const rows = [
+      { id: 'a', label: '', enabled: true, value: 100, flash: true, sound: 'off', soundVolume: 0 },
+      {
+        id: 'b',
+        label: '',
+        enabled: true,
+        value: 200,
+        flash: true,
+        sound: CHALLENGE_SE_SOUND_IDS[0],
+        soundVolume: 55,
+      },
+      {
+        id: 'c',
+        label: '',
+        enabled: true,
+        value: 300,
+        flash: true,
+        sound: 'custom:my-fanfare.mp3',
+        soundVolume: 999,
+      },
+      {
+        id: 'd',
+        label: '',
+        enabled: true,
+        value: 400,
+        flash: true,
+        sound: 'こんな音は無い',
+        soundVolume: -5,
+      },
+    ];
+    const v = validateQuiz({ ...structuredClone(DEFAULT_QUIZ), thresholds: rows });
+    expect(v.thresholds.map((r) => r.sound)).toEqual([
+      'off',
+      CHALLENGE_SE_SOUND_IDS[0],
+      'custom:my-fanfare.mp3',
+      QUIZ_THRESHOLD_SOUND_SLOT,
+    ]);
+    // 音量は 0-100 に clamp。
+    expect(v.thresholds.map((r) => r.soundVolume)).toEqual([0, 55, 100, 0]);
+  });
+
+  it('件数は QUIZ_THRESHOLDS_MAX で打ち切る', () => {
+    const many = Array.from({ length: QUIZ_THRESHOLDS_MAX + 4 }, (_, i) => ({
+      id: `t${i}`,
+      label: '',
+      enabled: true,
+      value: 100 + i,
+      flash: true,
+    }));
+    expect(validateQuiz({ ...structuredClone(DEFAULT_QUIZ), thresholds: many }).thresholds).toHaveLength(
+      QUIZ_THRESHOLDS_MAX
+    );
   });
 });

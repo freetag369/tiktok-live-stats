@@ -15,6 +15,7 @@ import type {
   ChallengeStockSlot,
   ChallengeTestEffectSpec,
   QuizRule,
+  QuizThresholdRule,
   RevolutionRule,
   RoulettePattern,
   TapBoostRule,
@@ -65,6 +66,8 @@ import {
   REVOLUTION_INTRO_MS,
   REVOLUTION_COUNT_MS,
   REVOLUTION_MAX_MS,
+  QUIZ_ANNOUNCE_MS,
+  QUIZ_THRESHOLD_SOUND_SLOT,
   QUIZ_ARM_MAX_MS,
   QUIZ_INTRO_MS,
   QUIZ_SPIN_MS,
@@ -74,6 +77,9 @@ import {
   QUIZ_PREP_MAX_SEC,
   QUIZ_DURATION_MAX_SEC,
   QUIZ_VOTE_MAX_SEC,
+  initialQuizThresholdArmed,
+  quizThresholdNum,
+  stepQuizThresholds,
 } from '@shared/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { REVOLUTION_RESULT_MS, REVOLUTION_SETTLE_BUDGET_MS } from '@shared/revolution-settle';
@@ -112,6 +118,19 @@ interface QuizArmSnapshot {
   label: string;
   flash: boolean;
   nickname: string;
+  /**
+   * **数値到達で発動した**ときのしきい値。ギフト発動では未定義 — キーの有無が
+   * 「どちらのトリガーで来たか」の唯一の印で、armQuiz はこれを見て告知ラッチを
+   * 立てるかどうかを決める。
+   */
+  threshold?: number;
+  /**
+   * 数値到達の告知で鳴らす音と音量(`QuizThresholdRule.sound` / `soundVolume` の
+   * 焼き込み)。threshold と対で載る。**id ではなく値を焼く**のは他のフィールドと
+   * 同じ理由 — 予約待ちの間に設定を変えても、跨いだ時点の音で鳴る。
+   */
+  thresholdSound?: string;
+  thresholdSoundVolume?: number;
   giftName?: string;
   giftIconUrl?: string;
   diamonds?: number;
@@ -488,6 +507,11 @@ export class ChallengeEngine {
   private testQuizPrompt = '';
   private testQuizAmount = 0;
   private testQuizResultMs = 0;
+  /** ▶実演の告知(数値トリガー行のみ)。実発動の quizAnnounce* と同じ意味。 */
+  private testQuizAnnounceUntilMs: number | null = null;
+  private testQuizAnnounceThreshold = 0;
+  private testQuizAnnounceSound: string = QUIZ_THRESHOLD_SOUND_SLOT;
+  private testQuizAnnounceSoundVolume = 100;
   private testQuizGood = 0;
   private testQuizBad = 0;
   private testQuizBlocked = 0;
@@ -677,6 +701,35 @@ export class ChallengeEngine {
   /** 結果発表カットシーンの尺(commit 時に焼き込み。プレーンは 0)。 */
   private quizResultMs = 0;
   /**
+   * 数値到達の**告知オーバーレイ**の期限(絶対 ms)。null = 告知なし。
+   *
+   * 幕(凍結)は張らない — 告知は舞台キューを迂回する常設オーバーレイで、
+   * 出ている間も溜まっていた演出のドレインは進み続ける
+   *(2026-08-22 ユーザー決定「告知だけ先に割り込む」)。モニターはこの期限を
+   * 過ぎるまで quizCue{start} を撃たないので、キューが空なら
+   * 告知4秒 → 導入カット と切れ目なく繋がる。
+   */
+  private quizAnnounceUntilMs: number | null = null;
+  /** 告知に出すしきい値。quizAnnounceUntilMs と対で立てる。 */
+  private quizAnnounceThreshold = 0;
+  /**
+   * 告知で鳴らす音と音量(発動した行の焼き込み)。既定の番兵
+   * `QUIZ_THRESHOLD_SOUND_SLOT` は「効果音タブのルーレット確定に従う」。
+   */
+  private quizAnnounceSound: string = QUIZ_THRESHOLD_SOUND_SLOT;
+  private quizAnnounceSoundVolume = 100;
+  /**
+   * 数値到達トリガーの**再武装済み**行の id(shared の stepQuizThresholds が権威)。
+   * 「一度発動したら、カウントがしきい値を下回るまで再発動しない」の状態がこれ。
+   */
+  private quizThresholdArmed = new Set<string>();
+  /**
+   * 再武装集合を作り直すかの判定に使う設定の署名(id/enabled/value)。
+   * 設定を編集した瞬間に**現在値から**作り直すためのもの — 署名が同じ限り
+   * 作り直さないので、跨いだ直後の設定変更で発動を取りこぼすこともない。
+   */
+  private quizThresholdSig = '';
+  /**
    * バリア: 発動(アーム)〜清算(settleQuiz)に届いたイベントの値適用+演出の
    * 保留列。**優先度が高い op(フィーバー/革命の発動 critical 含む)も等しく
    * ここへ落ちる** — 「発動以降に作動したキューは優先が高くても後回し」
@@ -803,6 +856,10 @@ export class ChallengeEngine {
     // お題ルーレットも同じ — 窓・投票・予約 FIFO・バリアの溜め分をまとめて破棄
     // (pendingOps を捨てるのと同じ判断: 新ランは initialValue から素で始める)。
     this.clearQuiz();
+    // 数値到達の再武装も新ランのぶんを作り直す。**this.value は上で initialValue に
+    // なっている**ので、初期値より下のしきい値は armed に入らない = 開始した瞬間に
+    // 鳴らない(initialQuizThresholdArmed の doc 参照)。
+    this.resetQuizThresholds();
     // 排他スケジューリングの予約も持ち込まない(前ランの罰・演出を跨がせない)。
     this.pendingTapLock = null;
     this.deferredBoosts = [];
@@ -898,6 +955,9 @@ export class ChallengeEngine {
     this.armFreezeTimer();
     this.status = 'idle';
     this.value = this.getConfig().initialValue;
+    // **this.value の代入より後**に置くこと(start() と違い reset() は clearQuiz の
+    // 後で値を戻すので、上に置くと1つ前のランの値で再武装を組んでしまう)。
+    this.resetQuizThresholds();
     this.startedMs = null;
     this.achievedMs = null;
     this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0 };
@@ -1615,16 +1675,28 @@ export class ChallengeEngine {
         const q = cfg.quiz;
         // お題が無ければ回しようがない
         if (q.prompts.length === 0) return { previewMs: 0, cinematic };
+        // 数値到達トリガー行の実演(quizThresholdId 指定)。指定があればそちらが優先で、
+        // 告知(「○○を超えました!」)から始まる**数値発動と同じ通し**を見せる。
+        const th =
+          spec.quizThresholdId != null
+            ? (q.thresholds.find((r) => r.id === spec.quizThresholdId) ??
+              q.thresholds.find((r) => r.enabled) ??
+              q.thresholds[0])
+            : undefined;
         // 行フォールバック(revolution と同型)。行が1件も無くても既定値で演出は見せる。
         const rule =
-          q.rules.find((r) => r.id === spec.quizId) ?? q.rules.find((r) => r.enabled) ?? q.rules[0];
+          th ??
+          q.rules.find((r) => r.id === spec.quizId) ??
+          q.rules.find((r) => r.enabled) ??
+          q.rules[0];
         const prompts = [...q.prompts];
         const idx = Math.min(prompts.length - 1, Math.floor(this.rand() * prompts.length));
         const cine = this.fxAllowed();
         const introMs = cine && q.introClip !== 'off' ? QUIZ_INTRO_MS : 0;
         const prepMs = q.prepSec * 1000;
-        // 実演も実発動と同じ前置きの式(お題発表準備を含む)— 窓の頭が実物とズレない。
-        const preMs = cine ? introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + prepMs : 0;
+        const announceMs = cine && th != null ? QUIZ_ANNOUNCE_MS : 0;
+        // 実演も実発動と同じ前置きの式(告知・お題発表準備を含む)— 窓の頭が実物とズレない。
+        const preMs = cine ? announceMs + introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + prepMs : 0;
         const durationMs = q.durationSec * 1000;
         const voteMs = q.voteSec * 1000;
         if (this.testPreviewAllowed()) {
@@ -1644,6 +1716,14 @@ export class ChallengeEngine {
             voteMs,
             this.rand
           );
+          // 告知は実発動と同じ「state 駆動のオーバーレイ」で出す — モニターは
+          // 実演か本番かを区別しない(get() が同じ quiz キーへ合流させる)。
+          this.testQuizAnnounceUntilMs = announceMs > 0 ? atMs + announceMs : null;
+          this.testQuizAnnounceThreshold = th?.value ?? 0;
+          // 行ごとの告知音も実演に載せる — 「▶この行」で音を確かめられないと
+          // 設定した意味が無い(実発動と同じ焼き込みの流儀)。
+          this.testQuizAnnounceSound = th?.sound ?? QUIZ_THRESHOLD_SOUND_SLOT;
+          this.testQuizAnnounceSoundVolume = th?.soundVolume ?? 100;
           this.armFreezeTimer();
         }
         e = {
@@ -1658,6 +1738,8 @@ export class ChallengeEngine {
           quizDurationMs: q.durationSec * 1000,
           quizVoteMs: q.voteSec * 1000,
           quizAmount: q.amount,
+          ...(th != null ? { quizThreshold: th.value } : {}),
+          ...(announceMs > 0 ? { quizAnnounceEndsAtMs: atMs + announceMs } : {}),
           fxDurationMs: preMs,
           ...(rule?.flash ? { flash: true } : {}),
           nickname: 'テスト',
@@ -2954,6 +3036,16 @@ export class ChallengeEngine {
                 ? { label: this.armedQuiz !== null ? this.armedQuiz.snap.label : this.quizLabel }
                 : {}),
               ...(this.quizQueue.length > 0 ? { queued: this.quizQueue.length } : {}),
+              // 数値到達の告知(出ている間だけ)。モニターはこのキーで全画面の
+              // 「○○を超えました!」を出し、期限を過ぎるまで quizCue を撃たない。
+              ...(this.quizAnnounceUntilMs !== null
+                ? {
+                    announceUntilMs: this.quizAnnounceUntilMs,
+                    announceThreshold: this.quizAnnounceThreshold,
+                    announceSound: this.quizAnnounceSound,
+                    announceSoundVolume: this.quizAnnounceSoundVolume,
+                  }
+                : {}),
             },
           }
         : this.testQuizVoteEndsMs !== null
@@ -2971,6 +3063,14 @@ export class ChallengeEngine {
                 blocked: this.testQuizBlocked,
                 goodLabel: this.testQuizGoodLabel,
                 badLabel: this.testQuizBadLabel,
+                ...(this.testQuizAnnounceUntilMs !== null
+                  ? {
+                      announceUntilMs: this.testQuizAnnounceUntilMs,
+                      announceThreshold: this.testQuizAnnounceThreshold,
+                      announceSound: this.testQuizAnnounceSound,
+                      announceSoundVolume: this.testQuizAnnounceSoundVolume,
+                    }
+                  : {}),
                 nickname: 'テスト',
                 test: true as const,
               },
@@ -3098,11 +3198,15 @@ export class ChallengeEngine {
       // 配信切断・モニター閉でも worker 権威で自走 settle する(投票ゼロ = ±0)。
       this.armedQuiz?.deadlineMs ?? Infinity,
       this.quizVoteUntilMs ?? Infinity,
+      // 数値到達の告知の満了。**ライブ未接続では 2Hz tick が回らない**ので、
+      // ラッチを畳んで delta を押し出す出口はここだけになる。
+      this.quizAnnounceUntilMs ?? Infinity,
       // ▶テスト実演の満了(= 結果カットシーンの合図)。お題は**次のダミー票の
       // 到着**でも起こす — 票が増えるたびに delta を押し出さないと、投票
       // オーバーレイの数字が締切まで 0 のまま止まって見える。
       this.testRevolutionUntilMs ?? Infinity,
       this.testQuizVotes[0]?.atMs ?? Infinity,
+      this.testQuizAnnounceUntilMs ?? Infinity,
       this.testQuizVoteEndsMs ?? Infinity
     );
     const delay = Math.max(0, at - this.now()) + 25;
@@ -3168,6 +3272,16 @@ export class ChallengeEngine {
    */
   private giftDiag(message: string): void {
     this.diag(`[challenge/gift] ${message}`);
+  }
+
+  /**
+   * 数値到達トリガーの診断ログ。giftDiag と同じ出口だが**接頭辞を分ける** —
+   * この経路にギフトは1件も関わっておらず、`[challenge/gift]` で出すと
+   * diag.log を「どのギフトで鳴ったのか」と読み違える。
+   * 生存条件も違う(handleEvent ではなく flushFxFreeze の2出口から呼ばれる)。
+   */
+  private quizDiag(message: string): void {
+    this.diag(`[challenge/quiz] ${message}`);
   }
 
   /**
@@ -3385,6 +3499,9 @@ export class ChallengeEngine {
       // 待っていた保留 op のドレインが最長 ~82 秒延期される。そちらはドレイン
       // 完了後の末尾で解放する。
       this.releaseDeferredBoosts();
+      // 数値到達トリガーの判定。**maybeStartNextQuiz より上** — 同じ tick で
+      // 「跨いだ → 予約 FIFO へ積む → 手が空いていれば発動」まで到達させる。
+      this.maybeQuizThreshold(nowMs);
       // お題の予約 FIFO の次発動(自然解除の本線)。releaseDeferredBoosts の**後** —
       // 解放でフィーバーがアームされたら maybeStartNextQuiz のゲートが待つ
       // (「窓の終了を待って予約発動」のユーザー決定)。
@@ -3435,6 +3552,9 @@ export class ChallengeEngine {
     // **後** — ドレイン中の 0 到達で達成なら予約は破棄済みで、ここで新しいアームを
     // 始めない。再凍結(ドレイン中断)なら applyOrQueue が pendingOps へ落とすだけ。
     this.releaseDeferredBoosts();
+    // 数値到達トリガーの判定(ドレイン経路 — 上の早期 return 側と対)。ドレインで
+    // 妨害ギフトが一気に適用されて跨ぐのはこちら側の経路。
+    this.maybeQuizThreshold(nowMs);
     // お題の予約 FIFO の次発動(ドレイン経路 — 上の早期 return 側と対)。ゲートが
     // pendingOps 空 && 非凍結を要求するので、再凍結・残 op があれば次の解除へ持ち越す。
     this.maybeStartNextQuiz(nowMs);
@@ -3815,6 +3935,10 @@ export class ChallengeEngine {
     this.testQuizBad = 0;
     this.testQuizBlocked = 0;
     this.testQuizVotes = [];
+    this.testQuizAnnounceUntilMs = null;
+    this.testQuizAnnounceThreshold = 0;
+    this.testQuizAnnounceSound = QUIZ_THRESHOLD_SOUND_SLOT;
+    this.testQuizAnnounceSoundVolume = 100;
   }
 
   /**
@@ -3837,6 +3961,15 @@ export class ChallengeEngine {
    * モニターは実発動と同じ結果カットシーンの経路を通る。
    */
   private stepTestPreviews(nowMs: number): void {
+    // 数値到達の告知(実演)の満了。**armFreezeTimer の発火が唯一の出口**なので、
+    // ここで畳まないとライブ未接続の実演では告知が窓の上に出っぱなしになる。
+    if (this.testQuizAnnounceUntilMs !== null && nowMs >= this.testQuizAnnounceUntilMs) {
+      this.testQuizAnnounceUntilMs = null;
+      this.testQuizAnnounceThreshold = 0;
+      this.testQuizAnnounceSound = QUIZ_THRESHOLD_SOUND_SLOT;
+      this.testQuizAnnounceSoundVolume = 100;
+      this.dirty = true;
+    }
     // 革命: 窓の満了 → 結果カットシーン(revolution-end)。
     if (this.testRevolutionUntilMs !== null && nowMs >= this.testRevolutionUntilMs) {
       const down = this.testRevolutionDown;
@@ -4597,11 +4730,45 @@ export class ChallengeEngine {
     qz: QuizRule,
     e: Extract<NormalizedEvent, { kind: 'gift' }>
   ): QuizArmSnapshot {
+    return structuredClone({
+      ...this.makeQuizSnapshotBase(cfg, qz.label, qz.flash),
+      nickname: e.viewer.nickname ?? e.viewer.displayId ?? '',
+      ...(e.giftName ? { giftName: e.giftName } : {}),
+      ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+      ...(e.diamonds != null ? { diamonds: e.diamonds } : {}),
+      ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+    });
+  }
+
+  /**
+   * 数値到達トリガーの発動スナップショット。ギフト版と**同じ企画条件**(お題の
+   * 抽選・尺・増減幅)で、違うのは「贈り主が居ない」ことと threshold を焼くことだけ。
+   * nickname は空 — 発動者は視聴者ではなくカウントそのものなので、バナーは
+   * 「10,000 を超えました!」側の文言に倒す(quizAnnounceNode)。
+   */
+  private makeQuizThresholdSnapshot(cfg: ChallengeConfig, r: QuizThresholdRule): QuizArmSnapshot {
+    return structuredClone({
+      ...this.makeQuizSnapshotBase(cfg, r.label, r.flash),
+      threshold: r.value,
+      thresholdSound: r.sound,
+      thresholdSoundVolume: r.soundVolume,
+    });
+  }
+
+  /**
+   * 発動スナップショットの共通部(ギフト経路と数値到達経路で1本)。**this.rand を
+   * ちょうど1回**消費する — 数列 rand を注入するテストの決定性がここに依存する。
+   */
+  private makeQuizSnapshotBase(
+    cfg: ChallengeConfig,
+    label: string,
+    flash: boolean
+  ): QuizArmSnapshot {
     const prompts = [...cfg.quiz.prompts];
     // 等確率で1件。this.rand を1回だけ消費する(ルーレットの drawRouletteIndex と
     // 同じ「worker が到着時に確定」原則 — 数列 rand を注入するテストが決定的になる)。
     const promptIndex = Math.min(prompts.length - 1, Math.floor(this.rand() * prompts.length));
-    return structuredClone({
+    return {
       prompts,
       promptIndex,
       durationMs: cfg.quiz.durationSec * 1000,
@@ -4611,14 +4778,78 @@ export class ChallengeEngine {
       goodWords: [...cfg.quiz.goodWords],
       badWords: [...cfg.quiz.badWords],
       introClip: cfg.quiz.introClip,
-      label: qz.label,
-      flash: qz.flash,
-      nickname: e.viewer.nickname ?? e.viewer.displayId ?? '',
-      ...(e.giftName ? { giftName: e.giftName } : {}),
-      ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
-      ...(e.diamonds != null ? { diamonds: e.diamonds } : {}),
-      ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
-    });
+      label,
+      flash,
+      nickname: '',
+    };
+  }
+
+  /**
+   * 数値到達トリガーの判定と発動。**呼び出しは flushFxFreeze の2出口だけ**
+   *(maybeStartNextQuiz の直前)— あそこが press / handleEvent / drainIfChanged(2Hz)/
+   * 凍結タイマーの全経路が通る唯一の時計入口なので、`this.value = ...` の 10 箇所を
+   * 触らずに全部の値変化を拾える。接続中の検出遅延は最大 500ms(2Hz tick)。
+   *
+   * ゲートはギフト経路(handleEvent の quiz 分岐)と**同じ条件式**にしてある —
+   * フィーバー/革命/quiz の窓が生きていれば予約 FIFO へ、空いていれば即アーム。
+   */
+  private maybeQuizThreshold(nowMs: number): void {
+    if (this.status !== 'running') return;
+    const cfg = this.getConfig();
+    // 機能OFF・行ゼロでも署名だけは追う — 再有効化したときに「その時点の値から
+    // 作り直す」ため(有効化した瞬間に全行が鳴るのを防ぐ)。
+    this.syncQuizThresholds();
+    if (!cfg.enabled) return;
+    const q = cfg.quiz;
+    if (!q.enabled || q.thresholds.length === 0) return;
+    const step = stepQuizThresholds(q.thresholds, this.quizThresholdArmed, this.value);
+    this.quizThresholdArmed = step.armed;
+    const r = step.fired;
+    if (r === null) return;
+    for (const s of step.skipped) {
+      this.quizDiag(
+        `→ しきい値 ${quizThresholdNum(s.value)} も同時に跨いだが発動は1回にまとめる(次は下回ってから)`
+      );
+    }
+    this.quizDiag(
+      `→ 数値到達でお題ルーレット発動 id=${r.id} しきい値=${quizThresholdNum(r.value)} 現在値=${quizThresholdNum(this.value)}`
+    );
+    if (q.prompts.length === 0) {
+      // ギフト経路と同じ理由で必ず記録する(黙って消えると原因が追えない)。
+      this.quizDiag('→ お題が0件のため不発 — お題ルーレットタブでお題を追加してください');
+      return;
+    }
+    const snap = this.makeQuizThresholdSnapshot(cfg, r);
+    if (
+      this.armedBoost !== null ||
+      this.boostUntilMs !== null ||
+      this.armedRevolution !== null ||
+      this.revolutionUntilMs !== null ||
+      this.armedQuiz !== null ||
+      this.quizVoteUntilMs !== null
+    ) {
+      this.quizQueue.push(snap);
+      this.quizDiag(`→ 進行中の演出の終了を待って予約(待ち ${this.quizQueue.length} 件)`);
+      this.dirty = true;
+      return;
+    }
+    this.armQuiz(snap, nowMs);
+  }
+
+  /** 設定のしきい値行が変わっていたら、**現在値から**再武装集合を作り直す。 */
+  private syncQuizThresholds(): void {
+    const rules = this.getConfig().quiz.thresholds;
+    const sig = JSON.stringify(rules.map((r) => [r.id, r.enabled, r.value]));
+    if (sig === this.quizThresholdSig) return;
+    this.quizThresholdSig = sig;
+    this.quizThresholdArmed = initialQuizThresholdArmed(rules, this.value);
+  }
+
+  /** start / reset 用の強制再シード(値が initialValue へ飛ぶので署名は無視する)。 */
+  private resetQuizThresholds(): void {
+    const rules = this.getConfig().quiz.thresholds;
+    this.quizThresholdSig = JSON.stringify(rules.map((r) => [r.id, r.enabled, r.value]));
+    this.quizThresholdArmed = initialQuizThresholdArmed(rules, this.value);
   }
 
   /**
@@ -4638,12 +4869,26 @@ export class ChallengeEngine {
       );
     }
     const introMs = cinematic && snap.introClip !== 'off' ? QUIZ_INTRO_MS : 0;
-    // 前置きの総尺 = 導入カット + 回転 + 決定表示 + **お題発表準備**。
+    // 数値到達の告知(ギフト発動では 0)。前置きの**先頭の段**として数える —
+    // モニターは実際には「残りの告知尺」だけ待つので、渋滞で告知を見せ切った
+    // あとに前置きが始まる場合はここより短くなる(quizCue の preMs が実測値)。
+    const announceMs = cinematic && snap.threshold != null ? QUIZ_ANNOUNCE_MS : 0;
+    // 前置きの総尺 = 告知 + 導入カット + 回転 + 決定表示 + **お題発表準備**。
     // 準備区間ぶんを忘れると「準備表示が出ている最中に制限時間が始まっている」。
-    const preMs = cinematic ? introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + snap.prepMs : 0;
+    const preMs = cinematic ? announceMs + introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + snap.prepMs : 0;
     const deadlineMs = atMs + QUIZ_ARM_MAX_MS;
     if (cinematic) {
       this.armedQuiz = { id: 0, atMs, deadlineMs, snap };
+    }
+    // 数値到達の告知(「10,000 を超えました!」)。**preMs には足さない** — これは
+    // cue の前に出し切る段で、モニターは告知が終わってから quizCue{start} を撃つ。
+    // プレーン発動では立てない(窓が即開くので、告知と窓が同時に出てしまう)。
+    if (cinematic && snap.threshold != null) {
+      this.quizAnnounceThreshold = snap.threshold;
+      this.quizAnnounceUntilMs = atMs + QUIZ_ANNOUNCE_MS;
+      // 行ごとの告知音(2026-08-23)。旧 snapshot(キー無し)は番兵へ倒す。
+      this.quizAnnounceSound = snap.thresholdSound ?? QUIZ_THRESHOLD_SOUND_SLOT;
+      this.quizAnnounceSoundVolume = snap.thresholdSoundVolume ?? 100;
     }
     const prompt = snap.prompts[snap.promptIndex] ?? '';
     const effectId = this.pushEffect({
@@ -4659,6 +4904,10 @@ export class ChallengeEngine {
       quizDurationMs: snap.durationMs,
       quizVoteMs: snap.voteMs,
       quizAmount: snap.amount,
+      // 数値到達で来たときだけ載る。バナー文言(quizAnnounceNode)と履歴ログが
+      // 盤面なしで自己完結できるようにする — quizAmount と同じ焼き込みの流儀。
+      ...(snap.threshold != null ? { quizThreshold: snap.threshold } : {}),
+      ...(announceMs > 0 ? { quizAnnounceEndsAtMs: atMs + announceMs } : {}),
       // フォールバックのタイムライン(revolutionEndsAtMs と同じ規約 — 実際の期限は
       // ChallengeState.quiz が権威)。アーム期限まで cue が来なければ deadlineMs 起点。
       // **前置きは足さない** — 期限切れの強制発動(commitArmedQuizIfExpired)が
@@ -4738,9 +4987,12 @@ export class ChallengeEngine {
     // startedAtMs の丸めは boostCue / revolutionCue と同じ(now を超えさせない)。
     const startMs = Math.min(Math.max(p.startedAtMs, nowMs - BOOST_COMMIT_MAX_LAG_MS), nowMs);
     const introMs = a.snap.introClip !== 'off' ? QUIZ_INTRO_MS : 0;
+    // 上限に告知ぶんも足す — 数値到達では前置きの頭に最大 QUIZ_ANNOUNCE_MS が
+    // 乗るので、足さないと申告された実測 preMs がここで削られて窓が前へずれる。
+    const announceMax = a.snap.threshold != null ? QUIZ_ANNOUNCE_MS : 0;
     const preMs = Math.min(
       Math.max(0, p.preMs),
-      introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + a.snap.prepMs
+      announceMax + introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + a.snap.prepMs
     );
     this.commitQuiz(a, startMs, preMs, true);
     return true;
@@ -4779,6 +5031,16 @@ export class ChallengeEngine {
    * (flushRevolution と同じ理由)。期限は毎回 clampFutureMs で押さえる。
    */
   private flushQuiz(nowMs: number): void {
+    // 数値到達の告知の満了。**アーム期限切れの判定より先** — 告知が残ったまま
+    // 強制発動すると、モニターのゲート(告知中は cue を撃たない)と worker の
+    // 「もう窓は開いた」が食い違う。
+    if (this.quizAnnounceUntilMs !== null && nowMs >= this.quizAnnounceUntilMs) {
+      this.quizAnnounceUntilMs = null;
+      this.quizAnnounceThreshold = 0;
+      this.quizAnnounceSound = QUIZ_THRESHOLD_SOUND_SLOT;
+      this.quizAnnounceSoundVolume = 100;
+      this.dirty = true;
+    }
     // アーム期限切れの強制発動を先に見る — commit で quizVoteUntilMs が入るので、
     // 直後の清算判定が同じ時間軸で処理できる(boost / revolution 側と同型)。
     this.commitArmedQuizIfExpired(nowMs);
@@ -4786,6 +5048,7 @@ export class ChallengeEngine {
     // クランプの上限は 前置き + 窓の最大 + 投票の最大(flushRevolution の
     // 「上限に前置きを足す」判断と同じ — コミット直後の正当な期限を削らない)。
     const capMs =
+      QUIZ_ANNOUNCE_MS +
       QUIZ_INTRO_MS +
       QUIZ_SPIN_MS +
       QUIZ_REVEAL_MS +
@@ -4881,6 +5144,12 @@ export class ChallengeEngine {
     this.quizNickname = '';
     this.quizLabel = '';
     this.quizResultMs = 0;
+    // 告知もアームと一蓮托生(4出口すべてで畳む — 破棄されたお題の告知だけが
+    // 画面に残ると、来ない前置きを待っているように見える)。
+    this.quizAnnounceUntilMs = null;
+    this.quizAnnounceThreshold = 0;
+    this.quizAnnounceSound = QUIZ_THRESHOLD_SOUND_SLOT;
+    this.quizAnnounceSoundVolume = 100;
   }
 
   /** お題の全破棄(start/reset/達成/機能OFF の共通出口 — 予約もバリアも落とす)。 */

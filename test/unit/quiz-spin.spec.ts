@@ -20,10 +20,12 @@ describe('quizSpinTicks', () => {
   it('表示列は当選から逆算した連番の巡回(途中経過から答えが読めない = 全件が流れる)', () => {
     const count = 4;
     const ticks = quizSpinTicks(count, 1, 6000);
-    // 隣接コマは常に +1 の巡回。
-    for (let i = 1; i < ticks.length; i++) {
+    // 隣接コマは常に +1 の巡回。**最後の1組だけは同じコマ**(tail 拍と、描かれない
+    // 最終コマ)— どちらも当選なので、途中経過から答えが読めるようにはならない。
+    for (let i = 1; i < ticks.length - 1; i++) {
       expect(ticks[i]!.show).toBe((ticks[i - 1]!.show + 1) % count);
     }
+    expect(ticks[ticks.length - 1]!.show).toBe(ticks[ticks.length - 2]!.show);
     // 全 index が最低1回は出る(count <= STEPS の範囲)。
     expect(new Set(ticks.map((t) => t.show)).size).toBe(count);
   });
@@ -62,11 +64,20 @@ describe('拍(QUIZ_SPIN_BEATS)の振り付け', () => {
     expect(QUIZ_SPIN_MS).toBe(B.run1Ms + B.fake1Ms + B.run2Ms + B.nearMs + B.crawlMs + B.tailMs);
   });
 
-  it('合図は fake → near → crawl の順に1つずつだけ出る', () => {
+  it('合図は fake → near → crawl(全コマ)→ settle の順に出る', () => {
     const cues = ticks.filter((t) => t.cue).map((t) => t.cue);
-    expect(cues).toEqual(['fake', 'near', 'crawl']);
+    // fake / near / settle は1コマだけ。**crawl は減速拍の全コマ**に付く —
+    // 5 秒のあいだ「重そうに沈む」見得を出しっぱなしにするため。効果音の
+    // 連発は MonitorView 側が「cue の変化点だけ鳴らす」で防ぐ(quiz-fx.spec が凍結)。
+    expect(cues.filter((c) => c === 'fake')).toHaveLength(1);
+    expect(cues.filter((c) => c === 'near')).toHaveLength(1);
+    expect(cues.filter((c) => c === 'settle')).toHaveLength(1);
+    expect(cues.filter((c) => c === 'crawl').length).toBeGreaterThan(1);
+    // 並びは fake → near → crawl → settle(重複を畳んでから比較する)。
+    expect(cues.filter((c, i) => c !== cues[i - 1])).toEqual(['fake', 'near', 'crawl', 'settle']);
     expect(cueAt('fake')).toBeLessThan(cueAt('near'));
     expect(cueAt('near')).toBeLessThan(cueAt('crawl'));
+    expect(cueAt('crawl')).toBeLessThan(cueAt('settle'));
   });
 
   it('据え拍は拍表どおりの長さで止まる(フェイクストップとニアミスの本体)', () => {
@@ -76,13 +87,35 @@ describe('拍(QUIZ_SPIN_BEATS)の振り付け', () => {
     expect(gapAfter(cueAt('near'))).toBe(B.nearMs);
   });
 
-  it('最後の溜めは tailMs ぶん、**ハズレ(当選の1つ手前)を掴んだまま**引っぱる', () => {
+  /**
+   * ★ 2026-08-23 のバグ修正の凍結(ユーザー指摘「決定したお題と、その後表示される
+   * お題が違うものになっている」)。**回転が止まって見えるコマは必ず当選**で、
+   * その直後の決定パンチが同じお題を出す。
+   * ここを「1つ手前を掴む」に戻すと同じ苦情がそのまま再発する。
+   */
+  it('最後の溜めは tailMs ぶん、**当選を掴んだまま**静止する(決定パンチと一致)', () => {
     const last = ticks.length - 1;
     expect(gapAfter(last - 1)).toBe(B.tailMs);
-    // 当選は決定パンチで初出。回転の最終コマは描かれないので、視聴者が
-    // 溜めのあいだ見ているのは1つ手前のお題(ultra の tailMs とは意味が逆)。
+    // 描かれない最終コマも、その手前(視聴者が実際に見ている tail 拍)も当選。
     expect(ticks[last]!.show).toBe(7);
-    expect(ticks[last - 1]!.show).toBe(6);
+    expect(ticks[last - 1]!.show).toBe(7);
+    // tail 拍には静止の見得だけが付く(効果音は決定パンチが鳴らすので無音)。
+    expect(ticks[last - 1]!.cue).toBe('settle');
+    // その1つ手前(減速の最終コマ)は当選の1つ手前 = 巡回は生きている。
+    expect(ticks[last - 2]!.show).toBe(6);
+  });
+
+  it('減速拍は QUIZ_SPIN_BEATS.crawlMs ぶん続き、最後のコマ間隔が一番長い', () => {
+    const start = cueAt('crawl');
+    const settle = cueAt('settle');
+    // 減速の入りから静止の入りまでが crawlMs ちょうど(丸め誤差は許容しない)。
+    expect(ticks[settle]!.atMs - ticks[start]!.atMs).toBe(B.crawlMs);
+    // 「決定前に5秒かけてゆっくり停止する」— 尺の権威は拍表。
+    expect(B.crawlMs).toBe(5_000);
+    // 間隔は入りの crawlStepMs 近傍から等差で伸びる。crawlSpread が効いていないと
+    // 終盤が伸びず、5 秒に引き伸ばしても「止まりそうで止まらない」に見えない。
+    expect(gapAfter(start)).toBeLessThan(B.crawlStepMs * 1.4);
+    expect(gapAfter(settle - 1)).toBeGreaterThan(B.crawlStepMs * 2.5);
   });
 
   it('走行拍のコマ間隔は runStepMs 近傍 — 下げすぎると OBS でコマ落ちする', () => {

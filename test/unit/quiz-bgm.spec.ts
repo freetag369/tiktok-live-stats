@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CHALLENGE_ROULETTE_BGM_IDS,
+  DEFAULT_CHALLENGE,
   DEFAULT_QUIZ,
+  QUIZ_BGM_CHASE,
   QUIZ_BGM_KEEP,
+  QUIZ_BGM_THINK,
   QUIZ_OUTRO_MAX_SEC,
   QUIZ_PREP_MAX_SEC,
+  migrateChallengeConfig,
+  migrateChallengeQuizBgm,
+  migrateChallengeQuizThinkBgm,
   validateQuiz,
 } from '@shared/challenge';
 import { quizBgmForPhase, quizOutroBgmFor, type QuizBgmPhase } from '@shared/quiz-bgm';
-import type { QuizConfig } from '@shared/dto';
+import { SETTINGS_VERSION, type ChallengeConfig, type QuizConfig } from '@shared/dto';
 
 /**
  * お題ルーレットの区間別BGM(2026-08-22)の凍結。
@@ -21,8 +28,6 @@ import type { QuizConfig } from '@shared/dto';
 function cfg(over: Partial<QuizConfig> = {}): QuizConfig {
   return { ...structuredClone(DEFAULT_QUIZ), ...over };
 }
-
-const PHASES: QuizBgmPhase[] = ['spin', 'reveal', 'prep', 'window', 'vote'];
 
 describe('quizBgmForPhase — 区間とスロットの対応', () => {
   it('各区間が自分のスロットを読む(取り違えていない)', () => {
@@ -50,13 +55,29 @@ describe('quizBgmForPhase — 区間とスロットの対応', () => {
     expect(quizBgmForPhase(c, 'vote')).toEqual({ id: 'off', volume: DEFAULT_QUIZ.voteBgmVolume });
   });
 
-  it("★既定は先頭以外すべて 'keep' = 従来どおり1曲が通しで鳴る", () => {
+  it('★既定は「①追いかけっこ → ②③ keep → ④無音 → ⑤考え中」(2026-08-22 ユーザー指定)', () => {
     const c = cfg();
-    // 先頭区間だけ実曲(発動の瞬間に BGM が変わるのが「お題モードの予告」)。
-    expect(quizBgmForPhase(c, 'spin')).toEqual({ id: DEFAULT_QUIZ.bgm, volume: DEFAULT_QUIZ.bgmVolume });
-    for (const p of PHASES.filter((x) => x !== 'spin')) {
+    // 先頭区間は実曲(発動の瞬間に BGM が変わるのが「お題モードの予告」)。
+    // 導入の全面カットもこの区間に含まれる('spin' が catch-all)。
+    expect(quizBgmForPhase(c, 'spin')).toEqual({ id: QUIZ_BGM_CHASE, volume: 70 });
+    // お題発表・準備までは①の曲が続く。
+    for (const p of ['reveal', 'prep'] as QuizBgmPhase[]) {
       expect(quizBgmForPhase(c, p), `${p} の既定が keep でない`).toBe('keep');
     }
+    // ★お題に挑戦している間は**無音**。曲が止まること自体が「回転が終わって
+    // 挑戦の時間になった」の合図(2026-08-22 ユーザー決定)。
+    expect(quizBgmForPhase(c, 'window')).toEqual({ id: 'off', volume: 70 });
+    // コメント受付で専用曲へ切り替わる。
+    expect(quizBgmForPhase(c, 'vote')).toEqual({ id: QUIZ_BGM_THINK, volume: 70 });
+  });
+
+  it('★既定の2曲はカタログに登録されている(未知 id だと validate が既定へ倒す)', () => {
+    // 登録漏れは「設定画面の select が空表示・再生も無音」で表に出る。
+    expect(CHALLENGE_ROULETTE_BGM_IDS).toContain(QUIZ_BGM_CHASE);
+    expect(CHALLENGE_ROULETTE_BGM_IDS).toContain(QUIZ_BGM_THINK);
+    const v = validateQuiz(DEFAULT_QUIZ);
+    expect(v.bgm).toBe(QUIZ_BGM_CHASE);
+    expect(v.voteBgm).toBe(QUIZ_BGM_THINK);
   });
 
   it("custom: の取込み音もそのまま通る(カタログ id と同じ扱い)", () => {
@@ -165,10 +186,15 @@ describe('validateQuiz — 区間BGM の検証', () => {
     }
     const v = validateQuiz(legacy);
     expect(v).toEqual(DEFAULT_QUIZ);
-    // 復元後の挙動が「1曲通し + 締切で無音」= 旧版と同じであることまで確認する。
-    for (const p of PHASES.filter((x) => x !== 'spin')) {
+    // 復元後の挙動が現行の既定(①の曲が準備まで続き、④で止まり⑤で切替)に
+    // なることまで確認する。曲の割り当てそのものは migrateChallengeQuizBgm(v14)/
+    // migrateChallengeQuizThinkBgm(v15)が配るので、ここで見るのは
+    // 「キーが無い設定でも既定の形に戻る」ことだけ。
+    for (const p of ['reveal', 'prep'] as QuizBgmPhase[]) {
       expect(quizBgmForPhase(v, p)).toBe('keep');
     }
+    expect(quizBgmForPhase(v, 'window')).toEqual({ id: 'off', volume: 70 });
+    expect(quizBgmForPhase(v, 'vote')).toEqual({ id: QUIZ_BGM_THINK, volume: 70 });
     expect(quizOutroBgmFor(v, -5000)!.pick).toEqual({
       id: 'off',
       volume: DEFAULT_QUIZ.outroDownBgmVolume,
@@ -179,5 +205,131 @@ describe('validateQuiz — 区間BGM の検証', () => {
   it('validate を2度通しても値が変わらない(不動点)', () => {
     const once = validateQuiz(DEFAULT_QUIZ);
     expect(validateQuiz(once)).toEqual(once);
+  });
+});
+
+/**
+ * 設定移行 — 区間BGM の実素材化(SETTINGS_VERSION 14)。
+ *
+ * この段だけ「旧既定ちょうどのとき」条件を持たない(値を見ずに曲を上書きする)。
+ * 実運用の settings.json が bgm:'off' / bgmVolume:0 に倒してあり、旧既定一致の
+ * 条件では**指示された既定が一生届かない**ため(2026-08-22 ユーザー決定)。
+ * 代わりに触る範囲を4キーへ絞ってあるので、そこを凍結する。
+ */
+describe('設定移行 — 区間BGMの実素材化(SETTINGS_VERSION 14)', () => {
+  function quizCfg(over: Partial<QuizConfig> = {}): ChallengeConfig {
+    const c = structuredClone(DEFAULT_CHALLENGE);
+    return { ...c, quiz: { ...c.quiz, ...over } };
+  }
+
+  it('★無音に倒してある実運用の設定へ届く(off / 音量0 でも配る)', () => {
+    const base = quizCfg({ bgm: 'off', bgmVolume: 0, voteBgm: QUIZ_BGM_KEEP, voteBgmVolume: 70 });
+    const out = migrateChallengeQuizBgm(base, 13);
+    expect(out.quiz.bgm).toBe(QUIZ_BGM_CHASE);
+    expect(out.quiz.bgmVolume).toBe(70); // 0 は「鳴らない」ので既定へ戻す
+    expect(out.quiz.voteBgm).toBe(QUIZ_BGM_THINK);
+    expect(out.quiz.voteBgmVolume).toBe(70);
+  });
+
+  it('自分で絞っている音量は残す(0 のときだけ既定へ戻す)', () => {
+    const out = migrateChallengeQuizBgm(quizCfg({ bgmVolume: 40, voteBgmVolume: 25 }), 13);
+    expect(out.quiz.bgmVolume).toBe(40);
+    expect(out.quiz.voteBgmVolume).toBe(25);
+  });
+
+  it('世代0(settingsVersion 欠損)からでも届く', () => {
+    expect(migrateChallengeQuizBgm(quizCfg({ bgm: 'off' }), 0).quiz.bgm).toBe(QUIZ_BGM_CHASE);
+  });
+
+  it('fromVersion 14 以降には配らない(選び直した曲を二度と戻さない)', () => {
+    const base = quizCfg({ bgm: 'off', bgmVolume: 0 });
+    expect(migrateChallengeQuizBgm(base, 14)).toBe(base);
+    expect(migrateChallengeQuizBgm(base, SETTINGS_VERSION)).toBe(base);
+  });
+
+  it('★触るのは4キーだけ(②③区間・挑戦中・終了後・他機能には手を出さない)', () => {
+    const base = quizCfg({ bgm: 'off', bgmVolume: 0 });
+    const out = migrateChallengeQuizBgm(base, 13);
+    const touched = { bgm: 0, bgmVolume: 0, voteBgm: 0, voteBgmVolume: 0 };
+    expect({ ...out.quiz, ...touched }).toEqual({ ...base.quiz, ...touched });
+    expect(out.quiz.revealBgm).toBe(QUIZ_BGM_KEEP);
+    expect(out.quiz.prepBgm).toBe(QUIZ_BGM_KEEP);
+    // 挑戦中は v15 の既定(off)のまま — この段は触らない。
+    expect(out.quiz.thinkBgm).toBe(base.quiz.thinkBgm);
+    expect(out.quiz.outroDownBgm).toBe('off');
+    expect(out.quiz.outroUpBgm).toBe('off');
+    // quiz 以外のブロック(ルーレット・ブースト等)もそのまま。
+    expect({ ...out, quiz: base.quiz }).toEqual(base);
+  });
+
+  it('冪等 — 2回通しても同じ値', () => {
+    const once = migrateChallengeQuizBgm(quizCfg({ bgm: 'off', bgmVolume: 0 }), 13);
+    expect(migrateChallengeQuizBgm(once, 13)).toEqual(once);
+  });
+
+  it('移行の出力が validateQuiz の不動点(migrate の出力は再検証されない)', () => {
+    const out = migrateChallengeQuizBgm(quizCfg({ bgm: 'off', bgmVolume: 0 }), 13);
+    expect(validateQuiz(out.quiz)).toEqual(out.quiz);
+  });
+
+  it('migrateChallengeConfig のチェーンに組み込まれている', () => {
+    // 段の付け忘れは「テストは緑なのに実機に届かない」で表に出る。
+    const out = migrateChallengeConfig(quizCfg({ bgm: 'off', bgmVolume: 0 }), 13);
+    expect(out.quiz.bgm).toBe(QUIZ_BGM_CHASE);
+    expect(out.quiz.voteBgm).toBe(QUIZ_BGM_THINK);
+  });
+});
+
+/**
+ * 設定移行 — 挑戦中BGMの既定オフ(SETTINGS_VERSION 15)。
+ *
+ * v14 で区間①に実曲を入れた結果、②③④の 'keep' 連鎖で**導入の全面カットから
+ * 挑戦中までBGMが鳴りっぱなし**になり、「回転が終わって挑戦の時間になった」区切りが
+ * 音で分からなくなった(実機フィードバック)。v14 と違い**'keep' ちょうどのときだけ**
+ * 触るので、自分で曲を選んだ人の設定は残る。
+ */
+describe('設定移行 — 挑戦中BGMの既定オフ(SETTINGS_VERSION 15)', () => {
+  function quizCfg(over: Partial<QuizConfig> = {}): ChallengeConfig {
+    const c = structuredClone(DEFAULT_CHALLENGE);
+    return { ...c, quiz: { ...c.quiz, ...over } };
+  }
+
+  it("★v14 が配った 'keep' を 'off' へ寄せ替える", () => {
+    const out = migrateChallengeQuizThinkBgm(quizCfg({ thinkBgm: QUIZ_BGM_KEEP }), 14);
+    expect(out.quiz.thinkBgm).toBe('off');
+  });
+
+  it('★自分で曲を選んでいる人には配らない(keep ちょうどのときだけ)', () => {
+    const picked = quizCfg({ thinkBgm: QUIZ_BGM_CHASE });
+    expect(migrateChallengeQuizThinkBgm(picked, 14)).toBe(picked);
+    const off = quizCfg({ thinkBgm: 'off' });
+    expect(migrateChallengeQuizThinkBgm(off, 14)).toBe(off);
+  });
+
+  it('fromVersion 15 以降には配らない(選び直した曲を二度と消さない)', () => {
+    const base = quizCfg({ thinkBgm: QUIZ_BGM_KEEP });
+    expect(migrateChallengeQuizThinkBgm(base, 15)).toBe(base);
+    expect(migrateChallengeQuizThinkBgm(base, SETTINGS_VERSION)).toBe(base);
+  });
+
+  it('触るのは thinkBgm だけ(音量・他の区間・他機能はそのまま)', () => {
+    const base = quizCfg({ thinkBgm: QUIZ_BGM_KEEP });
+    const out = migrateChallengeQuizThinkBgm(base, 14);
+    expect({ ...out.quiz, thinkBgm: '' }).toEqual({ ...base.quiz, thinkBgm: '' });
+    expect(out.quiz.thinkBgmVolume).toBe(base.quiz.thinkBgmVolume);
+    expect({ ...out, quiz: base.quiz }).toEqual(base);
+  });
+
+  it('移行の出力が validateQuiz の不動点(migrate の出力は再検証されない)', () => {
+    const out = migrateChallengeQuizThinkBgm(quizCfg({ thinkBgm: QUIZ_BGM_KEEP }), 14);
+    expect(validateQuiz(out.quiz)).toEqual(out.quiz);
+  });
+
+  it('migrateChallengeConfig のチェーンに組み込まれている', () => {
+    // 段の付け忘れは「テストは緑なのに実機に届かない」で表に出る。
+    const out = migrateChallengeConfig(quizCfg({ thinkBgm: QUIZ_BGM_KEEP }), 14);
+    expect(out.quiz.thinkBgm).toBe('off');
+    // v14 の段(曲の割り当て)も一緒に通っている。
+    expect(out.quiz.bgm).toBe(QUIZ_BGM_CHASE);
   });
 });

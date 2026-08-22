@@ -6454,6 +6454,79 @@ body {
   /* めくりの縁(墨の細枠 + 金の太枠 + 落ち影)。4箇所で使い回す。 */
   --qz-fuda-edge: inset 0 0 0 3px rgba(28, 14, 4, 0.9), inset 0 0 0 7px var(--qz-gold),
     0 22px 54px rgba(0, 0, 0, 0.62);
+
+  /*
+   * 【2026-08-23】お題の**本文以外**を一括で拡大する倍率(ユーザー要件
+   * 「お題の文字以外を現在の2倍で表示する」+「お題文字を優先・収まる範囲で拡大」)。
+   * `.float` の --float-scale と同じ流儀 — 大きさを変えたいときはこの4行だけ触る。
+   * **お題本文(.qz-prompt / .qw-prompt / .qv-prompt / .qs-prompt)には掛けない** —
+   * 本文の大きさは quizPromptFontPx(インライン style)が権威で、CSS は据わり値。
+   *
+   * 4本に分かれているのは、素直に全部 2 倍にすると本文の枠(QUIZ_FIT_* の maxH)を
+   * 食い潰して**お題が小さくなる**から。役物と巨大数字だけ控えめに伸ばす。
+   *
+   * 【縦 540x960 の値が小さい理由】ステージ幅から左右 padding を引いた実効幅が
+   * **500px しかない**。見出しは white-space: nowrap の8文字で 40px x 1.2 x 8 +
+   * padding 60 = 444px、投票の集計行は札2枚 + VS + gap で 431px * 倍率。
+   * どちらも 1.2 倍前後で 500px に当たる(実測ではなく算術の上限)。
+   * 横 1280x720 は幅に余裕があるので指定どおり 2 倍。
+   */
+  /* 添え文字(見出し以外の説明・語・小さい数字)。 */
+  --qz-scale: 1.25;
+  /* 見出し(.qz-label)。nowrap の8文字がステージ幅に収まる上限で頭打ち。 */
+  --qz-head: 1.1;
+  /* 元から巨大な数字と決め字(残り秒・票数・判定・±N)。 */
+  --qz-num: 1.25;
+  /* 役物(提灯)。大きくするほど本文の天井が下がるので一番控えめ。 */
+  --qz-deco: 1.3;
+}
+
+/*
+ * 横ステージ(1280x720)。幅に余裕があるので添え文字と見出しは**指定どおり2倍**。
+ * 数字と役物だけ控えめなのは高さ 720 の制約(上のコメント参照)。
+ */
+.landscape .quiz-screen,
+.landscape .quiz-window-overlay,
+.landscape .quiz-vote-overlay,
+.landscape .quiz-settle {
+  --qz-scale: 2;
+  --qz-head: 2;
+  --qz-num: 1.5;
+  --qz-deco: 1.4;
+}
+
+/*
+ * 【画面ごとの上限】投票と結果発表だけ倍率を下げる。**実測で決めた値**
+ * (一時 html + 同梱 Electron の capturePage + getBoundingClientRect)。
+ * この2枚は縦に積む行数が一番多く(投票 = 見出し + 案内 + 札 + 集計、
+ * 発表 = 札 + 票数 + 判定 + 増減)、素直に 2 倍にすると
+ * **中身がステージからはみ出して見出しの上端が切れる**(実測 767px / 720px)。
+ * ユーザー決定「お題文字を優先」に従い、お題の枠(QUIZ_FIT_*)は削らずここを下げた。
+ *
+ * 縦は特に厳しい:
+ * - 投票の札幅は「よかった」4文字 x --qz-scale で決まり、札2枚 + VS + gap で
+ *   436px * 倍率 <= 内寸 500px → **1.14 倍が算術上の限界**。
+ * - 発表の増減は「-5,000」が 150px の時点で既に約 495px = 内寸ぴったり。
+ *   1 倍より上げると左右が切れる(だから縦は素の 1 倍のまま)。
+ */
+.quiz-vote-overlay {
+  --qz-scale: 1.1;
+  --qz-num: 1.1;
+}
+
+.quiz-settle {
+  --qz-scale: 1;
+  --qz-num: 1;
+}
+
+.landscape .quiz-vote-overlay {
+  --qz-scale: 1.7;
+  --qz-num: 1.3;
+}
+
+.landscape .quiz-settle {
+  --qz-scale: 1.8;
+  --qz-num: 1.35;
 }
 
 /*
@@ -6468,7 +6541,15 @@ body {
   align-items: center;
   justify-content: center;
   gap: 20px;
-  padding: 0 20px;
+  /*
+   * 上だけ**提灯の吊り下がる帯ぶん**を空ける(2026-08-23)。
+   * 提灯は position:absolute(top 18px + 高さ)で本文の外に居るが、中身は
+   * justify-content:center で上下中央に置かれるため、見出しを大きくすると
+   * 中身の天井が上がって提灯とぶつかる。上余白で「高座の下だけを使う」形に
+   * すると、ぶつからないまま**下の余りを本文に回せる**(以前は上下対称に
+   * 余白を捨てていた)。値は 18px + 提灯の高さ 68px * --qz-deco + 数px。
+   */
+  padding: calc(24px + 68px * var(--qz-deco)) 20px 0;
   overflow: hidden;
   pointer-events: none;
   /*
@@ -6489,19 +6570,31 @@ body {
 
 /* 見出し(「大喜利」「お題 けってい!」)。毛筆・金・木札の下地。 */
 .quiz-screen .qz-label {
-  padding: 6px 30px 9px;
+  padding: calc(6px * var(--qz-head)) calc(30px * var(--qz-head)) calc(9px * var(--qz-head));
   border-radius: 4px;
   font-family: var(--qz-brush);
   /*
    * 40px / 0.2em は「8文字の見出しが1行に収まる」上限
-   * (8 × 40 × 1.2 + padding 60 = 444px < 540px のステージ幅)。
+   * (8 x 40 x 1.2 + padding 60 = 444px)。**効くのはステージ幅ではなく
+   * .quiz-screen の内寸**(縦 540 - padding 40 = 500px / 横 1280 - 40 = 1240px)。
    * 46px / 0.3em にしたら「準備してください」が2行に折れた — 実描画で確認済み。
-   * 見出しを長くするときはこの計算をやり直すこと。
+   *
+   * 2026-08-23: --qz-head 倍で拡大。**縦の上限は 500 / 444 = 1.126 倍**なので
+   * --qz-head は 1.1(横は 1240 / 444 = 2.79 倍まで余るので 2)。
+   * 見出しを長くするか --qz-head を上げるときはこの計算をやり直すこと。
    */
-  font-size: 40px;
+  font-size: calc(40px * var(--qz-head));
   font-weight: 700;
   letter-spacing: 0.2em;
   white-space: nowrap;
+  /*
+   * **幅は本文の札と同じ**(2026-08-22 ユーザー決定)。見出しは画面ごとに文字数が
+   * 違う(「大喜利」3文字 /「準備してください」8文字)ので、内容任せだと画面が
+   * 変わるたびに札の外形が動く。実寸は shared/quiz-fit.ts の quizLabelWidthPx で、
+   * MonitorView がインラインで当てる。上の font-size の計算(8文字が1行に収まる)は
+   * この幅の中で成り立つ必要があるので、両方まとめて見直すこと。
+   */
+  text-align: center;
   /* letter-spacing は右端にも入るので、その分を戻して中央に見せる。 */
   text-indent: 0.2em;
   color: var(--qz-gold);
@@ -6526,6 +6619,18 @@ body {
   line-height: 1.18;
   font-weight: 700;
   text-align: center;
+  /*
+   * **外形は固定**(2026-08-22 ユーザー決定「文字数で囲いのサイズを変えない」)。
+   * 実寸は shared/quiz-fit.ts の quizBoxPx が権威で、MonitorView が width/height を
+   * インラインで当てる(font-size と同じ流儀)。上の max-width はその経路を通らない
+   * ときの据わり値。**この2つは対** — quiz-fit.ts の QUIZ_PAD がこの padding の写しで、
+   * test/renderer/quiz-shoten-css.spec.ts が機械照合している。
+   *
+   * 上下中央寄せに flex/grid を使わないのは、本文が匿名の flex アイテムになって
+   * overflow-wrap: anywhere の折返しが効かなくなるため。align-content はブロック
+   * レイアウトでも効く(Chromium 123+ / Electron 43 は 138 系)。
+   */
+  align-content: center;
   overflow-wrap: anywhere;
   color: var(--qz-sumi);
   text-shadow: 0 2px 0 rgba(120, 90, 40, 0.18);
@@ -6603,7 +6708,11 @@ body {
   }
 }
 
-/* よろよろ(最後の1コマずつ)。札が重そうに沈む。 */
+/*
+ * 減速(決定前の5秒)。札が重そうに沈む。**cue は減速拍の全コマに付く**ので
+ * この見得はコマが変わるたびに再生され、間隔が伸びるほど間延びして見える
+ * = そのまま「止まりそうで止まらない」の絵になる(quiz-spin.ts の crawlFrames)。
+ */
 .quiz-screen.qz-crawl .qz-prompt {
   animation: qz-crawl 520ms ease-out both;
 }
@@ -6614,6 +6723,41 @@ body {
   }
   100% {
     transform: translateY(0);
+  }
+}
+
+/*
+ * 停止(2026-08-23)。**当選の札を掴んだまま静止する 1.4 秒**。
+ * ニアミスと同じ「金に灼ける」だが、あちらが 1.4 秒かけて熱を持つのに対して
+ * こちらは**頭で一度カタッと止めてから灼き付ける** — 回転が終わったことを
+ * 音無しで伝えるのがこの拍の役目(効果音は 1.4 秒後の決定パンチが鳴らす)。
+ * この見得のお題と決定パンチのお題は必ず同じ(quiz-spin.ts の show 写像)。
+ */
+.quiz-screen.qz-settle .qz-prompt {
+  animation: qz-settle 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes qz-settle {
+  0% {
+    transform: translateY(-10px) scale(1.01, 0.97);
+    box-shadow: var(--qz-fuda-edge);
+    filter: brightness(1);
+  }
+  30% {
+    transform: translateY(0) scale(1);
+    box-shadow:
+      inset 0 0 0 3px rgba(28, 14, 4, 0.9),
+      inset 0 0 0 10px #fff3c4,
+      0 0 96px rgba(255, 214, 104, 0.95);
+    filter: brightness(1.28);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    box-shadow:
+      inset 0 0 0 3px rgba(28, 14, 4, 0.9),
+      inset 0 0 0 8px var(--qz-gold),
+      0 0 72px rgba(255, 196, 76, 0.8);
+    filter: brightness(1.08);
   }
 }
 
@@ -6738,55 +6882,11 @@ body {
 }
 
 /*
- * 座布団。決定の瞬間に下から積み上がる飾り(点数には一切紐づかない)。
- * 緞帳と同じ理由で DOM 順は本文の後ろ、提灯より前。
+ * 【2026-08-23】座布団(.qz-zabuton — 決定の瞬間に下から積み上がる赤い3枚)は
+ * ユーザー指定で撤去した。点数にも票数にも紐づかない飾りでありながら、
+ * 画面下部 160px を占めて本文の枠(QUIZ_FIT_*.reveal の maxH)を削っていた。
+ * 復活させるときは maxH の再計算とセットにすること。
  */
-.quiz-screen .qz-zabuton {
-  position: absolute;
-  bottom: 22px;
-  left: 50%;
-  width: 320px;
-  height: 138px;
-  transform: translateX(-50%);
-}
-
-.quiz-screen .qz-zabuton i {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 46px;
-  border-radius: 14px;
-  background: linear-gradient(180deg, #b8242c 0%, #7d0f16 100%);
-  box-shadow:
-    inset 0 0 0 3px rgba(255, 207, 74, 0.7),
-    0 8px 20px rgba(0, 0, 0, 0.5);
-  animation: qz-zabuton 420ms cubic-bezier(0.2, 1.5, 0.4, 1) both;
-}
-
-.quiz-screen .qz-zabuton i:nth-child(1) {
-  bottom: 0;
-}
-
-.quiz-screen .qz-zabuton i:nth-child(2) {
-  bottom: 34px;
-  animation-delay: 150ms;
-}
-
-.quiz-screen .qz-zabuton i:nth-child(3) {
-  bottom: 68px;
-  animation-delay: 300ms;
-}
-
-@keyframes qz-zabuton {
-  0% {
-    transform: translateY(70px);
-    opacity: 0;
-  }
-  100% {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
 
 /* 提灯(ちょうちん)。緞帳より DOM 順で後ろ = 常に最前。ゆっくり揺れる。 */
 .quiz-screen .qz-lanterns {
@@ -6796,12 +6896,13 @@ body {
   right: 0;
   display: flex;
   justify-content: center;
-  gap: 66px;
+  gap: calc(66px * var(--qz-deco));
 }
 
 .quiz-screen .qz-lanterns i {
-  width: 52px;
-  height: 68px;
+  width: calc(52px * var(--qz-deco));
+  /* 高さを変えたら .quiz-screen の padding-top の式も直すこと(対で効いている)。 */
+  height: calc(68px * var(--qz-deco));
   border-radius: 50% / 44%;
   background:
     repeating-linear-gradient(180deg, rgba(60, 10, 4, 0.22) 0 7px, transparent 7px 13px),
@@ -6848,7 +6949,7 @@ body {
 /* 残り秒。窓の .qw-timer より一回り小さい(主役はまだお題本文)。 */
 .quiz-screen .qz-prep-timer {
   font-family: var(--font-num, var(--font));
-  font-size: 92px;
+  font-size: calc(92px * var(--qz-num));
   font-weight: 800;
   line-height: 1;
   font-variant-numeric: tabular-nums;
@@ -6869,6 +6970,65 @@ body {
     transform: scale(1);
     opacity: 1;
   }
+}
+
+/*
+ * 数値到達の告知(「10,000 を超えました!」・2026-08-22)。.quiz-screen の金屏風を
+ * そのまま使い、中身だけ「特大の数字 + めくりの一言」に差し替える。
+ *
+ * **他の5枚と違ってホールド(幕)を持たない** — 演出が渋滞していても跨いだ瞬間に
+ * 出したいので、舞台キューを迂回して worker の絶対時刻だけで生き死にする。
+ * .fx-layer の中なので不透明カットイン動画より手前に出る = 割り込んで見える。
+ */
+.quiz-screen.quiz-threshold .qz-label {
+  color: #ffe9b0;
+  text-shadow: 0 0 22px rgba(255, 190, 70, 0.9);
+}
+
+/*
+ * 数字。**めくり(札)にはしない** — お題本文とは役割が違い、ここは「金の一撃」で
+ * 大台を殴る画にしたいため。大きさは quizPromptFontPx('announce') が決めて
+ * インライン style で入る(この font-size は関数を通らない経路の据わり値)。
+ */
+.quiz-screen .qz-th-num {
+  font-family: var(--font-num, var(--font));
+  font-size: 150px;
+  font-weight: 900;
+  line-height: 1.1;
+  /*
+   * 2026-08-23: **折り返しを許す**。quizPromptFontPx は「どこでも折れる」前提で
+   * 行数を数えるので、ここが折り返せないと縦ステージで「10,000」が 1 行 570px に
+   * なって左右が切れていた(実測 608px / 内寸 500px)。しきい値の上限は
+   * 99,999,999(桁区切り込みで 10 文字)まであるため、折り返せる側に倒す。
+   * 常用の桁が 1 行に収まるかどうかは QUIZ_FIT_*.announce.maxPx が受け持つ。
+   */
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+  color: #fff3cf;
+  text-shadow:
+    0 0 30px rgba(255, 190, 60, 0.95),
+    0 0 90px rgba(230, 120, 20, 0.6),
+    0 6px 0 rgba(120, 60, 8, 0.55);
+  /* 一撃は quiz-hit を流用してよい — 数字は札と違って最大幅まで育たないので、
+     0% の scale(1.32) でもステージからはみ出さない(.qz-prompt が
+     qz-reveal-hit を別に持っているのはそのため)。 */
+  animation: quiz-hit 520ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/* 「を超えました!」。数字が主役なので、めくりに毛筆で控えめに添える。 */
+.quiz-screen .qz-th-suffix {
+  padding: calc(4px * var(--qz-scale)) calc(26px * var(--qz-scale)) calc(7px * var(--qz-scale));
+  border-radius: 4px;
+  font-family: var(--qz-brush);
+  font-size: calc(46px * var(--qz-scale));
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--qz-sumi);
+  background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
+  box-shadow: var(--qz-fuda-edge);
+  animation: quiz-tick 220ms ease-out both;
+  /* 数字の一撃(520ms)の途中で入る — 同時だと二発が重なって的が散る。 */
+  animation-delay: 200ms;
 }
 
 /*
@@ -6893,7 +7053,7 @@ body {
 
 .quiz-window-overlay .qw-cap {
   font-family: var(--qz-brush);
-  font-size: 30px;
+  font-size: calc(30px * var(--qz-scale));
   font-weight: 700;
   letter-spacing: 0.26em;
   text-indent: 0.26em;
@@ -6911,6 +7071,8 @@ body {
   line-height: 1.18;
   font-weight: 700;
   text-align: center;
+  /* 外形固定の上下中央寄せ。理由は .quiz-screen .qz-prompt の注記。 */
+  align-content: center;
   overflow-wrap: anywhere;
   color: var(--qz-sumi);
   background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
@@ -6923,7 +7085,7 @@ body {
 /* 残り秒。key=秒 の再マウントで毎秒パンチ(.revolution-count と同じ手口)。 */
 .quiz-window-overlay .qw-timer {
   font-family: var(--num);
-  font-size: 200px;
+  font-size: calc(200px * var(--qz-num));
   line-height: 1;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -6953,7 +7115,7 @@ body {
 
 .quiz-vote-overlay .qv-cap {
   font-family: var(--qz-brush);
-  font-size: 32px;
+  font-size: calc(32px * var(--qz-scale));
   font-weight: 700;
   letter-spacing: 0.16em;
   color: var(--qz-gold);
@@ -6968,6 +7130,27 @@ body {
   color: #ffd9a0;
 }
 
+/*
+ * 投票の書き方(2026-08-23 ユーザー要件「よかった or だめ で回答下さい、と
+ * わかりやすくする」)。集計札には語が出ているが「そう書けば票になる」とは
+ * 読めなかったので、命令形の1行を見出しの直下に足した。
+ * 語(<b>)は state の goodLabel / badLabel から来る = 設定した判定ワードと必ず一致する。
+ */
+.quiz-vote-overlay .qv-howto {
+  font-family: var(--qz-brush);
+  font-size: calc(26px * var(--qz-scale));
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-align: center;
+  color: var(--qz-ink);
+  text-shadow: 0 0 16px rgba(255, 170, 60, 0.7);
+}
+
+.quiz-vote-overlay .qv-howto b {
+  color: var(--qz-gold);
+  text-shadow: 0 0 20px rgba(255, 200, 80, 0.95);
+}
+
 .quiz-vote-overlay .qv-prompt {
   max-width: 500px;
   padding: 10px 18px 13px;
@@ -6977,6 +7160,8 @@ body {
   line-height: 1.2;
   font-weight: 700;
   text-align: center;
+  /* 外形固定の上下中央寄せ。理由は .quiz-screen .qz-prompt の注記。 */
+  align-content: center;
   overflow-wrap: anywhere;
   color: var(--qz-sumi);
   background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
@@ -6989,7 +7174,7 @@ body {
 .quiz-vote-overlay .qv-row {
   display: flex;
   align-items: center;
-  gap: 26px;
+  gap: calc(26px * var(--qz-scale));
 }
 
 /* 票の札。座布団と同じ角丸+金の縁で寄席の小道具に見せる。 */
@@ -6997,9 +7182,15 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  min-width: 170px;
-  padding: 16px 26px 20px;
+  gap: calc(4px * var(--qz-scale));
+  /*
+   * 170px から 150px へ下げた(2026-08-23)。--qz-scale を掛けると
+   * 「札2枚 + VS + gap 2つ」が縦ステージの内寸 500px に当たるため、
+   * 倍率の伸びしろをここで作っている(数字の実幅はこれより狭い)。
+   */
+  min-width: calc(150px * var(--qz-scale));
+  padding: calc(16px * var(--qz-scale)) calc(26px * var(--qz-scale))
+    calc(20px * var(--qz-scale));
   border-radius: 18px;
   background: linear-gradient(180deg, rgba(28, 10, 4, 0.86), rgba(10, 3, 1, 0.9));
 }
@@ -7018,7 +7209,7 @@ body {
 
 .quiz-vote-overlay .qv-word {
   font-family: var(--qz-brush);
-  font-size: 30px;
+  font-size: calc(30px * var(--qz-scale));
   font-weight: 700;
   letter-spacing: 0.1em;
 }
@@ -7036,7 +7227,7 @@ body {
 /* 票数。key=票数 の再マウントで着弾パンチ。 */
 .quiz-vote-overlay .qv-side b {
   font-family: var(--num);
-  font-size: 84px;
+  font-size: calc(84px * var(--qz-num));
   line-height: 1;
   font-variant-numeric: tabular-nums;
   color: #fdf8ff;
@@ -7045,7 +7236,7 @@ body {
 
 .quiz-vote-overlay .qv-vs {
   font-family: var(--qz-brush);
-  font-size: 36px;
+  font-size: calc(36px * var(--qz-scale));
   font-weight: 700;
   letter-spacing: 0.12em;
   color: var(--qz-gold);
@@ -7104,6 +7295,8 @@ body {
   line-height: 1.2;
   font-weight: 700;
   text-align: center;
+  /* 外形固定の上下中央寄せ。理由は .quiz-screen .qz-prompt の注記。 */
+  align-content: center;
   overflow-wrap: anywhere;
   color: var(--qz-sumi);
   background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
@@ -7116,15 +7309,15 @@ body {
 .quiz-settle .qs-votes {
   display: flex;
   align-items: baseline;
-  gap: 30px;
+  gap: calc(30px * var(--qz-scale));
   font-family: var(--qz-brush);
-  font-size: 32px;
+  font-size: calc(32px * var(--qz-scale));
   font-weight: 700;
 }
 
 .quiz-settle .qs-votes b {
   font-family: var(--num);
-  font-size: 56px;
+  font-size: calc(56px * var(--qz-num));
   font-variant-numeric: tabular-nums;
 }
 
@@ -7148,7 +7341,8 @@ body {
 .quiz-settle.amount .qs-verdict {
   display: block;
   font-family: var(--qz-brush);
-  font-size: 76px;
+  /* 決め字は元から大きいので --qz-scale ではなく控えめな --qz-num 側。 */
+  font-size: calc(76px * var(--qz-num));
   font-weight: 700;
   letter-spacing: 0.1em;
   text-indent: 0.1em;
@@ -7162,7 +7356,7 @@ body {
 .quiz-settle.amount .qs-amt {
   display: block;
   font-family: var(--num);
-  font-size: 150px;
+  font-size: calc(150px * var(--qz-num));
   line-height: 1;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -7209,7 +7403,7 @@ body {
  * (触っても実表示は変わらず、据わり値の二重管理になるだけ)。
  */
 .landscape .quiz-window-overlay .qw-timer {
-  font-size: 150px;
+  font-size: calc(150px * var(--qz-num));
 }
 
 .landscape .quiz-screen .qz-prompt,
@@ -7223,11 +7417,14 @@ body {
 }
 
 .landscape .quiz-screen .qz-lanterns {
-  gap: 210px;
+  gap: calc(210px * var(--qz-deco));
 }
 
-.landscape .quiz-screen .qz-zabuton {
-  bottom: 14px;
+/* 横ステージは高さが足りないので、告知の添え字だけ一回り下げる(数字は関数側)。 */
+.landscape .quiz-screen .qz-th-suffix {
+  font-size: calc(34px * var(--qz-scale));
+  padding: calc(3px * var(--qz-scale)) calc(20px * var(--qz-scale))
+    calc(5px * var(--qz-scale));
 }
 
 @media (prefers-reduced-motion: reduce) {

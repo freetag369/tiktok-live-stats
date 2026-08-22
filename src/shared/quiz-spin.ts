@@ -21,12 +21,19 @@
  * フェイクストップもニアミスも表現できない。今は拍ごとに**コマの表示時間**を
  * 決め、その累積が atMs になる:
  *
- *   run1(高速) → fake(据え) → run2(高速) → near(据え) → crawl(よろよろ) → tail(溜め)
+ *   run1(高速) → fake(据え) → run2(高速) → near(据え) → crawl(減速) → tail(当選で静止)
  *
- * **`show` の並びは旧実装から一切変えていない**(当選から逆算した +1 の巡回)。
  * フェイクストップは「同じコマを長く表示する」だけで作れるので、
  * 「隣接コマは常に +1」というアンチリークの不変条件を保ったまま焦らせる。
  * 逆回転や飛ばしを入れるとこの不変条件が壊れるので、やらないこと。
+ *
+ * ── 2026-08-23: **停止位置を当選コマへ**(ユーザー指摘のバグ修正) ──
+ * 初版は tail 拍が「当選の1つ手前(ハズレ)」を掴んで引っぱる設計で、当選の初出は
+ * 決定パンチだった。実機では「ルーレットが A で止まったのに発表は B」という
+ * **不一致にしか見えない**という指摘を受け、`show` 写像を1つずらして
+ * **tail 拍にも当選コマを割り当てる**ようにした。あわせて crawl 拍を 5 秒へ伸ばし
+ * (`QUIZ_SPIN_BEATS.crawlSpread`)、「決定前に5秒かけてゆっくり停止する」を作る。
+ * 最終コマ(atMs >= totalMs)が決定表示に食われて描かれない仕組みは**据え置き**。
  */
 
 import { QUIZ_SPIN_BEATS, QUIZ_SPIN_MS } from './challenge';
@@ -37,13 +44,20 @@ import { QUIZ_SPIN_BEATS, QUIZ_SPIN_MS } from './challenge';
  * **新しい効果音スロットは作らない** — スロットの追加は既定音・音量・miniFx・
  * 設定画面・validate まで波及する(MonitorView の startQuizFx のコメント参照)。
  */
-export type QuizSpinCue = 'fake' | 'near' | 'crawl';
+export type QuizSpinCue = 'fake' | 'near' | 'crawl' | 'settle';
 
 /** 回転の1コマ。atMs は回転開始からのオフセット、show は表示するお題の index。 */
 export interface QuizSpinTick {
   atMs: number;
   show: number;
-  /** 拍の頭のコマにだけ付く。無い場合はキー自体を省く(既存テストの toEqual 対策)。 */
+  /**
+   * 見た目(CSS クラス)の切り替え。**fake / near / settle は1コマ、crawl は
+   * 減速拍の全コマに付く** — 5 秒のあいだ「重そうに沈む」見得を出しっぱなしに
+   * するため。効果音は拍の頭で1回だけ鳴らしたいので、モニター側で
+   * 「前のコマと cue が変わったコマ」だけ `playSeSlot` を呼ぶこと
+   * (`MonitorView` の startQuizFx を参照)。無い場合はキー自体を省く
+   * (既存テストの toEqual 対策)。
+   */
   cue?: QuizSpinCue;
 }
 
@@ -68,13 +82,18 @@ function runFrames(totalMs: number, stepMs: number): QuizSpinFrame[] {
 }
 
 /**
- * よろよろ拍。間隔が `crawlStepMs` から**等差で伸びて**いく — 走行拍の等間隔から
- * 溜め(tail)へ橋を架ける区間で、ここが「止まりそうで止まらない」の本体。
- * コマ数は「平均間隔が crawlStepMs の 1.4 倍」になる線で決める(伸びしろの分)。
+ * 減速拍。間隔が `crawlStepMs` から**等差で伸びて**いく — 走行拍の等間隔から
+ * 静止(tail)へ橋を架ける区間で、ここが「決定前に5秒かけてゆっくり停止する」の本体。
+ * コマ数は「平均間隔が crawlStepMs の `spread` 倍」になる線で決める(伸びしろの分) —
+ * **spread が大きいほどコマが少なく1コマが長い = 減速がはっきり見える**。
+ *
+ * `cue: 'crawl'` は**全コマ**に付ける(見得を出しっぱなしにするため)。
+ * 効果音の重複は呼び出し側が「cue の変化点だけ鳴らす」で防ぐ。
  */
-function crawlFrames(totalMs: number, stepMs: number): QuizSpinFrame[] {
+function crawlFrames(totalMs: number, stepMs: number, spread: number): QuizSpinFrame[] {
   const step = Math.max(1, stepMs);
-  const n = Math.max(2, Math.round(totalMs / (step * 1.4)));
+  const k = spread > 0 ? spread : 1.4;
+  const n = Math.max(2, Math.round(totalMs / (step * k)));
   // d0 = step から公差 inc で n 個。合計が totalMs ちょうどになる inc を解く。
   // n*d0 + inc*(0+1+...+(n-1)) = totalMs
   const tri = (n * (n - 1)) / 2;
@@ -84,7 +103,7 @@ function crawlFrames(totalMs: number, stepMs: number): QuizSpinFrame[] {
   for (let i = 0; i < n; i++) {
     const ms = i === n - 1 ? totalMs - used : Math.max(1, Math.round(step + inc * i));
     used += ms;
-    out.push(i === 0 ? { ms, cue: 'crawl' } : { ms });
+    out.push({ ms, cue: 'crawl' });
   }
   return out;
 }
@@ -101,9 +120,10 @@ function nominalFrames(b: typeof QUIZ_SPIN_BEATS): QuizSpinFrame[] {
     { ms: b.fake1Ms, cue: 'fake' },
     ...runFrames(b.run2Ms, b.runStepMs),
     { ms: b.nearMs, cue: 'near' },
-    ...crawlFrames(b.crawlMs, b.crawlStepMs),
-    // 最後の溜め。**合図を付けない**(無音で引っぱるのがこの拍の役目)。
-    { ms: b.tailMs },
+    ...crawlFrames(b.crawlMs, b.crawlStepMs, b.crawlSpread),
+    // 当選を掴んだままの静止。**効果音は鳴らさない**(無音で引っぱるのがこの拍の
+    // 役目 — 1.4 秒後の決定パンチが roulette-hit を鳴らす)。cue は見得だけのため。
+    { ms: b.tailMs, cue: 'settle' },
   ];
 }
 
@@ -125,9 +145,12 @@ export const QUIZ_SPIN_STEPS = FRAMES.length + 1;
  * - 最後のコマは必ず `show === winnerIndex` かつ `atMs >= totalMs`。ただし
  *   **このコマは実際には描かれない** — モニターは同時刻に決定パンチを同期予約して
  *   おり、そちらが先に登録されているので先に発火して回転 state を畳む。
- *   つまり当選お題の初出は決定パンチで、その手前の tail 拍は
- *   **ハズレ(当選の1つ手前)を掴んだまま引っぱる**ことになる(狙いどおり)。
- * - 表示列は winnerIndex から逆算した連番の巡回。隣接コマは常に +1。
+ * - **その1つ手前(tail 拍の頭)も `show === winnerIndex`**。つまり視聴者が最後に
+ *   見て「止まった」と認識するお題と、決定パンチで発表されるお題は必ず一致する
+ *   (2026-08-23 のバグ修正 — 以前はここが当選の1つ手前だった)。
+ * - 表示列は winnerIndex から逆算した連番の巡回。**隣接コマは常に +1** で、
+ *   同じコマが 2 回続くのは最後の 1 組(tail と描かれない最終コマ)だけ。
+ *   そこは既に当選が出ている位置なので、途中経過から答えは読めないまま。
  */
 export function quizSpinTicks(
   promptCount: number,
@@ -147,7 +170,11 @@ export function quizSpinTicks(
     const atMs = Math.max(prev + 1, Math.round(acc * scale));
     prev = atMs;
     if (i < FRAMES.length) acc += FRAMES[i]!.ms;
-    const show = (((winner - (n - 1 - i)) % count) + count) % count;
+    // 当選から何コマ手前か。**最後の2コマ(tail と描かれない最終コマ)は 0** =
+    // どちらも当選コマ。ここを `n - 1 - i` に戻すと tail がハズレを掴む
+    // 2026-08-22 版の挙動になり、「止まったお題と発表が違う」に逆戻りする。
+    const back = Math.max(0, n - 2 - i);
+    const show = (((winner - back) % count) + count) % count;
     const cue = i < FRAMES.length ? FRAMES[i]!.cue : undefined;
     // cue は**条件付きスプレッド**で載せる(常に undefined を持たせると
     // 既存テストの toEqual 比較が壊れる)。

@@ -19,6 +19,7 @@ import type {
   RevolutionRule,
   QuizConfig,
   QuizRule,
+  QuizThresholdRule,
   FinalGateConfig,
   GiftBandFxConfig,
   GiftFullCutConfig,
@@ -40,6 +41,7 @@ import {
   ROULETTE_PATTERN_TIER,
   ROULETTE_SELECTABLE_PATTERNS,
 } from './dto';
+import { num } from './format';
 import { WAKE_TIME_RE } from './time';
 import {
   FULL_CUT_CLIPS,
@@ -1330,13 +1332,26 @@ export const CHALLENGE_BAND_BGM_IDS: readonly string[] = [
 ];
 
 /**
+ * お題ルーレットの出荷既定BGM(2026-08-22 ユーザー指定の実素材)。
+ * - CHASE: 区間①(発動〜導入の全面カット〜回転)。②③④は 'keep' で続く。
+ * - THINK: 区間⑤(コメント受付 = 投票タイム)。
+ * 定数にしてあるのは、既定(DEFAULT_QUIZ)・移行(migrateChallengeQuizBgm)・
+ * テストの3者が同じ文字列を見るため。実ファイルは renderer/assets/se/quiz/。
+ */
+export const QUIZ_BGM_CHASE = 'bgm-quiz-chase';
+export const QUIZ_BGM_THINK = 'bgm-quiz-think';
+
+/**
  * ルーレット回転中BGMの id 一覧。実ファイルとラベルは renderer/lib/bgm.ts の
  * ROULETTE_BGM。**BAND_BGM の4曲も選択肢に連結する** — 既存曲を回転用に
  * 使い回せるようにするため(逆方向は無し: 帯域の select に回転曲は出さない)。
+ * お題の2曲もここに載る(validateQuiz はこのリストで区間BGMを検証する)。
  */
 export const CHALLENGE_ROULETTE_BGM_IDS: readonly string[] = [
   'bgm-roulette1',
   'bgm-roulette2',
+  QUIZ_BGM_CHASE,
+  QUIZ_BGM_THINK,
   ...CHALLENGE_BAND_BGM_IDS,
 ];
 
@@ -1983,15 +1998,17 @@ export const QUIZ_INTRO_SELF = 'quiz';
  * `ROULETTE_ULTRA_BEATS` と同じ流儀 — **尺の権威はこの表**で `QUIZ_SPIN_MS` は総和。
  *
  * 振り付け: 幕開け → 高速回転① → フェイクストップ① → 再加速② → ニアミス →
- * よろよろ → 最後の溜め →(決定パンチ `QUIZ_REVEAL_MS` へ)。
+ * **5秒かけての減速停止** → 当選を掴んだままの溜め →(決定パンチ `QUIZ_REVEAL_MS` へ)。
  *
- * ★ **`tailMs` の意味は `ROULETTE_ULTRA_BEATS` と逆**。ultra の tailMs は「当選が
- *   見えてからの溜め」だが、こちらは**ハズレ(当選の1つ手前)を掴んだまま
- *   引っぱる最後の間**。お題の当選は決定パンチで初めて出る — 回転の最終コマと
- *   決定表示は同時刻に予約され、同期スコープで先に登録された決定表示が勝つので、
- *   当選コマは回転中に一度も描かれない(2026-08-21 の実装からの挙動)。
- *   この形にしてあるおかげで `quizSpinTicks` の契約(最終コマは show === winner・
- *   atMs >= totalMs)を変えずに焦らしが載る。**逆の意味で使わないこと。**
+ * ★ **`tailMs` の意味は `ROULETTE_ULTRA_BEATS` と同じ**「当選を見せてからの溜め」。
+ *   2026-08-22 の初版だけは逆(ハズレを掴んで引っぱる)だったが、実機で
+ *   「ルーレットが A で止まったのに発表は B」という**バグにしか見えない**という
+ *   指摘を受けて 2026-08-23 に反転させた(ユーザー決定)。`quizSpinTicks` の
+ *   `show` 写像が tail 拍にも当選コマを割り当てるので、**視聴者が最後に見て
+ *   止まったお題と決定パンチのお題は必ず一致する**。
+ *   最終コマ(atMs >= totalMs)が決定表示に食われて描かれない仕組みは据え置きで、
+ *   その1つ手前の tail 拍が同じ当選コマを掴むことで辻褄が合っている。
+ *   **逆の意味に戻さないこと。**
  *
  * `runStepMs` / `crawlStepMs` は「目標のコマ間隔」で、コマ数はここから導出する
  * (`QUIZ_SPIN_STEPS`)。**下限は OBS 30fps の2フレーム ≒ 66ms** — これより細かく
@@ -2012,19 +2029,31 @@ export const QUIZ_SPIN_BEATS = {
   fake1Ms: 1_400,
   /** 再加速②。 */
   run2Ms: 3_200,
-  /** ニアミス。当選の1つ手前で長く止まる(cue: 'near')。 */
+  /** ニアミス。当選の2つ手前で長く止まる(cue: 'near')。 */
   nearMs: 1_600,
-  /** よろよろ。1コマずつ間隔が伸びる(cue: 'crawl')。 */
-  crawlMs: 2_600,
-  /** 最後の溜め。**ハズレを掴んだまま**引っぱる(上の ★ を参照)。 */
-  tailMs: 3_800,
+  /**
+   * **決定前の減速停止**(cue: 'crawl')。1コマずつ間隔が伸びていき、最後のコマで
+   * 当選の1つ手前に着く。ユーザー指定「決定前に5秒間かけてゆっくり停止する焦らし」
+   * の実体はこの拍。2026-08-23 に 2,600 → 5,000。
+   */
+  crawlMs: 5_000,
+  /** **当選を掴んだまま**静止して溜める最後の間(cue: 'settle'・上の ★ を参照)。 */
+  tailMs: 1_400,
   /**
    * 走行拍(run1 / run2)の目標コマ間隔。差し替えのたびに `MonitorView` が丸ごと
    * 再レンダーされるので、下げすぎると OBS でコマ落ちする。80ms ≒ 12.5 コマ/秒。
    */
   runStepMs: 80,
-  /** よろよろの入りのコマ間隔(ここから tail に向けて伸びる)。 */
+  /** 減速拍の入りのコマ間隔(ここから tail に向けて伸びる)。 */
   crawlStepMs: 260,
+  /**
+   * 減速拍の「伸びしろ」。コマ数を `crawlMs / (crawlStepMs * crawlSpread)` で決めるので、
+   * **大きいほどコマが少なく・1コマあたりが長く**なる = 減速がはっきり見える。
+   * 2.2 で 5 秒 / 260ms → 9 コマ、間隔は 260ms から約 850ms へ等差で伸びる。
+   * 初版の 1.4(quiz-spin.ts に直書きされていた係数)だと 14 コマ・最終 454ms までしか
+   * 伸びず、5 秒に引き伸ばしても「止まりそうで止まらない」に見えなかった。
+   */
+  crawlSpread: 2.2,
 } as const;
 
 /**
@@ -2047,9 +2076,10 @@ export const QUIZ_SPIN_MS = quizSpinTotalMs(QUIZ_SPIN_BEATS);
 
 /**
  * お題決定の全面パンチ表示の尺(ms)。この後「お題発表準備」へ引き継ぐ。
- * 2026-08-22 に 2,500 → **4,000** — 回転を3倍に伸ばした山場の着地なので、
- * 座布団が積み上がり切る(CSS の `.qz-zabuton` は 300ms 遅延 + 420ms)前に
- * 幕が変わってしまわない長さが要る。
+ * 2026-08-22 に 2,500 → **4,000** — 回転を3倍に伸ばした山場の着地の尺。
+ * 回転の tail 拍(1,400ms)で既に当選が見えているので、ここは「同じお題に
+ * 『お題 けってい!』の見出しと紙吹雪が乗る」段。読ませ切る時間が要るため
+ * 短くしないこと(2026-08-23 に座布団を廃止したが、尺の根拠はそちらではない)。
  */
 export const QUIZ_REVEAL_MS = 4_000;
 
@@ -2101,6 +2131,135 @@ export const QUIZ_RESULT_MS = 6_000;
  * 90 秒超を跨ぐため。溢れたら演出なしで値だけ即時適用(既存の溢れ弁哲学)。
  */
 export const QUIZ_DEFERRED_OPS_MAX = 512;
+
+// ── 数値到達トリガー(2026-08-22 ユーザー決定) ──────────────────────────────
+
+/**
+ * 「○○を超えました!」の全画面告知の尺(ms)。**前置き(preMs)には含めない** —
+ * 告知はモニターが quizCue{start} を撃つ**前**に、幕もホールドも取らない常設
+ * オーバーレイとして出し切る段だから(ChallengeState.quiz.announceUntilMs 参照)。
+ * 4 秒はユーザー決定 — 数字を読ませてテンポも落とさない線。
+ */
+export const QUIZ_ANNOUNCE_MS = 4_000;
+
+/** 登録できる数値トリガー行の上限。QUIZ_RULES_MAX と同じ 8。 */
+export const QUIZ_THRESHOLDS_MAX = 8;
+
+/**
+ * しきい値の clamp。下限が 1 なのは 0 を許すと「カウント 0 = 達成」と同時に
+ * 発動してしまうため(達成は clearQuiz で全部畳むので実害は無いが、設定として
+ * 意味を持たない)。上限はカウント値そのものの現実的な上限に合わせた。
+ */
+export const QUIZ_THRESHOLD_MIN = 1;
+export const QUIZ_THRESHOLD_MAX = 99_999_999;
+
+/**
+ * 告知の固定文の後半(2026-08-22 ユーザー決定「数字を自動で埋める固定文」)。
+ * モニターは数字とこの語を別要素で組む(数字だけ特大にするため)ので、
+ * 文言の権威をここ1箇所にまとめて二重定義を作らない。
+ */
+export const QUIZ_THRESHOLD_SUFFIX = 'を超えました!';
+
+/**
+ * `QuizThresholdRule.sound` の番兵「**『効果音』タブの『ルーレット確定』に従う**」
+ * (2026-08-23)。行ごとの音を足すにあたって既定をこれにしてあるので、
+ * 保存済み settings.json(キーが無い)は欠損フォールバックでここへ倒れ、
+ * 2026-08-22 版とまったく同じ音のまま動く =**移行を書かなくてよい**。
+ *
+ * 番兵の値が `'slot'` なのは `CHALLENGE_SE_SOUND_IDS` のどの id とも
+ * `'off'` とも `custom:` 接頭辞とも衝突しないため(先例は QUIZ_BGM_KEEP / QUIZ_INTRO_SELF)。
+ *
+ * **新しい ChallengeSeSlot は作らない**という恒久方針はこの機能でも守っている —
+ * 行が音の id を直接持つ形(RouletteSoundConfig.spinSe と同じ流儀)にした。
+ */
+export const QUIZ_THRESHOLD_SOUND_SLOT = 'slot';
+
+/**
+ * 行ごとの音が `QUIZ_THRESHOLD_SOUND_SLOT` のときに流用するスロット。
+ * 2026-08-22 版がここ決め打ちで鳴らしていたので、既定の互換はこの値で保たれる。
+ */
+export const QUIZ_THRESHOLD_FALLBACK_SLOT: ChallengeSeSlot = 'roulette-hit';
+
+/** 告知の数字部分(桁区切り)。モニター・設定プレビュー・バナーの共通の出所。 */
+export function quizThresholdNum(n: number): string {
+  return num(Math.max(0, Math.round(n)));
+}
+
+/**
+ * 告知の全文(「10,000 を超えました!」)。1行で足りる場所 — 発動バナー・
+ * 設定画面のプレビュー・履歴ログ — はこれを読む。
+ */
+export function quizThresholdText(n: number): string {
+  return `${quizThresholdNum(n)} ${QUIZ_THRESHOLD_SUFFIX}`;
+}
+
+/** stepQuizThresholds の戻り値。 */
+export interface QuizThresholdStep {
+  /** 今回跨いだ行(発動するのは**1行だけ**)。跨ぎ無しなら null。 */
+  fired: QuizThresholdRule | null;
+  /** 次回に持ち越す再武装済み id の集合(呼び出し側はこれで置き換える)。 */
+  armed: Set<string>;
+}
+
+/**
+ * 数値到達トリガーの判定(**唯一の実装**)。カウント値を渡すたびに呼び、
+ * 戻り値の armed で状態を置き換える。
+ *
+ * **ヒステリシス**: `value < rule.value` を見た行を「再武装済み」として armed に
+ * 入れ、armed の行が `value >= rule.value` になった瞬間に発動して armed から外す。
+ * これで「下回るまで再発動しない / 下回って再度超えたら何度でも」(ユーザー決定)に
+ * なる。armed に入っていない行は、何度上を通っても鳴らない。
+ *
+ * **同じ呼び出しで複数行が跨いだら、上から見て最初の1行だけ発動**し、跨いだ他の
+ * 行も armed から外す(次に下回るまで待つ)。1つの大口ギフトで 8 行ぶんの発動が
+ * FIFO に積まれて何十分も占有するのを構造で防ぐ — 連打コンボを1発動へ畳む
+ * 既存判断と同じ。飛ばした行は呼び出し側が skipped で診断に出せる。
+ *
+ * 無効な行(enabled=false / value が範囲外)は armed の出入りごと無視する —
+ * 途中で有効化されたときは「その時点の値から再武装をやり直す」のが正しい
+ * (initialQuizThresholdArmed が設定変更時に呼ばれるのはそのため)。
+ */
+export function stepQuizThresholds(
+  rules: readonly QuizThresholdRule[],
+  armed: ReadonlySet<string>,
+  value: number
+): QuizThresholdStep & { skipped: QuizThresholdRule[] } {
+  const next = new Set(armed);
+  let fired: QuizThresholdRule | null = null;
+  const skipped: QuizThresholdRule[] = [];
+  for (const r of rules) {
+    if (!r.enabled || !Number.isFinite(r.value) || r.value < QUIZ_THRESHOLD_MIN) continue;
+    if (value < r.value) {
+      next.add(r.id);
+      continue;
+    }
+    // ここへ来た = value >= r.value。再武装済みなら跨いだ瞬間。
+    if (!next.has(r.id)) continue;
+    next.delete(r.id);
+    if (fired === null) fired = r;
+    else skipped.push(r);
+  }
+  return { fired, armed: next, skipped };
+}
+
+/**
+ * 再武装集合の初期化。start / reset / 設定変更のたびに現在値で作り直す。
+ *
+ * **現在値以下のしきい値は armed に入れない**のが要点 — 入れると
+ * 「開始した瞬間に initialValue 未満の行が全部鳴る」ことになる。初期値より下の
+ * 行は「一度下回ってから戻ってきた」ときにだけ鳴る、が正しい挙動。
+ */
+export function initialQuizThresholdArmed(
+  rules: readonly QuizThresholdRule[],
+  value: number
+): Set<string> {
+  const out = new Set<string>();
+  for (const r of rules) {
+    if (!r.enabled || !Number.isFinite(r.value) || r.value < QUIZ_THRESHOLD_MIN) continue;
+    if (value < r.value) out.add(r.id);
+  }
+  return out;
+}
 
 /**
  * 判定ワードの既定。**先頭が投票画面の表示語**(goodLabel/badLabel)になる。
@@ -2188,10 +2347,17 @@ export const QUIZ_PROMPTS_V12: readonly string[] = [
  * 初回の動作確認(▶実演)すらできないため。**リストの中身**の方は既定を直しても保存済みの
  * settings.json には届かない(prompts キーは v0.13.0 以降どの設定も持っている)ので、
  * migrateChallengeQuizPrompts(SETTINGS_VERSION 12)が別途一度だけ配る。
+ * 区間BGM の曲(bgm / voteBgm)も同じ事情で migrateChallengeQuizBgm
+ * (SETTINGS_VERSION 14)が配る。
  */
 export const DEFAULT_QUIZ: QuizConfig = {
   enabled: false,
   rules: [structuredClone(DEFAULT_QUIZ_RULE)],
+  // 数値到達トリガーは**既定で空**。行を1つも配らないのは、ギフト行(giftId が
+  // 空なら何にも一致しない)と違って「無害な既定値」が存在しないため — 数字は
+  // 何を入れても企画次第で鳴ってしまう。旧 settings.json にこのキーは無いので、
+  // 欠損 → [] へ倒れること自体が移行の代わりになる(SETTINGS_VERSION は上げない)。
+  thresholds: [],
   prompts: [...QUIZ_PROMPTS_V12],
   durationSec: 60,
   voteSec: 30,
@@ -2200,21 +2366,29 @@ export const DEFAULT_QUIZ: QuizConfig = {
   badWords: [...DEFAULT_QUIZ_BAD_WORDS],
   // 発動の瞬間に BGM が変わること自体が「お題モードが来る」予告(ユーザー決定)
   // なので、既定から実曲を割り当てる(DEFAULT_ROULETTE_SOUND の bgm:'off' とは
-  // 逆向きの判断 — こちらは曲が鳴らないと仕様が成立しない)。
-  bgm: 'bgm-roulette1',
+  // 逆向きの判断 — こちらは曲が鳴らないと仕様が成立しない)。曲はユーザー指定の
+  // 実素材(2026-08-22)。区間①は**導入の全面カットも含む**('spin' が catch-all)
+  // ので、導入カット中もこの曲が専用素材の焼き込み音声と重なって鳴る。
+  bgm: QUIZ_BGM_CHASE,
   bgmVolume: 70,
-  // ── 区間別BGM(2026-08-22)。**既定はすべて 'keep'** = 前の区間の曲を続ける。
-  // これで設定を触っていないユーザーの挙動は「発動から清算まで1曲」のまま
-  // 1ミリも変わらない(欠損フォールバックが移行の代わりになる条件でもある)。
+  // ── 区間別BGM。②③④は 'keep' = 前の区間の曲を続ける(ユーザー指定)。
+  // つまり発動から「お題考え時」の終わりまで①の曲が1曲通しで鳴り、
+  // **コメント受付(⑤)でだけ専用曲へ切り替わる**。
   revealBgm: QUIZ_BGM_KEEP,
   revealBgmVolume: 70,
   // お題発表準備の尺。既定 5 秒(2026-08-22 ユーザー決定)。0 で区間ごとスキップ。
   prepSec: 5,
   prepBgm: QUIZ_BGM_KEEP,
   prepBgmVolume: 70,
-  thinkBgm: QUIZ_BGM_KEEP,
+  // お題考え時(挑戦ウィンドウ)だけは**既定で無音**(2026-08-22 ユーザー決定)。
+  // ここを 'keep' にすると導入の全面カットから挑戦中までBGMが途切れずに流れ続け、
+  // 「回転が終わってお題に挑戦する時間へ移った」という切り替わりが音で分からない。
+  // 曲を鳴らしたい人は設定画面で選ぶ('off' 以外にする)。
+  thinkBgm: 'off',
   thinkBgmVolume: 70,
-  voteBgm: QUIZ_BGM_KEEP,
+  // コメント受付(投票タイム)だけ専用曲(2026-08-22 ユーザー指定)。
+  // 「考え中」の曲に変わること自体が「投票が始まった」の合図になる。
+  voteBgm: QUIZ_BGM_THINK,
   voteBgmVolume: 70,
   // ── 終了後BGM。尺の既定は 20 秒だが、曲の既定は **'off'** —
   // 出荷 v0.13.0 は投票締切で無音になる仕様だったので、'keep' にすると
@@ -3091,17 +3265,23 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeRouletteHotGifts(
-    migrateChallengeQuizPrompts(
-      migrateChallengeQuizIntro(
-        migrateChallengeRouletteDjGlasses(
-          migrateChallengeTapBoostNebaaru(
-            migrateChallengeStampTriggers(
-              migrateChallengeTapBoostCorgi(
-                migrateChallengeGiftFullCutTriggersV5(
-                  migrateChallengeGiftFullCutTriggers(
-                    migrateChallengeGiftFullCut(
-                      migrateChallengeSeSounds(cfg, fromVersion),
+  return migrateChallengeQuizThinkBgm(
+    migrateChallengeQuizBgm(
+      migrateChallengeRouletteHotGifts(
+        migrateChallengeQuizPrompts(
+          migrateChallengeQuizIntro(
+            migrateChallengeRouletteDjGlasses(
+              migrateChallengeTapBoostNebaaru(
+                migrateChallengeStampTriggers(
+                  migrateChallengeTapBoostCorgi(
+                    migrateChallengeGiftFullCutTriggersV5(
+                      migrateChallengeGiftFullCutTriggers(
+                        migrateChallengeGiftFullCut(
+                          migrateChallengeSeSounds(cfg, fromVersion),
+                          fromVersion
+                        ),
+                        fromVersion
+                      ),
                       fromVersion
                     ),
                     fromVersion
@@ -3251,6 +3431,68 @@ export function migrateChallengeQuizPrompts(
   const p = cfg.quiz.prompts;
   if (p.length !== 1 || p[0] !== QUIZ_PROMPT_SHIPPED_V11) return cfg;
   return { ...cfg, quiz: { ...cfg.quiz, prompts: [...QUIZ_PROMPTS_V12] } };
+}
+
+/**
+ * v14: お題ルーレットの区間BGM を実素材へ寄せ替える(2026-08-22 ユーザー決定)。
+ * 区間①(発動〜**導入の全面カット**〜回転)を「追いかけっこ」、区間⑤(コメント
+ * 受付)を「考え中」にする。②③④は 'keep' のままなので、①の曲が投票開始まで続く。
+ *
+ * **この段だけは現在値を見ずに曲を上書きする。** 他の寄せ替え移行(ねば〜る君・
+ * お題リスト)は「旧既定ちょうどのときだけ」触るが、その条件ではこの変更が
+ * 実運用の設定に届かない — 出荷 v0.14.0 の既定は 'bgm-roulette1' / 'keep' でも、
+ * 実際の settings.json は bgm:'off' / bgmVolume:0(区間①も導入カットも無音)に
+ * 倒してあり、旧既定と一致しないため。「既定の曲を配る」ことがユーザーの指示
+ * そのものなので、一致条件は付けない。世代印が上がるのは1回だけなので、
+ * 移行後に自分で選び直した人には二度と配らない。
+ *
+ * - 触るのは quiz の4キーだけ。revealBgm/prepBgm/thinkBgm の 'keep' も、
+ *   終了後の 'off' も、他機能の設定も一切触らない。
+ * - **音量は 0 のときだけ既定へ戻す** — 曲を配っても音量0では鳴らないので0は
+ *   救うが、自分で 40 等に絞っている人の意思は残す。
+ *
+ * ⚠ validateQuiz の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
+ * ユーザーが選び直した曲がその場で戻る(migrateChallengeQuizIntro と同じ理由)。
+ */
+export function migrateChallengeQuizBgm(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 14) return cfg;
+  const q = cfg.quiz;
+  return {
+    ...cfg,
+    quiz: {
+      ...q,
+      bgm: QUIZ_BGM_CHASE,
+      bgmVolume: q.bgmVolume > 0 ? q.bgmVolume : DEFAULT_QUIZ.bgmVolume,
+      voteBgm: QUIZ_BGM_THINK,
+      voteBgmVolume: q.voteBgmVolume > 0 ? q.voteBgmVolume : DEFAULT_QUIZ.voteBgmVolume,
+    },
+  };
+}
+
+/**
+ * v15: お題考え時(挑戦ウィンドウ)の区間BGM を 'keep' → **'off'** へ寄せ替える
+ * (2026-08-22 ユーザー決定)。v14 で①に実曲を割り当てた結果、'keep' の連鎖で
+ * 導入の全面カットから挑戦中までBGMが鳴りっぱなしになり、「回転が終わって挑戦の
+ * 時間になった」という区切りが音で分からなくなったため。
+ *
+ * v14 と違い**「'keep' ちょうどのときだけ」触る**(本来の寄せ替えの流儀)。v14 が
+ * 無条件上書きだったのは実運用の値が旧既定と一致しなかったからで、今回は v14 が
+ * 配った直後の 'keep' がそのまま残っている = 条件が効くため、自分で曲を選んだ人の
+ * 設定を壊す理由がない。
+ *
+ * ⚠ validateQuiz の中に入れてはいけない(migrateChallengeQuizBgm と同じ理由 —
+ * UI の `cfg.set` も通るので、選び直した曲がその場で消える)。
+ */
+export function migrateChallengeQuizThinkBgm(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 15) return cfg;
+  if (cfg.quiz.thinkBgm !== QUIZ_BGM_KEEP) return cfg;
+  return { ...cfg, quiz: { ...cfg.quiz, thinkBgm: 'off' } };
 }
 
 /**
@@ -4127,9 +4369,29 @@ export function validateQuiz(raw: unknown): QuizConfig {
     }
   }
 
+  // 数値トリガー行。rules と同型(重複・欠損 id は振り直す)だが、**欠損時は
+  // 既定へ倒さず空配列**にする — 既定が [] なので結果は同じだが、「配るものが
+  // 無い」ことを式でも表しておく。
+  const thresholds: QuizThresholdRule[] = [];
+  if (Array.isArray(c.thresholds)) {
+    const seenT = new Set<string>();
+    for (const r of c.thresholds.slice(0, QUIZ_THRESHOLDS_MAX)) {
+      const v = validateQuizThresholdRule(r);
+      const id =
+        v.id !== '' && !seenT.has(v.id)
+          ? v.id
+          : v.id !== ''
+            ? `${v.id}-${thresholds.length}`
+            : `quiz-th-${thresholds.length}`;
+      seenT.add(id);
+      thresholds.push({ ...v, id });
+    }
+  }
+
   return {
     enabled,
     rules,
+    thresholds,
     // お題は欠損時だけ既定(QUIZ_PROMPTS_V12 の28件)へ倒す。明示的な空配列は空のまま —
     // 空だと発動しない(worker 側が不発 + giftDiag)ので破綻はしない。
     prompts: sanitizeStringList(c.prompts, QUIZ_PROMPTS_MAX, QUIZ_PROMPT_LEN_MAX, d.prompts),
@@ -4166,6 +4428,53 @@ export function validateQuiz(raw: unknown): QuizConfig {
       (typeof c.introClip === 'string' && FULL_CUT_CLIP_IDS.includes(c.introClip))
         ? c.introClip
         : d.introClip,
+  };
+}
+
+/**
+ * 数値トリガー1行の検証。validateQuizRule と同じ clamp の流儀。
+ * **既定行が無い**ので、壊れた行は「value を下限へ丸めた無効化しにくい行」ではなく
+ * clamp 済みの行として通す(rules と同じく throw しない)。
+ */
+function validateQuizThresholdRule(raw: unknown): QuizThresholdRule {
+  const r = raw as Partial<QuizThresholdRule> | null | undefined;
+  const fb: QuizThresholdRule = {
+    id: '',
+    label: '',
+    enabled: true,
+    value: QUIZ_THRESHOLD_MIN,
+    flash: true,
+    // 既定は番兵 = 「効果音タブに従う」。**キー欠損がここへ倒れることが移行の代わり**。
+    sound: QUIZ_THRESHOLD_SOUND_SLOT,
+    soundVolume: 100,
+  };
+  if (!r || typeof r !== 'object') return fb;
+  const v =
+    typeof r.value === 'number' && Number.isFinite(r.value)
+      ? Math.min(QUIZ_THRESHOLD_MAX, Math.max(QUIZ_THRESHOLD_MIN, Math.round(r.value)))
+      : fb.value;
+  // 取込み済みカスタム音(custom:<ファイル名>)は素通し。不正な custom(空名・
+  // トラバーサル文字列)と未知 id は既定(番兵)へ — validateRouletteSound の
+  // spinSe と同型で、ファイルの実在はここでは見ない(再生側が無音+警告で扱う)。
+  const sound = isCustomSoundId(r.sound)
+    ? r.sound
+    : typeof r.sound === 'string' &&
+        (r.sound === QUIZ_THRESHOLD_SOUND_SLOT ||
+          r.sound === 'off' ||
+          CHALLENGE_SE_SOUND_IDS.includes(r.sound))
+      ? r.sound
+      : fb.sound;
+  return {
+    id: typeof r.id === 'string' ? r.id.trim() : '',
+    label: typeof r.label === 'string' ? r.label.trim() : '',
+    enabled: r.enabled !== false,
+    value: v,
+    flash: r.flash !== false,
+    sound,
+    soundVolume:
+      typeof r.soundVolume === 'number' && Number.isFinite(r.soundVolume)
+        ? Math.min(100, Math.max(0, Math.round(r.soundVolume)))
+        : fb.soundVolume,
   };
 }
 

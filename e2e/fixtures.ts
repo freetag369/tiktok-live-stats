@@ -50,7 +50,7 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
   const body = {
     // 無いと from=0 とみなされ migrateChallengeConfig が設定を書き換える。
     // SETTINGS_VERSION と同値にしておくこと(古いままだと移行段が走る)。
-    settingsVersion: 12,
+    settingsVersion: 15,
     eulerApiKey: '',
     hostUniqueId: 'e2e-host',
     waitUntilLive: false,

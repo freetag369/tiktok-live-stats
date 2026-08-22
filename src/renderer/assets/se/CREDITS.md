@@ -200,3 +200,47 @@ ffmpeg -i IMAGE/bgm/slot.mp3 -af "aresample=44100" -c:a libvorbis -q:a 4 roulett
 # bgm-roulette1.ogg — スネアロール + ドローン + 心拍(8.0s ループ)
 ffmpeg  -f lavfi -i "aevalsrc=(random(0)-0.5)*exp(-48*mod(t\,0.0625)):s=44100:d=8"  -f lavfi -i "aevalsrc=0.30*sin(2*PI*55*t)+0.17*sin(2*PI*110*t)+0.10*sin(2*PI*164.81*t):s=44100:d=8"  -f lavfi -i "aevalsrc=sin(2*PI*(75-55*mod(t\,0.5))*mod(t\,0.5))*exp(-14*mod(t\,0.5)):s=44100:d=8"  -filter_complex "[0:a]highpass=f=250,lowpass=f=6500,volume=0.9[roll];[1:a]tremolo=f=0.5:d=0.35,volume=0.85[drone];[2:a]lowpass=f=200,volume=1.6[thump];[roll][drone][thump]amix=inputs=3:normalize=0,alimiter=limit=0.9,aformat=sample_fmts=fltp:channel_layouts=stereo[out]"  -map "[out]" -c:a libvorbis -q:a 5 roulette/bgm-roulette1.ogg
 ```
+
+---
+
+# お題ルーレットBGM(`quiz/` サブフォルダ)— 出典が違うので注意
+
+お題ルーレット(`shared/quiz-bgm.ts` の区間別BGM)の**出荷既定2曲**。
+出典は**ユーザー(配信者)提供の素材**で、リポジトリ外の作業フォルダ
+`Sound/追いかけっこキャッハー.mp3` / `Sound/考え中.mp3` から取り込んだ。
+**CC0 ではない** — `band/` の Higgsfield 素材と同じ扱いで、AGPL の
+ソースzip再配布前に権利元の許諾を必ず確認すること。
+
+取り込み日 2026-08-22。カタログとループ/フェード再生は
+`src/renderer/lib/bgm.ts` の `ROULETTE_BGM`(お題専用の配列は作らない —
+回転中BGMの選択肢としても選べるようにするため)。
+
+| ファイル | 区間 | 実尺 | 取り込み後の音量 | カタログ gain |
+|---|---|---|---|---|
+| bgm-quiz-chase.mp3 | ①ルーレット時(発動〜**導入の全面カット**〜回転)。②③④は `keep` なので投票開始まで続く | 132.28 秒 | -8.9 LUFS / TP +0.6dB(**無加工コピー**) | 0.6 |
+| bgm-quiz-think.mp3 | ⑤コメント受付(投票タイム) | 109.19 秒 | -14.1 LUFS / TP -1.3dB(+5.2dB 増幅済み) | 1 |
+
+- **gain の根拠**: 基準は `bgm-roulette1`(-12.8 LUFS × gain 0.85 = 実効 -14.2 LUFS)。
+  chase は素材が熱いので 0.6 で実効 -13.3 LUFS、think は増幅済みなので gain 1 で -14.1 LUFS。
+  両者の差は 0.8dB で、区間が切り替わっても音量段差が聞こえない。
+- **think だけ増幅してあるのは `reel-stop` と同じ事情**: 素材が -19.2 LUFS と 9dB 以上
+  小さく、カタログの `gain`(≤1)は減衰しかできないので後から取り戻せない。
+  ピークは alimiter で -1.5dBFS へ抑えてから mp3(VBR q4)化した。
+- **ループの継ぎ目は問題にならない**ので mp3 のままでよい(`roulette/` を ogg に
+  している理由の対象外)。①は最長でも 8+18+4+5+60 ≒ 95 秒、⑤は 30 秒で、
+  どちらも実尺の中に収まって一周しない。
+- 差し替え方: 同名の mp3 で上書きするだけ(コード変更不要)。音量が大きく違う
+  素材にするときは、この表の実測値を測り直して `bgm.ts` の `gain` を合わせること。
+- 既定の割り当ては `src/shared/challenge.ts` の `DEFAULT_QUIZ`(`bgm` / `voteBgm`)。
+  保存済み settings.json へは `migrateChallengeQuizBgm`(SETTINGS_VERSION 14)が
+  一度だけ配る。
+
+取り込みコマンド(再現用。元ファイルはリポジトリ外の `Sound/`):
+
+```
+# bgm-quiz-chase.mp3 — 無加工コピー(音圧調整はカタログの gain 0.6 側で行う)
+cp "Sound/追いかけっこキャッハー.mp3" quiz/bgm-quiz-chase.mp3
+
+# bgm-quiz-think.mp3 — mean -22.6dB → +5.2dB 増幅、ピークは -1.5dBFS で頭打ち
+ffmpeg -i "Sound/考え中.mp3" -af "volume=5.2dB,alimiter=limit=0.8414:attack=5:release=60:level=disabled,aformat=sample_fmts=fltp" -ar 44100 -c:a libmp3lame -q:a 4 quiz/bgm-quiz-think.mp3
+```

@@ -74,11 +74,16 @@ describe('バリア方式の配線(armed 監視が唯一の開始入口)', () =>
     // realIntroMs が「URL が解けたときだけ introMs」になっていないと、素材が無い
     // ときに黒画面のまま preMs だけ進んで窓の開始が 8 秒ズレる。
     expect(body).toContain('const realIntroMs = introUrl !== null');
-    // 前置きの総尺には**お題発表準備**(prepMs)も入る。落とすと準備表示の途中で
-    // 制限時間が始まる(worker が同じ式で窓の頭を決めているため)。
+    // 前置きの総尺には**数値到達の告知**(announceLeftMs)と**お題発表準備**(prepMs)も
+    // 入る。prepMs を落とすと準備表示の途中で制限時間が始まり、announceLeftMs を
+    // 落とすと告知の上に導入カットが被さる(worker が同じ式で窓の頭を決めている)。
     expect(body).toContain(
-      'const totalMs = realIntroMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + prepMs;'
+      'const totalMs = announceLeftMs + realIntroMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + prepMs;'
     );
+    // 告知は**残り時間**で待つ — 演出が渋滞して先に見せ切っていたら 0 になり、
+    // 待たずに導入へ入る(「告知だけ先に割り込む」= 2026-08-22 ユーザー決定)。
+    expect(body).toContain('Math.max(0, e.quizAnnounceEndsAtMs - Date.now())');
+    expect(body).toContain('const introAtMs = announceLeftMs + realIntroMs;');
     // 尺は cfg 直読みではなく effect が権威(cfg は 120 秒ポーリングで古くなりうる)。
     expect(body).toContain('const prepMs = Math.max(0, e.quizPrepMs ?? 0);');
     expect(body).toContain('preMs: totalMs');
@@ -147,6 +152,70 @@ describe('DOM 順と CSS(z-index 禁止の恒久ルール)', () => {
   });
 });
 
+describe('数値到達の告知(2026-08-22 — 「告知だけ先に割り込む」)', () => {
+  it('告知は**ホールドを取らない常設オーバーレイ** — 舞台にもドレインにも載せない', () => {
+    // quizHold / fxHoldDeadlines に載せると、告知の 4 秒だけ裏のドレインが止まって
+    // 「割り込む」が「渋滞をさらに伸ばす」に反転する(窓・投票と同じ扱いにすること)。
+    const at = view.indexOf('const quizAnnounceOn =');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const body = view.slice(at, at + 1200);
+    expect(body).not.toContain('quizHold.current = true');
+    expect(body).not.toContain('fxHoldDeadlines');
+    // 生き死には worker の絶対時刻だけ(モニター側にタイマーを持たない)。
+    expect(body).toContain('quiz.announceUntilMs != null && quizNowMs < quiz.announceUntilMs');
+  });
+
+  it('告知は .fx-layer の中・**残り数のミラーより前**(数字が最前の例外を守る)', () => {
+    const announce = view.indexOf('quiz-screen quiz-threshold');
+    // ミラーは className をテンプレートで組む(`${mirrorCls}`)ので、
+    // 'count-mirror' の文字列では引けない — **描画の入口**で位置を取る。
+    const mirror = view.indexOf('{mirrorOn ? (');
+    expect(announce).toBeGreaterThanOrEqual(0);
+    expect(mirror).toBeGreaterThanOrEqual(0);
+    // DOM 順が重なり順(z-index は付けない規約)。告知が後ろに来ると残り数の
+    // ミラーを覆ってしまい、「数字が最前」(2026-08-18 ユーザー決定)が壊れる。
+    expect(announce).toBeLessThan(mirror);
+  });
+
+  it('回転の幕(.quiz-spin)より前に描く = 告知 → 回転の順で重ならない', () => {
+    const announce = view.indexOf('quiz-screen quiz-threshold');
+    const spin = view.indexOf('quiz-screen quiz-spin');
+    expect(announce).toBeLessThan(spin);
+  });
+
+  it('初出で1回だけ鳴らす — 音は**行ごとの指定**(新しい ChallengeSeSlot は作らない)', () => {
+    const at = view.indexOf('const quizAnnounceKey =');
+    const body = view.slice(at, at + 1600);
+    // 2026-08-23: 行が音の id を直接持つ形にした(QuizThresholdRule.sound)。
+    // 番兵のときだけ従来どおり「効果音」タブのルーレット確定スロットを流用する。
+    expect(body).toContain('QUIZ_THRESHOLD_SOUND_SLOT');
+    expect(body).toContain('playSeSlot(QUIZ_THRESHOLD_FALLBACK_SLOT)');
+    expect(body).toContain('playSeAny(');
+    // 'off' は無音(既定音へフォールバックしない — 選んでいない音を鳴らさない)。
+    expect(body).toContain("quizAnnounceSound !== 'off'");
+    // **worker が焼いた値を読む**(cfg を引き直すと設定変更直後の1発が古い音になる)。
+    expect(body).toContain('quiz?.announceSound');
+    // key は満了時刻。同じ告知で 250ms tick のたびに鳴り直さないための同一性。
+    expect(body).toContain('}, [quizAnnounceKey]);');
+  });
+
+  it('CSS: 告知は .quiz-screen の幕を流用し、数字と添え字を別要素で組む', () => {
+    expect(css).toContain('.quiz-screen.quiz-threshold .qz-label');
+    expect(css).toContain('.quiz-screen .qz-th-num');
+    expect(css).toContain('.quiz-screen .qz-th-suffix');
+    // reduced-motion は .quiz-screen ごと display:none にする既存ブロックが覆う。
+    const rm = css.indexOf('@media (prefers-reduced-motion: reduce) {', css.indexOf('.qz-th-num'));
+    expect(css.slice(rm, rm + 400)).toContain('.quiz-screen,');
+  });
+
+  it('文言の権威は shared に1本(モニターは組むだけ)', () => {
+    expect(view).toContain('QUIZ_THRESHOLD_SUFFIX');
+    expect(view).toContain('quizThresholdNum(quiz.announceThreshold ?? 0)');
+    // 「を超えました」をモニターに直書きしない(設定画面のプレビューとズレる)。
+    expect(view).not.toContain("'を超えました");
+  });
+});
+
 describe('前置きのタイマー予約(オフセットの基準を取り違えない)', () => {
   it('回転コマは**コールバック相対**で予約する — realIntroMs を足すと二重に遅延する', () => {
     // push(realIntroMs, () => { … push(?, …) }) の内側は既に realIntroMs 後に
@@ -156,14 +225,47 @@ describe('前置きのタイマー予約(オフセットの基準を取り違え
     const at = view.indexOf('function startQuizFx(');
     expect(at).toBeGreaterThanOrEqual(0);
     const body = view.slice(at, view.indexOf('function finishQuizIntro(', at));
-    expect(body).toContain('for (const t of ticks) {\n        push(t.atMs, () => {');
+    expect(body).toContain('push(t.atMs, () => {');
     expect(body).not.toContain('push(realIntroMs + t.atMs');
+    expect(body).not.toContain('push(introAtMs + t.atMs');
+  });
+
+  /**
+   * 2026-08-23: 減速拍(crawl)の cue は**全コマ**に付くようになった
+   * (5 秒のあいだ見得を出しっぱなしにするため)。素直に cue で分岐すると
+   * roulette-hype が 9 連発するので、**変化点だけ**鳴らす。
+   */
+  it('回転の効果音は cue の**変化点**だけ — 減速拍で同じ音を連発しない', () => {
+    const at = view.indexOf('function startQuizFx(');
+    const body = view.slice(at, view.indexOf('function finishQuizIntro(', at));
+    expect(body).toContain("t.cue !== ticks[i - 1]?.cue");
+    expect(body).toContain('if (!fresh) return;');
+    // 静止拍(settle)は無音 — 1.4 秒後の決定パンチが roulette-hit を鳴らす。
+    expect(body).not.toContain("t.cue === 'settle'");
+  });
+
+  /**
+   * 2026-08-23 ユーザー指定「お題発表後に出る N 浮上はいらない」。
+   * 前置きを最後まで見せた経路では帯を出さない。**フォールバック経路の
+   * pushFloat は残す** — 演出を出せなかったときはバナーが唯一の告知だから。
+   */
+  it('前置きを見せ切った経路では発動バナー(±N 浮上)を出さない', () => {
+    const at = view.indexOf('function finishQuizIntro(');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const body = view.slice(at, view.indexOf('function abortQuizFx(', at));
+    expect(body).not.toContain('pushFloat(');
+    // 舞台の再開はバナーと無関係なので、こちらは残っていること。
+    expect(body).toContain('scheduleDrain();');
+    // フォールバック(演出なし)の告知バナーは生きている。
+    expect(view).toContain("pushFloat(quizAnnounceNode(e), 'bad banner-quiz', 'quiz-announce')");
   });
 
   it('決定表示と前置き終了は**同期スコープ**なので絶対オフセットのまま', () => {
     const at = view.indexOf('function startQuizFx(');
     const body = view.slice(at, view.indexOf('function finishQuizIntro(', at));
-    expect(body).toContain('push(realIntroMs + QUIZ_SPIN_MS, () => {');
+    // 基準は introAtMs(= 告知 + 導入カット)。realIntroMs のままだと、数値到達で
+    // 告知が入ったぶんだけ決定表示が回転に食い込む。
+    expect(body).toContain('push(introAtMs + QUIZ_SPIN_MS, () => {');
     expect(body).toContain('push(totalMs, () => finishQuizIntro());');
   });
 });
@@ -256,7 +358,7 @@ describe('区間別BGM と終了後BGM の配線', () => {
     const at = view.indexOf('function startQuizFx(');
     const body = view.slice(at, view.indexOf('function finishQuizIntro(', at));
     // 回転コマだけがコールバック相対。準備段は同期スコープなので絶対オフセット。
-    expect(body).toContain('push(realIntroMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS, () => {');
+    expect(body).toContain('push(introAtMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS, () => {');
     expect(body).toContain('if (prepMs > 0) {');
     // 前置きの後片付けで必ず畳む(孤児の準備画面を残さない)。
     for (const fn of ['function finishQuizIntro(', 'function abortQuizFx(']) {
