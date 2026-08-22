@@ -359,6 +359,8 @@ export const ROULETTE_PATTERN_TIMING: Record<RoulettePattern | 'fast', RouletteP
   heartbday: ultraTiming(),
   heartbloom: ultraTiming(),
   djglasses: ultraTiming(),
+  unicorngift: ultraTiming(),
+  bunnydj: ultraTiming(),
   fast: { nearAt: 1, quietAt: 1, kickAts: [], stepAts: [] },
 };
 

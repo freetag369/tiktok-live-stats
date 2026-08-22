@@ -50,7 +50,7 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
   const body = {
     // 無いと from=0 とみなされ migrateChallengeConfig が設定を書き換える。
     // SETTINGS_VERSION と同値にしておくこと(古いままだと移行段が走る)。
-    settingsVersion: 10,
+    settingsVersion: 12,
     eulerApiKey: '',
     hostUniqueId: 'e2e-host',
     waitUntilLive: false,
@@ -112,6 +112,11 @@ function buildEnv(): Record<string, string> {
     if (k === 'PORTABLE_EXECUTABLE_DIR') continue;
     // dev サーバの取り違え防止(out/ を起動する前提)。
     if (k === 'ELECTRON_RENDERER_URL') continue;
+    // 色制御はアプリに意味がなく、NO_COLOR と FORCE_COLOR が両方届くと
+    // Node 22 の worker が起動時警告を stderr へ吐く — reportWorkerLine が
+    // error として診断リングへ積み、diagErrorsSince の「エラーゼロ」検査が
+    // 偽陽性で落ちる(NO_COLOR=1 のシェル + npx の FORCE_COLOR 注入で実際に踏んだ)。
+    if (k === 'NO_COLOR' || k === 'FORCE_COLOR') continue;
     out[k] = v;
   }
   out.ELECTRON_ENABLE_LOGGING = '1';

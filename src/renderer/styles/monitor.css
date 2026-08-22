@@ -153,7 +153,12 @@ body {
 }
 
 .title-banner.clear {
-  animation: titleglow 1.2s ease-in-out infinite alternate;
+  /* steps の時間量子化 — text-shadow(124px 文字にぼかし 90px)はコンポジタで
+     補間できず、連続補間だとクリア後ずっと毎フレーム再ペイントが走る。
+     150ms 刻みの明滅なら「輝きが揺れる」意匠のまま負荷は 1/9。
+     jump-none 必須 — 既定(jump-end)は alternate と組むと 100% キー
+     (金の最大グロー)が一度も描画されず、ピークが 7/8 ブレンドで頭打ちになる。 */
+  animation: titleglow 1.2s steps(8, jump-none) infinite alternate;
 }
 
 @keyframes titleglow {
@@ -467,14 +472,22 @@ body {
  * 桁数は可変なので nth-child のスタガは使わず全桁同時に動かす。
  * グロー(filter)は .seg-digit 集約に合わせて segdigitflash 側で撃つ。
  */
+/*
+ * 色とグローだけ steps(3) の時間量子化(2026-08-22)。segdigitflash は
+ * drop-shadow のぼかし半径、segflash は最大42ポリゴンの fill をアニメする —
+ * どちらもコンポジタで補間できず、ease-out だと着弾のたび 280ms 間ずっと
+ * 桁の再ラスタが毎フレーム走る。段の境界は 2 本で完全に揃い(同尺・同 steps)、
+ * 動き(segjolt = transform)は連続のままコンポジタで 60fps 出るので、
+ * 離散化はジョルトの陰に隠れる。目視で段が見えたら steps(4〜5) へ。
+ */
 .countdown.punch-strike .seg-digit {
   animation:
     segjolt 380ms cubic-bezier(0.2, 1.5, 0.4, 1),
-    segdigitflash 280ms ease-out;
+    segdigitflash 280ms steps(3);
 }
 
 .countdown.punch-strike .seg.on {
-  animation: segflash 280ms ease-out;
+  animation: segflash 280ms steps(3);
 }
 
 @keyframes segjolt {
@@ -620,6 +633,13 @@ body {
    */
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
   overflow: hidden;
+  /*
+   * 自前レイヤへ隔離する(translateZ はスタック順・見た目に影響しない)。
+   * width transition はレイアウト誘発で、いいね流入中は実質常時動いている —
+   * レイヤが無いと box-shadow グロー込みの再ペイントがトラック・ラベル
+   * (9連 text-shadow)まで巻き込む。隔離後は自レイヤの再ラスタだけで済む。
+   */
+  transform: translateZ(0);
 }
 
 /*
@@ -670,7 +690,8 @@ body {
   width: 38px;
   height: 38px;
   border-radius: 50%;
-  transform: translate(-50%, -50%);
+  /* translateZ は .lg-fill と同じレイヤ隔離(lgpulse 停止中=data-empty でも維持)。 */
+  transform: translate(-50%, -50%) translateZ(0);
   background: radial-gradient(circle, #fff 0%, rgba(255, 160, 205, 0.9) 40%, transparent 72%);
   transition: left 0.4s cubic-bezier(0.22, 1, 0.36, 1);
   animation: lgpulse 1.2s ease-in-out infinite;
@@ -904,24 +925,52 @@ body {
   }
 }
 
-/* charge: 全点灯で脈動 — MonitorView の2段着弾(弾の発射待ち)と重なる時間帯 */
+/*
+ * charge: 全点灯で脈動 — MonitorView の2段着弾(弾の発射待ち)と重なる時間帯。
+ *
+ * box-shadow を直接アニメすると毎フレーム再描画になるので、ピークの強グローを
+ * 焼き付けた疑似要素の opacity だけを脈動させる(確定ハロー .roulette-panel::after
+ * と同じ手口)。谷 = 基底の 16px 影そのまま、ピーク = 基底影+焼き込み 30px 影の
+ * 合成で、補間版との差は並置比較レベル。transform の scale は本体に残す —
+ * ::before は inset:0 なので一緒に拡大され、実効グロー径も従来と一致する。
+ */
+.lgs-dot::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow:
+    0 0 30px rgba(61, 255, 156, 1),
+    inset 0 0 0 2px rgba(232, 255, 243, 0.9);
+  opacity: 0;
+  pointer-events: none;
+}
+
 .lg-stock[data-sphase='charge'] .lgs-dot.on {
   animation: lgs-charge 500ms ease-in-out infinite;
+}
+
+.lg-stock[data-sphase='charge'] .lgs-dot.on::before {
+  animation: lgs-charge-glow 500ms ease-in-out infinite;
 }
 
 @keyframes lgs-charge {
   0%,
   100% {
     transform: scale(1);
-    box-shadow:
-      0 0 16px rgba(61, 255, 156, 0.85),
-      inset 0 0 0 2px rgba(184, 255, 217, 0.6);
   }
   50% {
     transform: scale(1.25);
-    box-shadow:
-      0 0 30px rgba(61, 255, 156, 1),
-      inset 0 0 0 2px rgba(232, 255, 243, 0.9);
+  }
+}
+
+@keyframes lgs-charge-glow {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
@@ -2133,7 +2182,14 @@ body {
     0 top,
     calc(15px * var(--float-scale)) bottom;
   filter: drop-shadow(0 0 calc(4px * var(--float-scale)) var(--fl-lamp));
-  animation: float-lamp-chase 900ms linear infinite;
+  /*
+   * steps(6) の時間量子化 — background-position はコンポジタで補間できず、
+   * linear だと毎フレーム(60Hz)このタイル+drop-shadow の再ペイントが走る。
+   * 実物の電飾は離散点滅なので 150ms 刻み(1周期=玉間隔 30px を 5px ずつ)で
+   * 意匠は変わらず、再ラスタは 1/9 に落ちる。0%→100% がちょうど1周期なので
+   * steps でもループの継ぎ目は出ない。
+   */
+  animation: float-lamp-chase 900ms steps(6) infinite;
 }
 
 @keyframes float-lamp-chase {
@@ -2144,7 +2200,9 @@ body {
   }
 }
 
-/* 出現直後に一度だけ走る斜めのシャイン(メッキの照り返し)。 */
+/* 出現直後に一度だけ走る斜めのシャイン(メッキの照り返し)。
+   移動は left ではなく transform で行う — left はレイアウト誘発で毎フレーム
+   layout+paint になる。-45% → 115%(親幅 160%)は自幅 38% 基準で 421.05%。 */
 .float::after {
   content: '';
   position: absolute;
@@ -2161,19 +2219,19 @@ body {
     rgba(255, 255, 255, 0.22) 60%,
     transparent
   );
-  transform: skewX(-16deg);
+  transform: translateX(0) skewX(-16deg);
   animation: float-shine 1.6s ease-out forwards;
 }
 
 @keyframes float-shine {
   0% {
-    left: -45%;
+    transform: translateX(0) skewX(-16deg);
   }
   38% {
-    left: 115%;
+    transform: translateX(421.05%) skewX(-16deg);
   }
   100% {
-    left: 115%;
+    transform: translateX(421.05%) skewX(-16deg);
   }
 }
 
@@ -2855,6 +2913,11 @@ body {
  * .rl-p-djglasses     【超激アツ・激熱確定専用】DJメガネの動画4本。ターンテーブル →
  *                   ミラーボール → イコライザー過負荷 → スピーカーの一撃。
  *                   通常のパターン選択には出ない(dto の ROULETTE_HOT_ONLY_PATTERNS)
+ * .rl-p-unicorngift   【超激アツ・激熱確定専用】ユニコーンの動画4本。虹の星雲からの突進 →
+ *                   角のチャージ砲 → 虹の衝撃波 → たてがみの渦から頭突き。
+ *                   通常パターンの .rl-p-unicorn(一角獣)とは別物
+ * .rl-p-bunnydj       【超激アツ・激熱確定専用】バニーDJの動画4本。ターンテーブル →
+ *                   ミラーボール → イコライザー過負荷 → スピーカーの一撃
  * .rl-p-fast        短縮スピン(16 本目以降・合算 effect)。段は入れず単調に減速する(900ms に保持や
  *                   フェイク停止は入らず、入れても「止まりかけて再加速」になるだけ)
  *
@@ -2966,38 +3029,35 @@ body {
   0% {
     opacity: 0;
     transform: scale(1.012);
-    filter: blur(0);
   }
   100% {
     opacity: 0.96;
     transform: scale(1);
-    filter: blur(0);
   }
 }
 /*
  * 一撃のあとを「静止画が薄くなる」ではなく「絵ごと手前へ抜けて散る」に見せる。
  * 素材はウィンドウ実尺ちょうどなので最終フレームで必ず静止する — その静止を
- * 隠すのが scale と blur の仕事(動きが続いて見えるとフリーズに見えない)。
- * blur は後半(45%以降)だけに乗せる: 全画面 1280×720 のラスタ負荷はここに
- * 集中するので、**OBS でコマ落ちしたら最初に落とすのは blur**、次に scale。
- * 不透明度の傾きだけは絶対に触らないこと(それが今回の修正の本体)。
- * 拡大は blur のエッジ滲みが画面端に出るのも同時に防いでいる。
+ * 隠すのが scale の仕事(動きが続いて見えるとフリーズに見えない)。
+ * かつては終盤に blur も乗せていたが、全画面 1280×720 の filter は退場の
+ * 480ms 間ずっとレンダサーフェス+毎フレームのガウス処理を強いる — ここの
+ * コメント自身が「OBS でコマ落ちしたら最初に落とすのは blur」と認めていた
+ * 縮退を恒久化した(2026-08-22)。opacity は 0.44 まで落ちた後半にしか
+ * 効いていなかったので知覚差はほぼ無い。
+ * **不透明度の傾きだけは絶対に触らないこと**(rl-clip 復旧修正の本体)。
  */
 @keyframes rl-clip-out {
   0% {
     opacity: 0.96;
     transform: scale(1);
-    filter: blur(0);
   }
   45% {
     opacity: 0.44;
     transform: scale(1.024);
-    filter: blur(0);
   }
   100% {
     opacity: 0;
     transform: scale(1.06);
-    filter: blur(6px);
   }
 }
 
@@ -3227,11 +3287,15 @@ body {
     0 top,
     13px bottom;
   /* チェイス + 色サイクル(パチンコの多色電飾)。hue-rotate は基準の金色ごと
-     回すので、drop-shadow を各キーフレームへ書かず1本の filter に同居させる。 */
+     回すので、drop-shadow を各キーフレームへ書かず1本の filter に同居させる。
+     steps の時間量子化は .float::before と同じ理由 — background-position と
+     filter はコンポジタで補間できず、linear だと走行中(6〜12秒)ずっと毎フレーム
+     再ペイント+フィルタ再評価になる。チェイスは 133ms 刻み、色サイクルは
+     200ms 刻み(≒26°)で「色がパッと切り替わる」電飾の意匠のまま。 */
   filter: drop-shadow(0 0 4px var(--rl-lamp, #ffd75e));
   animation:
-    rl-lamp-chase 800ms linear infinite,
-    rl-lamp-disco 2.8s linear infinite;
+    rl-lamp-chase 800ms steps(6) infinite,
+    rl-lamp-disco 2.8s steps(14) infinite;
 }
 
 @keyframes rl-lamp-chase {
@@ -3367,26 +3431,41 @@ body {
   inset: 0;
   overflow: hidden;
   transform-origin: 50% 50%;
-  animation: rl-zoom var(--rl-ms) linear both;
+  /*
+   * transform(rl-zoom)と filter(rl-zoom-focus)を別アニメに割る。
+   * 1本のとき blur(0) が fill both で残り続け、ピントが合った後もスピン全尺で
+   * filter サーフェスを通っていた。focus 側は fill 無し・尺 = 全体の 47% —
+   * 終了と同時に filter プロパティ自体が消え(blur(0) → none は視覚差ゼロ)、
+   * 以後は transform だけのコンポジタ完結になる。
+   * 0.47 = veil 閉鎖(46%)の直後にピントが合う、の同期は従来のまま。
+   */
+  animation:
+    rl-zoom var(--rl-ms) linear both,
+    rl-zoom-focus calc(var(--rl-ms) * 0.47) linear;
 }
 
 @keyframes rl-zoom {
   0% {
-    filter: blur(2.6px) saturate(0.78);
     transform: scale(1.006);
   }
-  /* 47% = veil 閉鎖(46%)の直後にピントが合う、の同期は従来のまま。 */
   47% {
-    filter: blur(0) saturate(1);
     transform: scale(1.012);
   }
   86% {
-    filter: blur(0) saturate(1);
     transform: scale(1.03);
   }
   100% {
-    filter: blur(0) saturate(1);
     transform: scale(1.05);
+  }
+}
+
+/* 序盤のピンぼけ(数字を潰して先読みを封じる)。終端 = blur(0) で消滅する。 */
+@keyframes rl-zoom-focus {
+  0% {
+    filter: blur(2.6px) saturate(0.78);
+  }
+  100% {
+    filter: blur(0) saturate(1);
   }
 }
 
@@ -3511,7 +3590,9 @@ body {
 .rl-p-hearttouch .roulette-reel,
 .rl-p-heartbday .roulette-reel,
 .rl-p-heartbloom .roulette-reel,
-.rl-p-djglasses .roulette-reel {
+.rl-p-djglasses .roulette-reel,
+.rl-p-unicorngift .roulette-reel,
+.rl-p-bunnydj .roulette-reel {
   animation-name: rl-run-ultra;
 }
 
@@ -5768,10 +5849,12 @@ body {
     0 4px 0 rgba(90, 24, 0, 0.8);
 }
 
-/* 回転中: ドラムロールの微振動+滲み。 */
+/* 回転中: ドラムロールの微振動。かつての blur(0.6px) は外した — roll 中は
+   rAF が毎フレーム textContent を書き換えるため再ペイントは不可避で、その
+   1回ごとに 190px 数字のガウス処理まで払っていた。滲み感は text-shadow が
+   既に担っており、±3px ジッタと桁回転の最中の 0.6px は知覚できない。 */
 .roll .boost-settle-amt {
   animation: boost-settle-jitter 120ms steps(2) infinite;
-  filter: blur(0.6px);
 }
 
 @keyframes boost-settle-jitter {
@@ -6213,10 +6296,9 @@ body {
   text-shadow: 0 0 14px rgba(255, 80, 80, 0.8);
 }
 
-/* 回転中: ドラムロールの微振動+滲み(.boost-settle と同じ手口)。 */
+/* 回転中: ドラムロールの微振動(.boost-settle と同じ手口 — blur を外した理由も同じ)。 */
 .revolution-settle.roll .rs-amt {
   animation: boost-settle-jitter 120ms steps(2) infinite;
-  filter: blur(0.6px);
 }
 
 /* 確定: パンチ。 */
@@ -6305,13 +6387,79 @@ body {
 }
 
 /*
- * お題ルーレット(quiz)— 回転・決定・挑戦ウィンドウ・投票・結果発表。
+ * お題ルーレット(quiz)— 回転・決定・準備・挑戦ウィンドウ・投票・結果発表。
  * すべて fx-layer(z-index:50)の中・DOM 順で後方 = 不透明カットイン動画より
  * 必ず手前。z-index は付けない(恒久ルール — fx-backdrop.spec.ts が凍結)。
- * 配色は「お題=紫系」— 革命(赤)・応援(緑)と一目で見分ける。
+ *
+ * 【2026-08-22 全面和風リニューアル(ユーザー決定)】
+ * 旧配色は「お題=紫系」だったが、寄席(笑点)の高座に寄せて**朱赤+金**へ全面差し替え。
+ * 革命(赤)と色域は近いが、革命は全面が赤一色の「戦」の絵、こちらは金屏風の地に
+ * 緞帳・提灯・座布団という「寄席」の絵なので、役物と動きで区別が付く。
+ * 役物はすべて CSS と DOM で作る(動画素材を持たない)。
+ *
+ * 【お題の文字の大きさは CSS では決まらない】本文の font-size は
+ * shared/quiz-type.ts の quizPromptFontPx が文字数から逆算し、MonitorView が
+ * インライン style で渡す。ここに書く font-size は**関数を通らない経路の据わり値**で、
+ * 実際の表示はほぼ常にインライン側が勝つ。ステージは固定 px 設計なので
+ * clamp() / vw / vh は使わない(monitor.css 全体の恒久ルール)。
+ *
+ * 【お題は「めくり」で出す】幕の上の発光文字ではなく、生成りの紙に墨の本文。
+ * 寄席のめくりの見立てであると同時に、配信の実測でこちらのほうが圧倒的に読める。
+ * padding を持つのは本文の要素そのもの(ラッパを足さない)— box-sizing は
+ * monitor.css 冒頭の * で border-box なので、max-width から padding を引いた値が
+ * quizPromptFontPx に渡す maxW になる。
  */
 
-/* 回転・決定の共通全面(暗幕込み)。読ませる演出なので不透明寄りの濃い幕。 */
+/*
+ * 毛筆(佑字 肅 / Yuji Syuku)。SIL OFL 1.1 — 出典と条文は assets/fonts/CREDITS.md。
+ * **同梱が必須**: monitor.html の CSP は font-src 'self' なので、Google Fonts など
+ * 外部から読むことはできない。ここだけが Web フォントの読み口。
+ *
+ * font-display: swap — 8.4MB の TTF は最初の1回だけ解析に数百 ms かかる。block に
+ * すると回転の頭が空白になるので、その間は OS の明朝で出して差し替える。
+ * モニター窓は開きっぱなしなので、実際に間に合わないのは初回の1発だけ。
+ */
+@font-face {
+  font-family: 'Yuji Syuku';
+  src: url('../assets/fonts/YujiSyuku-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 5枚に共通の和風トークン。tokens.css は触らない(--font/--num は全画面が連動する)。 */
+.quiz-screen,
+.quiz-window-overlay,
+.quiz-vote-overlay,
+.quiz-settle {
+  /* 墨(めくりの文字)と生成り(めくりの紙)。 */
+  --qz-sumi: #150b03;
+  --qz-washi: #fbf2da;
+  --qz-washi-2: #ecdcb6;
+  /* 金は役物の縁取り、朱は緞帳と幕。 */
+  --qz-gold: #ffcf4a;
+  --qz-gold-deep: #a97a12;
+  --qz-crimson: #8c0f14;
+  /* 幕の上に出す文字(見出し・判定)。金がかった白。 */
+  --qz-ink: #fff6e0;
+  /*
+   * 見出し・決め字と、めくりの本文。**どちらも同じ毛筆**にしてある —
+   * 笑点のめくりは本文そのものが毛筆なので、本文だけ明朝にすると和風が半分になる。
+   * 同梱が効かない環境(font-display の入れ替わり前・素材欠損)では OS の明朝へ落ちる。
+   * 太明朝(Shippori Mincho B1)を足す余地はあるが、+15MB に対して見た目の差が
+   * 小さかったので入れていない(必要になったら @font-face を1本足すだけ)。
+   */
+  --qz-brush: 'Yuji Syuku', 'Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', 'MS Mincho', serif;
+  --qz-mincho: 'Yuji Syuku', 'Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', 'MS Mincho', serif;
+  /* めくりの縁(墨の細枠 + 金の太枠 + 落ち影)。4箇所で使い回す。 */
+  --qz-fuda-edge: inset 0 0 0 3px rgba(28, 14, 4, 0.9), inset 0 0 0 7px var(--qz-gold),
+    0 22px 54px rgba(0, 0, 0, 0.62);
+}
+
+/*
+ * 回転・決定・準備の共通全面。金屏風(縦の継ぎ目)+ 中央の後光 + 朱の地。
+ * 読ませる演出なので不透明寄り(occlusionOfCutin('quiz') = 'opaque' と対)。
+ */
 .quiz-screen {
   position: absolute;
   inset: 0;
@@ -6319,46 +6467,77 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 26px;
-  padding: 0 28px;
+  gap: 20px;
+  padding: 0 20px;
+  overflow: hidden;
   pointer-events: none;
-  background: radial-gradient(ellipse at 50% 44%, rgba(44, 14, 74, 0.94), rgba(8, 3, 16, 0.97) 72%);
+  /*
+   * 金屏風。**縦の継ぎ目をはっきり出す**のが要点 — 薄いと「茶色い幕」にしか
+   * 見えず寄席にならない(実描画で確認して 0.10 → 0.26 まで上げた)。
+   * それでもめくり(#fbf2da)より十分暗いので、札は変わらず浮いて見える。
+   */
+  background:
+    radial-gradient(56% 40% at 50% 42%, rgba(255, 226, 150, 0.5), transparent 74%),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 206, 104, 0.26) 0 40px,
+      rgba(146, 84, 12, 0.32) 40px 44px
+    ),
+    linear-gradient(180deg, #6b2410 0%, #3a0d08 60%, #1a0403 100%);
   animation: boost-overlay-in 260ms ease-out both;
 }
 
+/* 見出し(「大喜利」「お題 けってい!」)。毛筆・金・木札の下地。 */
 .quiz-screen .qz-label {
-  font-family: var(--font);
-  font-size: 30px;
+  padding: 6px 30px 9px;
+  border-radius: 4px;
+  font-family: var(--qz-brush);
+  /*
+   * 40px / 0.2em は「8文字の見出しが1行に収まる」上限
+   * (8 × 40 × 1.2 + padding 60 = 444px < 540px のステージ幅)。
+   * 46px / 0.3em にしたら「準備してください」が2行に折れた — 実描画で確認済み。
+   * 見出しを長くするときはこの計算をやり直すこと。
+   */
+  font-size: 40px;
   font-weight: 700;
-  letter-spacing: 0.22em;
-  color: #d9c4ff;
-  text-shadow: 0 0 18px rgba(150, 80, 255, 0.85);
+  letter-spacing: 0.2em;
+  white-space: nowrap;
+  /* letter-spacing は右端にも入るので、その分を戻して中央に見せる。 */
+  text-indent: 0.2em;
+  color: var(--qz-gold);
+  background: linear-gradient(180deg, rgba(24, 8, 2, 0.86), rgba(12, 3, 1, 0.92));
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 207, 74, 0.75),
+    0 8px 26px rgba(0, 0, 0, 0.55);
+  text-shadow: 0 0 22px rgba(255, 190, 70, 0.85);
 }
 
 /*
- * お題本文。最長 60 文字(QUIZ_PROMPT_LEN_MAX)を 540px 幅で折り返して読ませる。
- * 差し替え(key=show の再マウント)ごとに軽いパンチ — 回転の「コマ」感を出す。
+ * お題本文 = めくり札。**font-size はインライン style が権威**(quizPromptFontPx)。
+ * ここの値は関数を通らない経路の据わり値。max-width 500 - padding 24×2 = 452 が
+ * 縦ステージで関数へ渡す maxW。
  */
 .quiz-screen .qz-prompt {
-  max-width: 484px;
-  font-family: var(--font);
-  font-size: 52px;
-  line-height: 1.3;
+  max-width: 500px;
+  padding: 26px 24px 30px;
+  border-radius: 6px;
+  font-family: var(--qz-mincho);
+  font-size: 96px;
+  line-height: 1.18;
   font-weight: 700;
   text-align: center;
   overflow-wrap: anywhere;
-  color: #f3eaff;
-  text-shadow:
-    0 0 22px rgba(150, 80, 255, 0.9),
-    0 0 70px rgba(90, 30, 200, 0.6),
-    0 4px 0 rgba(30, 0, 60, 0.8);
-  animation: quiz-tick 140ms ease-out both;
+  color: var(--qz-sumi);
+  text-shadow: 0 2px 0 rgba(120, 90, 40, 0.18);
+  background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
+  box-shadow: var(--qz-fuda-edge);
+  animation: quiz-tick 120ms ease-out both;
 }
 
 @keyframes quiz-tick {
   0% {
-    transform: translateY(10px) scale(0.96);
-    opacity: 0.55;
+    transform: translateY(8px) scale(0.97);
+    opacity: 0.45;
   }
   100% {
     transform: translateY(0) scale(1);
@@ -6366,19 +6545,116 @@ body {
   }
 }
 
-/* 決定の1枚だけ強いパンチ(revolution-count-punch と同族)。 */
-.quiz-screen.quiz-reveal .qz-prompt.hit {
-  font-size: 64px;
-  animation: quiz-hit 420ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+/*
+ * 焦らしの拍(shared/quiz-spin.ts の cue)。クラスは MonitorView が付け替え、
+ * key に cue を混ぜて再マウントさせるので毎回頭から再生される。
+ * **尺は拍表に依存しない** — 据えの長さは JS タイマーが持ち、ここは一発の見得だけ。
+ * quiz-tick より後ろに置いて上書きすること(同じ要素の animation を奪う)。
+ */
+.quiz-screen.qz-fake .qz-prompt {
+  animation: qz-fake 460ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+
+/*
+ * 揺れ幅は控えめ(±12px / 1.1deg)。めくりは最大 500px 幅・数百 px 高になるので、
+ * これ以上振ると背の高い札の角が 540px のステージから出て金の縁が切れる。
+ */
+@keyframes qz-fake {
+  0% {
+    transform: translateX(0) rotate(0deg);
+  }
+  22% {
+    transform: translateX(-12px) rotate(-1.1deg);
+  }
+  48% {
+    transform: translateX(10px) rotate(0.9deg);
+  }
+  74% {
+    transform: translateX(-5px) rotate(-0.4deg);
+  }
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+}
+
+/* ニアミス(当たりの1つ手前)。札が金に灼ける。 */
+.quiz-screen.qz-near .qz-prompt {
+  animation: qz-near 1400ms ease-out both;
+}
+
+@keyframes qz-near {
+  0% {
+    box-shadow: var(--qz-fuda-edge);
+    filter: brightness(1);
+  }
+  18% {
+    box-shadow:
+      inset 0 0 0 3px rgba(28, 14, 4, 0.9),
+      inset 0 0 0 10px #fff3c4,
+      0 0 90px rgba(255, 208, 90, 0.95);
+    filter: brightness(1.32);
+  }
+  100% {
+    box-shadow:
+      inset 0 0 0 3px rgba(28, 14, 4, 0.9),
+      inset 0 0 0 8px var(--qz-gold),
+      0 0 60px rgba(255, 190, 70, 0.7);
+    filter: brightness(1.06);
+  }
+}
+
+/* よろよろ(最後の1コマずつ)。札が重そうに沈む。 */
+.quiz-screen.qz-crawl .qz-prompt {
+  animation: qz-crawl 520ms ease-out both;
+}
+
+@keyframes qz-crawl {
+  0% {
+    transform: translateY(-7px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+/*
+ * 決定の一撃。札が一度潰れて弾む。
+ *
+ * **`quiz-hit` を共用しない**のが要点 — あちらは 0% が `scale(1.32, 0.74)` で、
+ * めくりは最大 500px 幅まで育つので 500×1.32 = 660px となり 540px のステージから
+ * 溢れて左右が切れる(実測 430px の札が 567px に膨らんだ)。票数や判定のような
+ * 小さい要素なら 1.32 でも収まるので、あちらはそのまま残す。
+ * ここは**横の伸びを 1.06 に抑え、潰しと発光で一撃を作る**。
+ */
+.quiz-screen.quiz-reveal .qz-prompt {
+  animation: qz-reveal-hit 520ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+@keyframes qz-reveal-hit {
+  0% {
+    transform: scale(1.06, 0.7);
+    filter: brightness(2.4);
+  }
+  42% {
+    transform: scale(0.95, 1.09);
+    filter: brightness(1.25);
+  }
+  72% {
+    transform: scale(1.02, 0.98);
+  }
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
 }
 
 @keyframes quiz-hit {
   0% {
-    transform: scale(1.35, 0.75);
-    filter: brightness(2.2);
+    transform: scale(1.32, 0.74);
+    filter: brightness(2.1);
   }
   45% {
-    transform: scale(0.94, 1.08);
+    transform: scale(0.95, 1.07);
   }
   100% {
     transform: scale(1);
@@ -6387,9 +6663,218 @@ body {
 }
 
 /*
- * 挑戦ウィンドウ(制限時間)。お題を画面いっぱい+残り秒の大型数字(ユーザー要件
- * 「タイムリミット・お題を画面いっぱいに表示」)。常設・ホールドなしなので幕は
- * 半透明に留め、盤面の気配は後ろに残す(全遮蔽は前置きと発表だけ)。
+ * 緞帳(どんちょう)。**DOM 順で本文より後ろ**に置いて手前に描く — 幕が開くまで
+ * めくりを隠すのが役目なので、前に置くと本文が透けて意味が無くなる(z-index は
+ * 使えないので DOM 順が唯一の手段)。開き切る尺は QUIZ_SPIN_BEATS.openMs の内側に
+ * 収めること(test/renderer/quiz-fx.spec.ts が機械照合する)。
+ * 回転(.quiz-spin)にだけ出す — 決定・準備は別要素なので、そちらにも置くと
+ * 開くアニメが2度目を再生して「もう一度始まった」に見える。
+ */
+.quiz-screen .qz-curtain {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 54%;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.36) 0 6px,
+      rgba(255, 255, 255, 0.06) 6px 13px,
+      rgba(0, 0, 0, 0.2) 13px 23px
+    ),
+    linear-gradient(180deg, #a8161d 0%, var(--qz-crimson) 56%, #4b0509 100%);
+  box-shadow: inset 0 0 70px rgba(0, 0, 0, 0.6);
+}
+
+/* 房(ふさ)= 幕の内側の縁。金の縄目。 */
+.quiz-screen .qz-curtain::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  background: repeating-linear-gradient(
+    180deg,
+    var(--qz-gold) 0 7px,
+    var(--qz-gold-deep) 7px 14px
+  );
+  box-shadow: 0 0 18px rgba(255, 190, 70, 0.7);
+}
+
+.quiz-screen .qz-curtain.l {
+  left: 0;
+  animation: qz-curtain-l 1100ms cubic-bezier(0.5, 0, 0.2, 1) both;
+}
+
+.quiz-screen .qz-curtain.l::after {
+  right: 0;
+}
+
+.quiz-screen .qz-curtain.r {
+  right: 0;
+  animation: qz-curtain-r 1100ms cubic-bezier(0.5, 0, 0.2, 1) both;
+}
+
+.quiz-screen .qz-curtain.r::after {
+  left: 0;
+}
+
+@keyframes qz-curtain-l {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-101%);
+  }
+}
+
+@keyframes qz-curtain-r {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(101%);
+  }
+}
+
+/*
+ * 座布団。決定の瞬間に下から積み上がる飾り(点数には一切紐づかない)。
+ * 緞帳と同じ理由で DOM 順は本文の後ろ、提灯より前。
+ */
+.quiz-screen .qz-zabuton {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  width: 320px;
+  height: 138px;
+  transform: translateX(-50%);
+}
+
+.quiz-screen .qz-zabuton i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 46px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #b8242c 0%, #7d0f16 100%);
+  box-shadow:
+    inset 0 0 0 3px rgba(255, 207, 74, 0.7),
+    0 8px 20px rgba(0, 0, 0, 0.5);
+  animation: qz-zabuton 420ms cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+.quiz-screen .qz-zabuton i:nth-child(1) {
+  bottom: 0;
+}
+
+.quiz-screen .qz-zabuton i:nth-child(2) {
+  bottom: 34px;
+  animation-delay: 150ms;
+}
+
+.quiz-screen .qz-zabuton i:nth-child(3) {
+  bottom: 68px;
+  animation-delay: 300ms;
+}
+
+@keyframes qz-zabuton {
+  0% {
+    transform: translateY(70px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* 提灯(ちょうちん)。緞帳より DOM 順で後ろ = 常に最前。ゆっくり揺れる。 */
+.quiz-screen .qz-lanterns {
+  position: absolute;
+  top: 18px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 66px;
+}
+
+.quiz-screen .qz-lanterns i {
+  width: 52px;
+  height: 68px;
+  border-radius: 50% / 44%;
+  background:
+    repeating-linear-gradient(180deg, rgba(60, 10, 4, 0.22) 0 7px, transparent 7px 13px),
+    radial-gradient(60% 55% at 50% 42%, #ffe9a8, #f26a1f 72%, #a3210b 100%);
+  box-shadow:
+    0 0 26px rgba(255, 168, 56, 0.65),
+    inset 0 -8px 16px rgba(90, 12, 4, 0.55);
+  transform-origin: 50% -14px;
+  animation: qz-lantern 3400ms ease-in-out infinite alternate;
+}
+
+.quiz-screen .qz-lanterns i:nth-child(2) {
+  animation-duration: 4100ms;
+}
+
+.quiz-screen .qz-lanterns i:nth-child(3) {
+  animation-duration: 3800ms;
+}
+
+@keyframes qz-lantern {
+  0% {
+    transform: rotate(-3.5deg);
+  }
+  100% {
+    transform: rotate(3.5deg);
+  }
+}
+
+/*
+ * お題発表準備(prepSec)。決定表示のあと・制限時間の前の仕度時間。
+ * .quiz-screen の全面幕をそのまま使い、見出しと残り秒だけ差し替える —
+ * 「同じ画面のままカウントが減っていく」ので、発表からの連続性が切れない。
+ * 本文のめくりは決定の一撃を打たずに据え置く(quiz-tick も止める)。
+ */
+.quiz-screen.quiz-prep .qz-label {
+  color: #ffd9a8;
+  text-shadow: 0 0 18px rgba(255, 170, 60, 0.85);
+}
+
+.quiz-screen.quiz-prep .qz-prompt {
+  animation: none;
+}
+
+/* 残り秒。窓の .qw-timer より一回り小さい(主役はまだお題本文)。 */
+.quiz-screen .qz-prep-timer {
+  font-family: var(--font-num, var(--font));
+  font-size: 92px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: #ffd9a8;
+  text-shadow:
+    0 0 26px rgba(255, 170, 60, 0.9),
+    0 0 80px rgba(220, 110, 20, 0.55);
+  /* key={秒} の再マウントごとに1拍 — 数字が減っているのを一目で分からせる。 */
+  animation: quiz-prep-tick 320ms cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+@keyframes quiz-prep-tick {
+  0% {
+    transform: scale(1.28);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/*
+ * 挑戦ウィンドウ(制限時間)。お題を画面いっぱい+残り秒の大型数字。
+ * 常設・ホールドなしなので幕は半透明に留め、盤面の気配は後ろに残す
+ * (全遮蔽は前置きと発表だけ)。
  */
 .quiz-window-overlay {
   position: absolute;
@@ -6398,33 +6883,41 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 0 28px;
+  gap: 14px;
+  padding: 0 20px;
   pointer-events: none;
-  background: radial-gradient(ellipse at 50% 42%, rgba(38, 12, 66, 0.78), rgba(8, 3, 16, 0.82) 76%);
+  background:
+    radial-gradient(58% 40% at 50% 42%, rgba(255, 206, 112, 0.24), transparent 72%),
+    linear-gradient(180deg, rgba(52, 14, 10, 0.8) 0%, rgba(14, 3, 2, 0.86) 74%);
 }
 
 .quiz-window-overlay .qw-cap {
-  font-family: var(--font);
-  font-size: 26px;
+  font-family: var(--qz-brush);
+  font-size: 30px;
   font-weight: 700;
-  letter-spacing: 0.2em;
-  color: #d9c4ff;
-  text-shadow: 0 0 16px rgba(150, 80, 255, 0.8);
+  letter-spacing: 0.26em;
+  text-indent: 0.26em;
+  color: var(--qz-gold);
+  text-shadow: 0 0 18px rgba(255, 190, 70, 0.85);
 }
 
+/* 窓のあいだも「めくり」を出したままにする(何のお題かを常に読ませる)。 */
 .quiz-window-overlay .qw-prompt {
   max-width: 500px;
-  font-family: var(--font);
-  font-size: 56px;
-  line-height: 1.28;
+  padding: 18px 22px 22px;
+  border-radius: 6px;
+  font-family: var(--qz-mincho);
+  font-size: 72px;
+  line-height: 1.18;
   font-weight: 700;
   text-align: center;
   overflow-wrap: anywhere;
-  color: #f6efff;
-  text-shadow:
-    0 0 24px rgba(150, 80, 255, 0.9),
-    0 0 80px rgba(90, 30, 200, 0.55);
+  color: var(--qz-sumi);
+  background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
+  box-shadow:
+    inset 0 0 0 3px rgba(28, 14, 4, 0.9),
+    inset 0 0 0 6px var(--qz-gold),
+    0 18px 44px rgba(0, 0, 0, 0.6);
 }
 
 /* 残り秒。key=秒 の再マウントで毎秒パンチ(.revolution-count と同じ手口)。 */
@@ -6451,18 +6944,20 @@ body {
   align-items: center;
   justify-content: center;
   gap: 18px;
-  padding: 0 24px;
+  padding: 0 20px;
   pointer-events: none;
-  background: radial-gradient(ellipse at 50% 42%, rgba(38, 12, 66, 0.82), rgba(8, 3, 16, 0.86) 76%);
+  background:
+    radial-gradient(58% 40% at 50% 42%, rgba(255, 206, 112, 0.2), transparent 72%),
+    linear-gradient(180deg, rgba(52, 14, 10, 0.84) 0%, rgba(14, 3, 2, 0.9) 74%);
 }
 
 .quiz-vote-overlay .qv-cap {
-  font-family: var(--font);
-  font-size: 30px;
+  font-family: var(--qz-brush);
+  font-size: 32px;
   font-weight: 700;
-  letter-spacing: 0.14em;
-  color: #ffe9c9;
-  text-shadow: 0 0 16px rgba(255, 180, 60, 0.85);
+  letter-spacing: 0.16em;
+  color: var(--qz-gold);
+  text-shadow: 0 0 18px rgba(255, 190, 70, 0.85);
 }
 
 .quiz-vote-overlay .qv-cap em {
@@ -6475,14 +6970,20 @@ body {
 
 .quiz-vote-overlay .qv-prompt {
   max-width: 500px;
-  font-family: var(--font);
-  font-size: 34px;
-  line-height: 1.3;
+  padding: 10px 18px 13px;
+  border-radius: 5px;
+  font-family: var(--qz-mincho);
+  font-size: 44px;
+  line-height: 1.2;
   font-weight: 700;
   text-align: center;
   overflow-wrap: anywhere;
-  color: #e7dbff;
-  text-shadow: 0 0 18px rgba(150, 80, 255, 0.75);
+  color: var(--qz-sumi);
+  background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
+  box-shadow:
+    inset 0 0 0 2px rgba(28, 14, 4, 0.85),
+    inset 0 0 0 5px var(--qz-gold),
+    0 14px 34px rgba(0, 0, 0, 0.55);
 }
 
 .quiz-vote-overlay .qv-row {
@@ -6491,6 +6992,7 @@ body {
   gap: 26px;
 }
 
+/* 票の札。座布団と同じ角丸+金の縁で寄席の小道具に見せる。 */
 .quiz-vote-overlay .qv-side {
   display: flex;
   flex-direction: column;
@@ -6498,8 +7000,8 @@ body {
   gap: 4px;
   min-width: 170px;
   padding: 16px 26px 20px;
-  border-radius: 22px;
-  background: rgba(10, 4, 20, 0.78);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(28, 10, 4, 0.86), rgba(10, 3, 1, 0.9));
 }
 
 .quiz-vote-overlay .qv-side.good {
@@ -6515,8 +7017,8 @@ body {
 }
 
 .quiz-vote-overlay .qv-word {
-  font-family: var(--font);
-  font-size: 26px;
+  font-family: var(--qz-brush);
+  font-size: 30px;
   font-weight: 700;
   letter-spacing: 0.1em;
 }
@@ -6542,12 +7044,12 @@ body {
 }
 
 .quiz-vote-overlay .qv-vs {
-  font-family: var(--font);
-  font-size: 34px;
+  font-family: var(--qz-brush);
+  font-size: 36px;
   font-weight: 700;
   letter-spacing: 0.12em;
-  color: #b9a6e6;
-  text-shadow: 0 0 12px rgba(150, 80, 255, 0.7);
+  color: var(--qz-gold);
+  text-shadow: 0 0 14px rgba(255, 190, 70, 0.8);
 }
 
 /*
@@ -6562,30 +7064,61 @@ body {
   align-items: center;
   justify-content: center;
   gap: 20px;
-  padding: 0 24px;
+  padding: 0 20px;
+  overflow: hidden;
   pointer-events: none;
-  background: radial-gradient(ellipse at 50% 44%, rgba(44, 14, 74, 0.94), rgba(8, 3, 16, 0.97) 72%);
+  /* 金屏風は .quiz-screen と同じ調合(発表も同じ高座の上で起きている)。 */
+  background:
+    radial-gradient(56% 40% at 50% 42%, rgba(255, 226, 150, 0.46), transparent 74%),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 206, 104, 0.24) 0 40px,
+      rgba(146, 84, 12, 0.3) 40px 44px
+    ),
+    linear-gradient(180deg, #6b2410 0%, #3a0d08 60%, #1a0403 100%);
   animation: boost-overlay-in 260ms ease-out both;
+}
+
+/*
+ * 全面カット(assets/fx/quiz/result.mp4)が出ているときは金屏風の地を引っ込める。
+ * 幕は `.fx-clip-opaque`(.monitor-root 直下)より DOM 順で手前にあるので、
+ * 不透明のまま敷いておくと映像が完全に隠れて動画を出す意味が消える。
+ * 素材が無い / 動画オフのときは on-clip が付かず、これまで通り金屏風が出る。
+ */
+.quiz-settle.on-clip {
+  /*
+   * 金屏風の地は消すが、**文字の下だけ薄く落とす**。素材の頭(緞帳が開いている
+   * 明るい金屏風のコマ)では判定「大成功!」が金地に金文字で乗るので、無地の
+   * transparent にすると読みづらい瞬間ができる(実描画で確認)。
+   * 中央下寄りだけの radial なので、緞帳・提灯・座布団は素のまま見える。
+   */
+  background: radial-gradient(52% 34% at 50% 56%, rgba(0, 0, 0, 0.52), transparent 76%);
 }
 
 .quiz-settle .qs-prompt {
   max-width: 500px;
-  font-family: var(--font);
-  font-size: 30px;
-  line-height: 1.3;
+  padding: 9px 18px 12px;
+  border-radius: 5px;
+  font-family: var(--qz-mincho);
+  font-size: 40px;
+  line-height: 1.2;
   font-weight: 700;
   text-align: center;
   overflow-wrap: anywhere;
-  color: #d9c4ff;
-  text-shadow: 0 0 16px rgba(150, 80, 255, 0.75);
+  color: var(--qz-sumi);
+  background: linear-gradient(180deg, var(--qz-washi) 0%, var(--qz-washi-2) 100%);
+  box-shadow:
+    inset 0 0 0 2px rgba(28, 14, 4, 0.85),
+    inset 0 0 0 5px var(--qz-gold),
+    0 14px 34px rgba(0, 0, 0, 0.55);
 }
 
 .quiz-settle .qs-votes {
   display: flex;
   align-items: baseline;
   gap: 30px;
-  font-family: var(--font);
-  font-size: 30px;
+  font-family: var(--qz-brush);
+  font-size: 32px;
   font-weight: 700;
 }
 
@@ -6614,14 +7147,15 @@ body {
 .quiz-settle.verdict .qs-verdict,
 .quiz-settle.amount .qs-verdict {
   display: block;
-  font-family: var(--font);
-  font-size: 64px;
+  font-family: var(--qz-brush);
+  font-size: 76px;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  color: #fdf8ff;
+  letter-spacing: 0.1em;
+  text-indent: 0.1em;
+  color: var(--qz-ink);
   text-shadow:
-    0 0 24px rgba(150, 80, 255, 0.9),
-    0 0 80px rgba(90, 30, 200, 0.6);
+    0 0 26px rgba(255, 190, 70, 0.95),
+    0 0 84px rgba(255, 120, 20, 0.6);
   animation: quiz-hit 420ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
 }
 
@@ -6635,7 +7169,12 @@ body {
   animation: boost-settle-lock 400ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
 }
 
-/* 減算(よかった多数)= 応援の緑、増加(だめ多数)= 妨害の赤。 */
+/*
+ * 減算(よかった多数)= 応援の緑、増加(だめ多数)= 妨害の赤。
+ * **和風化しても増減の当選色は動かさない** — 増やす=赤 / 減らす=緑 は
+ * ルーレットの盤面・確定バナーと共有する規約で、ここだけ金にすると
+ * 「どっちに転んだのか」が読めなくなる。
+ */
 .quiz-settle.down .qs-amt {
   color: #d2ffe6;
   text-shadow:
@@ -6652,27 +7191,43 @@ body {
     0 4px 0 rgba(90, 0, 6, 0.8);
 }
 
-/* お題バナー(発動/結果)。紫系 — banner-revolution と同じ構造で変数差し替えのみ。 */
+/* お題バナー(発動/結果)。朱赤+金 — banner-revolution と同じ構造で変数差し替えのみ。 */
 .float.banner-quiz {
-  --fl-lamp: #c9a6ff;
-  --fl-glow: rgba(150, 80, 255, 0.6);
-  --fl-bg-1: rgba(40, 14, 70, 0.96);
-  --fl-bg-2: rgba(14, 4, 26, 0.94);
+  --fl-lamp: #ffcf4a;
+  --fl-glow: rgba(255, 176, 56, 0.6);
+  --fl-bg-1: rgba(72, 18, 11, 0.96);
+  --fl-bg-2: rgba(20, 4, 2, 0.94);
 }
 
 .float.banner-quiz::before {
   animation-duration: 480ms;
 }
 
-/* 横ステージは高さが足りないので一回り小さく(.revolution-settle と同じ判断)。 */
+/*
+ * 横ステージ(1280×720)。高さが足りないので役物と札幅を一回り変える。
+ * 本文の font-size は縦横ともインライン style が権威なので、ここでは触らない
+ * (触っても実表示は変わらず、据わり値の二重管理になるだけ)。
+ */
 .landscape .quiz-window-overlay .qw-timer {
   font-size: 150px;
 }
 
-.landscape .quiz-window-overlay .qw-prompt,
-.landscape .quiz-screen .qz-prompt {
-  max-width: 900px;
-  font-size: 44px;
+.landscape .quiz-screen .qz-prompt,
+.landscape .quiz-window-overlay .qw-prompt {
+  max-width: 1080px;
+}
+
+.landscape .quiz-vote-overlay .qv-prompt,
+.landscape .quiz-settle .qs-prompt {
+  max-width: 1000px;
+}
+
+.landscape .quiz-screen .qz-lanterns {
+  gap: 210px;
+}
+
+.landscape .quiz-screen .qz-zabuton {
+  bottom: 14px;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -5,6 +5,8 @@ import { MonitorView } from './monitor/MonitorView';
 import { attachLive } from './state/liveStore';
 import { installEnterRepeatGuard } from './lib/enter-repeat';
 import { installErrorHooks } from './lib/install-error-hooks';
+import { installFrameMeter } from './lib/frame-meter';
+import { schedulePrewarm } from './lib/media-prewarm';
 import './styles/monitor.css';
 
 // モニター窓は challenge / totals / sessionId しか使わないので lite 購読 —
@@ -17,6 +19,14 @@ installEnterRepeatGuard();
 
 // 捕まえ損ねた例外を main の診断リングへ(窓の再起動はしない — 下の理由参照)。
 installErrorHooks('monitor');
+
+// フレームタイム計測(毎分1行を diag.log のファイル専用経路へ)。「カクついた」を
+// 事後に切り分ける唯一の計器 — モニター窓だけに入れる(ダッシュボードは演出が無い)。
+installFrameMeter();
+
+// メディア予熱(起動8秒後からアイドルで直列に)。各素材の初回再生の
+// デコーダ初期化待ち・quiz 初回の 8.4MB フォントパースを前払いする。
+schedulePrewarm();
 
 /**
  * この窓は**配信者の背面に映っている**。フォールバックは放送に耐えることが最優先で、

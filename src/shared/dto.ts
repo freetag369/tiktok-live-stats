@@ -509,6 +509,9 @@ export const ROULETTE_PATTERNS = [
   // ── 激熱確定専用(ギフト連動)。設定画面のチェック一覧には出さず、通常の抽選にも乗らない。
   //    ROULETTE_HOT_ONLY_PATTERNS / ROULETTE_SELECTABLE_PATTERNS を参照。
   'djglasses', //   DJメガネ — ターンテーブル・ミラーボール・スピーカーの一撃。振り付けは ultra 共通
+  // 'unicorn' は既に一角獣の通常パターンとして埋まっているので、ギフト連動側は別スラッグ。
+  'unicorngift', // ユニコーン — 虹の角のチャージとプリズムの一撃。振り付けは ultra 共通
+  'bunnydj', //     バニーDJ — ターンテーブル・ミラーボール・スピーカーの一撃。振り付けは ultra 共通
 ] as const;
 export type RoulettePattern = (typeof ROULETTE_PATTERNS)[number];
 
@@ -522,7 +525,11 @@ export type RoulettePattern = (typeof ROULETTE_PATTERNS)[number];
  * 締め出しは3点セット: ①この配列から ROULETTE_SELECTABLE_PATTERNS を作る
  * ②sanitizeRoulettePatterns が保存時に除去 ③設定画面の一覧が SELECTABLE を回す。
  */
-export const ROULETTE_HOT_ONLY_PATTERNS: readonly RoulettePattern[] = ['djglasses'];
+export const ROULETTE_HOT_ONLY_PATTERNS: readonly RoulettePattern[] = [
+  'djglasses',
+  'unicorngift',
+  'bunnydj',
+];
 
 /**
  * 設定画面で選べる = 通常抽選に乗りうるパターン。ROULETTE_PATTERNS から激熱専用を抜いたもの。
@@ -568,6 +575,8 @@ export const ROULETTE_PATTERN_TIER: Record<RoulettePattern, RouletteTier> = {
   heartbday: 'ultra',
   heartbloom: 'ultra',
   djglasses: 'ultra',
+  unicorngift: 'ultra',
+  bunnydj: 'ultra',
 };
 /** スピン尺・走行距離の引数キー。'fast' は 16 本目以降(と合算 effect)の短縮スピン。 */
 export type RouletteSpinKey = RoulettePattern | 'fast';
@@ -1190,12 +1199,64 @@ export interface QuizConfig {
   /** 「だめ」判定ワード(規約は goodWords と同じ)。 */
   badWords: string[];
   /**
-   * 発動中(アーム〜清算)に流すBGM の id('off' / 同梱カタログ id / custom:)。
-   * ギフト着弾の瞬間からモニターが切り替える — 「お題モードが来る」予告そのもの。
+   * **区間①(発動〜導入カット〜回転)** の BGM の id
+   * ('off' / 同梱カタログ id / custom:)。ギフト着弾の瞬間からモニターが
+   * 切り替える — 「お題モードが来る」予告そのもの。
+   *
+   * 2026-08-22 に「発動中ずっと1曲」から**区間の先頭スロット**へ意味を変えた。
+   * 後続の区間(revealBgm / prepBgm / thinkBgm / voteBgm)の既定が
+   * QUIZ_BGM_KEEP なので、**何も設定していなければ従来どおり1曲が通しで鳴る**。
+   * このスロットだけは 'keep' を受け付けない(継続元が無い)。
    */
   bgm: string;
   /** bgm の音量 0-100(絶対値・seVolume は掛からない — rouletteSound と同じ規約)。 */
   bgmVolume: number;
+  /**
+   * **区間②(お題発表 = 決定パンチ表示・QUIZ_REVEAL_MS)** の BGM。
+   * QUIZ_BGM_KEEP で「前の区間の曲を続ける」(既定)。値域は bgm + 'keep'。
+   */
+  revealBgm: string;
+  /** revealBgm の音量 0-100。'off'/'keep' のときは使わない。 */
+  revealBgmVolume: number;
+  /**
+   * **区間★(お題発表準備)** の秒数。発表と制限時間の間に挟む仕度時間。
+   * 既定 5・clamp QUIZ_PREP_MIN_SEC(0)〜QUIZ_PREP_MAX_SEC(60)。
+   * **0 でこの区間ごとスキップ**(発表からそのまま制限時間へ)。
+   *
+   * 窓の原点は「モニターが前置きを再生し始めた時刻 + preMs」なので、この値は
+   * arm 時に QuizArmSnapshot へ焼き込み、effect の quizPrepMs で配る
+   * (窓中に設定を変えても進行中の1回はズレない)。
+   */
+  prepSec: number;
+  /** **区間★(お題発表準備)** の BGM。既定 QUIZ_BGM_KEEP。 */
+  prepBgm: string;
+  /** prepBgm の音量 0-100。 */
+  prepBgmVolume: number;
+  /** **区間③(お題考え時 = 挑戦ウィンドウ・durationSec)** の BGM。既定 QUIZ_BGM_KEEP。 */
+  thinkBgm: string;
+  /** thinkBgm の音量 0-100。 */
+  thinkBgmVolume: number;
+  /** **区間④(コメント受付時 = 投票タイム・voteSec)** の BGM。既定 QUIZ_BGM_KEEP。 */
+  voteBgm: string;
+  /** voteBgm の音量 0-100。 */
+  voteBgmVolume: number;
+  /**
+   * **区間⑤(終了後)** の秒数。**投票締切の瞬間**から数え、結果発表カットシーン
+   * (QUIZ_RESULT_MS = 6秒)はこの中に含まれる。既定 20・clamp 0〜120。0 で無効。
+   */
+  outroSec: number;
+  /**
+   * **区間⑤** の BGM(**減算 = 「よかった」多数**)。既定 'off'。
+   * 出荷 v0.13.0 は投票締切で無音になる仕様なので、既定を 'keep' にはしない
+   * (勝手に鳴り続けるようになった、という驚きを配らない)。
+   */
+  outroDownBgm: string;
+  /** outroDownBgm の音量 0-100。 */
+  outroDownBgmVolume: number;
+  /** **区間⑤** の BGM(**増加 = 「だめ」多数**)。既定 'off'。 */
+  outroUpBgm: string;
+  /** outroUpBgm の音量 0-100。 */
+  outroUpBgmVolume: number;
   /**
    * 導入全面カットのクリップ id。既定 'off'(再生枠のみ = この段をスキップ)。
    * 全面カット素材(FX_CLIPS)から選ぶ。
@@ -1785,6 +1846,14 @@ export interface ChallengeEffect {
   quizIntroMs?: number;
   /** kind='quiz-start': 導入全面カットのクリップ id。quizIntroMs > 0 のときだけ載る。 */
   quizIntroClip?: string;
+  /**
+   * kind='quiz-start': 「お題発表準備」区間の尺(ms)。0 = この段なし。
+   *
+   * cfg ではなく effect から配るのは quizPrompts と同じ理由 — モニターの cfg は
+   * 120 秒ポーリング(CFG_POLL_MS)で古くなりうるが、この値は worker が窓の開始
+   * 時刻(quizCue の preMs)を決めるのに使った値と**同一でなければならない**。
+   */
+  quizPrepMs?: number;
   /** kind='quiz-start'/'quiz-end': 挑戦ウィンドウ(制限時間)の尺(ms)。 */
   quizDurationMs?: number;
   /** kind='quiz-start'/'quiz-end': 投票タイムの尺(ms)。 */
@@ -1944,7 +2013,15 @@ export type ChallengeTestEffectSpec =
       /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
       quizId?: string;
     }
-  | { kind: 'achieved' };
+  | { kind: 'achieved' }
+  /**
+   * 走行中の▶テスト実演を全種**中断**する(設定画面の「■ 停止」)。effect は積まず、
+   * worker の実演窓を畳むだけ — DTO から revolution / quiz / boost キーが消えるので、
+   * モニターは既存の state 駆動 abort(revActive / quizActive の false 遷移)で
+   * 前置きも走行 HUD も片付ける。革命79秒・お題131秒(導入8+回転18+決定4+準備5+
+   * 制限60+投票30+発表6)の長尺を流しっぱなしにしない逃げ道。
+   */
+  | { kind: 'stopTest' };
 
 /**
  * challenge.boostCue のパラメータ。フィーバー(タップブースト)は worker が
@@ -2286,7 +2363,18 @@ export interface ChallengeState {
    * モニターの終了5秒前カウントダウンもこれが唯一のソース)。
    * multiplier は発動時に焼き込んだ値(窓中の設定変更で表示と適用がズレないように)。
    */
-  revolution?: { startsAtMs: Ms; endsAtMs: Ms; multiplier: number; nickname?: string; label?: string };
+  revolution?: {
+    startsAtMs: Ms;
+    endsAtMs: Ms;
+    multiplier: number;
+    nickname?: string;
+    label?: string;
+    /**
+     * ▶テスト実演の窓(testEffect 'revolution')。値・統計・凍結には触れない。
+     * 表示コードは実発動と区別しなくてよい — 設定画面の「■ 停止」判定だけが見る。
+     */
+    test?: true;
+  };
   /**
    * お題ルーレットが進行中(アーム〜投票締切)だけ載る。boost / tapLock / revolution と
    * 同じ規約で**絶対時刻のみ**を配り、非進行時はキーごと省く。
@@ -2314,6 +2402,12 @@ export interface ChallengeState {
     nickname?: string;
     label?: string;
     queued?: number;
+    /**
+     * ▶テスト実演の窓(testEffect 'quiz')。値・統計・凍結には触れず、投票は
+     * ダミー。**armed とは併存しない**(実演はバリアを持たない — 入口は
+     * quiz-start effect で、armed 監視に本物の cue を撃たせてはいけない)。
+     */
+    test?: true;
   };
   /**
    * 最終ゲート(ラスト◯◯モード)がアクティブな間だけ載る。taps = 現ゲートの蓄積
@@ -2340,6 +2434,16 @@ export interface ChallengeFxQueueItem {
   kind: 'band' | 'boost' | 'roulette' | 'follow' | 'revolution' | 'quiz';
   /** 行為者(viewer.nickname ?? displayId)。 */
   nickname?: string;
+  /**
+   * **お題バリア(quizDeferredOps)で清算待ちの予告**。表示上は他の待ちと同じだが、
+   * モニターの armed 監視(「発動時点で溜まっていたキューが空になるのを待つ」)は
+   * これを**数えてはいけない** — quizDeferredOps は清算まで吐き出されないので、
+   * アーム待ちのあいだに演出付きギフトが1件でも届くと待ちが構造的に永久化し、
+   * 前置きが一度も再生されないままアーム期限(120秒)で強制発動する。
+   * 立てるのは get() の組み立て時だけ(保持している fx オブジェクトは汚さない —
+   * 清算で pendingOps へ移送されたあとも印が残ると、次のお題の待ちが狂う)。
+   */
+  barrier?: true;
   /**
    * 連続ぶんの総回数。省略 = 1。**種別で単位が違う**(FxStockItem.count と同じ規約):
    * - roulette: **抽選回数**(実際に回るリール本数ではない)。ただし
@@ -2458,8 +2562,26 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  *    1回だけ**追加(migrateChallengeRouletteDjGlasses)。roulettes キーは既存の保存済み
  *    設定が必ず持っているので、既定(DEFAULT_ROULETTES / 同梱 challenge-default.json)を
  *    直しても届かない — v7 のコーギー行と同じ「足す移行」。
+ * 11: お題ルーレットの導入を専用素材へ寄せ替え(migrateChallengeQuizIntro)。
+ *    v0.13.0 が配った quiz.introClip: 'off' は「導入は要らない」ではなく
+ *    「専用素材がまだ無い」という意味だったので、素材の投入に合わせて
+ *    **'off' ちょうどの設定だけ** QUIZ_INTRO_SELF へ引き上げる。v9 の
+ *    ねば〜る君と同じ寄せ替えで、cut-* を自分で指名していた人には触らない。
+ * 12: お題ルーレットのお題リストを実運用の28件へ寄せ替え(migrateChallengeQuizPrompts)。
+ *    v0.13.0 が配った prompts 1件は実運用のお題ではなく「空だと ▶実演 すらできない」
+ *    ための**例**だった。quiz.prompts キーは v0.13.0 以降どの保存済み設定も持っていて
+ *    validateQuiz の欠損フォールバックを通らないので、既定を直しても既存ユーザーには
+ *    届かない — v10 の DJメガネと同じ「移行だけが唯一の経路」。ただし配るのは
+ *    **旧既定の1件ちょうど**の設定に限る。自分でお題を編集した人・全部消した人
+ *    (prompts: [])のリストは、v9 のねば〜る君と同じ流儀で一切触らない。
+ * 13: 激熱確定のユニコーン行(gift 12453・盤面は全マス 2499)とバニーDJ行
+ *    (gift 437679・盤面は全マス 1200)を**まだ無ければ1回だけ**追加
+ *    (migrateChallengeRouletteHotGifts)。v10 の DJメガネと同じ「足す移行」で、
+ *    roulettes キーは保存済み設定が必ず持っているので既定を直しても届かない。
+ *    2行あるので **ROULETTES_MAX の残数は行ごとに確認する**(1回だけ見て2行
+ *    push すると上限を超える)。倍率は両行とも確率抽選(×5 60% / ×10 30% / ×20 10%)。
  */
-export const SETTINGS_VERSION = 10;
+export const SETTINGS_VERSION = 13;
 
 export interface AppSettings {
   eulerApiKey: string;

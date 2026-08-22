@@ -342,6 +342,18 @@ export const ROULETTE_HOT_GIFT_PATTERNS: readonly {
     gift: { giftId: '11583', giftName: 'dj glasses', canonical: 'dj_glasses' },
     label: 'DJメガネ',
   },
+  {
+    pattern: 'unicorngift',
+    // 絵柄のスラッグが 'unicorn' でないのは、そちらが一角獣の通常パターンで埋まっているため。
+    // ここは exactName: true で照合するので 'unicorn' でも 'Unicorn Fantasy' は拾わない。
+    gift: { giftId: '12453', giftName: 'unicorn', canonical: '' },
+    label: 'ユニコーン',
+  },
+  {
+    pattern: 'bunnydj',
+    gift: { giftId: '437679', giftName: 'bunny dj', canonical: '' },
+    label: 'バニーDJ',
+  },
 ];
 
 /**
@@ -967,16 +979,98 @@ export const DJ_GLASSES_ROULETTE: ChallengeRouletteConfig = {
 };
 
 /**
- * ルーレット群の既定。出荷時はハートミーと DJメガネ(激熱確定)の2件 —
- * 設定画面から何件でも足せる。
+ * 倍率の候補列(確率抽選)。ユニコーン/バニーDJ の2行が共有する
+ * ×5 60% / ×10 30% / ×20 10%。
+ *
+ * ⚠ **並べ替えは掛からない**(sanitizeRouletteHotMultList は filter→slice→map のみ)ので、
+ * ここに書いた順がそのまま validate の出力になる。従来形へ畳まれないよう **2件以上**、
+ * かつ少なくとも1件は weight > 0 であること(1件だと validateRouletteHot が
+ * multipliers キーごと落として従来形にする)。
+ */
+const HOT_GIFT_MULTIPLIERS: readonly RouletteHotMultCandidate[] = [
+  { multiplier: 5, weight: 60 },
+  { multiplier: 10, weight: 30 },
+  { multiplier: 20, weight: 10 },
+];
+
+/**
+ * 激熱確定の既定行(ユニコーン / giftId 12453 / 2499💎)。盤面は**全マス 2499**で、
+ * 倍率は確率抽選なので 1個で 12,495 / 24,990 / 49,980 のいずれかに化ける。
+ *
+ * ⚠ DJ_GLASSES_ROULETTE と同じく **validate を通した後と同じ形**でなければならない
+ * (migrate の出力は再検証されない)。`multiplier` には
+ * `rouletteHotRepresentativeMult`(最大 weight・同率先勝ち)= **5** を焼いておくこと。
+ *
+ * ⚠ **giftName は空**。matchGiftTrigger の giftName 段は部分一致(includes)なので
+ * 'unicorn' を置くと **'Unicorn Fantasy'(giftId 7237 / 5000💎)まで巻き込む** —
+ * そちらは giftRules も giftFullCut も評価されなくなる。指定は giftId 一本で足りる。
+ * (ROULETTE_HOT_GIFT_PATTERNS 側の 'unicorn' は exactName: true なので安全。)
+ *
+ * 絵柄は ROULETTE_HOT_GIFT_PATTERNS により 100% 'unicorngift'(設定項目は無い)。
+ */
+export const UNICORN_ROULETTE: ChallengeRouletteConfig = {
+  id: 'rl-unicorn',
+  label: 'ユニコーン',
+  enabled: true,
+  giftId: '12453',
+  giftName: '',
+  canonical: '',
+  // 全マス同額。倍率が本物なので素の出目は動かさず、どこに止まっても同じ額で確定する。
+  segments: [
+    { amount: 2499, weight: 17 },
+    { amount: 2499, weight: 17 },
+    { amount: 2499, weight: 17 },
+    { amount: 2499, weight: 17 },
+    { amount: 2499, weight: 16 },
+    { amount: 2499, weight: 16 },
+  ],
+  direction: 'add',
+  patterns: [...DEFAULT_ROULETTE_PATTERNS],
+  hot: { enabled: true, multiplier: 5, multipliers: [...HOT_GIFT_MULTIPLIERS] },
+};
+
+/**
+ * 激熱確定の既定行(バニーDJ / giftId 437679 / 1200💎)。盤面は**全マス 1200**で、
+ * 倍率は確率抽選なので 1個で 6,000 / 12,000 / 24,000 のいずれかに化ける。
+ *
+ * giftName 'bunny dj' は部分一致でも他のギフトに当たらないことを確認済み
+ * (ギフト一覧 666 件中、'bunny' を含むのはこの1件だけ)。
+ *
+ * 絵柄は ROULETTE_HOT_GIFT_PATTERNS により 100% 'bunnydj'(設定項目は無い)。
+ */
+export const BUNNY_DJ_ROULETTE: ChallengeRouletteConfig = {
+  id: 'rl-bunny_dj',
+  label: 'バニーDJ',
+  enabled: true,
+  giftId: '437679',
+  giftName: 'bunny dj',
+  canonical: '',
+  segments: [
+    { amount: 1200, weight: 17 },
+    { amount: 1200, weight: 17 },
+    { amount: 1200, weight: 17 },
+    { amount: 1200, weight: 17 },
+    { amount: 1200, weight: 16 },
+    { amount: 1200, weight: 16 },
+  ],
+  direction: 'add',
+  patterns: [...DEFAULT_ROULETTE_PATTERNS],
+  hot: { enabled: true, multiplier: 5, multipliers: [...HOT_GIFT_MULTIPLIERS] },
+};
+
+/**
+ * ルーレット群の既定。出荷時はハートミーと激熱確定3件(DJメガネ / ユニコーン /
+ * バニーDJ)の計4件 — 設定画面から何件でも足せる。
  * 複数ある場合は**上から順に評価し、最初に一致した1件だけ**が回る(matchRoulette)。
  *
- * **DJメガネは必ず末尾**。先頭に入れるとテストや呼び元の `roulettes[0]` /
+ * **激熱確定の行は必ず末尾へ足す**。先頭に入れるとテストや呼び元の `roulettes[0]` /
  * `DEFAULT_ROULETTES[0]`(= 従来ハートミーを指していた)が別人を掴む。
  */
 export const DEFAULT_ROULETTES: readonly ChallengeRouletteConfig[] = [
   DEFAULT_ROULETTE,
   DJ_GLASSES_ROULETTE,
+  UNICORN_ROULETTE,
+  BUNNY_DJ_ROULETTE,
 ];
 
 /**
@@ -1860,20 +1954,140 @@ export const QUIZ_RULES_MAX = 8;
 export const QUIZ_ARM_MAX_MS = 120_000;
 
 /**
- * 導入全面カット(introClip)の尺(ms)。全面カット素材(assets/fx/cut/)は
- * 5 秒契約(giftFullCut の既定 durationSec: 5 と同じ)なのでそれに合わせる。
+ * 導入全面カット(introClip)の尺(ms)。**専用素材 `assets/fx/quiz/intro.mp4` の
+ * 192 フレーム(8.000 秒)と対**なので、片方だけ動かさないこと
+ * (REVOLUTION_INTRO_MS と素材の関係と同じ規約)。
+ *
+ * 2026-08-22 に 5 秒 → 8 秒。5 秒だったのは「全面カット素材(assets/fx/cut/)を
+ * 借りて流す枠」でしかなかった時代の名残で、あちらの契約(giftFullCut の
+ * durationSec: 5)に合わせていたもの。専用素材の投入に合わせて革命と同じ
+ * 8 秒契約へ寄せた。**cut/*.mp4 を introClip に選ぶと素材(5.06 秒)より長くなる**が、
+ * モニターの導入ホルダーは loop も onEnded も持たないので、素材が尽きたあとは
+ * 最終フレーム(白金フラッシュ)で静止したまま残り約 3 秒を待つ — 黒画面にも
+ * 巻き戻りにもならない。尺の権威は素材ではなくこの定数(JS タイマーが打ち切る)。
+ *
  * モニターは onEnded ではなく JS タイマーで打ち切る(既存規約)。
  */
-export const QUIZ_INTRO_MS = 5_000;
+export const QUIZ_INTRO_MS = 8_000;
 
 /**
- * お題回転演出(全画面テキストの減速差し替え)の尺(ms)。既存ルーレットの
- * mid(7.5秒)より短めの一定尺 — お題は読ませる必要があるので焦らしはしない。
+ * `QuizConfig.introClip` が**専用素材**(`assets/fx/quiz/intro.mp4`)を指すときの値。
+ * 他の候補は 'off' か全面カットのカタログ(`FULL_CUT_CLIP_IDS` = すべて `cut-` 始まり)
+ * なので、この番兵と衝突しない。URL 解決は renderer の `QUIZ_INTRO_CLIP_URL`
+ * (0 件許容 — 素材が無ければ導入だけスキップして回転から始まる)。
  */
-export const QUIZ_SPIN_MS = 6_000;
+export const QUIZ_INTRO_SELF = 'quiz';
 
-/** お題決定の全面パンチ表示の尺(ms)。この後 60 秒窓のオーバーレイへ引き継ぐ。 */
-export const QUIZ_REVEAL_MS = 2_500;
+/**
+ * お題回転の拍(2026-08-22 ユーザー決定「回転は今の3倍・焦らしをたっぷり」)。
+ * `ROULETTE_ULTRA_BEATS` と同じ流儀 — **尺の権威はこの表**で `QUIZ_SPIN_MS` は総和。
+ *
+ * 振り付け: 幕開け → 高速回転① → フェイクストップ① → 再加速② → ニアミス →
+ * よろよろ → 最後の溜め →(決定パンチ `QUIZ_REVEAL_MS` へ)。
+ *
+ * ★ **`tailMs` の意味は `ROULETTE_ULTRA_BEATS` と逆**。ultra の tailMs は「当選が
+ *   見えてからの溜め」だが、こちらは**ハズレ(当選の1つ手前)を掴んだまま
+ *   引っぱる最後の間**。お題の当選は決定パンチで初めて出る — 回転の最終コマと
+ *   決定表示は同時刻に予約され、同期スコープで先に登録された決定表示が勝つので、
+ *   当選コマは回転中に一度も描かれない(2026-08-21 の実装からの挙動)。
+ *   この形にしてあるおかげで `quizSpinTicks` の契約(最終コマは show === winner・
+ *   atMs >= totalMs)を変えずに焦らしが載る。**逆の意味で使わないこと。**
+ *
+ * `runStepMs` / `crawlStepMs` は「目標のコマ間隔」で、コマ数はここから導出する
+ * (`QUIZ_SPIN_STEPS`)。**下限は OBS 30fps の2フレーム ≒ 66ms** — これより細かく
+ * 刻んでも再描画が間に合わず、`MonitorView` の全体再レンダーがコマ落ちするだけ
+ * (`ROULETTE_ULTRA_BEATS` の走行距離に同じ配慮がある)。
+ */
+export const QUIZ_SPIN_BEATS = {
+  /**
+   * 幕開け。緞帳が開き切るまでの時間で、**`run1Ms` の内側**にある(総和には足さない)。
+   * この間もリールは回っている — 幕が開いた瞬間にはもう飛んでいるほうが勢いが出るので、
+   * 「幕の裏で1コマ据える」形にはしない。CSS の `.qz-curtain` のアニメ尺はこの値の
+   * 内側に収めること(`test/renderer/quiz-fx.spec.ts` が機械照合する)。
+   */
+  openMs: 1_200,
+  /** 高速回転①(頭の `openMs` は緞帳の裏)。 */
+  run1Ms: 5_400,
+  /** フェイクストップ①。ハズレを掴んで止まる(cue: 'fake')。 */
+  fake1Ms: 1_400,
+  /** 再加速②。 */
+  run2Ms: 3_200,
+  /** ニアミス。当選の1つ手前で長く止まる(cue: 'near')。 */
+  nearMs: 1_600,
+  /** よろよろ。1コマずつ間隔が伸びる(cue: 'crawl')。 */
+  crawlMs: 2_600,
+  /** 最後の溜め。**ハズレを掴んだまま**引っぱる(上の ★ を参照)。 */
+  tailMs: 3_800,
+  /**
+   * 走行拍(run1 / run2)の目標コマ間隔。差し替えのたびに `MonitorView` が丸ごと
+   * 再レンダーされるので、下げすぎると OBS でコマ落ちする。80ms ≒ 12.5 コマ/秒。
+   */
+  runStepMs: 80,
+  /** よろよろの入りのコマ間隔(ここから tail に向けて伸びる)。 */
+  crawlStepMs: 260,
+} as const;
+
+/**
+ * `QUIZ_SPIN_BEATS` の総和 = 回転の尺。export しない(ultra と同じ)。
+ * **`openMs` は `run1Ms` の内側なので足さない。**
+ */
+function quizSpinTotalMs(b: typeof QUIZ_SPIN_BEATS): number {
+  return b.run1Ms + b.fake1Ms + b.run2Ms + b.nearMs + b.crawlMs + b.tailMs;
+}
+
+/**
+ * お題回転演出(全画面テキストの減速差し替え)の尺(ms)= `QUIZ_SPIN_BEATS` の総和。
+ *
+ * 2026-08-22 に 6,000 → **18,000**(ユーザー指定「今の3倍」)。
+ * **「お題は読ませる必要があるので焦らしはしない」という旧方針はここで撤回された** —
+ * 読ませるのは決定パンチ以降(発表 → 準備 → 制限時間のあいだ、めくりが出っぱなし)が
+ * 受け持ち、回転そのものは寄席の見世物として引っぱる。
+ */
+export const QUIZ_SPIN_MS = quizSpinTotalMs(QUIZ_SPIN_BEATS);
+
+/**
+ * お題決定の全面パンチ表示の尺(ms)。この後「お題発表準備」へ引き継ぐ。
+ * 2026-08-22 に 2,500 → **4,000** — 回転を3倍に伸ばした山場の着地なので、
+ * 座布団が積み上がり切る(CSS の `.qz-zabuton` は 300ms 遅延 + 420ms)前に
+ * 幕が変わってしまわない長さが要る。
+ */
+export const QUIZ_REVEAL_MS = 4_000;
+
+/**
+ * 「お題発表準備」(発表 → 制限時間の間の仕度時間)の秒数の範囲。
+ * **0 でこの区間ごとスキップ**(2026-08-22 以前とまったく同じ進行に戻る)ので
+ * 下限は 0 — durationSec/voteSec のように「短すぎると企画が成立しない」性質が無い。
+ */
+export const QUIZ_PREP_MIN_SEC = 0;
+export const QUIZ_PREP_MAX_SEC = 60;
+
+/**
+ * 「終了後BGM」(投票締切から鳴らし続ける尺)の秒数の範囲。0 で無効。
+ * 上限が QUIZ_VOTE_MAX_SEC と同じ 120 なのは、結果発表(6秒)の後に
+ * フリートークを乗せる用途を想定した線。
+ */
+export const QUIZ_OUTRO_MIN_SEC = 0;
+export const QUIZ_OUTRO_MAX_SEC = 120;
+
+/**
+ * 区間BGM スロットの番兵「**前の区間の曲を鳴らし続ける**」。
+ *
+ * これが要るのは後方互換のため — 新スロットの既定を 'off' にすると、保存済み
+ * settings.json のユーザーは決定表示の瞬間に曲が止まる(退行)。既定を 'keep' に
+ * すれば「発動から清算まで1曲」という 2026-08-22 以前の挙動と完全に一致する。
+ *
+ * bgm.ts の id 接頭辞規約('bgm-*' / 'spin-*' / 'custom:')と衝突しない
+ * (先例は QUIZ_INTRO_SELF)。**先頭区間の `bgm` だけは受け付けない** —
+ * 継続元が無いので、validateQuiz の既存分岐が未知 id として既定へ倒す。
+ */
+export const QUIZ_BGM_KEEP = 'keep';
+
+/**
+ * 区間をまたぐ BGM 切替のクロスフェード尺(ms)。前の曲を fade-out させながら
+ * 次の曲を fade-in で重ねる。短いのは「区間が変わった」ことを聞かせるのが目的で、
+ * 曲を混ぜたいわけではないため。
+ */
+export const QUIZ_BGM_XFADE_MS = 400;
 
 /**
  * 結果発表カットシーン(票数→判定→±のロールアップ)の尺(ms)。
@@ -1913,17 +2127,72 @@ export const DEFAULT_QUIZ_RULE: QuizRule = {
 };
 
 /**
+ * v0.13.0(SETTINGS_VERSION 11)まで出荷していた「例」のお題1件。
+ * migrateChallengeQuizPrompts が「配信者がまだ触っていないか」を判定するためだけの
+ * 定数で、既定リストからは外れている(カタカナ表記の『誰もやったことないモノマネ』が
+ * 実質の後継)。**この文字列は書き換えない** — 変えると v12 の移行が誰にも一致しなくなる。
+ */
+export const QUIZ_PROMPT_SHIPPED_V11 = '誰もやったことないものまね';
+
+/**
+ * v0.14.0(SETTINGS_VERSION 12)の出荷既定お題28件(2026-08-22 ユーザー提供)。
+ *
+ * **この配列は増やさない** — 移行(migrateChallengeQuizPrompts)が配るのはこの28件だけで、
+ * DEFAULT_QUIZ.prompts を参照させると次の世代で既定が増えたときに v12 の段が新しい行まで
+ * 配って二重適用になる(STAMP_TRIGGER_RULES_V8 / FULL_CUT_CLIPS_V3 と同じ理由)。お題を
+ * 増やすときは DEFAULT_QUIZ.prompts 側に別の配列を継ぎ足し、既存ユーザーへ届けたいなら
+ * 新しい世代の移行を書くこと。
+ *
+ * 全件が QUIZ_PROMPT_LEN_MAX(60)以内・前後空白なし・重複なしで、件数も QUIZ_PROMPTS_MAX
+ * (50)以内 = **sanitizeStringList の不動点**。ここが崩れると validateQuiz の出力が既定と
+ * 食い違い、boot-settings.spec の冪等検査まで落ちる(壊れ方の詳細は
+ * test/unit/quiz-prompts-default.spec.ts の冒頭)。
+ */
+export const QUIZ_PROMPTS_V12: readonly string[] = [
+  '底辺YouTubeのキャッチコピー挨拶',
+  '近くにあるものと本気で喧嘩',
+  '誰もやったことないモノマネ',
+  '悲しい話を満面の笑顔で話す',
+  'カメラに向かってエア告白',
+  'コンビニの商品になりきって自己紹介',
+  '誰もやったことない必殺技を本気で披露',
+  '最弱のヒーローになって自分の能力を自慢する',
+  '未来から来た人として重大発表',
+  '自分の動作を全部実況しながら過ごす',
+  'ゲームのNPCになって同じセリフしか言えない',
+  '能力披露「ちょっとだけ風を起こせる」',
+  '世界一どうでもいいギネス記録に挑戦',
+  '絶対に流行らない新しい挨拶',
+  '新しいじゃんけんを発明する',
+  '絶対に売れないアイドルのキャッチコピー',
+  '世界一怖い「おやすみ」',
+  'ボタンに相談する',
+  '「あ」だけで感情を5種類表現',
+  '自分の長所を全部デメリットぽく紹介',
+  '自分の短所を超能力みたいに紹介',
+  '突然YouTuberになって物をレビュー',
+  '自分の右手と左手を別人格にして喧嘩させる',
+  '架空の都道府県を紹介する',
+  '突然記憶を失った人を演じる',
+  '普通の出来事を武勇伝として語る',
+  '空気を食べて食レポする',
+  '宇宙一くだらない発明をプレゼンする',
+];
+
+/**
  * お題ルーレットの既定。**機能そのものは既定で OFF**(DEFAULT_REVOLUTION と同じ
  * 判断)— 全アクション停止+投票で±5000 はゲーム経済の大技なので、キー欠損の
  * フォールバックで勝手に有効化されてはならない。旧 settings.json にこのキーは
  * 無いので、**欠損時のフォールバックが移行の代わり**になる(SETTINGS_VERSION は
- * 上げない)。お題は例を1件だけ配る — 空のままだと enabled にしても不発で、
- * 初回の動作確認(▶実演)すらできないため。
+ * 上げない)。お題は QUIZ_PROMPTS_V12 の28件を配る — 空のままだと enabled にしても不発で、
+ * 初回の動作確認(▶実演)すらできないため。**リストの中身**の方は既定を直しても保存済みの
+ * settings.json には届かない(prompts キーは v0.13.0 以降どの設定も持っている)ので、
+ * migrateChallengeQuizPrompts(SETTINGS_VERSION 12)が別途一度だけ配る。
  */
 export const DEFAULT_QUIZ: QuizConfig = {
   enabled: false,
   rules: [structuredClone(DEFAULT_QUIZ_RULE)],
-  prompts: ['誰もやったことないものまね'],
+  prompts: [...QUIZ_PROMPTS_V12],
   durationSec: 60,
   voteSec: 30,
   amount: 5000,
@@ -1934,8 +2203,33 @@ export const DEFAULT_QUIZ: QuizConfig = {
   // 逆向きの判断 — こちらは曲が鳴らないと仕様が成立しない)。
   bgm: 'bgm-roulette1',
   bgmVolume: 70,
-  // 導入全面カットは再生枠のみ(ユーザー決定)。素材を選んだ人だけ流れる。
-  introClip: 'off',
+  // ── 区間別BGM(2026-08-22)。**既定はすべて 'keep'** = 前の区間の曲を続ける。
+  // これで設定を触っていないユーザーの挙動は「発動から清算まで1曲」のまま
+  // 1ミリも変わらない(欠損フォールバックが移行の代わりになる条件でもある)。
+  revealBgm: QUIZ_BGM_KEEP,
+  revealBgmVolume: 70,
+  // お題発表準備の尺。既定 5 秒(2026-08-22 ユーザー決定)。0 で区間ごとスキップ。
+  prepSec: 5,
+  prepBgm: QUIZ_BGM_KEEP,
+  prepBgmVolume: 70,
+  thinkBgm: QUIZ_BGM_KEEP,
+  thinkBgmVolume: 70,
+  voteBgm: QUIZ_BGM_KEEP,
+  voteBgmVolume: 70,
+  // ── 終了後BGM。尺の既定は 20 秒だが、曲の既定は **'off'** —
+  // 出荷 v0.13.0 は投票締切で無音になる仕様だったので、'keep' にすると
+  // 「勝手に 20 秒鳴り続けるようになった」という驚きを配ることになる。
+  // 鳴らしたい人が選ぶ('off' 以外にする)まで従来どおり無音。
+  outroSec: 20,
+  outroDownBgm: 'off',
+  outroDownBgmVolume: 70,
+  outroUpBgm: 'off',
+  outroUpBgmVolume: 70,
+  // 導入全面カットは**専用素材が既定**(2026-08-22)。出荷 v0.13.0 の 'off' は
+  // 「導入は要らない」ではなく「専用素材がまだ無い」という意味だったので、
+  // 素材の投入に合わせて既定を引き上げ、保存済み設定には
+  // migrateChallengeQuizIntro(settingsVersion 11)が一度だけ届ける。
+  introClip: QUIZ_INTRO_SELF,
 };
 
 /**
@@ -2797,13 +3091,25 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeRouletteDjGlasses(
-    migrateChallengeTapBoostNebaaru(
-      migrateChallengeStampTriggers(
-        migrateChallengeTapBoostCorgi(
-          migrateChallengeGiftFullCutTriggersV5(
-            migrateChallengeGiftFullCutTriggers(
-              migrateChallengeGiftFullCut(migrateChallengeSeSounds(cfg, fromVersion), fromVersion),
+  return migrateChallengeRouletteHotGifts(
+    migrateChallengeQuizPrompts(
+      migrateChallengeQuizIntro(
+        migrateChallengeRouletteDjGlasses(
+          migrateChallengeTapBoostNebaaru(
+            migrateChallengeStampTriggers(
+              migrateChallengeTapBoostCorgi(
+                migrateChallengeGiftFullCutTriggersV5(
+                  migrateChallengeGiftFullCutTriggers(
+                    migrateChallengeGiftFullCut(
+                      migrateChallengeSeSounds(cfg, fromVersion),
+                      fromVersion
+                    ),
+                    fromVersion
+                  ),
+                  fromVersion
+                ),
+                fromVersion
+              ),
               fromVersion
             ),
             fromVersion
@@ -2816,6 +3122,43 @@ export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number
     ),
     fromVersion
   );
+}
+
+/**
+ * v13: 激熱確定のユニコーン行(gift 12453)とバニーDJ行(gift 437679)を
+ * **まだ無ければ1回だけ**足す。migrateChallengeRouletteDjGlasses(v10)と同型。
+ *
+ * roulettes キーは保存済み設定が必ず持っているので、既定(DEFAULT_ROULETTES /
+ * 同梱 challenge-default.json)を直しても既存ユーザーには一生届かない — 足す移行が要る。
+ *
+ * ⚠ validateChallengeConfig の中に入れてはいけない。あちらは UI の cfg.set も通るので、
+ *   ユーザーが消した行がその場で復活する。
+ *
+ * ⚠ **上限は行ごとに確認する。** 1回だけ見て2行 push すると ROULETTES_MAX を超える。
+ *   1行目で上限に達したら2行目は足さない(reduce ではなく逐次 push なのはこのため)。
+ *
+ * - giftId 一致で「自分でその行を作っていた人」に二重に配らない。
+ * - id 一致も見る: 同梱 resources/challenge-default.json には明示行が入っているので、
+ *   そこから来た行でユーザーが giftId を空にしていても足さない(足すと id が重複して
+ *   validateRoulettes の振り直しで 'rl-unicorn-N' に化ける)。
+ * - **末尾へ append**。matchRoulette は先勝ちなので、ユーザーが並べた優先度を壊さない。
+ * - 行を消した人には二度と配らない(世代印が上がるのは1回だけ)。
+ */
+export function migrateChallengeRouletteHotGifts(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 13) return cfg;
+  const roulettes = [...cfg.roulettes];
+  let added = 0;
+  for (const row of [UNICORN_ROULETTE, BUNNY_DJ_ROULETTE]) {
+    if (roulettes.some((r) => r.giftId === row.giftId || r.id === row.id)) continue;
+    // 残数は毎回見る — 1行足したぶんだけ上限に近づく。
+    if (roulettes.length >= ROULETTES_MAX) break;
+    roulettes.push(structuredClone(row));
+    added += 1;
+  }
+  return added === 0 ? cfg : { ...cfg, roulettes };
 }
 
 /**
@@ -2847,6 +3190,67 @@ export function migrateChallengeRouletteDjGlasses(
   if (has) return cfg;
   if (cfg.roulettes.length >= ROULETTES_MAX) return cfg;
   return { ...cfg, roulettes: [...cfg.roulettes, structuredClone(DJ_GLASSES_ROULETTE)] };
+}
+
+/**
+ * v11: お題ルーレットの導入を専用素材(`assets/fx/quiz/intro.mp4`)へ引き上げる。
+ *
+ * v0.13.0(settingsVersion 10)が配った `introClip: 'off'` は「導入は要らない」
+ * ではなく「**専用素材がまだ無い**」という意味だった(当時は他機能の全面カットを
+ * 借りる枠しか無く、既定で他人の絵を流すわけにいかなかった)。素材を投入した
+ * 2026-08-22 に既定を `QUIZ_INTRO_SELF` へ変えたが、**既定を直しても保存済みの
+ * settings.json には一生届かない**ので、足す移行が要る。
+ *
+ * - **`'off'` ちょうどのときだけ**書き換える。`cut-*` を自分で選んでいた人の
+ *   選択は尊重する(そちらは「素材が無い」ではなく明確な指名だから)。
+ * - 世代印が上がるのは1回だけなので、移行後に自分で `'off'` へ戻した人には
+ *   二度と配らない。
+ *
+ * ⚠ validateQuiz の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
+ * ユーザーが選んだ `'off'` がその場で戻る(giftFullCut / コーギーと同じ理由)。
+ */
+export function migrateChallengeQuizIntro(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 11) return cfg;
+  if (cfg.quiz.introClip !== 'off') return cfg;
+  return { ...cfg, quiz: { ...cfg.quiz, introClip: QUIZ_INTRO_SELF } };
+}
+
+/**
+ * v12: お題リストを実運用の28件(QUIZ_PROMPTS_V12)へ**寄せ替える**。足す移行ではない。
+ *
+ * v0.13.0 が配った prompts は「誰もやったことないものまね」1件だけで、これは実運用の
+ * お題ではなく「空だと enabled にしても不発で ▶実演 すらできない」ための**例**だった。
+ * 2026-08-22 に実運用の28件を出荷既定にしたが、prompts キーは v0.13.0 以降どの保存済み
+ * 設定も持っているので validateQuiz の欠損フォールバックを通らず、**既定を直しても
+ * 既存ユーザーには一生届かない** — 足す/寄せ替えの移行だけが唯一の経路。
+ *
+ * ⚠ validateQuiz の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
+ * ユーザーが消したお題がその場で復活する(migrateChallengeQuizIntro と同じ理由)。
+ *
+ * **出荷既定の「例」1件ちょうどのときだけ**書き換える(migrateChallengeTapBoostNebaaru の
+ * 方針)。`length !== 1` を先に見るので:
+ * - `[]`(全部消した人)には配らない。sanitizeStringList が明示的な空配列を空のまま通す
+ *   のと同じ判断で、「お題を使わない」という意思を尊重する。
+ * - 1件でも別の文字列に書き換えている人、2件以上に育てている人には触らない。
+ * - 世代印が上がるのは1回だけなので、移行後に自分で1件へ戻した人には二度と配らない。
+ *
+ * この1段で3経路すべてに効く(migrateChallengeTapBoostNebaaru と同じ):
+ *  (1) settings.json(保存済み)
+ *  (2) ユーザーのデフォ保存 config/challenge-default.json
+ *  (3) 同梱の公開デフォ resources/challenge-default.json(quiz キーを持たないので
+ *      validateChallengeConfig が DEFAULT_QUIZ = 28件へ倒し、この段は素通りする)
+ */
+export function migrateChallengeQuizPrompts(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 12) return cfg;
+  const p = cfg.quiz.prompts;
+  if (p.length !== 1 || p[0] !== QUIZ_PROMPT_SHIPPED_V11) return cfg;
+  return { ...cfg, quiz: { ...cfg.quiz, prompts: [...QUIZ_PROMPTS_V12] } };
 }
 
 /**
@@ -3690,6 +4094,16 @@ export function validateQuiz(raw: unknown): QuizConfig {
   if (!c || typeof c !== 'object') return structuredClone(d);
   const n = (v: unknown, fb: number, min: number, max: number): number =>
     typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  // BGM スロットの検証。'off' / カタログ id / custom: の3分岐は既存の bgm と同じで、
+  // 区間スロットだけ番兵 'keep'(前の区間の曲を続ける)を上乗せする。
+  // **先頭区間の bgm には keep を渡さない** — 継続元が無いので既定へ倒すのが正しい。
+  const bgmId = (v: unknown, fb: string, keep: boolean): string =>
+    v === 'off' ||
+    (keep && v === QUIZ_BGM_KEEP) ||
+    (typeof v === 'string' && CHALLENGE_ROULETTE_BGM_IDS.includes(v)) ||
+    isCustomSoundId(v)
+      ? (v as string)
+      : fb;
   // 既定が false の真偽値なので `=== true` で読む(revolution と同じ向き)。
   const enabled = c.enabled === true;
 
@@ -3716,7 +4130,7 @@ export function validateQuiz(raw: unknown): QuizConfig {
   return {
     enabled,
     rules,
-    // お題は欠損時だけ既定(例1件)へ倒す。明示的な空配列は空のまま —
+    // お題は欠損時だけ既定(QUIZ_PROMPTS_V12 の28件)へ倒す。明示的な空配列は空のまま —
     // 空だと発動しない(worker 側が不発 + giftDiag)ので破綻はしない。
     prompts: sanitizeStringList(c.prompts, QUIZ_PROMPTS_MAX, QUIZ_PROMPT_LEN_MAX, d.prompts),
     durationSec: n(c.durationSec, d.durationSec, QUIZ_DURATION_MIN_SEC, QUIZ_DURATION_MAX_SEC),
@@ -3726,15 +4140,30 @@ export function validateQuiz(raw: unknown): QuizConfig {
     goodWords: sanitizeStringList(c.goodWords, QUIZ_WORDS_MAX, QUIZ_WORD_LEN_MAX, d.goodWords),
     badWords: sanitizeStringList(c.badWords, QUIZ_WORDS_MAX, QUIZ_WORD_LEN_MAX, d.badWords),
     // BGM はルーレットと同じカタログ(+custom:)。未知の id は既定へ戻す。
-    bgm:
-      c.bgm === 'off' || (typeof c.bgm === 'string' && CHALLENGE_ROULETTE_BGM_IDS.includes(c.bgm))
-        ? c.bgm
-        : isCustomSoundId(c.bgm)
-          ? c.bgm
-          : d.bgm,
+    // 区間①(発動〜導入カット〜回転)の曲 — ここだけ 'keep' を受け付けない。
+    bgm: bgmId(c.bgm, d.bgm, false),
     bgmVolume: n(c.bgmVolume, d.bgmVolume, 0, 100),
+    // ── 区間②〜④の曲。既定 'keep' なので、キー欠損 = 従来どおり1曲通し。
+    revealBgm: bgmId(c.revealBgm, d.revealBgm, true),
+    revealBgmVolume: n(c.revealBgmVolume, d.revealBgmVolume, 0, 100),
+    prepSec: n(c.prepSec, d.prepSec, QUIZ_PREP_MIN_SEC, QUIZ_PREP_MAX_SEC),
+    prepBgm: bgmId(c.prepBgm, d.prepBgm, true),
+    prepBgmVolume: n(c.prepBgmVolume, d.prepBgmVolume, 0, 100),
+    thinkBgm: bgmId(c.thinkBgm, d.thinkBgm, true),
+    thinkBgmVolume: n(c.thinkBgmVolume, d.thinkBgmVolume, 0, 100),
+    voteBgm: bgmId(c.voteBgm, d.voteBgm, true),
+    voteBgmVolume: n(c.voteBgmVolume, d.voteBgmVolume, 0, 100),
+    // ── 区間⑤(終了後)。減算/増加で別の曲・±0 は無音(2026-08-22 ユーザー決定)。
+    outroSec: n(c.outroSec, d.outroSec, QUIZ_OUTRO_MIN_SEC, QUIZ_OUTRO_MAX_SEC),
+    outroDownBgm: bgmId(c.outroDownBgm, d.outroDownBgm, true),
+    outroDownBgmVolume: n(c.outroDownBgmVolume, d.outroDownBgmVolume, 0, 100),
+    outroUpBgm: bgmId(c.outroUpBgm, d.outroUpBgm, true),
+    outroUpBgmVolume: n(c.outroUpBgmVolume, d.outroUpBgmVolume, 0, 100),
+    // 'off' / 専用素材の番兵 / 全面カットのカタログ。未知の id は既定へ戻す。
     introClip:
-      c.introClip === 'off' || (typeof c.introClip === 'string' && FULL_CUT_CLIP_IDS.includes(c.introClip))
+      c.introClip === 'off' ||
+      c.introClip === QUIZ_INTRO_SELF ||
+      (typeof c.introClip === 'string' && FULL_CUT_CLIP_IDS.includes(c.introClip))
         ? c.introClip
         : d.introClip,
   };

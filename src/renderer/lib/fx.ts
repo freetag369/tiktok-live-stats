@@ -267,6 +267,44 @@ const tapLockGlob = import.meta.glob('../assets/fx/tap-lock/*.mp4', {
 export const TAP_LOCK_INTRO_CLIP_URL: string | null =
   tapLockGlob['../assets/fx/tap-lock/intro.mp4'] ?? null;
 
+/**
+ * お題ルーレットの導入全面カット(8秒 = QUIZ_INTRO_MS・不透明・音声焼き込み)。
+ * 素材は assets/fx/quiz/intro.mp4(寄席のオープニング。専用サブディレクトリなのは
+ * rl/hot・revolution・tap-lock と同じ理由: 既存カタログの孤児検査を踏まない)。
+ *
+ * **無ければ null**。仮流用は置かない — 導入が無いときは `startQuizFx` が段ごと
+ * 飛ばして回転から始めるのが正しい退避先で、preMs も実際に再生する尺で cue に
+ * 申告されるので窓はズレない(TAP_LOCK_INTRO_CLIP_URL と同じ 0 件許容の流儀)。
+ *
+ * 設定で `cut-*`(全面カットのカタログ)を選んだ場合はこの URL ではなく
+ * `fxClipUrl` 側が解決する。分岐は MonitorView の startQuizFx 1 箇所だけ。
+ *
+ * gift-t1〜t4 で代用してはいけない: あちらは screen 合成前提の黒背景素材で、
+ * 不透明ホルダー(.fx-clip-opaque)に出すと黒画面 8 秒になる。
+ */
+const quizGlob = import.meta.glob('../assets/fx/quiz/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+export const QUIZ_INTRO_CLIP_URL: string | null =
+  quizGlob['../assets/fx/quiz/intro.mp4'] ?? null;
+
+/**
+ * お題ルーレットの結果発表カットシーン(6秒 = QUIZ_RESULT_MS・不透明・音声焼き込み)。
+ * 素材は assets/fx/quiz/result.mp4(寄席の高座で緞帳が閉じていく絵)。
+ *
+ * **無ければ null**(REVOLUTION_RESULT_CLIP_URL と同型)。導入のような仮流用は
+ * 置かない — 素材が無いときは `.quiz-settle` の金屏風の幕がそのまま出て、票数・
+ * 判定・±N は必ず出し切る。導入と同じ絵を終了で流すと「もう1回始まった」に見える。
+ *
+ * 導入とは**別ホルダー**にすること(革命と同じ理由 — 導入と結果は最大 130 秒
+ * 離れた別の生存期間で、共有すると abortQuizFx や次の startQuizFx が結果を殺す)。
+ */
+export const QUIZ_RESULT_CLIP_URL: string | null =
+  quizGlob['../assets/fx/quiz/result.mp4'] ?? null;
+
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 
 /** クリップ id → URL。未知の id は null(設定が古い/壊れていても落とさない)。 */

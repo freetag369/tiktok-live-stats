@@ -139,6 +139,33 @@ const pools = new Map<string, { els: HTMLAudioElement[]; next: number }>();
  * 'off' や未知の id は無音(validate 済み設定なら既定に矯正されているが、
  * ポーリング前の古い設定が来ても落ちないように)。
  */
+/**
+ * 効果音の先読み置き場(2026-08-22)。id → ロード済みの未使用 HTMLAudioElement。
+ * playSe がプールへ新要素を作る瞬間に、新規作成の代わりにここから引き取る。
+ */
+const warmed = new Map<string, HTMLAudioElement>();
+
+/**
+ * 効果音の先読み(モニター窓の起動アイドル時に media-prewarm から)。
+ *
+ * 各 id につき1本だけ Audio を作って load() まで済ませる — playSe は初回
+ * 再生時に new Audio + フェッチ + デコード初期化を払うため、その音がその配信で
+ * 初めて鳴る瞬間に一拍の遅れが出ていた。play() は呼ばない(無音でも autoplay
+ * ポリシー・音量事故の芽を残さない)。既知でない id・予熱済み・プール作成済みは
+ * 無視。常駐は最終的に playSe が自然に到達する本数の前借りで、上限は増えない。
+ */
+export function prewarmSe(ids: readonly string[]): void {
+  for (const id of ids) {
+    const s = BY_ID.get(id);
+    if (!s) continue;
+    if (pools.has(s.id) || warmed.has(s.id)) continue;
+    const a = new Audio(s.url);
+    a.preload = 'auto';
+    a.load();
+    warmed.set(s.id, a);
+  }
+}
+
 export function playSe(id: string, volume: number): void {
   const s = BY_ID.get(id);
   if (!s) return;
@@ -151,8 +178,15 @@ export function playSe(id: string, volume: number): void {
   }
   let a: HTMLAudioElement;
   if (p.els.length < POOL_SIZE) {
-    a = new Audio(s.url);
-    a.preload = 'auto';
+    // 予熱済みの未使用要素(prewarmSe)がいればロードをやり直さず引き取る。
+    const w = warmed.get(s.id);
+    if (w) {
+      warmed.delete(s.id);
+      a = w;
+    } else {
+      a = new Audio(s.url);
+      a.preload = 'auto';
+    }
     p.els.push(a);
   } else {
     a = p.els[p.next]!;

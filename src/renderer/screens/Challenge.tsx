@@ -91,11 +91,18 @@ import {
   DEFAULT_QUIZ_RULE,
   QUIZ_AMOUNT_MAX,
   QUIZ_AMOUNT_MIN,
+  QUIZ_BGM_KEEP,
   QUIZ_DURATION_MAX_SEC,
   QUIZ_DURATION_MIN_SEC,
   QUIZ_INTRO_MS,
+  QUIZ_INTRO_SELF,
+  QUIZ_OUTRO_MAX_SEC,
+  QUIZ_OUTRO_MIN_SEC,
+  QUIZ_PREP_MAX_SEC,
+  QUIZ_PREP_MIN_SEC,
   QUIZ_PROMPTS_MAX,
   QUIZ_PROMPT_LEN_MAX,
+  QUIZ_RESULT_MS,
   QUIZ_REVEAL_MS,
   QUIZ_RULES_MAX,
   QUIZ_SPIN_MS,
@@ -313,11 +320,37 @@ function specForSlot(slot: ChallengeSeSlot): ChallengeTestEffectSpec | null {
 }
 
 /** 「▶ モニター」ボタン。モニターウィンドウ上で演出を実演再生する。 */
+/**
+ * モニターの再生能力(challenge.fxCaps)の到着を待つ上限とポーリング間隔。
+ * モニターを閉じた状態から ▶ を押した1回目だけ効く保険で、握手が来なければ
+ * 諦めて素の(バナーだけの)結果をそのまま見せる — 固定待ちには戻さない。
+ */
+const TEST_CAPS_WAIT_MS = 3_000;
+const TEST_CAPS_POLL_MS = 150;
+
+/**
+ * 走行中プレビューの識別子。行ごとの ▶ を区別して、その行だけを「■ 停止」にする。
+ * 行 id を持たない種別(spec に *Id が無いもの)は kind だけで十分。
+ */
+function testKeyOf(spec: ChallengeTestEffectSpec): string {
+  switch (spec.kind) {
+    case 'revolution':
+      return `revolution:${spec.revolutionId ?? ''}`;
+    case 'quiz':
+      return `quiz:${spec.quizId ?? ''}`;
+    case 'tapBoost':
+      return `tapBoost:${spec.boostId ?? ''}`;
+    default:
+      return spec.kind;
+  }
+}
+
 function MonitorTestBtn({
   spec,
   onTest,
   busy,
   disabled,
+  running,
   label,
   title,
   style,
@@ -327,10 +360,28 @@ function MonitorTestBtn({
   busy: boolean;
   /** 追加の無効化条件(例: 簡易演出スロットが「出さない」)。title で理由を添えること。 */
   disabled?: boolean;
+  /**
+   * **この行の**実演が走行中。ボタンが「■ 停止」に変わり、押すと即座に片付ける。
+   * 革命(約79秒)・お題(約105秒)のフル尺プレビューを流しっぱなしにしない逃げ道
+   * なので、`busy` による無効化より優先する(走行中でも必ず押せる)。
+   */
+  running?: boolean;
   label?: string;
   title?: string;
   style?: React.CSSProperties;
 }): React.JSX.Element {
+  if (running) {
+    return (
+      <button
+        className="btn small"
+        title="実演を中断してモニターの表示を片付けます"
+        style={style}
+        onClick={() => onTest({ kind: 'stopTest' })}
+      >
+        ■ 停止
+      </button>
+    );
+  }
   return (
     <button
       className="btn small"
@@ -397,6 +448,16 @@ export function Challenge(): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('basic');
   const [monitorOpen, setMonitorOpen] = useState(false);
   const [confirmNode, confirm] = useConfirm();
+  /**
+   * 走行中の▶実演(フル尺プレビュー)の識別子。`${kind}:${id}` 形式で、その行の
+   * ボタンだけが「■ 停止」になる。null = 実演なし。
+   *
+   * この画面は challenge state を購読していない(preload の API は onMonitorState
+   * だけ)ので、**尺は worker の戻り値 previewMs を信じて**自前のタイマーで解除する。
+   * 尺の算術を renderer に複製しないための設計。
+   */
+  const [testRunning, setTestRunning] = useState<string | null>(null);
+  const testRunningTimer = useRef<number | null>(null);
 
   useEffect(() => {
     // マウント時に必ず最新を取り直す — 設定画面での変更後でも古い draft を種にしない。
@@ -411,6 +472,15 @@ export function Challenge(): React.JSX.Element {
       .then((r) => setMonitorOpen(r.open))
       .catch(() => undefined); // onMonitorState 購読で回復する
     return window.api.onMonitorState((s) => setMonitorOpen(s.open));
+  }, []);
+
+  // 画面を離れるときに走行中フラグのタイマーを畳む(worker の窓は残す — 設定を
+  // 閉じてモニターだけ見たいケースがあるので、勝手に stopTest は撃たない)。
+  // **早期 return(draft 未取得)より上に置くこと** — 下に置くと条件付き呼び出しになる。
+  useEffect(() => {
+    return () => {
+      if (testRunningTimer.current !== null) window.clearTimeout(testRunningTimer.current);
+    };
   }, []);
 
   if (!draft) return <div className="screen">読み込み中…</div>;
@@ -501,20 +571,63 @@ export function Challenge(): React.JSX.Element {
     }
   }
 
+  /** 走行中プレビューの表示を解除する(自然満了・中断の共通出口)。 */
+  function clearTestRunning(): void {
+    if (testRunningTimer.current !== null) {
+      window.clearTimeout(testRunningTimer.current);
+      testRunningTimer.current = null;
+    }
+    setTestRunning(null);
+  }
+
   async function testFx(spec: ChallengeTestEffectSpec): Promise<void> {
+    // 「■ 停止」は走行中でも必ず通す(testBusy ガードの外)。
+    if (spec.kind === 'stopTest') {
+      clearTestRunning();
+      try {
+        await rpc('challenge.testEffect', spec);
+      } catch (e) {
+        toast({ level: 'error', msgJa: (e as Error).message });
+      }
+      return;
+    }
     if (testBusy) return;
     setTestBusy(true);
     try {
       // 未保存の編集内容で実演する — 保存前の割り当てが再生される混乱を避ける。
       if (dirty && !(await save())) return;
-      if (!monitorOpen) {
+      const wasOpen = monitorOpen;
+      if (!wasOpen) {
         await rpc('monitor.open', undefined);
         // マウント完了は待たない — モニターの watermark はマウント時、最初の
         // スナップショットに含まれる test 演出を再生する(freshChallengeEffects の
         // mountPlaysTest)ので、push が先でも捨てられない。以前の固定 1500ms 待ちは
         // ウィンドウ生成が遅い環境で足りず「▶ が無言で消える」原因だった。
       }
-      await rpc('challenge.testEffect', spec);
+      // **fxCaps 握手のレース**: モニターを閉じた状態から押すと、レンダラがまだ
+      // challenge.fxCaps を送っていないので worker 側の monitorBandFx は既定の
+      // false のまま = fxAllowed() が false = カットインが全部拒否され、
+      // 「バナー1枚で終わる」。**stopTest は effect を積まない**ので握手の成否を
+      // 覗く道具に使え、実演を撃つ前に短くポーリングできる(先に撃ってから
+      // 撃ち直すとバナーと本編が二重に出る)。**固定待ちには戻さない** — 以前の
+      // 1500ms 待ちは、ウィンドウ生成が遅い環境で足りず「▶ が無言で消える」原因だった。
+      if (!wasOpen) {
+        const deadline = Date.now() + TEST_CAPS_WAIT_MS;
+        while (Date.now() < deadline) {
+          if ((await rpc('challenge.testEffect', { kind: 'stopTest' })).cinematic) break;
+          await new Promise((res) => window.setTimeout(res, TEST_CAPS_POLL_MS));
+        }
+      }
+      const r = await rpc('challenge.testEffect', spec);
+      // 尺の分かる実演(革命・お題・フィーバー)だけ「■ 停止」を出す。
+      if (r.previewMs > 0) {
+        clearTestRunning();
+        setTestRunning(testKeyOf(spec));
+        testRunningTimer.current = window.setTimeout(() => {
+          testRunningTimer.current = null;
+          setTestRunning(null);
+        }, r.previewMs);
+      }
     } catch (e) {
       toast({ level: 'error', msgJa: (e as Error).message });
     } finally {
@@ -630,13 +743,31 @@ export function Challenge(): React.JSX.Element {
           <HelperSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
         ) : null}
         {tab === 'revolution' ? (
-          <RevolutionSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+          <RevolutionSection
+            cfg={draft}
+            onPatch={patch}
+            onTest={onTest}
+            testBusy={testBusy}
+            testRunning={testRunning}
+          />
         ) : null}
         {tab === 'quiz' ? (
-          <QuizSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+          <QuizSection
+            cfg={draft}
+            onPatch={patch}
+            onTest={onTest}
+            testBusy={testBusy}
+            testRunning={testRunning}
+          />
         ) : null}
         {tab === 'boost' ? (
-          <BoostSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+          <BoostSection
+            cfg={draft}
+            onPatch={patch}
+            onTest={onTest}
+            testBusy={testBusy}
+            testRunning={testRunning}
+          />
         ) : null}
         {tab === 'taplock' ? (
           <TapLockSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
@@ -652,6 +783,12 @@ interface SectionProps {
   onPatch: (p: Partial<ChallengeConfig>) => void;
   onTest: OnTest;
   testBusy: boolean;
+  /**
+   * 走行中の▶実演の識別子(testKeyOf の値)。**フル尺プレビューを持つ節だけ**が
+   * 受け取る(革命・お題・フィーバー)— 該当行のボタンが「■ 停止」に変わる。
+   * 短い実演しか持たない節は渡さない(省略 = 常に ▶ のまま)。
+   */
+  testRunning?: string | null;
 }
 
 /** 基本設定: 数値・ホットキー・モニター表示先。 */
@@ -2153,7 +2290,7 @@ function RouletteSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Reac
           className="btn small"
           onClick={() => onPatch({ roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[] })}
         >
-          既定(ハートミー・DJメガネ)に戻す
+          既定(ハートミー・激熱確定3種)に戻す
         </button>
       </div>
       <JoinRouletteSection cfg={cfg} onPatch={onPatch} onTest={onTest} testBusy={testBusy} audition={audition} />
@@ -2411,6 +2548,14 @@ const ROULETTE_PATTERN_LABELS: Record<RoulettePattern, { label: string; hint: st
   djglasses: {
     label: 'DJメガネ',
     hint: 'DJメガネのギフトで回る激熱確定の専用演出。通常のルーレットでは出ません',
+  },
+  unicorngift: {
+    label: 'ユニコーン',
+    hint: 'ユニコーンのギフトで回る激熱確定の専用演出。通常のルーレットでは出ません',
+  },
+  bunnydj: {
+    label: 'バニーDJ',
+    hint: 'バニーDJのギフトで回る激熱確定の専用演出。通常のルーレットでは出ません',
   },
 };
 
@@ -3578,7 +3723,7 @@ function StampTriggerBlock({
  *
  * giftId が type="text" なのは HelperSection と同じ理由(前置ゼロ・長い ID)。
  */
-function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+function BoostSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionProps): React.JSX.Element {
   const tb = cfg.tapBoost;
   // tapBoost はネストしたオブジェクト — 丸ごと差し替える(patchFs と同じ作法)。
   const patchTb = (p: Partial<TapBoostConfig>): void => {
@@ -3747,6 +3892,7 @@ function BoostSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.J
                 spec={{ kind: 'tapBoost', boostId: r.id }}
                 onTest={onTest}
                 busy={testBusy}
+                running={testRunning === `tapBoost:${r.id}`}
                 label="▶ この行"
                 title="モニターウィンドウで、この行の設定(倍率・秒数・映像)のまま起動カットイン→3・2・1→タップウィンドウ→結果カットシーン→減算発表→着弾を実演再生します(giftId 未設定でも確認できます)。カウント値は変わりません"
               />
@@ -4004,7 +4150,13 @@ function TapLockSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React
  * (BoostSection の multiplier と同じ clamp 表示)。既定は OFF(反転はゲーム
  * 経済の意味を変えるので、キー欠損フォールバックで勝手に有効化しない)。
  */
-function RevolutionSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+function RevolutionSection({
+  cfg,
+  onPatch,
+  onTest,
+  testBusy,
+  testRunning,
+}: SectionProps): React.JSX.Element {
   const rv = cfg.revolution;
   const patchRv = (p: Partial<RevolutionConfig>): void => {
     onPatch({ revolution: { ...rv, ...p } });
@@ -4131,8 +4283,9 @@ function RevolutionSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
                 spec={{ kind: 'revolution', revolutionId: r.id }}
                 onTest={onTest}
                 busy={testBusy}
+                running={testRunning === `revolution:${r.id}`}
                 label="▶ この行"
-                title="モニターウィンドウで、導入カットイン+カウントダウンだけを実演再生します(giftId 未設定でも確認できます)。実際には窓を開きません・カウント値も変わりません"
+                title="モニターウィンドウで、導入カットイン→カウントダウン→窓(タップ×倍率)→結果カットシーンまで通しで実演再生します(giftId 未設定でも確認できます)。本番と同じ尺なので、この行の秒数ぶんかかります。窓中のタップは実演として数えますが、カウント値は変わりません。途中でやめるときは同じボタン(■ 停止)を押してください"
               />
               <button
                 className="btn small"
@@ -4201,6 +4354,97 @@ let quizSeq = 0;
  * お題リスト・判定ワードの共通エディタ(1行1項目の text input + 追加/削除)。
  * CommentRulesSection の行 UI から「規則」の部分を抜いた形。
  */
+/**
+ * お題ルーレットの区間BGM 1行ぶん(選択 + ♪試聴 + 参照…取込み + 音量)。
+ * RouletteSoundFields の BGM 行をお題の 6 スロット用に一般化したもの —
+ * 選択肢・試聴・取込みの実装を1本に保つ。
+ *
+ * keep=true のスロットは番兵「前の区間の曲を続ける」を選べる(既定)。
+ * 先頭区間(ルーレット時)だけは継続元が無いので false で呼ぶ。
+ */
+function QuizBgmRow({
+  label,
+  title,
+  id,
+  volume,
+  keep,
+  audition,
+  auditionKey,
+  onPick,
+  onVolume,
+}: {
+  label: string;
+  title: string;
+  id: string;
+  volume: number;
+  keep: boolean;
+  audition: SoundAudition;
+  auditionKey: string;
+  onPick: (id: string) => void;
+  onVolume: (v: number) => void;
+}): React.JSX.Element {
+  // 'off'(無音)と 'keep'(前の区間を継続)は鳴らす曲が無いので試聴も音量も無効。
+  const silent = id === 'off' || id === QUIZ_BGM_KEEP;
+  const key = `${auditionKey}:${id}`;
+  // 取込みは main がダイアログ → config/sounds/ へのコピーまで担う(回転音と同じ
+  // sound.importCustom を再利用 — パラメータを取らないのでそのまま使える)。
+  const pickCustom = (): void => {
+    void rpc('sound.importCustom', undefined)
+      .then((r) => {
+        if (r) onPick(CUSTOM_SOUND_PREFIX + r.file);
+      })
+      .catch((e: Error) => {
+        toast({ level: 'error', msgJa: `BGM の取込みに失敗しました: ${e.message}` });
+      });
+  };
+  return (
+    <div className="row" style={{ gap: 8, alignItems: 'flex-end', marginTop: 6 }}>
+      <label className="field" style={{ width: 210 }} title={title}>
+        {label}
+        <select value={id} onChange={(e) => onPick(e.target.value)}>
+          {keep ? <option value={QUIZ_BGM_KEEP}>前の区間の曲を続ける(既定)</option> : null}
+          <option value="off">off(鳴らさない)</option>
+          {[...ROULETTE_BGM, ...BAND_BGM].map((b) => (
+            <option key={b.id} value={b.id}>
+              {b.label}
+            </option>
+          ))}
+          {/* 現在値が取込み音のときだけ動的に足す — 無いと controlled select が空表示になる。 */}
+          {isCustomSoundId(id) ? (
+            <option value={id}>取込み: {customSoundFileName(id)}</option>
+          ) : null}
+        </select>
+      </label>
+      <button
+        className="btn small"
+        disabled={silent}
+        title={audition.key === key ? '試聴を停止' : 'この BGM を試聴'}
+        onClick={() => audition.toggle(key, id, volume)}
+      >
+        {audition.key === key ? '■' : '♪'}
+      </button>
+      <button
+        className="btn small"
+        title="自分の音声ファイル(mp3 / ogg / wav / m4a)を取り込んでこの区間の BGM にする"
+        onClick={pickCustom}
+      >
+        参照…
+      </button>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        value={volume}
+        disabled={silent}
+        onChange={(e) => onVolume(Number(e.target.value))}
+      />
+      <span className="faint" style={{ fontSize: 11, minWidth: 56 }}>
+        音量 {volume}
+      </span>
+    </div>
+  );
+}
+
 function QuizStringList({
   values,
   placeholder,
@@ -4253,15 +4497,41 @@ function QuizStringList({
  * 文字列リスト。既定は OFF(全アクション停止+投票で±はゲーム経済の大技なので、
  * キー欠損フォールバックで勝手に有効化しない)。
  */
-function QuizSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
+function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionProps): React.JSX.Element {
   const qz = cfg.quiz;
   const patchQz = (p: Partial<QuizConfig>): void => {
     onPatch({ quiz: { ...qz, ...p } });
   };
+  // 区間BGM の試聴。RouletteSection と同じ持ち方で**このセクションに1個だけ** —
+  // どの区間の♪を押しても同時に鳴るのは常に1音(別の♪で前の試聴が止まる)。
+  const auditionRef = useRef<BgmHandle | null>(null);
+  const [auditionKey, setAuditionKey] = useState<string | null>(null);
+  useEffect(
+    () => () => {
+      auditionRef.current?.stop(0);
+    },
+    []
+  );
+  const stopAudition = (): void => {
+    auditionRef.current?.stop(0);
+    auditionRef.current = null;
+    setAuditionKey(null);
+  };
+  const toggleAudition = (key: string, id: string, volume: number): void => {
+    const playing = auditionKey;
+    stopAudition();
+    if (playing === key) return;
+    auditionRef.current = playBandBgm(id, volume);
+    if (auditionRef.current) setAuditionKey(key);
+  };
+  const audition: SoundAudition = { key: auditionKey, toggle: toggleAudition, stop: stopAudition };
   const patchRule = (i: number, p: Partial<QuizRule>): void => {
     patchQz({ rules: qz.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
   };
-  const preSec = Math.round((QUIZ_INTRO_MS + QUIZ_SPIN_MS + QUIZ_REVEAL_MS) / 1000);
+  // 前置きの尺の案内。お題発表準備(prepSec・0 で無し)も前置きの一部。
+  const preSec = Math.round(
+    (QUIZ_INTRO_MS + QUIZ_SPIN_MS + QUIZ_REVEAL_MS) / 1000 + qz.prepSec
+  );
 
   return (
     <>
@@ -4272,10 +4542,12 @@ function QuizSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JS
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
         ギフトが届いた瞬間に<b>BGM が切り替わり</b>、その時点で溜まっていた演出を消化してから
-        <b>導入カット(素材を選んだ場合・約{Math.round(QUIZ_INTRO_MS / 1000)}秒)→
-        お題ルーレット → お題決定</b>(前置き 最大約{preSec}秒)→
+        <b>導入カット(既定オン・約{Math.round(QUIZ_INTRO_MS / 1000)}秒)→
+        お題ルーレット → お題決定{qz.prepSec > 0 ? ' → お題発表準備' : ''}</b>
+        (前置き 最大約{preSec}秒)→
         <b>制限時間(既定 {DEFAULT_QUIZ.durationSec}秒・お題を画面いっぱいに表示)→
-        投票タイム(既定 {DEFAULT_QUIZ.voteSec}秒)</b>と進みます。
+        投票タイム(既定 {DEFAULT_QUIZ.voteSec}秒)</b>と進み、コメント締切のあとも
+        <b>終了後 BGM</b>を{qz.outroSec > 0 ? `約${qz.outroSec}秒` : ''}流せます。
         投票は<b>コメントの「よかった」「だめ」</b>(下の判定ワード・1人1票で最後の投票が有効)で、
         よかった多数なら<b>減算</b>、だめ多数なら<b>増加</b>、引き分け・無投票は±0です。
         <b>発動中は他の全アクションが一時停止</b>し、ギフト・コメント妨害などは終了後にまとめて
@@ -4360,8 +4632,9 @@ function QuizSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JS
                 spec={{ kind: 'quiz', quizId: r.id }}
                 onTest={onTest}
                 busy={testBusy}
+                running={testRunning === `quiz:${r.id}`}
                 label="▶ この行"
-                title="モニターウィンドウで、お題の回転〜決定表示だけを実演再生します(giftId 未設定でも確認できます)。制限時間も投票も始まりません・カウント値も変わりません"
+                title="モニターウィンドウで、お題の回転→決定表示→制限時間→投票タイム→結果発表まで通しで実演再生します(giftId 未設定でも確認できます)。本番と同じ尺なので、制限時間+投票時間ぶんかかります。投票はダミーの票で進みます・カウント値は変わりません。途中でやめるときは同じボタン(■ 停止)を押してください"
               />
               <button
                 className="btn small"
@@ -4445,6 +4718,20 @@ function QuizSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JS
 
           <h4 style={{ marginTop: 16 }}>時間と増減幅</h4>
           <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+            <label
+              className="field"
+              style={{ width: 150 }}
+              title={`お題が発表されてから制限時間が始まるまでの仕度時間(${QUIZ_PREP_MIN_SEC}〜${QUIZ_PREP_MAX_SEC}秒)。0 にするとこの区間ごと無くなり、発表からそのまま制限時間へ入ります。`}
+            >
+              お題発表準備(秒)
+              <input
+                type="number"
+                min={QUIZ_PREP_MIN_SEC}
+                max={QUIZ_PREP_MAX_SEC}
+                value={qz.prepSec}
+                onChange={(e) => patchQz({ prepSec: Number(e.target.value) })}
+              />
+            </label>
             <label className="field" style={{ width: 130 }}>
               制限時間(秒)
               <input
@@ -4479,41 +4766,124 @@ function QuizSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JS
                 onChange={(e) => patchQz({ amount: Number(e.target.value) })}
               />
             </label>
-          </div>
-
-          <h4 style={{ marginTop: 16 }}>音と導入カット</h4>
-          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-            <label className="field" style={{ width: 240 }} title="発動の瞬間からモニターで流れる BGM(お題モードの予告)。">
-              発動中の BGM
-              <select value={qz.bgm} onChange={(e) => patchQz({ bgm: e.target.value })}>
-                <option value="off">off(鳴らさない)</option>
-                {[...ROULETTE_BGM, ...BAND_BGM].map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label}
-                  </option>
-                ))}
-                {isCustomSoundId(qz.bgm) ? (
-                  <option value={qz.bgm}>取込み: {customSoundFileName(qz.bgm)}</option>
-                ) : null}
-              </select>
-            </label>
-            <label className="field" style={{ width: 110 }}>
-              BGM 音量
+            <label
+              className="field"
+              style={{ width: 150 }}
+              title={`コメントの受付が終わってから BGM を流し続ける秒数(${QUIZ_OUTRO_MIN_SEC}〜${QUIZ_OUTRO_MAX_SEC}秒)。結果発表の ${QUIZ_RESULT_MS / 1000} 秒はこの中に入ります。0 で終了後 BGM を無効にします。`}
+            >
+              終了後 BGM(秒)
               <input
                 type="number"
-                min="0"
-                max="100"
-                value={qz.bgmVolume}
-                onChange={(e) => patchQz({ bgmVolume: Number(e.target.value) })}
+                min={QUIZ_OUTRO_MIN_SEC}
+                max={QUIZ_OUTRO_MAX_SEC}
+                value={qz.outroSec}
+                onChange={(e) => patchQz({ outroSec: Number(e.target.value) })}
               />
             </label>
+          </div>
+
+          <h4 style={{ marginTop: 16 }}>区間ごとの BGM</h4>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 4 }}>
+            進行に合わせて曲が切り替わります(切替は短いクロスフェード)。
+            <b>「前の区間の曲を続ける」</b>のままにしておくと、その区間では切り替えずに
+            1曲を流し続けます(既定 — 設定を触らなければ従来どおり通しで1曲)。
+            音量は曲ごとの絶対値で、効果音の音量スライダーは掛かりません。
+          </div>
+          <QuizBgmRow
+            label="① ルーレット時"
+            title="発動(ギフト着弾)の瞬間から導入カット・回転が終わるまで。BGM が変わること自体が「お題モードが来る」予告です。ここだけは継続元が無いので「前の区間を続ける」は選べません。"
+            id={qz.bgm}
+            volume={qz.bgmVolume}
+            keep={false}
+            audition={audition}
+            auditionKey="quiz:spin"
+            onPick={(v) => patchQz({ bgm: v })}
+            onVolume={(v) => patchQz({ bgmVolume: v })}
+          />
+          <QuizBgmRow
+            label="② お題発表時"
+            title={`お題が決まって全画面に出る ${QUIZ_REVEAL_MS / 1000} 秒間。`}
+            id={qz.revealBgm}
+            volume={qz.revealBgmVolume}
+            keep
+            audition={audition}
+            auditionKey="quiz:reveal"
+            onPick={(v) => patchQz({ revealBgm: v })}
+            onVolume={(v) => patchQz({ revealBgmVolume: v })}
+          />
+          <QuizBgmRow
+            label="③ お題発表準備"
+            title="お題が出てから制限時間が始まるまでの仕度時間。下の「お題発表準備(秒)」を 0 にするとこの区間ごと無くなります。"
+            id={qz.prepBgm}
+            volume={qz.prepBgmVolume}
+            keep
+            audition={audition}
+            auditionKey="quiz:prep"
+            onPick={(v) => patchQz({ prepBgm: v })}
+            onVolume={(v) => patchQz({ prepBgmVolume: v })}
+          />
+          <QuizBgmRow
+            label="④ お題考え時"
+            title="制限時間(挑戦ウィンドウ)の間。"
+            id={qz.thinkBgm}
+            volume={qz.thinkBgmVolume}
+            keep
+            audition={audition}
+            auditionKey="quiz:think"
+            onPick={(v) => patchQz({ thinkBgm: v })}
+            onVolume={(v) => patchQz({ thinkBgmVolume: v })}
+          />
+          <QuizBgmRow
+            label="⑤ コメント受付時"
+            title="投票タイム(コメントで「よかった / だめ」を受け付けている間)。"
+            id={qz.voteBgm}
+            volume={qz.voteBgmVolume}
+            keep
+            audition={audition}
+            auditionKey="quiz:vote"
+            onPick={(v) => patchQz({ voteBgm: v })}
+            onVolume={(v) => patchQz({ voteBgmVolume: v })}
+          />
+          <div className="faint" style={{ fontSize: 11, marginTop: 12 }}>
+            <b>⑥ 終了後</b> — コメントの受付が終わった瞬間から流します(結果発表の
+            {' '}{QUIZ_RESULT_MS / 1000} 秒はこの中に入ります)。判定で曲が変わり、
+            <b>引き分け・無投票(±0)のときは鳴りません</b>。
+          </div>
+          <QuizBgmRow
+            label="⑥ 終了後(減算)"
+            title="「よかった」多数 = 数字が減ったときの締めの曲。"
+            id={qz.outroDownBgm}
+            volume={qz.outroDownBgmVolume}
+            keep
+            audition={audition}
+            auditionKey="quiz:outro-down"
+            onPick={(v) => patchQz({ outroDownBgm: v })}
+            onVolume={(v) => patchQz({ outroDownBgmVolume: v })}
+          />
+          <QuizBgmRow
+            label="⑥ 終了後(増加)"
+            title="「だめ」多数 = 数字が増えたときの締めの曲。"
+            id={qz.outroUpBgm}
+            volume={qz.outroUpBgmVolume}
+            keep
+            audition={audition}
+            auditionKey="quiz:outro-up"
+            onPick={(v) => patchQz({ outroUpBgm: v })}
+            onVolume={(v) => patchQz({ outroUpBgmVolume: v })}
+          />
+
+          <h4 style={{ marginTop: 16 }}>導入カット</h4>
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
             <label
               className="field"
               style={{ width: 240 }}
-              title="お題ルーレットの前に流す全面カット動画。off なら回転から始まります(再生枠 — 素材は全面カットのカタログから選びます)。"
+              title="お題ルーレットの前に流す全面カット動画。既定は専用素材(寄席のオープニング)。off なら回転から始まり、そのぶん前置きが短くなります。全面カットのカタログから他の素材へ差し替えることもできます(その場合も尺はこの機能の契約に従います)。"
             >
               導入の全面カット
               <select value={qz.introClip} onChange={(e) => patchQz({ introClip: e.target.value })}>
+                <option value={QUIZ_INTRO_SELF}>
+                  専用(寄席のオープニング・{Math.round(QUIZ_INTRO_MS / 1000)}秒)
+                </option>
                 <option value="off">off(導入なし — 回転から開始)</option>
                 <FxClipOptions />
               </select>

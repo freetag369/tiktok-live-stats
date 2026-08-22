@@ -125,6 +125,112 @@
         "enabled": true,
         "multiplier": 10
       }
+    },
+    {
+      "id": "rl-unicorn",
+      "label": "ユニコーン",
+      "enabled": true,
+      "giftId": "12453",
+      "giftName": "",
+      "canonical": "",
+      "segments": [
+        {
+          "amount": 2499,
+          "weight": 17
+        },
+        {
+          "amount": 2499,
+          "weight": 17
+        },
+        {
+          "amount": 2499,
+          "weight": 17
+        },
+        {
+          "amount": 2499,
+          "weight": 17
+        },
+        {
+          "amount": 2499,
+          "weight": 16
+        },
+        {
+          "amount": 2499,
+          "weight": 16
+        }
+      ],
+      "direction": "add",
+      "hot": {
+        "enabled": true,
+        "multiplier": 5,
+        "multipliers": [
+          {
+            "multiplier": 5,
+            "weight": 60
+          },
+          {
+            "multiplier": 10,
+            "weight": 30
+          },
+          {
+            "multiplier": 20,
+            "weight": 10
+          }
+        ]
+      }
+    },
+    {
+      "id": "rl-bunny_dj",
+      "label": "バニーDJ",
+      "enabled": true,
+      "giftId": "437679",
+      "giftName": "bunny dj",
+      "canonical": "",
+      "segments": [
+        {
+          "amount": 1200,
+          "weight": 17
+        },
+        {
+          "amount": 1200,
+          "weight": 17
+        },
+        {
+          "amount": 1200,
+          "weight": 17
+        },
+        {
+          "amount": 1200,
+          "weight": 17
+        },
+        {
+          "amount": 1200,
+          "weight": 16
+        },
+        {
+          "amount": 1200,
+          "weight": 16
+        }
+      ],
+      "direction": "add",
+      "hot": {
+        "enabled": true,
+        "multiplier": 5,
+        "multipliers": [
+          {
+            "multiplier": 5,
+            "weight": 60
+          },
+          {
+            "multiplier": 10,
+            "weight": 30
+          },
+          {
+            "multiplier": 20,
+            "weight": 10
+          }
+        ]
+      }
     }
   ],
   "rouletteSound": {

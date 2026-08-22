@@ -71,11 +71,13 @@ import {
   QUIZ_REVEAL_MS,
   QUIZ_RESULT_MS,
   QUIZ_DEFERRED_OPS_MAX,
+  QUIZ_PREP_MAX_SEC,
   QUIZ_DURATION_MAX_SEC,
   QUIZ_VOTE_MAX_SEC,
 } from '@shared/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { REVOLUTION_RESULT_MS, REVOLUTION_SETTLE_BUDGET_MS } from '@shared/revolution-settle';
+import { planTestQuizVotes, quizNominalAmount } from '@shared/quiz-settle';
 import { clampFutureMs } from '@shared/time';
 import { drawRoulettePattern } from '@shared/roulette-fx';
 import { BoundedSet } from '@shared/bounded-set';
@@ -97,6 +99,12 @@ interface QuizArmSnapshot {
   promptIndex: number;
   durationMs: number;
   voteMs: number;
+  /**
+   * 「お題発表準備」区間の尺(ms・prepSec * 1000)。**アーム時に焼き込む** —
+   * 窓の開始は「モニターが前置きを再生し始めた時刻 + preMs」で決まるので、
+   * 進行中に設定を変えられても preMs の算出とモニターの表示がズレてはいけない。
+   */
+  prepMs: number;
   amount: number;
   goodWords: string[];
   badWords: string[];
@@ -445,6 +453,48 @@ export class ChallengeEngine {
   private testBoostTapCount = 0;
   private testBoostMultiplier = 1;
   private testBoostPressStep = 1;
+  /**
+   * ▶テスト実演(testEffect 'revolution')の窓。null = 実演なし。testBoost と
+   * 同じ「値・統計・凍結に触れず、計数だけ worker が持つ」規約で、get() は
+   * **実発動と同じ `revolution` キー**へ合流させる(モニターの表示コードを
+   * 分岐させないため — testBoost が boost キーへ合流しているのと同型)。
+   *
+   * 満了の合図は **armFreezeTimer が唯一の出口**。ライブ未接続の実演モードでは
+   * 2Hz tick(drainIfChanged)が一度も回らないので、そこに相乗りすると
+   * 結果カットシーンが永久に来ない。
+   */
+  private testRevolutionUntilMs: number | null = null;
+  private testRevolutionStartMs = 0;
+  private testRevolutionTapCount = 0;
+  /** 窓中のタップ由来の減算合計(表示専用 — 実値は動かさない)。 */
+  private testRevolutionDown = 0;
+  private testRevolutionMultiplier = 1;
+  private testRevolutionPressStep = 1;
+  private testRevolutionMs = 0;
+  private testRevolutionResultMs = 0;
+  /**
+   * ▶テスト実演(testEffect 'quiz')の窓。null = 実演なし。revolution の実演窓と
+   * 同型だが、**投票はダミー**(ライブ未接続ではコメントが来ないため)。
+   * `testQuizVotes` は「到着時刻 → good/bad」の予定表で、登録時に this.rand で
+   * 決定的に引く。armFreezeTimer は次の到着時刻でも起こされ、票が増えるたびに
+   * delta を押し出す(投票オーバーレイの票数が実際に伸びる)。
+   *
+   * **armed は絶対に立てない** — 立てるとモニターの armed 監視が本物の
+   * quizCue{start} を撃ってしまう。実演の入口は playEffect の quiz-start 分岐。
+   */
+  private testQuizVoteEndsMs: number | null = null;
+  private testQuizStartMs = 0;
+  private testQuizWindowEndsMs = 0;
+  private testQuizPrompt = '';
+  private testQuizAmount = 0;
+  private testQuizResultMs = 0;
+  private testQuizGood = 0;
+  private testQuizBad = 0;
+  private testQuizBlocked = 0;
+  private testQuizGoodLabel = '';
+  private testQuizBadLabel = '';
+  /** 未到着のダミー票(atMs 昇順)。先頭から順に消費する。 */
+  private testQuizVotes: { atMs: number; good: boolean }[] = [];
   // ── お邪魔(タップ封じ) ──────────────────────────────────────────────────
   /**
    * 封印の期限(絶対 ms)。null = 非封印。boostUntilMs と同じ流儀で専用タイマーは
@@ -758,7 +808,7 @@ export class ChallengeEngine {
     this.deferredBoosts = [];
     // ▶実演の窓も破棄 — press() は実演ブロックを最優先で見るので、実演の残り窓を
     // 跨いで開始すると開幕のタップが全部テストカウンタに吸われて実値が減らない。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     this.armFreezeTimer();
     this.dirty = true;
     return this.get();
@@ -818,7 +868,7 @@ export class ChallengeEngine {
     // 意味論なので、見えない進捗を次のランへ跨がせない(clearTapLock と同じ判断)。
     this.gauntletTaps = 0;
     this.resetFanStampFx();
-    this.clearTestBoost();
+    this.clearTestPreviews();
     // 停止は一時停止だが封印は跨がせない — 再開したら見えないボタンが死んでいる、
     // が最悪の体験(pendingPressFx / testBoost を捨てるのと同じ判断)。
     this.clearTapLock();
@@ -844,7 +894,7 @@ export class ChallengeEngine {
     // 排他スケジューリングの予約も破棄(start/stop と同じ判断)。
     this.pendingTapLock = null;
     this.deferredBoosts = [];
-    this.clearTestBoost();
+    this.clearTestPreviews();
     this.armFreezeTimer();
     this.status = 'idle';
     this.value = this.getConfig().initialValue;
@@ -926,6 +976,30 @@ export class ChallengeEngine {
         this.clearTestBoost(); // 期限切れの lazy 掃除
       } else if (nowMs >= this.testBoostStartMs) {
         this.testBoostTapCount++;
+        this.dirty = true;
+        return this.get();
+      }
+    }
+    // 革命の実演窓も同じ規約で「数えるだけ」。減算合計は表示専用(実値は動かさない)
+    // ので、実減少量のクランプは通さない — 結果カットシーンの戦果はこの生の積算。
+    // 期限切れの掃除はここでは**しない**: 満了は armFreezeTimer が revolution-end を
+    // 積む合図で、lazy に消すと結果カットシーンの入力ごと消える。
+    if (this.testRevolutionUntilMs !== null) {
+      const nowMs = this.now();
+      if (nowMs >= this.testRevolutionStartMs && nowMs < this.testRevolutionUntilMs) {
+        this.testRevolutionTapCount++;
+        this.testRevolutionDown += this.testRevolutionPressStep * this.testRevolutionMultiplier;
+        this.dirty = true;
+        return this.get();
+      }
+    }
+    // お題の実演窓は**破棄**する(本番と同じ — 窓・投票中のタップは効かない)。
+    // 手応えの blocked だけ増やす。前置き中(startMs 前)は破棄しない — 本番でも
+    // バリアはボタンを殺さないので、実演でもそこは素通しにする。
+    if (this.testQuizVoteEndsMs !== null) {
+      const nowMs = this.now();
+      if (nowMs >= this.testQuizStartMs && nowMs < this.testQuizVoteEndsMs) {
+        this.testQuizBlocked++;
         this.dirty = true;
         return this.get();
       }
@@ -1231,9 +1305,26 @@ export class ChallengeEngine {
    * valueAfter = value + amount とし、ラッチ開始値 = 現在値に揃える(演出明けは
    * worker の実値へ収束するので表示は動かない)。
    */
-  testEffect(spec: ChallengeTestEffectSpec): void {
+  /**
+   * 戻り値は設定画面の「■ 停止」ボタン用のヒント:
+   * - `previewMs` … 実演の総尺(0 = 尺の分かる窓を開いていない = 停止ボタンを出さない)
+   * - `cinematic` … `fxAllowed()`(モニターの再生能力の握手が済んでいるか)。
+   *   false のときカットインは全拒否されるので、呼び出し側は握手待ちの再送を判断できる。
+   */
+  testEffect(spec: ChallengeTestEffectSpec): { previewMs: number; cinematic: boolean } {
     const cfg = this.getConfig();
     const atMs = this.now();
+    const cinematic = this.fxAllowed();
+    if (spec.kind === 'stopTest') {
+      // effect は積まない(「止めました」の演出は不要)。窓を畳んで delta を押し出せば
+      // モニターの state 駆動 abort が前置き・走行 HUD・幕を片付ける。
+      if (this.anyTestPreviewActive()) {
+        this.clearTestPreviews();
+        this.armFreezeTimer();
+        this.dirty = true;
+      }
+      return { previewMs: 0, cinematic };
+    }
     let e: Omit<ChallengeEffect, 'id' | 'valueAfter' | 'test' | 'atMs'>;
     switch (spec.kind) {
       case 'press':
@@ -1346,33 +1437,14 @@ export class ChallengeEngine {
         // 消えていたら最初の有効な行。1行も無ければ積む演出が無いので抜ける。
         const tb =
           cfg.tapBoost.rules.find((r) => r.id === spec.boostId) ?? cfg.tapBoost.rules.find((r) => r.enabled);
-        if (!tb) return;
+        if (!tb) return { previewMs: 0, cinematic };
         const durationMs = tb.durationSec * 1000;
         const introMs = tb.introClip !== 'off' ? TAP_BOOST_INTRO_MS : 0;
         const countMs = tb.countClip !== 'off' ? TAP_BOOST_COUNT_MS : 0;
         const resultMs = tb.resultClip !== 'off' ? TAP_BOOST_RESULT_MS : 0;
         // タップ計数のウィンドウを worker 側に登録する(値・統計・凍結は不変)。
-        // 実ブースト進行中・**アーム中**は登録しない — モニターも他演出中の実演は
-        // スキップするので、実カウンタを乗っ取らないのが正。アーム中は
-        // boostUntilMs がまだ null(armedBoost ⟹ boostUntilMs === null の不変条件)
-        // なので、armedBoost も見ないと commit 後の実タップが実演に吸われる。
-        // **革命も同じ理由で列挙する** — press() の実演ブロックは最優先で return
-        // するので、革命の窓/アームと重なると窓のタップが丸ごと実演カウンタへ
-        // 吸われ、699💎 を撃った視聴者から見て数字が1も動かない。
-        // **封印(tapLock)とお題(quiz)も列挙する** — activateTapLock/armQuiz は
-        // 「実演の窓は封印/バリアの抜け道にしない」と clearTestBoost で防御している
-        // のに、逆方向(封印中・お題中に実演を開始)が素通しだと、以降の押下が全部
-        // 実演カウンタへ吸われて tapLockBlocked / quizBlocked が止まり、封印・全アク
-        // ション停止の手応えが消える(get() には tapLock と実演 boost が同時に載る)。
-        if (
-          this.boostUntilMs === null &&
-          this.armedBoost === null &&
-          this.revolutionUntilMs === null &&
-          this.armedRevolution === null &&
-          this.tapLockUntilMs === null &&
-          this.armedQuiz === null &&
-          this.quizVoteUntilMs === null
-        ) {
+        // 登録可否の判定は testPreviewAllowed() が権威(3種の実演で共通)。
+        if (this.testPreviewAllowed()) {
           this.testBoostStartMs = atMs + introMs + countMs;
           this.testBoostUntilMs = this.testBoostStartMs + durationMs;
           this.testBoostTapCount = 0;
@@ -1405,7 +1477,7 @@ export class ChallengeEngine {
         // 開けるので、ここで本当にラッチすると本番のボタンが死ぬ。
         const tl =
           cfg.tapLock.rules.find((r) => r.id === spec.lockId) ?? cfg.tapLock.rules.find((r) => r.enabled);
-        if (!tl) return;
+        if (!tl) return { previewMs: 0, cinematic };
         const lockMs = tl.durationSec * 1000;
         e = {
           kind: 'tap-lock',
@@ -1431,7 +1503,7 @@ export class ChallengeEngine {
             cfg.roulettes.find((r) => r.enabled) ??
             null);
         const rl = spec.join ? cfg.joinRoulette : gr;
-        if (!rl) return;
+        if (!rl) return { previewMs: 0, cinematic };
         // 激熱確定は入室ルーレットには無い(RouletteHotConfig の解説)ので gr 側だけ見る。
         // 実演でも本番と同じ倍率・同じ絵柄を通す — 「実演では出るのに本番で違う」を作らない。
         // 候補列(hot.multipliers)があるときだけ this.rand を1回消費して重み抽選する。
@@ -1489,9 +1561,10 @@ export class ChallengeEngine {
       case 'revolution': {
         // 行ごとの実演(revolutionId)。未指定・対象行が消えていたら最初の有効な行、
         // 1件も無ければ既定値で演出だけ見せる(tapLock / roulette の行フォールバックと同型)。
-        // トリガー一致は評価しない。**実際には窓を開かない**(値・統計・状態に触れない
-        // 規約 — アームも凍結も張らないので、モニターの revolutionCue は worker 側で
-        // 黙って無視され、導入+カウントダウンの試写だけが流れる)。
+        // トリガー一致は評価しない。**値・統計・凍結には触れない**が、tapBoost の実演と
+        // 同じく「実演専用の窓」は開く(2026-08-21 ユーザー決定 — 導入だけでは
+        // 走行HUD も結果カットシーンも一度も確認できなかった)。窓は get() で
+        // 実発動と同じ revolution キーへ合流するので、モニターは無改造で本編を出す。
         const rule =
           cfg.revolution.rules.find((r) => r.id === spec.revolutionId) ??
           cfg.revolution.rules.find((r) => r.enabled) ??
@@ -1501,6 +1574,21 @@ export class ChallengeEngine {
         const cine = this.fxAllowed();
         const introMs = cine ? REVOLUTION_INTRO_MS : 0;
         const countMs = cine ? REVOLUTION_COUNT_MS : 0;
+        // 登録ガードは tapBoost の実演と同一(実発動・アーム中は窓を作らない)。
+        if (this.testPreviewAllowed()) {
+          this.testRevolutionStartMs = atMs + introMs + countMs;
+          this.testRevolutionUntilMs = this.testRevolutionStartMs + durMs;
+          this.testRevolutionTapCount = 0;
+          this.testRevolutionDown = 0;
+          this.testRevolutionMultiplier = mult;
+          this.testRevolutionPressStep = cfg.pressStep;
+          this.testRevolutionMs = durMs;
+          // 実演は downTotal 0 でも結果カットシーンを出す(本番の「downTotal>0 の
+          // ときだけ」規約はそのまま — プレビューの目的は段を見ることなので、
+          // 押さなかった人に結末が出ないのは目的に反する)。
+          this.testRevolutionResultMs = cine ? REVOLUTION_RESULT_MS : 0;
+          this.armFreezeTimer();
+        }
         e = {
           kind: 'revolution-start',
           amount: 0,
@@ -1516,13 +1604,17 @@ export class ChallengeEngine {
         break;
       }
       case 'quiz': {
-        // お題ルーレットの試写。前置き(導入カット → 回転 → 決定表示)だけを実演し、
-        // **窓も投票も開かない**(testEffect の規約どおり値・統計・状態に触れない —
-        // モニターの quizCue は armedQuiz が無いので worker 側で黙って無視される)。
+        // お題ルーレットの試写。前置き(導入カット → 回転 → 決定表示)に続けて
+        // **挑戦ウィンドウ・投票・結果発表まで通しで**実演する(2026-08-21 ユーザー決定)。
+        // 値・統計・凍結には触れない規約は維持 — 窓は get() で実発動と同じ quiz キーへ
+        // 合流するので、モニターは無改造で本編を出す。**投票はダミー**
+        // (ライブ未接続ではコメントが来ないため。タップは本物)。
         // 実発動の進行中は積まない — 本物の armed 監視と test の前置きが取り合いになる。
-        if (this.armedQuiz !== null || this.quizVoteUntilMs !== null) return;
+        if (this.armedQuiz !== null || this.quizVoteUntilMs !== null)
+          return { previewMs: 0, cinematic };
         const q = cfg.quiz;
-        if (q.prompts.length === 0) return; // お題が無ければ回しようがない
+        // お題が無ければ回しようがない
+        if (q.prompts.length === 0) return { previewMs: 0, cinematic };
         // 行フォールバック(revolution と同型)。行が1件も無くても既定値で演出は見せる。
         const rule =
           q.rules.find((r) => r.id === spec.quizId) ?? q.rules.find((r) => r.enabled) ?? q.rules[0];
@@ -1530,7 +1622,30 @@ export class ChallengeEngine {
         const idx = Math.min(prompts.length - 1, Math.floor(this.rand() * prompts.length));
         const cine = this.fxAllowed();
         const introMs = cine && q.introClip !== 'off' ? QUIZ_INTRO_MS : 0;
-        const preMs = cine ? introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS : 0;
+        const prepMs = q.prepSec * 1000;
+        // 実演も実発動と同じ前置きの式(お題発表準備を含む)— 窓の頭が実物とズレない。
+        const preMs = cine ? introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + prepMs : 0;
+        const durationMs = q.durationSec * 1000;
+        const voteMs = q.voteSec * 1000;
+        if (this.testPreviewAllowed()) {
+          this.testQuizStartMs = atMs + preMs;
+          this.testQuizWindowEndsMs = this.testQuizStartMs + durationMs;
+          this.testQuizVoteEndsMs = this.testQuizWindowEndsMs + voteMs;
+          this.testQuizPrompt = prompts[idx] ?? '';
+          this.testQuizAmount = q.amount;
+          this.testQuizResultMs = cine ? QUIZ_RESULT_MS : 0;
+          this.testQuizGood = 0;
+          this.testQuizBad = 0;
+          this.testQuizBlocked = 0;
+          this.testQuizGoodLabel = q.goodWords[0] ?? 'よかった';
+          this.testQuizBadLabel = q.badWords[0] ?? 'だめ';
+          this.testQuizVotes = planTestQuizVotes(
+            this.testQuizWindowEndsMs,
+            voteMs,
+            this.rand
+          );
+          this.armFreezeTimer();
+        }
         e = {
           kind: 'quiz-start',
           amount: 0,
@@ -1539,6 +1654,7 @@ export class ChallengeEngine {
           quizPrompt: prompts[idx] ?? '',
           quizIntroMs: introMs,
           ...(introMs > 0 ? { quizIntroClip: q.introClip } : {}),
+          quizPrepMs: cine ? prepMs : 0,
           quizDurationMs: q.durationSec * 1000,
           quizVoteMs: q.voteSec * 1000,
           quizAmount: q.amount,
@@ -1552,6 +1668,31 @@ export class ChallengeEngine {
         e = { kind: 'achieved', amount: 0 };
         break;
     }
+    this.pushTestEffect(e, atMs);
+    // 実演窓を開いた種別だけが「■ 停止」の対象。尺は worker が権威(設定画面へ
+    // 算術を複製しない)— 結果カットシーンぶんも足した「見終わるまで」の長さ。
+    const previewMs =
+      this.testRevolutionUntilMs !== null
+        ? this.testRevolutionUntilMs - atMs + this.testRevolutionResultMs
+        : this.testQuizVoteEndsMs !== null
+          ? this.testQuizVoteEndsMs - atMs + this.testQuizResultMs
+          : this.testBoostUntilMs !== null
+            ? this.testBoostUntilMs - atMs
+            : 0;
+    return { previewMs: Math.max(0, previewMs), cinematic };
+  }
+
+  /**
+   * ▶テスト実演の effect を ring へ積む。**pushEffect(本番)とは別物** — あちらは
+   * 値・統計・凍結を動かす。こちらは `this.value` に一切触れず、`valueAfter` を
+   * 「もし適用したら」の値として焼くだけなので、非0の amount も安全に運べる
+   * (press / roulette / comment の実演が既にそうしている)。実演窓の満了で
+   * revolution-end / quiz-end を積むときにも使う。
+   */
+  private pushTestEffect(
+    e: Omit<ChallengeEffect, 'id' | 'valueAfter' | 'test' | 'atMs'>,
+    atMs: number
+  ): void {
     this.recentEffects.unshift({
       id: this.nextEffectId++,
       valueAfter: this.value + e.amount,
@@ -2076,8 +2217,9 @@ export class ChallengeEngine {
           return false;
         }
         // 連打コンボは1メッセージ1発動に畳む。予約 FIFO は上限なし(ユーザー決定)
-        // だが、連打可能ギフトを quiz に登録した設定で 17 連打 = 演出 25 分の
+        // だが、連打可能ギフトを quiz に登録した設定で 17 連打 = 演出 37 分の
         // 占有だけは作らない(発動は視聴者のメッセージ単位で十分に「上限なし」)。
+        // ※ 1本あたり既定 131 秒(2026-08-22 に回転を 6→18 秒へ伸ばした)。
         if (e.repeatCount > 1) {
           this.giftDiag(`→ お題の連打 ${e.repeatCount}個 — 発動は1回に畳む`);
         }
@@ -2593,7 +2735,7 @@ export class ChallengeEngine {
         }
       }
       // ▶実演の窓も一緒に畳む — OFF 後の press が実演カウンタへ吸われない。
-      this.clearTestBoost();
+      this.clearTestPreviews();
       // 二重防御: 保留 op に発動が紛れていても(各 activate 冒頭の幽霊ガードで
       // 無言破棄されるが、万一すり抜けても)OFF を生き残らせない — stop() の
       // 後始末と同じ並び。掃除(clearRevolution/clearQuiz/clearTapLock)が
@@ -2631,7 +2773,11 @@ export class ChallengeEngine {
       })),
       // お題バリアで清算待ちの演出予告も同じ「待ち」なので合流させる(解放時は
       // pendingOps 側へ同じ fx オブジェクトごと移送されるため表示キーは安定)。
-      ...this.quizDeferredOps.filter((p) => p.fx !== null).map((p) => p.fx!),
+      // **barrier の印はここでコピーに乗せる**(保持している fx を汚すと、清算で
+      // pendingOps へ移送されたあとも印が残って次のお題の armed 監視が狂う)。
+      ...this.quizDeferredOps
+        .filter((p) => p.fx !== null)
+        .map((p) => ({ ...p.fx!, barrier: true as const })),
     ].slice(0, CHALLENGE_FX_QUEUE_MAX);
     return {
       status: this.status,
@@ -2722,11 +2868,14 @@ export class ChallengeEngine {
       // お題ルーレット(コミット済み — quizVoteUntilMs 非 null)も同じ免除:
       // 窓・投票中のタップは破棄されゲートに蓄積されないので、リングを出すと
       // 「押しても進まないリング」になる(press の quiz 分岐がゲートより上に居るのと対)。
+      // ▶テスト実演の窓も同じ免除 — press() の実演ブロックはゲートより上に居るので、
+      // リングを出すと「押しても進まないリング」になる(実発動と同じ理由)。
       ...(cfg.finalGate.enabled &&
       this.status === 'running' &&
       this.boostUntilMs === null &&
       this.revolutionUntilMs === null &&
       this.quizVoteUntilMs === null &&
+      !this.anyTestPreviewActive() &&
       this.value > 0 &&
       this.value <= cfg.lowThreshold
         ? { gauntlet: { taps: this.gauntletTaps, needed: cfg.finalGate.taps } }
@@ -2748,6 +2897,10 @@ export class ChallengeEngine {
       // 非アクティブ時はキーごと省く)。モニターの走行 HUD と終了5秒前カウント
       // ダウンの唯一のソース。導入演出中(cue 後・窓オープン前)も載る —
       // startsAtMs が未来なので受け手は「まだ窓前」を判別できる。
+      // ▶テスト実演の窓も**同じキーへ合流**させる(testBoost が boost キーへ載るのと
+      // 同型)— モニターの走行 HUD・BGM・終了カウントダウンは実発動と実演を
+      // 区別しなくてよい。実発動が優先(testPreviewAllowed で排他だが、
+      // 三項の順序でも保証しておく)。
       ...(this.revolutionUntilMs !== null
         ? {
             revolution: {
@@ -2758,7 +2911,17 @@ export class ChallengeEngine {
               ...(this.revolutionLabel !== '' ? { label: this.revolutionLabel } : {}),
             },
           }
-        : {}),
+        : this.testRevolutionUntilMs !== null
+          ? {
+              revolution: {
+                startsAtMs: this.testRevolutionStartMs,
+                endsAtMs: this.testRevolutionUntilMs,
+                multiplier: this.testRevolutionMultiplier,
+                nickname: 'テスト',
+                test: true as const,
+              },
+            }
+          : {}),
       // お題ルーレットが進行中(アーム〜投票締切)だけ載せる(tapLock / revolution と
       // 同じ「キーの有無 = 状態」規約)。アーム中(バリア消化待ち)は armed: true +
       // 時刻 0 — モニターはこのキーの出現で BGM を切り替え、キューが空になったら
@@ -2793,7 +2956,26 @@ export class ChallengeEngine {
               ...(this.quizQueue.length > 0 ? { queued: this.quizQueue.length } : {}),
             },
           }
-        : {}),
+        : this.testQuizVoteEndsMs !== null
+          ? {
+              // ▶テスト実演の窓(revolution と同じ「同じキーへ合流」)。
+              // **armed は載せない** — 載せるとモニターの armed 監視が本物の
+              // quizCue{start} を撃ってしまう(実演の入口は quiz-start effect)。
+              quiz: {
+                startsAtMs: this.testQuizStartMs,
+                windowEndsAtMs: this.testQuizWindowEndsMs,
+                voteEndsAtMs: this.testQuizVoteEndsMs,
+                prompt: this.testQuizPrompt,
+                good: this.testQuizGood,
+                bad: this.testQuizBad,
+                blocked: this.testQuizBlocked,
+                goodLabel: this.testQuizGoodLabel,
+                badLabel: this.testQuizBadLabel,
+                nickname: 'テスト',
+                test: true as const,
+              },
+            }
+          : {}),
     };
   }
 
@@ -2805,8 +2987,14 @@ export class ChallengeEngine {
     // 来ないまま期限が切れたとき get() が boost キーを黙って省くだけで dirty が
     // 立たず、モニターが最後の delta の古いタップカウンタを保持し続ける。
     if (this.testBoostUntilMs !== null && this.now() >= this.testBoostUntilMs) {
-      this.clearTestBoost();
+      this.clearTestBoost(); // boost の窓だけ(革命・お題は下の stepTestPreviews が締める)
       this.dirty = true;
+    }
+    // 革命・お題の実演も進める。**権威は armFreezeTimer** — ライブ未接続では
+    // 2Hz tick 自体が回らない(startTimers は接続/リプレイでしか呼ばれない)ので、
+    // ここは配信中に票の反映を滑らかにするための相乗り。
+    if (this.testRevolutionUntilMs !== null || this.testQuizVoteEndsMs !== null) {
+      this.stepTestPreviews(this.now());
     }
     this.flushLikeFx();
     this.flushFanStampFx();
@@ -2876,7 +3064,12 @@ export class ChallengeEngine {
       this.armedRevolution === null &&
       this.revolutionUntilMs === null &&
       this.armedQuiz === null &&
-      this.quizVoteUntilMs === null
+      this.quizVoteUntilMs === null &&
+      // ▶テスト実演(革命・お題)の窓もこのタイマーが唯一の出口。ライブ未接続の
+      // 実演モードでは 2Hz tick(drainIfChanged)が一度も回らないので、ここを
+      // 落とすと窓が永久に閉じず結果カットシーンも来ない。
+      this.testRevolutionUntilMs === null &&
+      this.testQuizVoteEndsMs === null
     ) {
       return;
     }
@@ -2904,12 +3097,21 @@ export class ChallengeEngine {
       // お題ルーレットのアーム期限と投票締切(= 清算の時計)も唯一の出口はここ —
       // 配信切断・モニター閉でも worker 権威で自走 settle する(投票ゼロ = ±0)。
       this.armedQuiz?.deadlineMs ?? Infinity,
-      this.quizVoteUntilMs ?? Infinity
+      this.quizVoteUntilMs ?? Infinity,
+      // ▶テスト実演の満了(= 結果カットシーンの合図)。お題は**次のダミー票の
+      // 到着**でも起こす — 票が増えるたびに delta を押し出さないと、投票
+      // オーバーレイの数字が締切まで 0 のまま止まって見える。
+      this.testRevolutionUntilMs ?? Infinity,
+      this.testQuizVotes[0]?.atMs ?? Infinity,
+      this.testQuizVoteEndsMs ?? Infinity
     );
     const delay = Math.max(0, at - this.now()) + 25;
     const t = setTimeout(() => {
       this.freezeTimer = null;
       this.flushFxFreeze(this.now());
+      // ▶テスト実演の進行(ダミー票の到着・窓の満了 → 結果 effect)。flushFxFreeze の
+      // 後に置くのは、実演が凍結を張らないぶん順序に依存しないため。
+      this.stepTestPreviews(this.now());
       // 早発(注入時計 = Date.now と libuv の単調時計のズレ。NTP 巻き戻しや
       // サスペンド/レジュームで起きる)だと flushFxFreeze が冒頭の
       // 「nowMs < fxFreezeUntilMs なら return」で戻るため、**タイマーだけ消えて
@@ -2926,7 +3128,10 @@ export class ChallengeEngine {
           this.armedRevolution !== null ||
           this.revolutionUntilMs !== null ||
           this.armedQuiz !== null ||
-          this.quizVoteUntilMs !== null) &&
+          this.quizVoteUntilMs !== null ||
+          // 実演も張り直しの対象 — お題は票が残っている限り何度も起こされる。
+          this.testRevolutionUntilMs !== null ||
+          this.testQuizVoteEndsMs !== null) &&
         this.freezeTimer === null
       ) {
         this.armFreezeTimer();
@@ -3284,7 +3489,7 @@ export class ChallengeEngine {
     const atMs = this.now();
     // 実発動が優先 — 実演のタップウィンドウが残っていたら破棄する(press が
     // テスト計数に吸われて実カウンタが動かない事故を防ぐ)。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     // まだ映像が始まっていない予約が残っていたら、ここでプレーンとして発動させる。
     // 直後の settleBoost が boost-end(タップ 0)を積むので、モニター側は
     // 「x.id > boost-end.id」の間引きで**古い持ち越しを確実に捨てられる** —
@@ -3446,7 +3651,7 @@ export class ChallengeEngine {
     // 実発動が常に優先(activateBoost と同じ判断)。実演の窓が生き残っていると
     // press() の実演ブロックが先に食い、実フィーバーの全タップが実演カウンタへ
     // 吸われて清算が 0 になる。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     this.armedBoost = null;
     this.boostStartMs = startMs + (cinematic ? preMs : 0);
     this.boostUntilMs = this.boostStartMs + a.durationMs;
@@ -3586,6 +3791,153 @@ export class ChallengeEngine {
     this.testBoostTapCount = 0;
   }
 
+  /** ▶テスト実演(革命)の窓の破棄。clearTestBoost と同じ規約。 */
+  private clearTestRevolution(): void {
+    this.testRevolutionUntilMs = null;
+    this.testRevolutionStartMs = 0;
+    this.testRevolutionTapCount = 0;
+    this.testRevolutionDown = 0;
+    this.testRevolutionMs = 0;
+    this.testRevolutionResultMs = 0;
+    this.testRevolutionMultiplier = 1;
+    this.testRevolutionPressStep = 1;
+  }
+
+  /** ▶テスト実演(お題)の窓の破棄。clearTestBoost と同じ規約。 */
+  private clearTestQuiz(): void {
+    this.testQuizVoteEndsMs = null;
+    this.testQuizStartMs = 0;
+    this.testQuizWindowEndsMs = 0;
+    this.testQuizPrompt = '';
+    this.testQuizAmount = 0;
+    this.testQuizResultMs = 0;
+    this.testQuizGood = 0;
+    this.testQuizBad = 0;
+    this.testQuizBlocked = 0;
+    this.testQuizVotes = [];
+  }
+
+  /**
+   * ▶テスト実演の窓を**全種**破棄する。実発動のコミット・stop/reset・機能OFF から
+   * 呼ぶ共通の出口 — press() の実演ブロックは最優先で return するので、1種でも
+   * 残すと実発動のタップがそちらへ吸われる(3種は同時に立たない設計だが、
+   * 「どれか1つでも生きていたら実発動が負ける」ので掃除は必ず一括で行う)。
+   */
+  private clearTestPreviews(): void {
+    this.clearTestBoost();
+    this.clearTestRevolution();
+    this.clearTestQuiz();
+  }
+
+  /**
+   * ▶テスト実演の時間進行。**armFreezeTimer の発火が唯一の呼び出し元**
+   * (ライブ未接続では 2Hz tick が回らないため — drainIfChanged に相乗りしない)。
+   *
+   * 値・統計・凍結には触れない。積む effect は pushTestEffect(test 印)なので、
+   * モニターは実発動と同じ結果カットシーンの経路を通る。
+   */
+  private stepTestPreviews(nowMs: number): void {
+    // 革命: 窓の満了 → 結果カットシーン(revolution-end)。
+    if (this.testRevolutionUntilMs !== null && nowMs >= this.testRevolutionUntilMs) {
+      const down = this.testRevolutionDown;
+      const taps = this.testRevolutionTapCount;
+      const mult = this.testRevolutionMultiplier;
+      const windowMs = this.testRevolutionMs;
+      const resultMs = this.testRevolutionResultMs;
+      this.clearTestRevolution();
+      this.pushTestEffect(
+        {
+          kind: 'revolution-end',
+          // 実発動と同じく 0 — 窓中に即時反映済みで清算 lump が無い(実演は
+          // そもそも値を動かさないので、表示にも動かす額は無い)。
+          amount: 0,
+          revolutionDownTotal: down,
+          revolutionTapCount: taps,
+          revolutionLikeDown: 0,
+          revolutionMultiplier: mult,
+          revolutionMs: windowMs,
+          ...(resultMs > 0 ? { revolutionResultMs: resultMs } : {}),
+          nickname: 'テスト',
+        },
+        nowMs
+      );
+    }
+    if (this.testQuizVoteEndsMs === null) return;
+    // お題: 到着済みのダミー票を反映(投票オーバーレイの票数が伸びる)。
+    while (this.testQuizVotes.length > 0 && nowMs >= this.testQuizVotes[0]!.atMs) {
+      const v = this.testQuizVotes.shift()!;
+      if (v.good) this.testQuizGood++;
+      else this.testQuizBad++;
+      this.dirty = true;
+    }
+    // お題: 投票締切 → 結果発表(quiz-end)。
+    if (nowMs >= this.testQuizVoteEndsMs) {
+      const good = this.testQuizGood;
+      const bad = this.testQuizBad;
+      const amount = this.testQuizAmount;
+      const prompt = this.testQuizPrompt;
+      const resultMs = this.testQuizResultMs;
+      this.clearTestQuiz();
+      this.pushTestEffect(
+        {
+          // 判定は本番と同じ純関数。**クランプは掛けない** — 実演は値を動かさない
+          // ので「実減少量」という概念が無く、設定した額をそのまま見せるのが正しい。
+          amount: quizNominalAmount(good, bad, amount),
+          kind: 'quiz-end',
+          quizGood: good,
+          quizBad: bad,
+          ...(prompt !== '' ? { quizPrompt: prompt } : {}),
+          quizAmount: amount,
+          ...(resultMs > 0 ? { quizResultMs: resultMs } : {}),
+          nickname: 'テスト',
+        },
+        nowMs
+      );
+    }
+  }
+
+  /** ▶テスト実演の窓が1つでも生きているか(登録ガード・停止の判定に使う)。 */
+  private anyTestPreviewActive(): boolean {
+    return (
+      this.testBoostUntilMs !== null ||
+      this.testRevolutionUntilMs !== null ||
+      this.testQuizVoteEndsMs !== null
+    );
+  }
+
+  /**
+   * ▶テスト実演の窓を開いてよいか。**3種(boost / revolution / quiz)で共通の権威**。
+   *
+   * 実発動進行中・**アーム中**は登録しない — モニターも他演出中の実演はスキップ
+   * するので、実カウンタを乗っ取らないのが正。アーム中は boostUntilMs が
+   * まだ null(armedBoost ⟹ boostUntilMs === null の不変条件)なので、armedBoost も
+   * 見ないと commit 後の実タップが実演に吸われる。
+   * **革命も列挙する** — press() の実演ブロックは最優先で return するので、革命の
+   * 窓/アームと重なると窓のタップが丸ごと実演カウンタへ吸われ、699💎 を撃った
+   * 視聴者から見て数字が1も動かない。
+   * **封印(tapLock)とお題(quiz)も列挙する** — activateTapLock/armQuiz は
+   * 「実演の窓は封印/バリアの抜け道にしない」と clearTestPreviews で防御している
+   * のに、逆方向(封印中・お題中に実演を開始)が素通しだと、以降の押下が全部
+   * 実演カウンタへ吸われて tapLockBlocked / quizBlocked が止まり、封印・全アク
+   * ション停止の手応えが消える(get() には tapLock と実演 boost が同時に載る)。
+   *
+   * **実演どうしも排他**(anyTestPreviewActive)— 革命79秒・お題105秒の長尺が
+   * 増えたので、走行中に別の実演を重ねられると get() のキー合流がどちらの窓を
+   * 載せるか曖昧になり、「■ 停止」の意味も壊れる。
+   */
+  private testPreviewAllowed(): boolean {
+    return (
+      this.boostUntilMs === null &&
+      this.armedBoost === null &&
+      this.revolutionUntilMs === null &&
+      this.armedRevolution === null &&
+      this.tapLockUntilMs === null &&
+      this.armedQuiz === null &&
+      this.quizVoteUntilMs === null &&
+      !this.anyTestPreviewActive()
+    );
+  }
+
   // ── お邪魔(タップ封じ) ──────────────────────────────────────────────────
 
   /**
@@ -3685,7 +4037,7 @@ export class ChallengeEngine {
     this.tapLockLabel = tl.label;
     // ▶テスト実演の窓が開いていると press が実演ブロックで先に return してしまい、
     // 実演が封印の抜け道になる(activateBoost が同じ理由で落としているのと同型)。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     this.giftDiag(`→ お邪魔発動 残り${Math.round((capped - nowMs) / 1000)}秒`);
     this.dirty = true;
     this.armFreezeTimer();
@@ -3744,7 +4096,7 @@ export class ChallengeEngine {
     this.tapLockNickname = p.nickname;
     this.tapLockLabel = p.label;
     // 実演の窓は抜け道にしない(activateTapLock と同じ理由)。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     this.giftDiag(`→ 予約していたお邪魔を発動 残り${Math.round(p.addMs / 1000)}秒`);
     this.dirty = true;
     this.armFreezeTimer();
@@ -3898,7 +4250,7 @@ export class ChallengeEngine {
     // 実発動が優先 — ▶実演のタップ窓が残っていたら破棄する(activateBoost と同じ
     // 規約)。press() の実演ブロックは最優先で return するので、残しておくと
     // 革命の窓のタップが実演カウンタへ吸われて実値が動かない。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     // 連打コンボは normalize.ts が1メッセージへ畳むので repeatCount を見る。掛ける
     // のは発動回数ではなく**尺**(tapLock と同じ判断 — 窓の直列化はできない)。
     const times = revolutionActivationCount(e.repeatCount);
@@ -4023,7 +4375,7 @@ export class ChallengeEngine {
   ): void {
     // コミット時にも破棄する(commitBoost と同じ二重の防御)— アームしてから
     // 窓が開くまでの最長 60 秒の間に ▶実演を張られる経路があるため。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     // 戦果カウンタは窓単位。clearRevolution でも落とすが、ここでも落とす
     // (二重の防御 — 「窓が開くたびに 0 から」の意図を明示する)。
     this.revTapCount = 0;
@@ -4254,6 +4606,7 @@ export class ChallengeEngine {
       promptIndex,
       durationMs: cfg.quiz.durationSec * 1000,
       voteMs: cfg.quiz.voteSec * 1000,
+      prepMs: cfg.quiz.prepSec * 1000,
       amount: cfg.quiz.amount,
       goodWords: [...cfg.quiz.goodWords],
       badWords: [...cfg.quiz.badWords],
@@ -4277,7 +4630,7 @@ export class ChallengeEngine {
    */
   private armQuiz(snap: QuizArmSnapshot, atMs: number): void {
     // 実発動が優先 — ▶実演のタップ窓が残っていたら破棄(activateBoost と同じ規約)。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     const cinematic = this.fxAllowed();
     if (!cinematic) {
       this.giftDiag(
@@ -4285,7 +4638,9 @@ export class ChallengeEngine {
       );
     }
     const introMs = cinematic && snap.introClip !== 'off' ? QUIZ_INTRO_MS : 0;
-    const preMs = cinematic ? introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS : 0;
+    // 前置きの総尺 = 導入カット + 回転 + 決定表示 + **お題発表準備**。
+    // 準備区間ぶんを忘れると「準備表示が出ている最中に制限時間が始まっている」。
+    const preMs = cinematic ? introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + snap.prepMs : 0;
     const deadlineMs = atMs + QUIZ_ARM_MAX_MS;
     if (cinematic) {
       this.armedQuiz = { id: 0, atMs, deadlineMs, snap };
@@ -4299,12 +4654,16 @@ export class ChallengeEngine {
       quizPrompt: prompt,
       quizIntroMs: introMs,
       ...(introMs > 0 ? { quizIntroClip: snap.introClip } : {}),
+      // 準備区間の尺。プレーン発動(cinematic=false)は前置きごと無いので 0。
+      quizPrepMs: cinematic ? snap.prepMs : 0,
       quizDurationMs: snap.durationMs,
       quizVoteMs: snap.voteMs,
       quizAmount: snap.amount,
       // フォールバックのタイムライン(revolutionEndsAtMs と同じ規約 — 実際の期限は
       // ChallengeState.quiz が権威)。アーム期限まで cue が来なければ deadlineMs 起点。
-      quizEndsAtMs: (cinematic ? deadlineMs + preMs : atMs) + snap.durationMs + snap.voteMs,
+      // **前置きは足さない** — 期限切れの強制発動(commitArmedQuizIfExpired)が
+      // preMs 0 で即窓オープンするので、そちらと同じ時刻になっていないと嘘になる。
+      quizEndsAtMs: (cinematic ? deadlineMs : atMs) + snap.durationMs + snap.voteMs,
       // プレーンは 0(モニターはバナーだけ出す)。シネマは前置きの総尺。
       fxDurationMs: preMs,
       ...(snap.flash ? { flash: true } : {}),
@@ -4328,7 +4687,7 @@ export class ChallengeEngine {
   /** 窓の状態を一括で開く(commit とプレーン即発動の共通実体 — commitRevolutionState の鏡像)。 */
   private commitQuizState(windowStartMs: number, snap: QuizArmSnapshot, resultMs: number): void {
     // コミット時にも▶実演を破棄(commitRevolutionState と同じ二重の防御)。
-    this.clearTestBoost();
+    this.clearTestPreviews();
     this.quizStartMs = windowStartMs;
     this.quizUntilMs = windowStartMs + snap.durationMs;
     this.quizVoteUntilMs = this.quizUntilMs + snap.voteMs;
@@ -4379,7 +4738,10 @@ export class ChallengeEngine {
     // startedAtMs の丸めは boostCue / revolutionCue と同じ(now を超えさせない)。
     const startMs = Math.min(Math.max(p.startedAtMs, nowMs - BOOST_COMMIT_MAX_LAG_MS), nowMs);
     const introMs = a.snap.introClip !== 'off' ? QUIZ_INTRO_MS : 0;
-    const preMs = Math.min(Math.max(0, p.preMs), introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS);
+    const preMs = Math.min(
+      Math.max(0, p.preMs),
+      introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + a.snap.prepMs
+    );
     this.commitQuiz(a, startMs, preMs, true);
     return true;
   }
@@ -4396,8 +4758,12 @@ export class ChallengeEngine {
     this.giftDiag(
       `→ お題のアーム期限切れ(${Math.round(QUIZ_ARM_MAX_MS / 1000)}秒)— モニターの再生を待たず強制発動`
     );
-    const introMs = a.snap.introClip !== 'off' ? QUIZ_INTRO_MS : 0;
-    this.commitQuiz(a, a.deadlineMs, introMs + QUIZ_SPIN_MS + QUIZ_REVEAL_MS, true);
+    // **前置きは足さない(preMs = 0 = 即窓オープン)。** ここへ来たのは「モニターが
+    // 前置きを一度も再生しなかった」異常系で、その尺ぶん窓の開始を後ろへずらすと
+    // armed が落ちているのに startsAtMs が未来のまま = **前置きも窓も出ない空白**が
+    // できる(2026-08-22 に回転を 3 倍へ伸ばしたので、既定で 35 秒の無表示になっていた)。
+    // effect に焼く quizEndsAtMs(armQuiz)も同じく preMs を足さない — 両方揃えること。
+    this.commitQuiz(a, a.deadlineMs, 0, true);
   }
 
   /** アーム中のお題をプレーンモードで即発動(plainCommitArmedRevolution の鏡像。凍結は元々無い)。 */
@@ -4423,6 +4789,7 @@ export class ChallengeEngine {
       QUIZ_INTRO_MS +
       QUIZ_SPIN_MS +
       QUIZ_REVEAL_MS +
+      QUIZ_PREP_MAX_SEC * 1000 +
       QUIZ_DURATION_MAX_SEC * 1000 +
       QUIZ_VOTE_MAX_SEC * 1000;
     this.quizVoteUntilMs = clampFutureMs(this.quizVoteUntilMs, nowMs, capMs);
@@ -4441,7 +4808,8 @@ export class ChallengeEngine {
     const good = this.quizGoodCount;
     const bad = this.quizBadCount;
     const cfgAmount = this.quizAmount;
-    const nominal = good > bad ? -cfgAmount : bad > good ? cfgAmount : 0;
+    // 判定は shared の純関数が権威(▶テスト実演の清算と共通 — 二重権威を作らない)。
+    const nominal = quizNominalAmount(good, bad, cfgAmount);
     // 減算方向だけクランプ(実減少量規約)。加算はクランプ不要。
     const applied = nominal < 0 ? this.clampDownAmount(nominal) : nominal;
     if (applied < 0) this.stats.quizDown += -applied;

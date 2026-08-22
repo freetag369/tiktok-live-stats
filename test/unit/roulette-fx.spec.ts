@@ -137,8 +137,8 @@ describe('走行距離と幾何の不変条件', () => {
 });
 
 describe('drawRoulettePattern — 終盤パターンの抽選', () => {
-  it('パターンは23種、うち通常抽選に乗るのは22種(激熱確定専用の1種を除く)', () => {
-    expect(ROULETTE_PATTERNS).toHaveLength(23);
+  it('パターンは25種、うち通常抽選に乗るのは22種(激熱確定専用の3種を除く)', () => {
+    expect(ROULETTE_PATTERNS).toHaveLength(25);
     expect(ROULETTE_SELECTABLE_PATTERNS).toHaveLength(22);
     // 激熱専用は一覧に居るが、選べる集合には居ない(通常スピンに混ざらないことの凍結)。
     for (const p of ROULETTE_HOT_ONLY_PATTERNS) {
@@ -194,7 +194,7 @@ describe('drawRoulettePattern — 終盤パターンの抽選', () => {
 });
 
 describe('段位(tier)と尺 — 信頼度方式の骨格', () => {
-  it('全23パターンに段位があり、heavy/ultra の顔ぶれが固定されている', () => {
+  it('全25パターンに段位があり、heavy/ultra の顔ぶれが固定されている', () => {
     for (const p of ROULETTE_PATTERNS) {
       expect(['light', 'mid', 'heavy', 'ultra']).toContain(ROULETTE_PATTERN_TIER[p]);
     }
@@ -205,7 +205,7 @@ describe('段位(tier)と尺 — 信頼度方式の骨格', () => {
       new Set([
         'dragon', 'unicorn', 'whale', 'phoenix', 'lion',
         'heartme', 'hearttouch', 'heartbday', 'heartbloom',
-        'djglasses',
+        'djglasses', 'unicorngift', 'bunnydj',
       ])
     );
   });

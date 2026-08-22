@@ -5,6 +5,7 @@ import type { MessagePortMain } from 'electron';
 import type { RpcRequest } from '@shared/ipc';
 import type { LiveMessage } from '@shared/ipc';
 import type { AppSettings, ScoringConfig } from '@shared/dto';
+import { liteLiveMessage } from '@shared/live-lite';
 import { DEFAULT_CHALLENGE } from '@shared/challenge';
 import { DEFAULT_SCORING } from '@shared/scoring';
 import { ChallengeEngine } from './challenge';
@@ -46,8 +47,13 @@ let missions: MissionStore | null = null;
 let challenge: ChallengeEngine | null = null;
 let handle: ((req: RpcRequest) => Promise<unknown>) | null = null;
 let settings: AppSettings | null = null;
-/** ウィンドウごとに1本。メイン窓とモニター窓で複数になる。 */
-let feedPorts: MessagePortMain[] = [];
+/**
+ * ウィンドウごとに1本。メイン窓とモニター窓で複数になる。
+ * lite = モニター窓 — viewers(最大800件×2Hz)/ feed(4Hz)を**送らない**
+ * (受け側は捨てるだけなのにデシリアライズ+GC 圧だけ払っていた。
+ *  間引きの形は shared/live-lite.ts が権威)。
+ */
+let feedPorts: Array<{ port: MessagePortMain; lite: boolean }> = [];
 
 function post(msg: unknown): void {
   process.parentPort?.postMessage(msg);
@@ -56,15 +62,24 @@ function post(msg: unknown): void {
 /** Live traffic goes straight to the renderer; main only brokered the handshake. */
 function pushLive(m: LiveMessage): void {
   let delivered = false;
-  for (const p of [...feedPorts]) {
+  // lite 変換は必要になった最初の1回だけ組んで全 lite ポートで使い回す。
+  let liteMsg: LiveMessage | null | undefined;
+  for (const f of [...feedPorts]) {
+    const out = f.lite ? (liteMsg === undefined ? (liteMsg = liteLiveMessage(m)) : liteMsg) : m;
+    if (out === null) {
+      // feed の意図的な間引き — 「配れなかった」ではないので main 経由へ倒さない。
+      delivered = true;
+      continue;
+    }
     try {
-      p.postMessage(m);
+      f.port.postMessage(out);
       delivered = true;
     } catch {
-      feedPorts = feedPorts.filter((x) => x !== p);
+      feedPorts = feedPorts.filter((x) => x !== f);
     }
   }
   // 全ポート死亡時のみ main 経由へフォールバック(firehose を main に流さない)。
+  // フォールバックはフル payload のまま — 受け側 liveStore の lite ガードが守る。
   if (!delivered) post({ t: 'live', m });
 }
 
@@ -157,14 +172,17 @@ process.parentPort?.on('message', (e) => {
 
   if (ports && ports.length > 0 && msg && (msg as { t?: string }).t === 'feedPort') {
     const p = ports[0]!;
+    // lite フラグは main(worker-host)が窓の種別から付ける。旧 main と混在しない
+    // (同一アプリ内)が、欠損は full 扱いへ倒す — 間引き漏れは無害、配り漏れは事故。
+    const lite = (msg as { lite?: boolean }).lite === true;
     // ウィンドウのリロード/クローズは close で検知して自己清掃する。
     p.on('close', () => {
-      feedPorts = feedPorts.filter((x) => x !== p);
+      feedPorts = feedPorts.filter((x) => x.port !== p);
     });
     p.start();
-    feedPorts.push(p);
+    feedPorts.push({ port: p, lite });
     // 番犬: 再配線が繰り返されても無限に溜めない(窓は高々2枚)。
-    while (feedPorts.length > 4) feedPorts.shift()?.close();
+    while (feedPorts.length > 4) feedPorts.shift()?.port.close();
     return;
   }
   if (!msg) return;

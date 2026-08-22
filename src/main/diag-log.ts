@@ -40,9 +40,24 @@ let flushing = false;
  */
 const KEEP_PREFIX = ['[fx-skip]', '[worker]', '[diag]'];
 
-function interesting(level: DiagLevel, message: string): boolean {
-  if (level === 'error') return true;
-  return KEEP_PREFIX.some((p) => message.includes(p));
+export type ConsoleRoute = 'ring' | 'file' | 'drop';
+
+/**
+ * console 行の行き先(純関数 — test/unit/diag-route.spec.ts)。
+ * '[frame]'(モニターの毎分フレームタイム計測 — renderer/lib/frame-meter.ts)は
+ * **ファイル専用** — 定期行をリングへ積むと RING_CAP=300 が定期行だけで埋まり、
+ * 肝心の fxWarn・例外を押し流す(metrics.ts の reportFileOnly と同じ理由)。
+ * 異常の要約は frame-meter 側が '[diag]' の warn で別途上げる。
+ *
+ * 判定は includes ではなく**行頭一致** — frame-meter のエスカレーション warn は
+ * 「…(詳細は diag.log の [frame] 行)」と本文中に字面を含むため、includes だと
+ * リングへ上げるはずの '[diag]' warn ごとファイルへ demote してしまう
+ * (レビューで実際に踏んだ)。計測行そのものは必ず '[frame]' で始まる。
+ */
+export function routeConsoleLine(level: DiagLevel, message: string): ConsoleRoute {
+  if (message.startsWith('[frame]')) return 'file';
+  if (level === 'error') return 'ring';
+  return KEEP_PREFIX.some((p) => message.includes(p)) ? 'ring' : 'drop';
 }
 
 export function initDiagLog(dataDir: string): void {
@@ -132,7 +147,12 @@ export function attachConsoleCapture(wc: WebContents, scope: DiagScope): void {
     (details: { level?: string; message?: string; lineNumber?: number; sourceId?: string }) => {
       const raw = String(details?.message ?? '');
       const lvl: DiagLevel = details?.level === 'error' ? 'error' : details?.level === 'warning' ? 'warn' : 'info';
-      if (!interesting(lvl, raw)) return;
+      const route = routeConsoleLine(lvl, raw);
+      if (route === 'drop') return;
+      if (route === 'file') {
+        reportFileOnly(scope, lvl, raw);
+        return;
+      }
       report(scope, lvl, raw);
     }
   );
@@ -140,6 +160,11 @@ export function attachConsoleCapture(wc: WebContents, scope: DiagScope): void {
 
 /** worker の stdout/stderr 行を取り込む(worker-host から呼ぶ)。 */
 export function reportWorkerLine(level: DiagLevel, line: string): void {
-  if (!interesting(level, line)) return;
+  const route = routeConsoleLine(level, line);
+  if (route === 'drop') return;
+  if (route === 'file') {
+    reportFileOnly('worker', level, line);
+    return;
+  }
   report('worker', level, line);
 }

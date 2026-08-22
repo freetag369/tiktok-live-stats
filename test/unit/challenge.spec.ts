@@ -2139,7 +2139,7 @@ describe('validateChallengeConfig — hideRouletteResultInLog', () => {
 });
 
 describe('validateChallengeConfig — roulettes', () => {
-  it('roulettes/roulette どちらも無い(新規)は既定(ハートミー + DJメガネ)へ', () => {
+  it('roulettes/roulette どちらも無い(新規)は既定(ハートミー + 激熱確定3種)へ', () => {
     const bare = { ...DEFAULT_CHALLENGE } as Record<string, unknown>;
     delete bare.roulettes;
     expect(validateChallengeConfig(bare).roulettes).toEqual([...DEFAULT_ROULETTES]);

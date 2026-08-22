@@ -36,9 +36,12 @@ function cfgWith(rows: ChallengeRouletteConfig[]): ChallengeConfig {
 describe('DJメガネの既定行(DJ_GLASSES_ROULETTE)', () => {
   it('出荷既定の末尾に居て、ハートミーの位置(先頭)は動かない', () => {
     // 先頭に入れると DEFAULT_ROULETTES[0] / roulettes[0] を掴む呼び元とテストが崩れる。
-    expect(DEFAULT_ROULETTES).toHaveLength(2);
+    // v13 でユニコーン / バニーDJ が DJメガネの後ろに足されたので、DJ は末尾ではなく
+    // 「ハートミーより後ろ」であることだけを固定する(順序の意図は変わっていない)。
+    expect(DEFAULT_ROULETTES).toHaveLength(4);
     expect(DEFAULT_ROULETTES[0]).toBe(DEFAULT_ROULETTE);
-    expect(DEFAULT_ROULETTES[DEFAULT_ROULETTES.length - 1]).toBe(DJ_GLASSES_ROULETTE);
+    expect(DEFAULT_ROULETTES).toContain(DJ_GLASSES_ROULETTE);
+    expect(DEFAULT_ROULETTES.indexOf(DJ_GLASSES_ROULETTE)).toBeGreaterThan(0);
   });
 
   it('ユーザー仕様: giftId 11583 / 有効 / 増やす / 倍率 ×10 / 盤面は全マス 500', () => {

@@ -185,6 +185,29 @@ describe('screen 合成クリップ(assets/fx 直下)', () => {
     }
   });
 
+  /**
+   * 専用サブディレクトリ(0 件許容 glob)の孤児検査。素材そのものは無くてもよい
+   * (renderer が null へ縮退する)が、**在るなら名前がコード側の期待と一致すること**。
+   * `quiz/intro-v2.mp4` のような綴り違いを置いても glob が拾わず、導入が黙って
+   * 消えるのが唯一の症状になる — それをここで潰す。
+   */
+  it.each([
+    // result は結果発表カットシーン(2026-08-22 追加)。導入とは別ホルダー・別 glob キー。
+    ['quiz', ['intro', 'result']],
+    ['revolution', ['intro', 'result']],
+    ['tap-lock', ['intro']],
+  ])('専用サブディレクトリ %s/ の mp4 は %s だけ', (dir, expected) => {
+    const d = join(FX_DIR, dir);
+    if (!existsSync(d)) return; // 未投入は許容(0 件許容 glob)
+    const files = readdirSync(d)
+      .filter((f) => f.endsWith('.mp4'))
+      .map((f) => f.replace(/\.mp4$/, ''))
+      .sort();
+    for (const f of files) {
+      expect(expected.includes(f), `${dir}/${f}.mp4 は glob が拾わない綴り`).toBe(true);
+    }
+  });
+
   it('帯域カットイン(band/)は 4 本と一対一', () => {
     // 期待リストの出典: renderer/lib/fx.ts の FX_CLIPS(band 4 id は直書き)。
     const band = readdirSync(join(FX_DIR, 'band'))

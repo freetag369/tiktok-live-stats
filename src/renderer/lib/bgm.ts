@@ -76,6 +76,12 @@ const BY_ID = new Map([...BAND_BGM, ...ROULETTE_BGM, ...ROULETTE_SPIN_SE].map((b
 export interface BgmHandle {
   /** fadeMs かけて音量を落として止める。0 で即時停止。 */
   stop(fadeMs?: number): void;
+  /**
+   * 音量(0-100)を差し替える。お題の区間別BGM で「同じ曲を続けたまま区間ごとの
+   * 音量へ寄せる」ために足した(頭出しに戻さないため鳴らし直しはしない)。
+   * フェード中(stop 済み)は無視する — 消えかけの曲を生き返らせない。
+   */
+  setVolume(volume: number): void;
 }
 
 /** フェードの刻み。荒いと段付きが聞こえ、細かいと timer が無駄に回る。 */
@@ -90,8 +96,15 @@ const FADE_STEP_MS = 50;
  * 呼び出し側の規約: 返ったハンドルは必ず stop すること。カットインの終端フェード・
  * finishBandFx/abortBandFx・unmount cleanup のすべての出口で stop を呼ぶ
  * (stop は冪等なので重複して呼んでよい)。
+ *
+ * fadeInMs > 0 で無音から立ち上げる(お題の区間別BGM のクロスフェード用 —
+ * 前の曲の stop(fadeMs) と重ねて呼ぶ)。省略時 0 = 従来どおり即フル音量。
  */
-export function playBandBgm(id: string | null | undefined, volume: number): BgmHandle | null {
+export function playBandBgm(
+  id: string | null | undefined,
+  volume: number,
+  fadeInMs = 0
+): BgmHandle | null {
   if (!id) return null;
   let url: string;
   let gain: number;
@@ -111,9 +124,12 @@ export function playBandBgm(id: string | null | undefined, volume: number): BgmH
   const v = Math.min(1, Math.max(0, volume / 100)) * gain;
   if (v <= 0) return null;
 
+  // 目標音量。setVolume で動く(フェードイン中はこの値へ向かって上がる)。
+  let target = Math.min(1, v);
+
   const a = new Audio(url);
   a.loop = true; // 曲がカットインより短くても途切れない(尺はタイマーが権威)
-  a.volume = Math.min(1, v);
+  a.volume = fadeInMs > 0 ? 0 : target;
 
   // 取り壊し済みの印 = 下の error リスナーの偽陽性除け。
   //
@@ -143,7 +159,19 @@ export function playBandBgm(id: string | null | undefined, volume: number): BgmH
   // 生き返ったように見える)。
   let fadeEndsAt = 0;
 
+  // フェードイン(クロスフェードの立ち上がり側)。stop のフェードとは別 timer で
+  // 持ち、beginFade / kill の入口で必ず畳む — 両方が同時に a.volume を書くと
+  // 「消えかけているのに上がり続ける」が起きる。
+  let fadeInTimer: number | null = null;
+  const clearFadeIn = (): void => {
+    if (fadeInTimer !== null) {
+      window.clearInterval(fadeInTimer);
+      fadeInTimer = null;
+    }
+  };
+
   const kill = (): void => {
+    clearFadeIn();
     if (fadeTimer !== null) {
       window.clearInterval(fadeTimer);
       fadeTimer = null;
@@ -157,6 +185,7 @@ export function playBandBgm(id: string | null | undefined, volume: number): BgmH
   };
 
   const beginFade = (fadeMs: number): void => {
+    clearFadeIn();
     if (fadeTimer !== null) window.clearInterval(fadeTimer);
     fadeEndsAt = performance.now() + fadeMs;
     const startVol = a.volume;
@@ -172,7 +201,30 @@ export function playBandBgm(id: string | null | undefined, volume: number): BgmH
     }, FADE_STEP_MS);
   };
 
+  if (fadeInMs > 0) {
+    const steps = Math.max(1, Math.round(fadeInMs / FADE_STEP_MS));
+    let i = 0;
+    fadeInTimer = window.setInterval(() => {
+      i++;
+      if (i >= steps) {
+        a.volume = target;
+        clearFadeIn();
+        return;
+      }
+      // target を毎回読むので、立ち上がり中に setVolume されても追従する。
+      a.volume = Math.max(0, Math.min(1, target * (i / steps)));
+    }, FADE_STEP_MS);
+  }
+
   return {
+    setVolume(nextVolume: number): void {
+      target = Math.min(1, Math.max(0, nextVolume / 100) * gain);
+      // 停止処理に入った後は触らない(消えかけの曲を生き返らせない)。
+      if (stopped) return;
+      // フェードイン中は interval が target へ向かうので、ここでは書かない
+      // (書くと立ち上がりが一瞬で終わったように聞こえる)。
+      if (fadeInTimer === null) a.volume = target;
+    },
     stop(fadeMs = 400): void {
       // 再入対応: 「フェード中に stop(0) で即断する」を必ず通す。
       // 以前は stopped フラグで2回目以降が丸ごと no-op になり、finishBandFx の

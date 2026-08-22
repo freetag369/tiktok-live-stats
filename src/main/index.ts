@@ -131,7 +131,9 @@ function openMonitor(): void {
       host?.send({ t: 'monitorOpen', open: false });
     }
   );
-  host?.attachRenderer(mon.webContents);
+  // lite: モニター窓は viewers/feed を使わないので worker に送らせない
+  // (shared/live-lite.ts — 長時間配信のデシリアライズ・GC 圧対策)。
+  host?.attachRenderer(mon.webContents, { lite: true });
   host?.send({ t: 'monitorOpen', open: true });
   // 診断: この窓の console を main のリングへ。レンダラ側は1行も変えずに
   // 既存の fxWarn 21箇所と fx エンジンの警告が事後に読めるようになる。
@@ -141,7 +143,7 @@ function openMonitor(): void {
   // Re-handshake the firehose port after a reload (メイン窓と同じ流儀)。
   mon.webContents.on('did-finish-load', () => {
     const m = getMonitorWindow();
-    if (m) host?.attachRenderer(m.webContents);
+    if (m) host?.attachRenderer(m.webContents, { lite: true });
   });
   mon.on('hide', syncVisibility);
   mon.on('minimize', syncVisibility);

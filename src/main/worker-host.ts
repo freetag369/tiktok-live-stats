@@ -38,8 +38,13 @@ export class WorkerHost {
    * 場合はリセットが走らずカウントが進むので、従来のスピン防止は保たれる。
    */
   private stableTimer: NodeJS.Timeout | null = null;
-  /** メイン窓とモニター窓 — firehose ポートはウィンドウごとに1本張る。 */
-  private wcs = new Set<WebContents>();
+  /**
+   * メイン窓とモニター窓 — firehose ポートはウィンドウごとに1本張る。
+   * lite = モニター窓(viewers/feed を worker が送らない — shared/live-lite.ts)。
+   * フラグを Map で持つのは、worker 再起動(ready)や did-finish-load の
+   * 再ハンドシェイクでも同じ種別で張り直すため。
+   */
+  private wcs = new Map<WebContents, { lite: boolean }>();
   /**
    * クラッシュ自動再起動に使う boot ペイロード。設定変更のたびに refreshBoot で
    * 差し替える — start() 時のクロージャのままだと、再起動で古い設定に巻き戻る。
@@ -112,7 +117,7 @@ export class WorkerHost {
             this.stableTimer.unref?.();
           }
           this.flushQueue();
-          for (const wc of this.wcs) this.wireFeedPort(wc);
+          for (const [wc, o] of this.wcs) this.wireFeedPort(wc, o.lite);
           return;
         case 'rpcResult': {
           const res = msg.res as RpcResponse;
@@ -182,20 +187,24 @@ export class WorkerHost {
   }
 
   /** Renderer gets a direct line to the worker; 20k events/min never touch main. */
-  attachRenderer(wc: WebContents): void {
-    if (!this.wcs.has(wc)) {
-      this.wcs.add(wc);
+  attachRenderer(wc: WebContents, opts?: { lite?: boolean }): void {
+    const prev = this.wcs.get(wc);
+    // opts 省略の再ハンドシェイクでは登録済みの種別を保つ(既定は full —
+    // 間引き漏れは無害だが、メイン窓を誤って lite にするとフィードが消える)。
+    const lite = opts?.lite ?? prev?.lite ?? false;
+    if (!prev) {
       wc.once('destroyed', () => this.wcs.delete(wc));
     }
+    this.wcs.set(wc, { lite });
     // リロード後の再ハンドシェイクを含め、呼ばれるたびに新しいポートを張る。
     // 古いポートは worker 側が close イベントで自己清掃する。
-    if (this.ready) this.wireFeedPort(wc);
+    if (this.ready) this.wireFeedPort(wc, lite);
   }
 
-  private wireFeedPort(wc: WebContents): void {
+  private wireFeedPort(wc: WebContents, lite: boolean): void {
     if (!this.proc || wc.isDestroyed()) return;
     const { port1, port2 } = new MessageChannelMain();
-    this.proc.postMessage({ t: 'feedPort' }, [port1]);
+    this.proc.postMessage({ t: 'feedPort', lite }, [port1]);
     wc.postMessage(CH_FEED_PORT, null, [port2]);
   }
 

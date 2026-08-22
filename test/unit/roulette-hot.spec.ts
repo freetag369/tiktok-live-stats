@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHALLENGE,
   DEFAULT_ROULETTE,
+  BUNNY_DJ_ROULETTE,
   DJ_GLASSES_ROULETTE,
+  UNICORN_ROULETTE,
   DEFAULT_ROULETTE_HOT,
   ROULETTE_HOT_DON_STEPS,
   ROULETTE_HOT_INTRO_MS,
@@ -128,10 +130,11 @@ describe('validateRoulette — 激熱確定の互換と clamp', () => {
   it('キー欠損(既存の settings.json)は無効 — キーごと生えない', () => {
     const raw = structuredClone(DEFAULT_CHALLENGE) as unknown as Record<string, unknown>;
     const v = validateChallengeConfig(raw);
-    // 出荷既定の DJメガネ行だけは hot を持つ(v10 で追加した激熱確定の既定)。
+    // 出荷既定の激熱確定3行(DJメガネ / ユニコーン / バニーDJ)だけが hot を持つ。
     // それ以外の行に hot が生えないことが「キー欠損 = 無効」の担保。
+    const hotIds = new Set([DJ_GLASSES_ROULETTE.id, UNICORN_ROULETTE.id, BUNNY_DJ_ROULETTE.id]);
     for (const r of v.roulettes) {
-      if (r.id === DJ_GLASSES_ROULETTE.id) continue;
+      if (hotIds.has(r.id)) continue;
       expect(r.hot, r.id).toBeUndefined();
     }
     expect(DEFAULT_ROULETTE.hot).toBeUndefined();
@@ -139,6 +142,18 @@ describe('validateRoulette — 激熱確定の互換と clamp', () => {
       enabled: true,
       multiplier: 10,
     });
+    // 候補列を持つ行は「代表値(最大 weight)+ multipliers」が正規形。
+    for (const row of [UNICORN_ROULETTE, BUNNY_DJ_ROULETTE]) {
+      expect(v.roulettes.find((r) => r.id === row.id)?.hot, row.id).toEqual({
+        enabled: true,
+        multiplier: 5,
+        multipliers: [
+          { multiplier: 5, weight: 60 },
+          { multiplier: 10, weight: 30 },
+          { multiplier: 20, weight: 10 },
+        ],
+      });
+    }
   });
 
   it('enabled:false はキーごと落ちる(無意味な既定値を保存済み JSON に生やさない)', () => {

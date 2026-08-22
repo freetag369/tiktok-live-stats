@@ -134,3 +134,65 @@ describe('playBandBgm — 欠損の警告と、その偽陽性除け', () => {
     expect(warns).toHaveLength(0);
   });
 });
+
+/**
+ * クロスフェード用の追加 API(2026-08-22 — お題の区間別BGM)。
+ * fadeInMs で無音から立ち上げ、setVolume で鳴らしたまま音量だけ寄せる。
+ * どちらも「曲を頭出しへ戻さずに区間をまたぐ」ために足したもの。
+ */
+describe('playBandBgm — フェードイン / setVolume', () => {
+  it('fadeInMs > 0 は無音から始まる(前の曲の fade-out と重ねるため)', () => {
+    const h = playBandBgm('custom:loop.mp3', 100, 400);
+    expect(h).not.toBeNull();
+    expect(last().volume).toBe(0);
+  });
+
+  it('fadeInMs 省略は従来どおり即フル音量(既存の呼び出しを変えない)', () => {
+    playBandBgm('custom:loop.mp3', 50);
+    expect(last().volume).toBeCloseTo(0.5, 5);
+  });
+
+  it('フェードインは尺の経過で目標音量へ到達する', async () => {
+    vi.useFakeTimers();
+    try {
+      playBandBgm('custom:loop.mp3', 80, 200);
+      expect(last().volume).toBe(0);
+      vi.advanceTimersByTime(100);
+      // 途中は 0 と目標の間(段階フェードなので厳密値は問わない)。
+      expect(last().volume).toBeGreaterThan(0);
+      expect(last().volume).toBeLessThan(0.8);
+      vi.advanceTimersByTime(200);
+      expect(last().volume).toBeCloseTo(0.8, 5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('setVolume は鳴らし直さずに音量だけ差し替える(同じ曲が続く区間の要件)', () => {
+    const h = playBandBgm('custom:loop.mp3', 100)!;
+    const madeBefore = FakeAudio.made.length;
+    h.setVolume(30);
+    expect(last().volume).toBeCloseTo(0.3, 5);
+    // Audio 要素が作り直されていない = 頭出しに戻っていない。
+    expect(FakeAudio.made.length).toBe(madeBefore);
+  });
+
+  it('★停止処理に入った後の setVolume は無視する(消えかけの曲を生き返らせない)', () => {
+    const h = playBandBgm('custom:loop.mp3', 100)!;
+    h.stop(0);
+    const after = last().volume;
+    h.setVolume(30);
+    // stop(0) は音量を落とさず src を外して畳む(kill)。setVolume が素通しだと
+    // ここが 0.3 に書き換わり、フェード中の停止では消えかけの曲が鳴り直す。
+    expect(last().volume).toBe(after);
+    expect(last().removed).toBe(true);
+  });
+
+  it('カタログ音の setVolume は gain 補正を通す(素材間の音圧差を保つ)', () => {
+    const h = playBandBgm('spin-reel1', 100)!;
+    const full = last().volume;
+    h.setVolume(50);
+    // 相対値が半分になる = gain が掛かったまま(生の 0.5 になっていない)。
+    expect(last().volume).toBeCloseTo(full / 2, 5);
+  });
+});

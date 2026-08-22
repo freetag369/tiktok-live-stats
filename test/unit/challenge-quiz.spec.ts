@@ -4,11 +4,14 @@ import {
   DEFAULT_QUIZ,
   DEFAULT_QUIZ_RULE,
   QUIZ_ARM_MAX_MS,
+  QUIZ_INTRO_MS,
+  QUIZ_INTRO_SELF,
   QUIZ_REVEAL_MS,
   QUIZ_RESULT_MS,
   QUIZ_SPIN_MS,
   judgeQuizVote,
   matchQuiz,
+  migrateChallengeQuizIntro,
   validateChallengeConfig,
   validateQuiz,
 } from '@shared/challenge';
@@ -112,13 +115,23 @@ function quizEngine(c: ChallengeConfig = cfg()): { e: ChallengeEngine; tick: (ms
   };
 }
 
-/** アーム → cue → コミットまで進める(シネマティック経路の共通前半)。preMs は intro 無しの前置き。 */
+/**
+ * 既定設定でモニターが申告する前置きの総尺。
+ * 導入(専用素材)+ 回転 + 決定 + **お題発表準備**(2026-08-22・既定 5 秒)。
+ */
+const DEFAULT_PRE_MS =
+  QUIZ_INTRO_MS + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + DEFAULT_QUIZ.prepSec * 1000;
+
+/**
+ * アーム → cue → コミットまで進める(シネマティック経路の共通前半)。
+ * preMs は**既定の設定(導入 = 専用素材)でモニターが申告する前置き**。
+ */
 function armAndCommit(e: ChallengeEngine, now: () => number): { preMs: number; startId: number } {
   e.handleEvent(gift({ giftId: '777' }));
   const s = e.get();
   expect(s.quiz?.armed).toBe(true);
   const startId = s.recentEffects[0]!.id;
-  const preMs = QUIZ_SPIN_MS + QUIZ_REVEAL_MS; // introClip 'off'
+  const preMs = DEFAULT_PRE_MS;
   expect(e.quizCue({ action: 'start', effectId: startId, startedAtMs: now(), preMs })).toBe(true);
   return { preMs, startId };
 }
@@ -163,7 +176,42 @@ describe('validateQuiz — 旧 settings.json との互換(欠損フォールバ�
   it('bgm / introClip は未知 id を既定へ戻す', () => {
     const v = validateQuiz({ ...DEFAULT_QUIZ, bgm: 'nope', introClip: 'nope' });
     expect(v.bgm).toBe(DEFAULT_QUIZ.bgm);
-    expect(v.introClip).toBe('off');
+    expect(v.introClip).toBe(DEFAULT_QUIZ.introClip);
+    expect(DEFAULT_QUIZ.introClip).toBe(QUIZ_INTRO_SELF); // 既定は専用素材(2026-08-22)
+  });
+
+  it("introClip は 'off' / 専用素材 / 全面カットのカタログを通す", () => {
+    expect(validateQuiz({ ...DEFAULT_QUIZ, introClip: 'off' }).introClip).toBe('off');
+    expect(validateQuiz({ ...DEFAULT_QUIZ, introClip: QUIZ_INTRO_SELF }).introClip).toBe(QUIZ_INTRO_SELF);
+    expect(validateQuiz({ ...DEFAULT_QUIZ, introClip: 'cut-rose' }).introClip).toBe('cut-rose');
+  });
+});
+
+describe('migrateChallengeQuizIntro(settingsVersion 11)— 導入を専用素材へ寄せ替え', () => {
+  const withIntro = (introClip: string): ChallengeConfig => cfg({ introClip });
+
+  it("v10 以前の 'off' は一度だけ専用素材へ引き上げる", () => {
+    const v = migrateChallengeQuizIntro(withIntro('off'), 10);
+    expect(v.quiz.introClip).toBe(QUIZ_INTRO_SELF);
+  });
+
+  it('世代印が上がったあとは触らない(自分で off へ戻した人に再配布しない)', () => {
+    const v = migrateChallengeQuizIntro(withIntro('off'), 11);
+    expect(v.quiz.introClip).toBe('off');
+  });
+
+  it('cut-* を自分で指名していた人の選択は尊重する', () => {
+    const v = migrateChallengeQuizIntro(withIntro('cut-rose'), 10);
+    expect(v.quiz.introClip).toBe('cut-rose');
+  });
+
+  it('冪等(2回通しても増えない・他のキーを壊さない)', () => {
+    const base = withIntro('off');
+    const once = migrateChallengeQuizIntro(base, 10);
+    const twice = migrateChallengeQuizIntro(once, 10);
+    expect(twice).toEqual(once);
+    expect(twice.quiz.prompts).toEqual(base.quiz.prompts);
+    expect(twice.quiz.amount).toBe(base.quiz.amount);
   });
 });
 
@@ -205,10 +253,55 @@ describe('アーム → cue → コミット(シネマティック)', () => {
     expect(ef.quizDurationMs).toBe(60_000);
     expect(ef.quizVoteMs).toBe(30_000);
     expect(ef.quizAmount).toBe(5000);
-    expect(ef.quizIntroMs).toBe(0); // introClip 'off' は導入なし
-    expect(ef.fxDurationMs).toBe(QUIZ_SPIN_MS + QUIZ_REVEAL_MS);
+    expect(ef.quizIntroMs).toBe(QUIZ_INTRO_MS); // 既定は専用素材の導入あり
+    expect(ef.quizIntroClip).toBe(QUIZ_INTRO_SELF);
+    // お題発表準備(既定 5 秒)も前置きの一部 — モニターが窓を開く原点になる。
+    expect(ef.quizPrepMs).toBe(DEFAULT_QUIZ.prepSec * 1000);
+    expect(ef.fxDurationMs).toBe(DEFAULT_PRE_MS);
     // アーム中は値が動かない(トリガーギフト自体は増減規則を通らない)。
     expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue);
+  });
+
+  it("introClip 'off' は導入の段ごと尺を詰める(前置きは回転 + 決定 + 準備)", () => {
+    const { e } = quizEngine(cfg({ introClip: 'off' }));
+    e.start();
+    e.handleEvent(gift({ giftId: '777' }));
+    const ef = e.get().recentEffects[0]!;
+    expect(ef.quizIntroMs).toBe(0);
+    expect(ef.quizIntroClip).toBeUndefined(); // 尺 0 のときは id を載せない
+    expect(ef.fxDurationMs).toBe(
+      QUIZ_SPIN_MS + QUIZ_REVEAL_MS + DEFAULT_QUIZ.prepSec * 1000
+    );
+  });
+
+  it('prepSec 0 は準備の段ごと尺を詰める(2026-08-22 以前と同じ前置き)', () => {
+    const { e } = quizEngine(cfg({ prepSec: 0 }));
+    e.start();
+    e.handleEvent(gift({ giftId: '777' }));
+    const ef = e.get().recentEffects[0]!;
+    expect(ef.quizPrepMs).toBe(0);
+    expect(ef.fxDurationMs).toBe(QUIZ_INTRO_MS + QUIZ_SPIN_MS + QUIZ_REVEAL_MS);
+  });
+
+  it('prepSec は窓の頭を後ろへずらす(cue の preMs 上限も伸びる)', () => {
+    const { e, now } = quizEngine(cfg({ prepSec: 20 }));
+    e.start();
+    e.handleEvent(gift({ giftId: '777' }));
+    const startId = e.get().recentEffects[0]!.id;
+    const preMs = QUIZ_INTRO_MS + QUIZ_SPIN_MS + QUIZ_REVEAL_MS + 20_000;
+    expect(e.quizCue({ action: 'start', effectId: startId, startedAtMs: now(), preMs })).toBe(true);
+    // 上限で切り詰められていないこと(切られると準備表示の途中で制限時間が始まる)。
+    expect(e.get().quiz!.startsAtMs).toBe(now() + preMs);
+  });
+
+  it('プレーン発動(モニター不在)は準備の段も無い — quizPrepMs は 0', () => {
+    const { e } = quizEngine();
+    e.setMonitorOpen(false);
+    e.start();
+    e.handleEvent(gift({ giftId: '777' }));
+    const ef = e.get().recentEffects[0]!;
+    expect(ef.quizPrepMs).toBe(0);
+    expect(ef.fxDurationMs).toBe(0);
   });
 
   it('cue で窓が開く(startsAtMs = 実再生開始 + preMs)。effectId 不一致は無視', () => {
@@ -474,5 +567,72 @@ describe('4出口と機能OFF', () => {
     const end = s.recentEffects.find((x) => x.kind === 'quiz-end')!;
     expect(end.amount).toBe(0);
     expect(s.value).toBe(DEFAULT_CHALLENGE.initialValue + 30);
+  });
+});
+
+/**
+ * アーム待ちの穴(2026-08-22 に修正)。どちらも 8/21 実装時からの既存バグで、
+ * 回転を 6→18 秒へ伸ばした回に一緒に潰した(前置きが長くなるほど実害が増えるため)。
+ */
+describe('アーム待ちの穴', () => {
+  /** 演出予告(fx)を持つギフトを出せる設定 — 既定の cfg() は帯域カットインを落としている。 */
+  function cfgWithBandFx(): ChallengeConfig {
+    const base = structuredClone(DEFAULT_CHALLENGE);
+    return cfg({}, { giftBandFx: { ...base.giftBandFx, enabled: true } });
+  }
+
+  it('期限切れの強制発動は**即窓オープン**(前置きぶんの無表示を作らない)', () => {
+    const { e, tick, now } = quizEngine();
+    e.start();
+    const armedAt = now();
+    e.handleEvent(gift({ giftId: '777' }));
+    expect(e.get().quiz?.armed).toBe(true);
+    tick(QUIZ_ARM_MAX_MS + 100);
+    e.drainIfChanged(); // flushFxFreeze 経由で commitArmedQuizIfExpired
+    const q = e.get().quiz!;
+    expect(q.armed).toBeUndefined();
+    // モニターが前置きを一度も再生していないので、その尺ぶん窓を後ろへずらすと
+    // 「armed は落ちたのに startsAtMs は未来」= 何も出ない空白になる。
+    expect(q.startsAtMs).toBe(armedAt + QUIZ_ARM_MAX_MS);
+    expect(q.windowEndsAtMs).toBe(armedAt + QUIZ_ARM_MAX_MS + DEFAULT_QUIZ.durationSec * 1000);
+  });
+
+  it('effect に焼いた quizEndsAtMs も強制発動の時刻と一致する(嘘のフォールバックを配らない)', () => {
+    const { e, now } = quizEngine();
+    e.start();
+    const armedAt = now();
+    e.handleEvent(gift({ giftId: '777' }));
+    const ef = e.get().recentEffects.find((x) => x.kind === 'quiz-start')!;
+    expect(ef.quizEndsAtMs).toBe(
+      armedAt + QUIZ_ARM_MAX_MS + (DEFAULT_QUIZ.durationSec + DEFAULT_QUIZ.voteSec) * 1000
+    );
+  });
+
+  it('アーム待ち中に届いた演出付きギフトの予告には barrier 印が付く', () => {
+    const { e, tick } = quizEngine(cfgWithBandFx());
+    e.start();
+    e.handleEvent(gift({ giftId: '777' })); // お題をアーム(バリア開始)
+    expect(e.get().quiz?.armed).toBe(true);
+    tick(500);
+    e.handleEvent(gift({ giftId: '8888', diamonds: 30 })); // 演出付き → quizDeferredOps へ
+    const q = e.get().fxQueue ?? [];
+    expect(q.length).toBeGreaterThan(0);
+    // 印が無いと、モニターの armed 監視が「キューが空になる」のを永久に待って
+    // 前置きが一度も再生されないまま 120 秒でアーム期限切れになる。
+    expect(q.every((x) => x.barrier === true)).toBe(true);
+  });
+
+  it('清算で pendingOps へ移送された同じ予告からは barrier が消える(次のお題の待ちを壊さない)', () => {
+    const { e, tick, now } = quizEngine(cfgWithBandFx());
+    e.start();
+    const { preMs } = armAndCommit(e, now);
+    e.handleEvent(gift({ giftId: '8888', diamonds: 30 }));
+    expect((e.get().fxQueue ?? []).every((x) => x.barrier === true)).toBe(true);
+    // 窓 + 投票を満了させて清算 → deferred は pendingOps へ移送される。
+    tick(preMs + (DEFAULT_QUIZ.durationSec + DEFAULT_QUIZ.voteSec) * 1000 + 100);
+    e.drainIfChanged();
+    const after = e.get().fxQueue ?? [];
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.some((x) => x.barrier === true)).toBe(false);
   });
 });

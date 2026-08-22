@@ -94,3 +94,72 @@ export function planQuizResult(input: {
     totalMs: resultMs,
   };
 }
+
+/**
+ * 投票の判定 → 名目の増減。**settleQuiz(本番)と ▶テスト実演の共通の権威**で、
+ * 判定の二重権威を作らないためにここへ置く。
+ * よかった多数 → 減算 / だめ多数 → 加算 / 引き分け・無投票 → ±0(ユーザー決定)。
+ *
+ * 戻り値は**名目**。本番は減算方向だけ実減少量へクランプするので、呼び出し側の
+ * 責務(実演は値を動かさないのでクランプ不要)。
+ */
+export function quizNominalAmount(good: number, bad: number, amount: number): number {
+  if (good > bad) return -amount;
+  if (bad > good) return amount;
+  return 0;
+}
+
+/** ダミー票1件の予定(▶テスト実演専用)。 */
+export interface TestQuizVote {
+  /** 到着の絶対時刻(ms)。 */
+  atMs: number;
+  good: boolean;
+}
+
+/** ダミー票の総数の下限/上限(投票オーバーレイの数字が伸びて見える程度)。 */
+const TEST_VOTE_MIN = 5;
+const TEST_VOTE_MAX = 14;
+
+/**
+ * ▶テスト実演の投票を組み立てる。ライブ未接続ではコメントが来ないので、
+ * 「票が伸びていく様子 → 決着のついた結果発表」までを worker が自前で作る。
+ *
+ * **決定的**(Math.random 不使用 — rand は注入された数列で凍結できる)。
+ * **必ず決着させる**(引き分けにしない)— 結果発表の ±N ロールアップまで
+ * 見せるのがプレビューの目的なので、同数になる配分は作らない。
+ *
+ * 票は投票窓に等間隔で分散し、最後の1票は締切より前に置く(締切と同時刻だと
+ * 清算と票の到着の順序が実装依存になる)。
+ */
+export function planTestQuizVotes(
+  voteStartMs: number,
+  voteMs: number,
+  rand: () => number
+): TestQuizVote[] {
+  const span = Math.max(0, Math.floor(voteMs));
+  const total = TEST_VOTE_MIN + Math.floor(rand() * (TEST_VOTE_MAX - TEST_VOTE_MIN + 1));
+  // 過半数を取る側と、その得票数(過半数〜全部)。同数は構造的に起きない。
+  const goodWins = rand() < 0.5;
+  const minWin = Math.floor(total / 2) + 1;
+  const win = minWin + Math.floor(rand() * (total - minWin + 1));
+  const lose = total - win;
+  // 勝ち側と負け側を1つずつ交互に差し込む(片側が固まって「途中まで一方的」に
+  // 見えるのを避ける)。余った勝ち票は末尾へ続く — 決定的な順序。
+  const mixed: boolean[] = [];
+  for (let hi = 0, lo = 0; hi < win || lo < lose; ) {
+    if (hi < win) {
+      mixed.push(goodWins);
+      hi++;
+    }
+    if (lo < lose) {
+      mixed.push(!goodWins);
+      lo++;
+    }
+  }
+  // 等間隔(span/(n+1) 刻み)。最後の1票も締切より前に落ちる。
+  const step = span / (mixed.length + 1);
+  return mixed.map((good, i) => ({
+    atMs: voteStartMs + Math.round(step * (i + 1)),
+    good,
+  }));
+}

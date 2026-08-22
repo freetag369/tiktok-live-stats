@@ -43,8 +43,16 @@ export type RpcMap = {
    * 配信中のカウントダウンを潰す」ことになる。封印中でなければ何もしない。
    */
   'challenge.clearTapLock': { p: void; r: D.ChallengeState };
-  /** モニター演出のテスト再生(値・統計は変えない)。設定画面の「▶ モニター」用。 */
-  'challenge.testEffect': { p: D.ChallengeTestEffectSpec; r: void };
+  /**
+   * モニター演出のテスト再生(値・統計は変えない)。設定画面の「▶ モニター」用。
+   * 戻り値の previewMs は実演の総尺(0 = 窓を開かない種別)。設定画面はこれで
+   * 「■ 停止」の表示期間を決める — 尺の算術を renderer へ複製しないため。
+   * cinematic は fxAllowed()(モニターの再生能力の握手が済んでいるか)。
+   */
+  'challenge.testEffect': {
+    p: D.ChallengeTestEffectSpec;
+    r: { previewMs: number; cinematic: boolean };
+  };
   /**
    * モニターの再生能力の申告(カットインを実際に再生できるか)。モニター窓が
    * マウント時と reduced-motion の切替時に送る。worker はこれとモニター窓の

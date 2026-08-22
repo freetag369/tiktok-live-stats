@@ -128,9 +128,10 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       return challenge.get();
     },
     'challenge.testEffect': async (p) => {
-      challenge.testEffect(p);
+      const r = challenge.testEffect(p);
       // 未接続でも challenge-only の delta が出る(pushDelta の許可規約)。
       session.nudgeChallenge();
+      return r;
     },
     'challenge.fxCaps': async (p) => {
       // caps が落ちて凍結を即時解除した場合だけ状態が変わる(nudge で配る)。
@@ -252,7 +253,9 @@ type HandlerMap = {
   'challenge.toggleRank': () => Promise<D.ChallengeState>;
   'challenge.toggleRouletteRush': () => Promise<D.ChallengeState>;
   'challenge.clearTapLock': () => Promise<D.ChallengeState>;
-  'challenge.testEffect': (p: D.ChallengeTestEffectSpec) => Promise<void>;
+  'challenge.testEffect': (
+    p: D.ChallengeTestEffectSpec
+  ) => Promise<{ previewMs: number; cinematic: boolean }>;
   'challenge.fxCaps': (p: { bandFx: boolean }) => Promise<void>;
   'challenge.boostCue': (p: D.ChallengeBoostCue) => Promise<void>;
   'challenge.revolutionCue': (p: D.ChallengeRevolutionCue) => Promise<void>;

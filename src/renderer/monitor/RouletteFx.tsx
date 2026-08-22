@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RoulettePattern } from '@shared/dto';
 import { rouletteHeadline, rouletteRevealMs, rouletteSpinMs } from '@shared/challenge';
 import { isJackPattern } from '@shared/roulette-tease';
@@ -12,6 +12,7 @@ import {
   rouletteStrip,
 } from '@shared/roulette-fx';
 import { rouletteClipUrl } from '../lib/fx';
+import { noteMediaLatency } from '../lib/frame-meter';
 import {
   type RouletteDirection,
   rouletteBlockSign,
@@ -219,7 +220,10 @@ export function RouletteFx({
   // 判定は shared/roulette-tease.ts の isJackPattern が唯一の実装(カウント方式の
   // 降格判定と食い違わせない)。
   const jack = key !== 'fast' && isJackPattern(key);
-  const strip = rouletteStrip(segments, index);
+  // 104 ブロックのストリップは1スピンの間ずっと不変 — 毎レンダー再生成すると、
+  // スピン中の 2Hz delta と押下ごとの親再レンダーのたびに 104 ノードの diff が
+  // 走っていた(OBS のコマ落ち要因)。useMemo で生成も diff も変化時だけにする。
+  const strip = useMemo(() => rouletteStrip(segments, index), [segments, index]);
   const run = rouletteRun(seed, segments.length, key);
   const shift = -(ROULETTE_TARGET_BLOCK - 1) * ROULETTE_BLOCK_W;
   const sign = amount < 0 ? '-' : '+';
@@ -280,6 +284,11 @@ export function RouletteFx({
     v.volume = Math.max(0, Math.min(1, clipVolume / 100));
     if (!v.dataset.playArmed) {
       v.dataset.playArmed = '1';
+      // arm → 初回フレームの実測(MonitorView の armVideoPlay と同じ計装)。
+      const armedAtMs = performance.now();
+      v.addEventListener('playing', () => noteMediaLatency('rl-clip', performance.now() - armedAtMs), {
+        once: true,
+      });
       v.play().catch(() => {
         // 取り壊し起因の中断は失敗ではない — cleanup の pause()/load() は pending の
         // play() を AbortError で落とす。ultra はウィンドウごとに key 差し替えで
@@ -370,6 +379,51 @@ export function RouletteFx({
   // 動画URL(未投入なら null → オーバーレイ自体を出さず純ホールドに縮退)。
   const clipSrc = clip != null ? rouletteClipUrl(pattern, clip.n + 1) : null;
 
+  /*
+   * リールの中身(104 ブロック+ゴースト)。変化するのは hit(確定・1回)と
+   * mult(ドン・最大4回)だけなので、それ以外の親再レンダーではこの要素ツリーを
+   * 参照ごと使い回して React の diff を丸ごとスキップさせる。
+   * onAnimationEnd を持つ .roulette-reel 本体は memo の外(finish のクロージャ鮮度)。
+   */
+  const blocks = useMemo(
+    () => (
+      <>
+        {strip.map((v, i) => (
+          // 目印はここでは付けない — 付けた瞬間に答えが DOM と画面に出る。
+          <div key={i} className={hit && i === ROULETTE_TARGET_BLOCK ? 'rl-block win' : 'rl-block'}>
+            {hit && i === ROULETTE_TARGET_BLOCK ? (
+              <span className="rl-sign">{sign}</span>
+            ) : blockSign !== null ? (
+              <span className="rl-sign">{blockSign}</span>
+            ) : null}
+            {/* mult は超激アツの見せかけ倍率。素のスピンでは常に 1 = 挙動不変。 */}
+            {num(v * mult)}
+          </div>
+        ))}
+        {/*
+         * ゴーストブロック(超焦らし系のみ)。当選の1つ手前 strip[TARGET-1] の
+         * 真上に「盤面の一番下の出目」を被せる。値は盤面の最終行で固定・位置も
+         * 定数 — どちらも当選と無相関なので DOM に出ても何も漏れない(素直に
+         * 実位置で狙うと当選 index が逆算できてしまう。monitor.css の解説参照)。
+         * 見た目は .rl-block と同一。消灯は rl-jack-fade(97% までに opacity 0)。
+         */}
+        {jack ? (
+          <div
+            className="rl-block rl-jack"
+            style={{
+              left: `calc(var(--rl-w) * ${ROULETTE_TARGET_BLOCK - 1} + var(--rl-gap))`,
+            }}
+          >
+            {/* 本物と同一見た目が命 — 応援の行ではゴーストにも符号をそろえる。 */}
+            {blockSign !== null ? <span className="rl-sign">{blockSign}</span> : null}
+            {num(segments[segments.length - 1] ?? 0)}
+          </div>
+        ) : null}
+      </>
+    ),
+    [strip, hit, sign, blockSign, mult, jack, segments]
+  );
+
   return (
     <>
       <div className={roulettePanelClass({ direction, amount, hit, hot: hotMults != null })}>
@@ -414,37 +468,7 @@ export function RouletteFx({
               finish();
             }}
           >
-            {strip.map((v, i) => (
-              // 目印はここでは付けない — 付けた瞬間に答えが DOM と画面に出る。
-              <div key={i} className={hit && i === ROULETTE_TARGET_BLOCK ? 'rl-block win' : 'rl-block'}>
-                {hit && i === ROULETTE_TARGET_BLOCK ? (
-                  <span className="rl-sign">{sign}</span>
-                ) : blockSign !== null ? (
-                  <span className="rl-sign">{blockSign}</span>
-                ) : null}
-                {/* mult は超激アツの見せかけ倍率。素のスピンでは常に 1 = 挙動不変。 */}
-                {num(v * mult)}
-              </div>
-            ))}
-            {/*
-             * ゴーストブロック(超焦らし系のみ)。当選の1つ手前 strip[TARGET-1] の
-             * 真上に「盤面の一番下の出目」を被せる。値は盤面の最終行で固定・位置も
-             * 定数 — どちらも当選と無相関なので DOM に出ても何も漏れない(素直に
-             * 実位置で狙うと当選 index が逆算できてしまう。monitor.css の解説参照)。
-             * 見た目は .rl-block と同一。消灯は rl-jack-fade(97% までに opacity 0)。
-             */}
-            {jack ? (
-              <div
-                className="rl-block rl-jack"
-                style={{
-                  left: `calc(var(--rl-w) * ${ROULETTE_TARGET_BLOCK - 1} + var(--rl-gap))`,
-                }}
-              >
-                {/* 本物と同一見た目が命 — 応援の行ではゴーストにも符号をそろえる。 */}
-                {blockSign !== null ? <span className="rl-sign">{blockSign}</span> : null}
-                {num(segments[segments.length - 1] ?? 0)}
-              </div>
-            ) : null}
+            {blocks}
           </div>
         </div>
         {/* 終盤に左右を覆って隣のブロックを読ませない目隠し。 */}

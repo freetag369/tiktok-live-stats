@@ -489,7 +489,7 @@ ffmpeg -y -i raw.mp4 -filter_complex \
   本リポジトリは AGPL で配布されるため、**再配布前に規約上の再配布可否を必ず確認すること**。
 
 
-## 激熱確定の導入動画4本 — `rl/hot/` ・2026-08-18 追加(DJメガネのみ 2026-08-21)
+## 激熱確定の導入動画6本 — `rl/hot/` ・2026-08-18 追加(ギフト連動3種は 2026-08-21〜22)
 
 激熱確定(hot)ルーレットが**スロットに入る前**に流す 8 秒の全画面動画。
 1本流し切ってから、同じ絵柄の超激アツスピン(既存素材)へつながる。
@@ -500,10 +500,15 @@ ffmpeg -y -i raw.mp4 -filter_complex \
 | `rl/hot/dragon.mp4` | ドラゴンの炎 → 黄金龍の激熱 | `dragon` | 抽選(3種) |
 | `rl/hot/phoenix.mp4` | フェニックス → 不死鳥の激熱 | `phoenix` | 抽選(3種) |
 | `rl/hot/djglasses.mp4` | DJメガネ → ネオンDJの激熱 | `djglasses` | **ギフト連動(100%)** |
+| `rl/hot/unicorngift.mp4` | ユニコーン → 虹の角の激熱 | `unicorngift` | **ギフト連動(100%)** |
+| `rl/hot/bunnydj.mp4` | バニーDJ → うさ耳DJの激熱 | `bunnydj` | **ギフト連動(100%)** |
 
 **絵柄は2通りの選ばれ方がある。** 既定は `ROULETTE_HOT_PATTERNS` の3種からの抽選だが、
 `ROULETTE_HOT_GIFT_PATTERNS`(`shared/challenge.ts`)に載ったギフトの激熱行は
-**抽選を通さず必ずその絵柄**になる(DJメガネ = giftId 11583 → `djglasses`)。
+**抽選を通さず必ずその絵柄**になる(DJメガネ = giftId 11583 → `djglasses`、
+ユニコーン = giftId 12453 → `unicorngift`、バニーDJ = giftId 437679 → `bunnydj`)。
+**`unicorn` は一角獣の通常パターンで埋まっている**ので、ギフト連動側のスラッグは
+`unicorngift` にしてある(同名にすると通常抽選の絵柄と衝突する)。
 実装は `rouletteHotPatternPool()` の1本で、**候補が1件の配列**になるだけ —
 呼び元は今までどおり `drawRoulettePattern` を通すので **fxRand の消費は1回のまま**。
 早期 return で飛ばすと同じ seed の再生が別物になる。
@@ -620,6 +625,86 @@ TikTok ギフト **DJメガネ**(giftId `11583` / `DJ Glasses` / 500💎)専用�
 
 > 著作権の注意は `cut/` / `boost/` / `revolution/` と同じ — TikTok 本家のギフト演出の
 > 再現ではなく、ギフトアイコンの題材を参照した完全オリジナル。生成物の利用条件は
+> Dreamina (CapCut) の利用規約に従う(**CC0 ではない**)。**再配布可否は未了**。
+> 再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
+
+### ユニコーン / バニーDJ 各5本(導入1 + スピン4)— Dreamina(Seedance 2.0)製・2026-08-22 追加
+
+TikTok ギフト **ユニコーン**(giftId `12453` / `Unicorn` / 2499💎)と
+**バニーDJ**(giftId `437679` / `Bunny DJ` / 1200💎)専用の激熱確定。
+**このギフトの激熱行だけは抽選を通さず 100% この絵柄**になる(上の表)。
+DJメガネ(2026-08-21)と**同じレシピ・同じ契約**で、骨格は一切変えていない。
+
+> ⚠ **スラッグが `unicorn` ではなく `unicorngift`**。`unicorn` は一角獣の
+> **通常パターン**(`rl/unicorn-1..4.mp4`)で既に埋まっていて、同名にすると
+> `ROULETTE_PATTERNS` が衝突する。`.rl-p-unicorn` と `.rl-p-unicorngift` は別のクラス。
+
+| ファイル | 枠 | モチーフ | 契約 | S | 実測音量 | サイズ |
+|---|---|---|---|---|---|---|
+| `rl/hot/unicorngift.mp4` | 導入 | 暗闇 → 虹の角が灯りプリズムの光条が開く → 正面で静止 | 192f / 8.000s | 1 | -16.04 LUFS / -2.28 dBTP | 0.73 MB |
+| `rl/unicorngift-1.mp4` | 1 | 虹の星雲が裂けて疾走 → 角をレンズへ突き出す | 93f / 3875ms | 28 | -15.48 LUFS / -1.42 dBTP | 0.72 MB |
+| `rl/unicorngift-2.mp4` | 2 | 角にプリズムの環が収束 → 虹の閃光がレンズを撃つ | 72f / 3000ms | 49 | -15.92 LUFS / -1.49 dBTP | 0.44 MB |
+| `rl/unicorngift-3.mp4` | 3 | 棹立ち → 虹の衝撃波と結晶片が飛ぶ | 57f / 2375ms | 64 | -16.51 LUFS / -1.68 dBTP | 0.78 MB |
+| `rl/unicorngift-4.mp4` | 4 | たてがみが虹のリボンの渦になり頭突き | 52f / 2167ms | 69 | -16.07 LUFS / -3.63 dBTP | 0.58 MB |
+| `rl/hot/bunnydj.mp4` | 導入 | 暗闇 → バイザーとネオンリングが点灯 → 正面で静止 | 192f / 8.000s | 1 | -16.05 LUFS / -3.48 dBTP | 0.54 MB |
+| `rl/bunnydj-1.mp4` | 1 | ターンテーブルにレコードが落ちる → バイザーがレンズへ | 93f / 3875ms | 28 | -16.09 LUFS / -6.60 dBTP | 0.46 MB |
+| `rl/bunnydj-2.mp4` | 2 | ミラーボールが割れ、光線が束になってレンズを撃つ | 72f / 3000ms | 49 | -16.31 LUFS / -4.70 dBTP | 0.67 MB |
+| `rl/bunnydj-3.mp4` | 3 | バイザーのイコライザーが振り切れ衝撃波が抜ける | 57f / 2375ms | 64 | -16.06 LUFS / -9.12 dBTP | 0.44 MB |
+| `rl/bunnydj-4.mp4` | 4 | スピーカーの壁が破れ、うさ耳ごとレンズへ | 52f / 2167ms | 69 | -16.01 LUFS / -7.11 dBTP | 0.35 MB |
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.0`(モード **オムニリファレンス**・参照画像あり) |
+| 生成日 | 2026-08-22 |
+| 参照画像 | TikTok ギフトのサムネから**下端のギフト名+コインの帯を切り落とし**、Lanczos で拡大 + `unsharp`。ユニコーン 284×296 → 上 200px → 1704×1200 / バニーDJ 279×346 → 上 212px → 1674×1272 |
+| 生成パラメータ | `16:9` / `720P` / 導入 `8s`・スピン `5s` / 音声は `Audio:` 句から自動で焼き込み |
+| 素の出力 | 1280×720 / **60fps を名乗る容器に真の 24fps・(尺×24+1) フレーム**(導入 193f / スピン 121f)/ H.264 / AAC |
+| コスト | (✦192 + ✦120×4) × 2 = **✦1344** |
+| ウォーターマーク | 左上に "AI" の焼き込みあり(既存の Dreamina 製素材と同じくそのまま出荷) |
+
+加工は `rl/` 共通レシピ(`trim=start_frame=S,settb=1/24,setpts=N` + 2パス loudnorm −16 LUFS
++ 末尾 150ms `afade` + 48kHz + `-crf 28 -preset slow` + `+faststart`)。
+**S はすべて頭側**(`S = 素のフレーム数 − 契約フレーム数`)で、DJメガネと同じ 1 / 28 / 49 / 64 / 69。
+
+> **2パス loudnorm の落とし穴**: 測定パスを `ffmpeg -v error` で回すと
+> `print_format=json` の出力(info レベル)ごと消えて `measured_I=` が空になり、
+> 2パス目が `Unable to parse option value ""` で落ちる。測定は `-v info` で回すこと。
+> また `while read` ループの中で ffmpeg を回すなら **`-nostdin` が必須**
+> (ffmpeg がループの stdin を食ってジョブ表が壊れる)。
+
+**終わり方の要件は導入とスピンで逆**(DJメガネの節の ⚠ を参照)。実測値:
+
+- 導入の終端フレーム間差分は **unicorngift 0.002 / bunnydj 0.003** —
+  合格実績(djglasses 0.024 / dragon 0.013)より更に静止している。
+  プロンプトに「THE LAST THREE SECONDS ARE A COMPLETELY FROZEN STILL IMAGE」+
+  動かないものの列挙を入れたのが効いている。
+- スピン8本の終端差分は **1.34〜35.63** で、これは**大きくて正しい**
+  (最後の約1秒がカメラへの一撃)。
+- 末尾フレーム輝度は導入が 55.7 / 32.4。目安(70〜230)は下回るが、暗い背景に
+  発光体という絵なので意図どおり(`djglasses` 59.4 / `revolution/result.mp4` 68.85 と同じ扱い)。
+- `unicorngift-4` だけ背景が純黒でなく暗いチャコール(参照画像の灰色地の影響)。
+  **`.rl-clip` は不透明合成**(`background:#000` / `mix-blend-mode` なし)なので
+  合成は壊れない ─ 見た目だけの差で、終端の一撃では被写体が全画面を覆うので実害なし。
+
+プロンプトは10本とも同じ骨格で、被写体の固定句と禁止句を共有している:
+
+> 〈本ごとのモチーフ〉. 〈被写体を `exactly matching the reference image` として列挙:
+> ユニコーンは「pure white glossy head / a long smooth spiralling horn glowing in a rainbow
+> gradient from golden yellow through green and cyan to violet / a thick voluminous flowing
+> mane in candy pink, magenta and violet」、バニーDJは「a pearlescent white headphone
+> headband with tall pink-and-white bunny ears / chunky earcups glowing with cyan and violet
+> neon rings / a smoked purple visor with a glowing blue-violet lens」〉.
+> 〈導入は「THE LAST THREE SECONDS ARE A COMPLETELY FROZEN STILL IMAGE …」/
+> スピンは「IN THE FINAL SECOND … STRAIGHT TOWARD THE CAMERA」〉.
+> **Ignore the flat dark grey backdrop of the reference image; it is not part of the character.**
+> Pure black background with drifting light motes. Glossy 3D render in the style of a TikTok
+> live gift animation, centered composition with the subject inside the middle third of the
+> frame, safe for a vertical center crop, high contrast, vivid saturated neon colors.
+> Audio: 〈本ごとの音〉.
+> **No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI, no people.**
+
+> 著作権の注意は DJメガネの節と同じ — TikTok 本家のギフト演出の再現ではなく、
+> ギフトアイコンの題材を参照した完全オリジナル。生成物の利用条件は
 > Dreamina (CapCut) の利用規約に従う(**CC0 ではない**)。**再配布可否は未了**。
 > 再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
 
@@ -1214,3 +1299,201 @@ safe for a vertical center crop` / 文字・数字・ロゴ・人物・ウォー
 > 利用規約に従う(**CC0 ではない**)。**再配布可否は未了** — `rl/` の Dreamina 製16本や
 > `boost/` と同じ扱いで、Higgsfield 製ハート系12本の「2026-08-17 に判断済み」とは
 > 混同しないこと。再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
+
+---
+
+## お題ルーレットの導入全画面動画 — `quiz/intro.mp4`・Dreamina (CapCut) 製・2026-08-22 追加
+
+カウントダウンチャレンジの「お題ルーレット」(quiz) が発動した瞬間に流す **8 秒の不透明フルフレーム**。
+このあと全画面のお題回転(`QUIZ_SPIN_MS` **18 秒**)→ お題決定(`QUIZ_REVEAL_MS` **4 秒**)と
+続くので、前置きは合計 **30 秒**(+ お題発表準備 `prepSec` 既定 5 秒)になる
+(2026-08-22 に回転を 6→18 秒・決定を 2.5→4 秒へ — ユーザー指定「回転は今の3倍・焦らしをたっぷり」)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.0`(**テキストのみ = 参照画像なし**) |
+| 生成日 | 2026-08-22 |
+| 生成パラメータ | `16:9` / `720P` / `8s`。音声は `Audio:` 句から自動で焼き込み(専用トグルは無い) |
+| コスト | **✦192**(8 秒)。1 回で採用、撮り直しなし |
+| 素の出力 | 1280×720 / **60fps を名乗る容器に真の 24fps・193 フレーム**(8.057 秒)/ H.264 / AAC 44.1kHz stereo / 7.04MB |
+| 同梱の実尺 | **8.000 秒ちょうど**(192 フレーム @ 真の 24fps CFR)/ **1.03MB** |
+| 出力音量 | **-16.1 LUFS / -1.5 dBTP**(LRA 3.3) |
+| ウォーターマーク | 左上に "AI" の焼き込みあり(非表示オプションが見当たらず、既存の Dreamina 製素材と同じくそのまま出荷) |
+
+モチーフ: 暗転 → スポットライト2灯 → 赤金の緞帳が中央から開く → 金屏風・赤提灯の高座に
+色違いの着物(橙 / 青緑 / 桃)のキャラ3体が座布団に並び、一斉に扇子を開く → 前面に巨大な
+光る回転盤が降りてきて高速回転、金の紙吹雪 → **終端は完全な静止画**。
+
+**参照画像を使っていないのは意図** — お題ルーレットには既定のトリガーギフトが無く
+(`DEFAULT_QUIZ_RULE` の `giftId` は空)、参照すべきアイコンが存在しないため。
+「ギフト風」の見た目は `Glossy 3D render in the style of a TikTok live gift animation` の
+一句だけで担保している(`rl/hot/djglasses` などと同じ文言)。
+
+**置き場所は `quiz/` サブディレクトリ。** 理由は `rl/hot/` `revolution/` `tap-lock/` と同じで、
+直下に置くと `test/unit/fx-catalog.spec.ts` の「直下の mp4 に未知の孤児が無い」に引っかかる。
+読み込みは専用 glob(`renderer/lib/fx.ts` の `QUIZ_INTRO_CLIP_URL`)で **0 件許容** —
+ファイルを消しても `startQuizFx` が導入だけ飛ばして回転から始まる(黒画面にはならない)。
+
+### 選ばれ方 — 番兵 `QUIZ_INTRO_SELF`
+
+`QuizConfig.introClip` は3通りの値を取る(`shared/challenge.ts` の `validateQuiz`):
+
+| 値 | 意味 |
+|---|---|
+| `'quiz'`(= `QUIZ_INTRO_SELF`・**既定**) | この専用素材 |
+| `'off'` | 導入なし(回転から開始・前置きは 8.5 秒に縮む) |
+| `cut-*` | 全面カットのカタログから差し替え |
+
+**モニターは番兵を `fxClipUrl` より先に分岐する**(`MonitorView` の `startQuizFx`)。
+専用素材は `FX_CLIPS` のカタログに載っていないので、順序を逆にすると `'quiz'` が
+未知 id 扱いで `null` になり、既定の導入が黙って消える(`test/renderer/quiz-fx.spec.ts` で凍結)。
+
+> 既定を `'quiz'` にしたので **`SETTINGS_VERSION` 10 → 11 + `migrateChallengeQuizIntro`** が要る。
+> v0.13.0 が配った `'off'` は「導入は要らない」ではなく「**専用素材がまだ無い**」という意味
+> だったので、**`'off'` ちょうどのときだけ**引き上げ、`cut-*` の指名は尊重する。
+
+### 加工内容(`revolution/` と同一のレシピ)
+
+Seedance は `duration` 秒の注文に対し **`duration×24+1` フレーム**で返す。頭を 1 フレーム
+落として 192f = 8.000 秒にした(見せ場と終端の静止が末尾にあるので、詰めるのは必ず頭側)。
+
+```
+# 1パス目で実測 → input_i=-18.75 / input_tp=-1.92 / input_lra=4.20 / input_thresh=-29.54 / offset=0.36
+ffmpeg -y -i raw.mp4 -filter_complex \
+ "[0:v]trim=start_frame=1:end_frame=193,settb=1/24,setpts=N[v];\
+  [0:a]atrim=start=0.0416667:duration=8,asetpts=PTS-STARTPTS,\
+       loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=-18.75:measured_TP=-1.92:measured_LRA=4.20:measured_thresh=-29.54:offset=0.36:linear=true,\
+       afade=t=out:st=7.85:d=0.15,aresample=48000[a]" \
+ -map "[v]" -map "[a]" -map_metadata -1 \
+ -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v high -fps_mode cfr -r 24 \
+ -c:a aac -b:a 128k -ac 2 -ar 48000 -movflags +faststart intro.mp4
+```
+
+> ⚠ **この素材はピーク余裕が足りず `linear=true` は素通りしていない。**
+> 目標 -16 LUFS には +2.75dB 要るのに素の真ピークが -1.92 dBTP しかないので、
+> loudnorm は dynamic へ落ちている。実害が無いのは **LRA が 4.20 と狭く、
+> dynamic でもほぼ一定ゲインにしかならない**から(実測 LRA 3.3 / TP -1.5 で着地)。
+> 撮り直して LRA が広い素材になったときは、`revolution/` の注記どおり
+> 前段に `volume=…,alimiter=…` を挟んで linear へ戻すこと。
+
+実測(合格基準は `rl/hot` 節と同じ):
+
+| 項目 | 実測 | 目安 |
+|---|---|---|
+| フレーム数 / 実尺 | 192f / 8.000 秒 | 契約ちょうど |
+| 終端フレーム間差分(平均輝度) | **0.006**(7.5〜8.0 秒) | < 1.0(実績 dragon 0.013 / djglasses 0.024 / revolution 0.084) |
+| 末尾フレーム輝度 | 97.04 | 70〜230 |
+| 頭の暗転 | 1 フレームのみ(t=0 で YAVG 14 → 0.25 秒で 55) | 立ち上がりを捨てていない |
+
+> **静止は約 3 秒ある**(t≒5.0 秒以降ほぼ不動)。指定は「最後の 2 秒」だったが、
+> Seedance は `rl/hot/dragon` のときと同じく指定より長めに止める。次の段が
+> 全画面テキストの回転なので繋ぎは問題ないが、**動きを 6 秒使いたいなら
+> 「THE LAST ONE SECOND」へ縮めて撮り直す**こと。
+
+> ## ⚠️ 不透明フルフレーム — screen 禁止・`.fx-clip-opaque`・音声は素材のもの
+>
+> `cut/*.mp4` `tap-lock/intro.mp4` と同族。黒背景発光体ではないので
+> `mix-blend-mode: screen` 禁止、`.fx-clip-opaque` で重ねる
+> (配置は `.monitor-root` 直下・z-index なし)。
+>
+> **段の長さは素材ではなく定数が決める**(`QUIZ_INTRO_MS` = 8000)。モニターは `onEnded` を
+> 使わず JS タイマーで打ち切り、終端 400ms は `.out` でフェードさせる。
+> **導入ホルダーは `loop` も `onEnded` も持たない** — `cut-*`(5.06 秒)へ差し替えると
+> 素材が尽きたあと最終フレームで静止したまま残り約 3 秒待つ(黒画面にも巻き戻りにもならない)。
+>
+> 音声は**素材に焼き込まれたもの**。モニターは `seEnabled` のとき `muted` を外し、
+> 音量は **`quiz.bgmVolume`**(既定 70)を当てる — `giftFullCut.volume` と同じ
+> 「絶対値・全体音量を掛けない」流儀。
+>
+> **尺を変えるときは `QUIZ_INTRO_MS` と素材のフレーム数を必ず一緒に動かすこと。**
+> 設定画面の前置き秒数の表示は定数から導出しているので自動追随する。
+
+### 生成プロンプト(全文)
+
+共通ガードは `revolution/` と同じ(中央・正面・終端で静止 / 文字・ロゴ・ウォーターマーク禁止 /
+末尾に `Audio:` 句)。**人物禁止だけは外している** — 大喜利の題材なのでキャラが要る。
+代わりに「**完全に架空・実在の人物に似せない・実在の番組の意匠を使わない**」を明示した。
+
+> Festive Japanese vaudeville stage opening, widescreen 16:9. In darkness two warm spotlights snap on and a deep crimson-and-gold stage curtain sweeps open from the center. Behind it a raised wooden stage is revealed: a gold folding screen backdrop and glowing red paper lanterns hanging on both sides, with a compact row of three original invented stylized 3D cartoon characters in brightly colored kimono, orange, teal and magenta, sitting on square silk cushions, who all snap open round paper folding fans in unison and grin. A giant glossy 3D prize wheel then drops into the center in front of them and spins up fast with heavy motion blur, its segments in vivid candy colors with gold trim, throwing gold sparkles and confetti across the frame. THE LAST TWO SECONDS ARE A COMPLETELY FROZEN STILL IMAGE: absolutely no motion of any kind, the wheel is held frozen mid-spin as a single motion-blurred still, the characters hold their pose with fans raised, no flickering, no confetti drifting, no sparkles moving, no camera movement, exactly like a paused freeze-frame. The wheel and the row of characters stay inside the middle third of the frame, safe for a vertical center crop. The characters are completely fictional cartoon designs with simple stylized faces, not resembling any real person, no celebrity likeness, no existing television programme, no broadcast branding of any kind. Glossy 3D render in the style of a TikTok live gift animation, centered symmetrical composition, high contrast, vivid saturated colors, volumetric light. Audio: a bright festive Japanese entrance fanfare, a wooden clapper crack, plucked shamisen, taiko drum hits and hand claps as the curtain opens, a rising whoosh as the wheel spins up, ending with one big gong hit and a cheerful bell flourish decaying toward silence in the final half second. No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI.
+
+> ## 著作権について
+>
+> **実在のテレビ番組を題材にしていない。** 番組名・ロゴ・テーマ曲・セットの意匠・出演者の
+> 似姿はいずれも使わず、**寄席 / 大喜利 / 出囃子という一般的な文化的題材**として構成した
+> (プロンプトにも `no existing television programme, no broadcast branding of any kind` と
+> `not resembling any real person, no celebrity likeness` を明示してある)。生成物のキャラは
+> 顔の造作を持たないデフォルメ人形で、特定の人物に紐づかない。
+>
+> 生成物の利用条件は Dreamina (CapCut) の利用規約に従う(**CC0 ではない**)。
+> **再配布可否は未了** — `rl/` の Dreamina 製16本・`boost/` `revolution/` `tap-lock/` と
+> 同じ扱い。再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
+
+---
+
+## お題ルーレットの結果発表カットシーン — `quiz/result.mp4`・Dreamina (CapCut) 製・2026-08-22 追加
+
+投票が締め切られた瞬間に流す **6 秒の不透明フルフレーム**(`QUIZ_RESULT_MS`)。
+この映像の**上に**票数 → 判定 → ±N を重ねて発表する(`.quiz-settle`)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.0`(**テキストのみ = 参照画像なし**) |
+| 生成日 | 2026-08-22 |
+| 生成パラメータ | `16:9` / `720P` / `6s`。音声は `音は…` の一句から自動で焼き込み |
+| コスト | **✦144**(6 秒 × 24)。1 回で採用、撮り直しなし |
+| 素の出力 | 1280×720 / **60fps を名乗る容器に真の 24fps・145 フレーム**(6.017 秒)/ H.264 / AAC / 5.21MB |
+| 同梱の実尺 | **6.000 秒ちょうど**(144 フレーム @ 真の 24fps CFR)/ **1.98MB** |
+| 出力音量 | **-17.7 LUFS / -1.5 dBTP**(2 パス loudnorm + 末尾 150ms afade) |
+| ウォーターマーク | `quiz/intro.mp4` と同じく左上に "AI" の焼き込みあり |
+
+モチーフ: 寄席の高座を正面から見た**固定カメラ**。奥に金屏風、赤い提灯が3つ灯って揺れ、
+左右から深紅の緞帳が金の房を揺らしながらゆっくり閉じていく。手前の畳には赤い座布団が積まれ、
+暖色のスポット1灯だけが当たる。金粉がゆっくり舞い落ちる。
+
+### ⚠️ 中央を暗く保つのが必須条件
+
+この映像の上には**票数・判定(金の毛筆)・±N(緑/赤の巨大数字)が重なる**。
+プロンプトで「照明は暖色のスポット1灯だけで、画面の中央は影が落ちて暗いまま」を明示し、
+明るい要素(提灯・金屏風の照り)を上寄りと左右へ逃がしてある。
+**差し替えるときは必ず中央下寄りが暗いことを確認すること** — 明るい絵に替えると
+判定と ±N が読めなくなる(`revolution/result.mp4` の「中央を空ける」指定と同じ要件)。
+
+### 幕との関係(`.quiz-settle.on-clip`)
+
+素材があるときはモニターが `.quiz-settle` に `on-clip` を付けて **金屏風の地を引っ込める**
+(`background: none`)。幕は `.fx-clip-opaque` より DOM 順で手前にあるので、
+引っ込めないと不透明な地が映像を完全に隠す。
+素材が無い / `fxClipsEnabled` オフのときは `on-clip` が付かず、これまで通り CSS の金屏風が出る
+— **票数・判定・±N は映像の有無に関わらず必ず出し切る**。
+
+### 加工内容(`revolution/` `quiz/intro.mp4` と同一のレシピ)
+
+```
+# 1パス目(測定)
+ffmpeg -i RAW.mp4 -af loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json -f null -
+# 2パス目(トリム + 正規化 + 末尾フェード)
+ffmpeg -i RAW.mp4 \
+  -vf "trim=start_frame=0:end_frame=144,settb=1/24,setpts=N" -r 24 \
+  -af "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=-21.94:measured_TP=-4.25:measured_LRA=13.30:measured_thresh=-36.27:offset=0.17:linear=true,atrim=0:6,asetpts=N/SR/TB,afade=t=out:st=5.85:d=0.15" \
+  -c:v libx264 -profile:v high -pix_fmt yuv420p -crf 19 -preset slow \
+  -c:a aac -b:a 160k -ar 48000 -movflags +faststart result.mp4
+```
+
+> **`-ss` も `fps=24` も `setpts=N/24/TB` も使わない。** 素材は 60fps を名乗る容器に真の
+> 24fps が入っており、`-ss` はシーク破綻、`fps=24` は毎回 1 フレーム落とし、
+> `setpts=N/24/TB` は入力 TB が 1/60 なので 2.5 倍に重複展開する。
+> 正解は `trim=start_frame=…,settb=1/24,setpts=N` + `-r 24`(`rl/` で確立したレシピ)。
+
+### 生成プロンプト(全文)
+
+> 日本の寄席の高座を正面から捉えた固定カメラ。奥に金屏風、上部に赤い提灯が3つ灯ってゆっくり揺れる。左右から深紅のビロードの緞帳が金の房を揺らしながらゆっくり閉じていく。手前の床には赤い座布団が数枚積まれている。照明は暖色のスポット1灯だけで、画面の中央は影が落ちて暗いまま。金粉がゆっくり舞い落ちる。実写風でシネマティック、落ち着いた色調。人物なし、文字なし、ロゴなし。カメラは一切動かさない。音は和太鼓の締めの一打と、遠くの拍手。
+
+> ## 著作権について
+>
+> **実在のテレビ番組を題材にしていない。** 人物を一切出さず(`人物なし`)、番組名・ロゴ・
+> セットの意匠も使わない。**寄席の高座・緞帳・金屏風・提灯・座布団という一般的な
+> 文化的題材**だけで構成している。
+>
+> 生成物の利用条件は Dreamina (CapCut) の利用規約に従う(**CC0 ではない**)。
+> **再配布可否は未了** — `quiz/intro.mp4` と同じ扱い。
+> 再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
