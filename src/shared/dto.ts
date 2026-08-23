@@ -1186,8 +1186,19 @@ export interface QuizThresholdRule {
   /**
    * しきい値。カウント値がこの数**以上**へ跨いだ瞬間に発動する(「達した時」なので
    * 厳密には `>=`)。clamp は QUIZ_THRESHOLD_MIN〜MAX。
+   * `every: true` の行では**間隔**の意味になる(下記)。
    */
   value: number;
+  /**
+   * true なら「value ごとに繰り返し」(2026-08-23 ユーザー決定「10000刻みで発動」)—
+   * value を間隔として、その倍数(value, 2*value, 3*value, …)を下から跨ぐたびに
+   * **毎回**発動する。告知の数字は跨いだ倍数(間隔ではない)。一気に複数の倍数を
+   * 跨いだら**全節目が昇順で順番に**発動する(予約FIFOで直列化)。
+   * false は従来の1回きり行(下回るまで再発動しない)。判定の唯一の実装は
+   * shared/challenge.ts の stepQuizEvery。キー欠損は validate で false へ倒れる =
+   * 保存済み settings.json の移行不要。
+   */
+  every: boolean;
   /** true ならモニターに照明フラッシュ演出。 */
   flash: boolean;
   /**

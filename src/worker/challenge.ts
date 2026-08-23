@@ -77,8 +77,10 @@ import {
   QUIZ_PREP_MAX_SEC,
   QUIZ_DURATION_MAX_SEC,
   QUIZ_VOTE_MAX_SEC,
+  QUIZ_QUEUE_MAX,
   initialQuizThresholdArmed,
   quizThresholdNum,
+  stepQuizEvery,
   stepQuizThresholds,
 } from '@shared/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
@@ -724,7 +726,13 @@ export class ChallengeEngine {
    */
   private quizThresholdArmed = new Set<string>();
   /**
-   * 再武装集合を作り直すかの判定に使う設定の署名(id/enabled/value)。
+   * 「◯◯ごとに繰り返し」行(stepQuizEvery)用の**前回評価値**。maybeQuizThreshold が
+   * 呼ばれるたびに現在値へ追従させ、start / reset / 設定変更では現在値へ再シード
+   * する(間隔の変更・チェックON直後に過去の飛び分が誤発動しないため)。
+   */
+  private quizThresholdPrev = 0;
+  /**
+   * 再武装集合を作り直すかの判定に使う設定の署名(id/enabled/value/every)。
    * 設定を編集した瞬間に**現在値から**作り直すためのもの — 署名が同じ限り
    * 作り直さないので、跨いだ直後の設定変更で発動を取りこぼすこともない。
    */
@@ -4745,11 +4753,18 @@ export class ChallengeEngine {
    * 抽選・尺・増減幅)で、違うのは「贈り主が居ない」ことと threshold を焼くことだけ。
    * nickname は空 — 発動者は視聴者ではなくカウントそのものなので、バナーは
    * 「10,000 を超えました!」側の文言に倒す(quizAnnounceNode)。
+   *
+   * at は告知に出す節目の値 — 1回きり行では r.value、繰り返し行では跨いだ倍数
+   * (20,000・30,000…)。行の value を直接読まないのはそのため。
    */
-  private makeQuizThresholdSnapshot(cfg: ChallengeConfig, r: QuizThresholdRule): QuizArmSnapshot {
+  private makeQuizThresholdSnapshot(
+    cfg: ChallengeConfig,
+    r: QuizThresholdRule,
+    at: number
+  ): QuizArmSnapshot {
     return structuredClone({
       ...this.makeQuizSnapshotBase(cfg, r.label, r.flash),
-      threshold: r.value,
+      threshold: at,
       thresholdSound: r.sound,
       thresholdSoundVolume: r.soundVolume,
     });
@@ -4799,57 +4814,96 @@ export class ChallengeEngine {
     // 機能OFF・行ゼロでも署名だけは追う — 再有効化したときに「その時点の値から
     // 作り直す」ため(有効化した瞬間に全行が鳴るのを防ぐ)。
     this.syncQuizThresholds();
+    // every 行の前回値も早期 return より前に必ず追従させる — 機能OFF中の値変化を
+    // 再有効化後の「跨ぎ」として拾わないため(armed の再シードと同じ向き)。
+    const prev = this.quizThresholdPrev;
+    this.quizThresholdPrev = this.value;
     if (!cfg.enabled) return;
     const q = cfg.quiz;
     if (!q.enabled || q.thresholds.length === 0) return;
+
+    // ── 1回きり行(従来のまま — 同時跨ぎは上の1行だけ・残りは skip) ──
     const step = stepQuizThresholds(q.thresholds, this.quizThresholdArmed, this.value);
     this.quizThresholdArmed = step.armed;
-    const r = step.fired;
-    if (r === null) return;
     for (const s of step.skipped) {
       this.quizDiag(
         `→ しきい値 ${quizThresholdNum(s.value)} も同時に跨いだが発動は1回にまとめる(次は下回ってから)`
       );
     }
-    this.quizDiag(
-      `→ 数値到達でお題ルーレット発動 id=${r.id} しきい値=${quizThresholdNum(r.value)} 現在値=${quizThresholdNum(this.value)}`
-    );
+
+    // ── 繰り返し行(◯◯ごと — 跨いだ全節目を昇順で順番に発動。2026-08-23 ユーザー決定) ──
+    // FIFO の空きに収まる分だけ拾う。+1 は「1件目は即アームできる枠」—
+    // 進行中の演出があれば1件目も FIFO 行きなので、押し込みは下の push 側でも見張る。
+    const room = Math.max(0, QUIZ_QUEUE_MAX - this.quizQueue.length - (step.fired ? 1 : 0));
+    const ev = stepQuizEvery(q.thresholds, prev, this.value, room + 1);
+    if (ev.dropped > 0) {
+      this.quizDiag(
+        `→ 節目 ${ev.dropped} 件は予約が満杯(上限 ${QUIZ_QUEUE_MAX} 件)のため見送り`
+      );
+    }
+
+    // 発動リスト(1回きり行が先頭・every は倍数昇順)。threshold には
+    // 「跨いだ節目の値」を焼く — 告知「○○を超えました!」の数字になる。
+    const fires: Array<{ r: QuizThresholdRule; at: number }> = [
+      ...(step.fired !== null ? [{ r: step.fired, at: step.fired.value }] : []),
+      ...ev.fires.map((f) => ({ r: f.rule, at: f.at })),
+    ];
+    if (fires.length === 0) return;
     if (q.prompts.length === 0) {
       // ギフト経路と同じ理由で必ず記録する(黙って消えると原因が追えない)。
       this.quizDiag('→ お題が0件のため不発 — お題ルーレットタブでお題を追加してください');
       return;
     }
-    const snap = this.makeQuizThresholdSnapshot(cfg, r);
-    if (
-      this.armedBoost !== null ||
-      this.boostUntilMs !== null ||
-      this.armedRevolution !== null ||
-      this.revolutionUntilMs !== null ||
-      this.armedQuiz !== null ||
-      this.quizVoteUntilMs !== null
-    ) {
-      this.quizQueue.push(snap);
-      this.quizDiag(`→ 進行中の演出の終了を待って予約(待ち ${this.quizQueue.length} 件)`);
-      this.dirty = true;
-      return;
+    for (const f of fires) {
+      this.quizDiag(
+        `→ 数値到達でお題ルーレット発動 id=${f.r.id} しきい値=${quizThresholdNum(f.at)} 現在値=${quizThresholdNum(this.value)}`
+      );
+      const snap = this.makeQuizThresholdSnapshot(cfg, f.r, f.at);
+      // ゲートはギフト経路と同じ条件式。2件目以降は1件目のアームで
+      // armedQuiz が立つので、ここを毎周評価し直すだけで自然に FIFO へ落ちる。
+      if (
+        this.armedBoost !== null ||
+        this.boostUntilMs !== null ||
+        this.armedRevolution !== null ||
+        this.revolutionUntilMs !== null ||
+        this.armedQuiz !== null ||
+        this.quizVoteUntilMs !== null
+      ) {
+        if (this.quizQueue.length >= QUIZ_QUEUE_MAX) {
+          // room 計算は「空いていれば即アーム」前提なので、進行中の演出があると
+          // 1件だけ溢れうる。黙って消さない(ドロップの diag はここが最後の砦)。
+          this.quizDiag(
+            `→ しきい値 ${quizThresholdNum(f.at)} は予約が満杯(上限 ${QUIZ_QUEUE_MAX} 件)のため見送り`
+          );
+          continue;
+        }
+        this.quizQueue.push(snap);
+        this.quizDiag(`→ 進行中の演出の終了を待って予約(待ち ${this.quizQueue.length} 件)`);
+        this.dirty = true;
+        continue;
+      }
+      this.armQuiz(snap, nowMs);
     }
-    this.armQuiz(snap, nowMs);
   }
 
   /** 設定のしきい値行が変わっていたら、**現在値から**再武装集合を作り直す。 */
   private syncQuizThresholds(): void {
     const rules = this.getConfig().quiz.thresholds;
-    const sig = JSON.stringify(rules.map((r) => [r.id, r.enabled, r.value]));
+    const sig = JSON.stringify(rules.map((r) => [r.id, r.enabled, r.value, r.every]));
     if (sig === this.quizThresholdSig) return;
     this.quizThresholdSig = sig;
     this.quizThresholdArmed = initialQuizThresholdArmed(rules, this.value);
+    // every 行の前回値も現在値へ — 間隔の変更・チェックONの瞬間に、過去の飛び分を
+    // 「跨いだ」と誤認して発動しないため。
+    this.quizThresholdPrev = this.value;
   }
 
   /** start / reset 用の強制再シード(値が initialValue へ飛ぶので署名は無視する)。 */
   private resetQuizThresholds(): void {
     const rules = this.getConfig().quiz.thresholds;
-    this.quizThresholdSig = JSON.stringify(rules.map((r) => [r.id, r.enabled, r.value]));
+    this.quizThresholdSig = JSON.stringify(rules.map((r) => [r.id, r.enabled, r.value, r.every]));
     this.quizThresholdArmed = initialQuizThresholdArmed(rules, this.value);
+    this.quizThresholdPrev = this.value;
   }
 
   /**

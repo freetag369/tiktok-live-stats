@@ -2228,7 +2228,10 @@ export function stepQuizThresholds(
   let fired: QuizThresholdRule | null = null;
   const skipped: QuizThresholdRule[] = [];
   for (const r of rules) {
-    if (!r.enabled || !Number.isFinite(r.value) || r.value < QUIZ_THRESHOLD_MIN) continue;
+    // every 行(◯◯ごとに繰り返し)は armed の出入りごと無視する — 判定は
+    // stepQuizEvery が持つ(無効行と同じ扱い。ここで見ると二重発動になる)。
+    if (r.every || !r.enabled || !Number.isFinite(r.value) || r.value < QUIZ_THRESHOLD_MIN)
+      continue;
     if (value < r.value) {
       next.add(r.id);
       continue;
@@ -2255,10 +2258,66 @@ export function initialQuizThresholdArmed(
 ): Set<string> {
   const out = new Set<string>();
   for (const r of rules) {
-    if (!r.enabled || !Number.isFinite(r.value) || r.value < QUIZ_THRESHOLD_MIN) continue;
+    // every 行は armed に入れない(stepQuizThresholds と同じ理由)。
+    if (r.every || !r.enabled || !Number.isFinite(r.value) || r.value < QUIZ_THRESHOLD_MIN)
+      continue;
     if (value < r.value) out.add(r.id);
   }
   return out;
+}
+
+/** stepQuizEvery が返す発動1件。 */
+export interface QuizEveryFire {
+  rule: QuizThresholdRule;
+  /** 跨いだ倍数(告知に焼く値。間隔ではない)。 */
+  at: number;
+}
+
+/**
+ * quizQueue(予約FIFO)に数値到達トリガーが積める上限。1件が数分あるため、
+ * 大口ギフトで一気に大量の節目を跨いでも配信がルーレットで埋まらないようにする。
+ * 超過分は昇順の**後ろ**(高い節目)から捨て、worker が diag に件数を出す
+ * (サイレント切り捨て禁止)。ギフト経路の push はこの上限を見ない —
+ * 挙動変更を刻み機能に閉じるため(2026-08-23)。
+ */
+export const QUIZ_QUEUE_MAX = 8;
+
+/**
+ * 「◯◯ごとに繰り返し」行の判定(**唯一の実装**)。前回評価値→今回値で
+ * `floor(prev/間隔) < floor(value/間隔)` となった行について、跨いだ倍数を
+ * **昇順で全件**返す(2026-08-23 ユーザー決定「一気に跨いだら全節目を順番に発動」)。
+ *
+ * - 下回ってから再度跨げば同じ倍数でも再発動する(floor 比較が自然にそうなる —
+ *   1回きり行のヒステリシス「下回るまで再発動しない」と同じ向き)。
+ * - 複数行が every の場合は rules の並び順 × 各行内は倍数昇順。
+ * - `prev === value` や下降では何も返さない(上向きの跨ぎだけ)。
+ * - 1回の飛びで大量に跨ぐケースは maxFires で頭打ちし、あふれた件数を dropped で
+ *   返す(呼び出し側が diag に出す契約)。
+ *
+ * every でない行・無効行・値が範囲外の行は無視する(stepQuizThresholds の鏡像)。
+ */
+export function stepQuizEvery(
+  rules: readonly QuizThresholdRule[],
+  prevValue: number,
+  value: number,
+  maxFires: number
+): { fires: QuizEveryFire[]; dropped: number } {
+  const fires: QuizEveryFire[] = [];
+  let dropped = 0;
+  for (const r of rules) {
+    if (!r.every || !r.enabled || !Number.isFinite(r.value) || r.value < QUIZ_THRESHOLD_MIN)
+      continue;
+    const from = Math.floor(Math.max(0, prevValue) / r.value);
+    const to = Math.floor(Math.max(0, value) / r.value);
+    for (let k = from + 1; k <= to; k++) {
+      if (fires.length >= maxFires) {
+        dropped += to - k + 1;
+        break;
+      }
+      fires.push({ rule: r, at: k * r.value });
+    }
+  }
+  return { fires, dropped };
 }
 
 /**
@@ -4443,6 +4502,9 @@ function validateQuizThresholdRule(raw: unknown): QuizThresholdRule {
     label: '',
     enabled: true,
     value: QUIZ_THRESHOLD_MIN,
+    // 既定 false = 従来の1回きり行。**キー欠損がここへ倒れることが移行の代わり**
+    // (2026-08-22 版の保存済み settings.json は挙動不変)。
+    every: false,
     flash: true,
     // 既定は番兵 = 「効果音タブに従う」。**キー欠損がここへ倒れることが移行の代わり**。
     sound: QUIZ_THRESHOLD_SOUND_SLOT,
@@ -4469,6 +4531,7 @@ function validateQuizThresholdRule(raw: unknown): QuizThresholdRule {
     label: typeof r.label === 'string' ? r.label.trim() : '',
     enabled: r.enabled !== false,
     value: v,
+    every: r.every === true,
     flash: r.flash !== false,
     sound,
     soundVolume:

@@ -5,6 +5,7 @@ import {
   DEFAULT_QUIZ_RULE,
   QUIZ_ANNOUNCE_MS,
   QUIZ_ARM_MAX_MS,
+  QUIZ_QUEUE_MAX,
   QUIZ_INTRO_MS,
   QUIZ_INTRO_SELF,
   QUIZ_REVEAL_MS,
@@ -659,6 +660,7 @@ function thresholdCfg(value: number, over: Partial<ChallengeConfig> = {}): Chall
           label: '大台',
           enabled: true,
           value,
+          every: false,
           flash: true,
           sound: QUIZ_THRESHOLD_SOUND_SLOT,
           soundVolume: 100,
@@ -857,6 +859,145 @@ describe('数値到達トリガー — 跨いだ瞬間に発動する', () => {
   });
 });
 
+// ── ◯◯ごとに繰り返し(2026-08-23 ユーザー決定「10000刻みで発動」) ──────────
+
+/** every 行1本の設定。initialValue は 1000(= interval 1000 なら既に節目1に居る)。 */
+function everyCfg(interval: number, giftAmount: number): ChallengeConfig {
+  return cfg(
+    {
+      thresholds: [
+        {
+          id: 'ev1',
+          label: '刻み',
+          enabled: true,
+          value: interval,
+          every: true,
+          flash: true,
+          sound: QUIZ_THRESHOLD_SOUND_SLOT,
+          soundVolume: 100,
+        },
+      ],
+    },
+    { giftDefault: { mode: 'fixed', amount: giftAmount } }
+  );
+}
+
+describe('数値到達トリガー — ◯◯ごとに繰り返し(every 行)', () => {
+  it('節目を跨ぐたびに毎回発動する(1回きり行と違い下回りを要求しない)', () => {
+    // interval 1000・+1000/件。1000(節目1) → 2000 → 3000 と跨ぐたびに鳴る。
+    const { e, tick, now } = quizEngine(everyCfg(1000, 1000));
+    e.start();
+    bump(e, 1); // 2000 — 発動
+    expect(e.get().quiz?.armed).toBe(true);
+    expect(e.get().quiz?.announceThreshold).toBe(2000);
+    // 1本目を最後まで進めて清算。
+    const startId = e.get().recentEffects[0]!.id;
+    e.quizCue({ action: 'start', effectId: startId, startedAtMs: now(), preMs: QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS });
+    tick(QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS + (DEFAULT_QUIZ.durationSec + DEFAULT_QUIZ.voteSec) * 1000 + 100);
+    e.drainIfChanged();
+    tick(QUIZ_RESULT_MS + 500);
+    e.drainIfChanged();
+    expect(e.get().quiz).toBeUndefined();
+    bump(e, 1); // 3000 — **下回っていないのに**また鳴る(every の核)
+    expect(e.get().quiz?.armed).toBe(true);
+    expect(e.get().quiz?.announceThreshold).toBe(3000);
+  });
+
+  it('一気に複数の節目を跨いだら、1件目が即アーム・残りは FIFO へ昇順で予約', () => {
+    // 1000 → 3500: 節目 2000 と 3000 を同時に跨ぐ。
+    const { e } = quizEngine(everyCfg(1000, 2500));
+    e.start();
+    bump(e, 1);
+    const s = e.get();
+    expect(s.quiz?.armed).toBe(true);
+    expect(s.quiz?.announceThreshold).toBe(2000); // 低い節目から順番に
+    expect(s.quiz?.queued).toBe(1); // 3000 は予約待ち
+    const start = s.recentEffects.find((x) => x.kind === 'quiz-start');
+    expect(start?.quizThreshold).toBe(2000);
+  });
+
+  it('予約された節目は前の1本の清算後に自動発動し、跨いだ倍数が告知される', () => {
+    const { e, tick, now } = quizEngine(everyCfg(1000, 2500));
+    e.start();
+    bump(e, 1); // 2000 アーム + 3000 予約
+    const startId = e.get().recentEffects[0]!.id;
+    e.quizCue({ action: 'start', effectId: startId, startedAtMs: now(), preMs: QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS });
+    tick(QUIZ_ANNOUNCE_MS + DEFAULT_PRE_MS + (DEFAULT_QUIZ.durationSec + DEFAULT_QUIZ.voteSec) * 1000 + 100);
+    e.drainIfChanged();
+    tick(QUIZ_RESULT_MS + 500);
+    e.drainIfChanged();
+    // 予約が繰り上がって2本目がアームされる(threshold は跨いだ倍数の焼き込み)。
+    const s = e.get();
+    expect(s.quiz?.armed).toBe(true);
+    expect(s.quiz?.announceThreshold).toBe(3000);
+    expect(s.quiz?.queued).toBeUndefined();
+  });
+
+  it('FIFO は上限で頭打ちし、あふれた節目は捨てる(配信がルーレットで埋まらない)', () => {
+    // interval 100・+2000: 1100〜3000 の20節目を一気に跨ぐ → 1アーム + 8予約まで。
+    const { e } = quizEngine(everyCfg(100, 2000));
+    e.start();
+    bump(e, 1);
+    const s = e.get();
+    expect(s.quiz?.armed).toBe(true);
+    expect(s.quiz?.announceThreshold).toBe(1100);
+    expect(s.quiz?.queued).toBe(QUIZ_QUEUE_MAX);
+  });
+
+  it('1回きり行との混在 — 固定行が先・every の節目が後に続き、固定行の仕様は不変', () => {
+    const c = everyCfg(1000, 2500);
+    c.quiz.thresholds = [
+      {
+        id: 'once',
+        label: '大台',
+        enabled: true,
+        value: 1200,
+        every: false,
+        flash: true,
+        sound: QUIZ_THRESHOLD_SOUND_SLOT,
+        soundVolume: 100,
+      },
+      ...c.quiz.thresholds,
+    ];
+    const { e } = quizEngine(c);
+    e.start();
+    bump(e, 1); // 3500 — once(1200) と every の 2000/3000 を同時に跨ぐ
+    const s = e.get();
+    expect(s.quiz?.armed).toBe(true);
+    expect(s.quiz?.announceThreshold).toBe(1200); // 固定行が先頭
+    expect(s.quiz?.queued).toBe(2); // 2000 / 3000 が後に続く
+  });
+
+  it('間隔を変えた瞬間は前回値を再シードし、過去の飛び分では発動しない', () => {
+    const c = everyCfg(1000, 100);
+    const { e } = quizEngine(c);
+    e.start();
+    bump(e, 5); // 1500 — interval 1000 では節目を跨いでいない
+    expect(e.get().quiz).toBeUndefined();
+    // 配信中に間隔を 200 へ変更(1100〜1400 は歴史的には跨いでいるが鳴らない)。
+    c.quiz.thresholds[0]!.value = 200;
+    e.drainIfChanged();
+    expect(e.get().quiz).toBeUndefined();
+    bump(e, 1); // 1600 — 変更後に初めて跨いだ節目だけ鳴る
+    expect(e.get().quiz?.armed).toBe(true);
+    expect(e.get().quiz?.announceThreshold).toBe(1600);
+  });
+
+  it('reset で前回値も作り直される(前ランの値の飛びを持ち越さない)', () => {
+    const { e } = quizEngine(everyCfg(1000, 1000));
+    e.start();
+    bump(e, 1); // 2000 で発動
+    expect(e.get().quiz?.armed).toBe(true);
+    e.reset();
+    expect(e.get().quiz).toBeUndefined();
+    e.start();
+    e.drainIfChanged();
+    expect(e.get().quiz).toBeUndefined(); // 開始しただけでは鳴らない
+    bump(e, 1); // 1000 → 2000 でまた鳴る
+    expect(e.get().quiz?.armed).toBe(true);
+  });
+});
+
 describe('validateQuiz — 数値トリガー行', () => {
   it('キー欠損は空配列(= 数値では発動しない)。既定の不動点も壊さない', () => {
     const raw = { ...structuredClone(DEFAULT_QUIZ) } as Record<string, unknown>;
@@ -894,6 +1035,22 @@ describe('validateQuiz — 数値トリガー行', () => {
     });
     expect(v.thresholds[0]!.sound).toBe(QUIZ_THRESHOLD_SOUND_SLOT);
     expect(v.thresholds[0]!.soundVolume).toBe(100);
+  });
+
+  /**
+   * 2026-08-23: 「ごとに繰り返し」(every)。既定 false = 従来の1回きり行なので、
+   * キーの無い保存済み settings.json は挙動不変(= 移行を書かなくてよい)。
+   */
+  it('every はキー欠損なら false(1回きり行)へ倒れ、true だけを通す', () => {
+    const v = validateQuiz({
+      ...structuredClone(DEFAULT_QUIZ),
+      thresholds: [
+        { id: 'a', label: '', enabled: true, value: 100, flash: true },
+        { id: 'b', label: '', enabled: true, value: 100, flash: true, every: true },
+        { id: 'c', label: '', enabled: true, value: 100, flash: true, every: 'yes' },
+      ],
+    });
+    expect(v.thresholds.map((r) => r.every)).toEqual([false, true, false]);
   });
 
   it('告知音は off・カタログ id・custom: を通し、未知 id は番兵へ倒す', () => {

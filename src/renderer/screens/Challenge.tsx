@@ -4782,6 +4782,8 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
             下回ってから再び超えれば何度でも鳴ります。チャレンジ開始時点で<b>すでに初期値より
             下にあるしきい値は鳴りません</b>(一度下回ってから戻ってきたときだけ)。
             同じ瞬間に複数行を跨いだときは<b>上の1行だけ</b>が発動します。
+            「<b>ごとに繰り返し</b>」をONにすると、その値の<b>倍数を跨ぐたびに毎回</b>発動します
+            (10,000なら 10,000 / 20,000 / 30,000…。一気に複数跨いだら順番に全部発動)。
           </div>
           {qz.thresholds.map((r, i) => (
             <div className="challenge-rule" key={r.id} style={{ flexWrap: 'wrap' }}>
@@ -4811,9 +4813,13 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
               <label
                 className="field"
                 style={{ width: 130 }}
-                title={`カウントがこの数以上へ跨いだ瞬間に発動します(${num(QUIZ_THRESHOLD_MIN)}〜${num(QUIZ_THRESHOLD_MAX)})`}
+                title={
+                  r.every
+                    ? `この値ごと(値・値×2・値×3…)を跨ぐたびに毎回発動します(${num(QUIZ_THRESHOLD_MIN)}〜${num(QUIZ_THRESHOLD_MAX)})`
+                    : `カウントがこの数以上へ跨いだ瞬間に発動します(${num(QUIZ_THRESHOLD_MIN)}〜${num(QUIZ_THRESHOLD_MAX)})`
+                }
               >
-                しきい値
+                {r.every ? '間隔(ごと)' : 'しきい値'}
                 <input
                   type="number"
                   min={QUIZ_THRESHOLD_MIN}
@@ -4825,7 +4831,26 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
               <div className="faint" style={{ fontSize: 11, width: 200 }}>
                 告知の文言
                 <div style={{ fontSize: 13, color: 'var(--fg)' }}>{quizThresholdText(r.value)}</div>
+                {r.every ? (
+                  <div>
+                    {num(r.value * 2)} / {num(r.value * 3)} …でも発動(数字は自動で変わります)
+                  </div>
+                ) : null}
               </div>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 96 }}
+                title="ONにすると、この値ごと(値・値×2・値×3…)を跨ぐたびに毎回発動します。一気に複数跨いだら順番に全部発動します。OFFは従来どおり1回きり(下回るまで再発動しません)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.every}
+                  onChange={(e) => patchThreshold(i, { every: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  ごとに繰り返し
+                </span>
+              </label>
               <label className="row" style={{ cursor: 'pointer', width: 76 }}>
                 <input
                   type="checkbox"
@@ -4880,6 +4905,8 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
                         QUIZ_THRESHOLD_MAX,
                         Math.max(QUIZ_THRESHOLD_MIN, cfg.initialValue)
                       ),
+                      // 既定は従来の1回きり行(「ごとに繰り返し」は明示的にONにする)。
+                      every: false,
                       flash: true,
                       // 既定は番兵 = 「効果音」タブの『ルーレット確定』に従う
                       // (2026-08-22 以前と同じ音。行ごとに変えたい人だけ触る)。

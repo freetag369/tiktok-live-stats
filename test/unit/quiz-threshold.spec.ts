@@ -5,6 +5,7 @@ import {
   initialQuizThresholdArmed,
   quizThresholdNum,
   quizThresholdText,
+  stepQuizEvery,
   stepQuizThresholds,
 } from '@shared/challenge';
 import type { QuizThresholdRule } from '@shared/dto';
@@ -26,6 +27,7 @@ function rule(over: Partial<QuizThresholdRule> = {}): QuizThresholdRule {
     label: '',
     enabled: true,
     value: 1000,
+    every: false,
     flash: true,
     sound: QUIZ_THRESHOLD_SOUND_SLOT,
     soundVolume: 100,
@@ -152,5 +154,73 @@ describe('stepQuizThresholds — 跨ぎの判定とヒステリシス', () => {
     expect(stepQuizThresholds([], new Set(), 9999).fired).toBeNull();
     const rules = [rule({ value: Number.NaN })];
     expect(stepQuizThresholds(rules, new Set(['t1']), 9999).fired).toBeNull();
+  });
+
+  it('every 行は armed の出入りごと無視する(判定は stepQuizEvery が持つ)', () => {
+    const rules = [rule({ id: 'ev', value: 1000, every: true })];
+    expect(initialQuizThresholdArmed(rules, 0).size).toBe(0);
+    const s = stepQuizThresholds(rules, new Set(['ev']), 2000);
+    expect(s.fired).toBeNull();
+    expect(s.armed.has('ev')).toBe(true); // 触らない(出入りごと無視)
+  });
+});
+
+describe('stepQuizEvery — ◯◯ごとに繰り返し(2026-08-23 ユーザー決定)', () => {
+  const ev = (over: Partial<QuizThresholdRule> = {}): QuizThresholdRule =>
+    rule({ id: 'ev', value: 10_000, every: true, ...over });
+
+  it('節目を下から跨いだ瞬間に、跨いだ倍数を返す', () => {
+    const s = stepQuizEvery([ev()], 9_000, 10_000, 99);
+    expect(s.fires.map((f) => f.at)).toEqual([10_000]);
+    expect(s.dropped).toBe(0);
+  });
+
+  it('一気に複数の節目を跨いだら**昇順で全件**返す(すべて順番に発動する契約)', () => {
+    const s = stepQuizEvery([ev()], 9_000, 35_000, 99);
+    expect(s.fires.map((f) => f.at)).toEqual([10_000, 20_000, 30_000]);
+  });
+
+  it('下回ってから再び跨げば同じ節目でも再発動する', () => {
+    expect(stepQuizEvery([ev()], 20_001, 19_999, 99).fires).toEqual([]);
+    expect(stepQuizEvery([ev()], 19_999, 20_001, 99).fires.map((f) => f.at)).toEqual([20_000]);
+  });
+
+  it('prev === value・下降・節目未満では何も返さない', () => {
+    expect(stepQuizEvery([ev()], 15_000, 15_000, 99).fires).toEqual([]);
+    expect(stepQuizEvery([ev()], 35_000, 9_000, 99).fires).toEqual([]);
+    expect(stepQuizEvery([ev()], 1_000, 9_999, 99).fires).toEqual([]);
+  });
+
+  it('ちょうど節目の値でも鳴る(`>=` — 1回きり行の「達した時」と同じ向き)', () => {
+    expect(stepQuizEvery([ev()], 19_999, 20_000, 99).fires.map((f) => f.at)).toEqual([20_000]);
+  });
+
+  it('maxFires で頭打ちし、あふれた件数を dropped で返す(呼び出し側が diag に出す)', () => {
+    const s = stepQuizEvery([ev()], 0, 100_000, 3);
+    expect(s.fires.map((f) => f.at)).toEqual([10_000, 20_000, 30_000]);
+    expect(s.dropped).toBe(7);
+  });
+
+  it('every でない行・無効行・値が範囲外の行は無視する', () => {
+    expect(stepQuizEvery([ev({ every: false })], 0, 50_000, 99).fires).toEqual([]);
+    expect(stepQuizEvery([ev({ enabled: false })], 0, 50_000, 99).fires).toEqual([]);
+    expect(stepQuizEvery([ev({ value: 0 })], 0, 50_000, 99).fires).toEqual([]);
+    expect(stepQuizEvery([ev({ value: Number.NaN })], 0, 50_000, 99).fires).toEqual([]);
+  });
+
+  it('複数の every 行は rules の並び順 × 各行内は倍数昇順', () => {
+    const s = stepQuizEvery(
+      [ev({ id: 'a', value: 20_000 }), ev({ id: 'b', value: 15_000 })],
+      0,
+      45_000,
+      99
+    );
+    expect(s.fires.map((f) => `${f.rule.id}:${f.at}`)).toEqual([
+      'a:20000',
+      'a:40000',
+      'b:15000',
+      'b:30000',
+      'b:45000',
+    ]);
   });
 });
