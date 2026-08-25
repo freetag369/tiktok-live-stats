@@ -186,4 +186,24 @@ describe('封筒(envelope) — セッション合計と視聴者別集計の整�
     expect(row).toBeDefined();
     expect(row!.diamondsCurrent).toBe(500);
   });
+
+  it('封筒が作る vss 行の初見ラッチは touchViewer と同じ規約 — 再訪者は 0・first_timers 据え置き', () => {
+    const s1 = open(T0);
+    store.applyBatch(s1.sessionId, [
+      ev('chat', { common: { msgId: 'c2', createTime: String(T0 / 1000) }, user: u('11'), content: 'a' }, T0),
+    ]);
+    store.closeSession(s1.sessionId, { endedMs: T0 + 5 * MIN, reason: 'streamEnd' });
+
+    const s2 = open(T0 + 35 * MIN);
+    expect(s2.sessionId).not.toBe(s1.sessionId);
+    store.applyBatch(s2.sessionId, [
+      ev('envelope', { envelopeInfo: { envelopeId: 'env2', sendUserId: '11', diamondCount: 100, peopleCount: 5 } }, T0 + 36 * MIN),
+    ]);
+
+    // visits は加算前に読んでラッチ(0 固定だと将来 known && visits=0 の行が
+    // 出来たとき初見が誤確定する)。再訪者なので 0 のまま・first_timers も動かない。
+    const row = store.getSessionViewerTable(s2.sessionId, {}).rows.find((r) => r.userId === '11')!;
+    expect(row.isFirstEver).toBe(false);
+    expect(store.getSessionTotals(s2.sessionId)!.firstTimers).toBe(0);
+  });
 });

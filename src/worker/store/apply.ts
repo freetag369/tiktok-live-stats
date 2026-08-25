@@ -171,9 +171,14 @@ export function applyEvent(ctx: ApplyCtx, sessionId: number, e: NormalizedEvent,
       // 場合、bump が 0行更新で静かに消えてセッション合計とだけ乖離する。
       // touchViewer と同じ流儀で行を確保してから加算する。
       st.get(SQL.ensureLifetime).run(e.senderUserId, e.tsMs, e.tsMs);
-      const vssNew = Number(st.get(SQL.insertVss).run(sessionId, e.senderUserId, e.tsMs, e.tsMs, 0).changes) > 0;
+      // touchViewer と同じ規律: visits を増やす前に読んでラッチ。0 固定だと初見の
+      // 送信者が is_first_ever=0 で確定し、以後の初見演出が丸ごと落ちる。
+      const lt = st.get(SQL.selectLifetimeVisits).get(e.senderUserId) as { visits: number } | undefined;
+      const firstEver = (lt?.visits ?? 0) === 0;
+      const vssNew = Number(st.get(SQL.insertVss).run(sessionId, e.senderUserId, e.tsMs, e.tsMs, firstEver ? 1 : 0).changes) > 0;
       if (vssNew) {
         st.get(SQL.bumpSession('unique_viewers')).run(1, sessionId);
+        if (firstEver) st.get(SQL.bumpSession('first_timers')).run(1, sessionId);
         st.get(SQL.markLifetimeVisit).run(sessionId, sessionId, e.tsMs, e.tsMs, e.senderUserId);
       }
       bump(ctx, sessionId, e.senderUserId, 'diamonds', e.diamonds);

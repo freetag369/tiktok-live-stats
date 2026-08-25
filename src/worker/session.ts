@@ -359,7 +359,11 @@ export class SessionManager {
         ? {
             vipTier: card.vipTier,
             visits: card.visits,
-            firstEver: card.visits === 0,
+            // DB のラッチ値が正 — visits はダイヤランキング(topContributors)や
+            // お年玉の先行書き込みで入室前に +1 され得るので、visits===0 単独だと
+            // 高ランク視聴者ほど初見扱いが消える。visits===0 は「viewer 行はあるが
+            // 来店記録ゼロ」(vss 未作成の完全新規)の安全網として残す。
+            firstEver: card.isFirstEver || card.visits === 0,
             prevVisitMs: card.prevVisitMs ?? undefined,
             diamondsLifetime: card.diamondsLifetime,
             heartMeLifetime: card.heartMeLifetime,
