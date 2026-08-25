@@ -229,6 +229,74 @@ test.describe('革命(シネマ・導入 → カウントダウン → 窓オー
     await expect.poll(async () => (await challengeGet(main)).value, { timeout: 10_000 }).toBe(before - 3);
     await expect.poll(() => segValue(monitor), { timeout: 10_000 }).toBe(before - 3);
 
+    // ⑦ 走行タリー(二者HUD・2026-08-26)。worker の窓カウンタ
+    //    (revolution.tapCount / tapDown / likeDown)が press の nudge と 2Hz 相乗りで
+    //    プロセスを跨いでモニターへ届くこと自体がここでしか取れない事実。
+    //    導入中に凍結キューへ積まれた反転いいねは窓オープンのドレインで適用される
+    //    ので、いいね側には反転の実減少量(45)が載っている。
+    await expect(monitor.locator('.revolution-tally')).toHaveCount(1);
+    await expect(monitor.locator('.rvt-tap .rvt-amt')).toHaveText('-3');
+    await expect(monitor.locator('.rvt-tap .rvt-meta')).toContainText('タップ1回');
+    await expect(monitor.locator('.rvt-like .rvt-amt')).toHaveText(`-${LIKE_DOWN_TOTAL}`);
+
+    const errors = await diagErrorsSince(main, baseline);
+    expect(errors.map((e) => `[${e.scope}] ${e.message}`)).toEqual([]);
+  });
+});
+
+test.describe('革命バリア(窓中のカットイン級はキューへ・プレーン)', () => {
+  // 帯域カットインを band1 だけ有効にする(fixture の 30💎 ギフトが当たる)。
+  // giftDefault は null のままなので値は動かず、「カットイン級の op がバリアへ落ちて
+  // 窓明けに解放される」ことだけが観測対象 — プロセスを跨いで fxQueue の barrier 印が
+  // 届き、窓明けに待ちが消えることがここでしか取れない事実。
+  const bandSettings = (): Record<string, unknown> => {
+    const s = revSettings(REV_SHORT_SEC);
+    // matchGiftBand は fxClipsEnabled(クリップ全体スイッチ)を尊重する — false のままだと
+    // 帯域が一致せずバリアに乗らない。プレーン(モニター無し)なので再生も凍結も
+    // 起きず、決定性は revSettings のまま保たれる。
+    (s.challenge as Record<string, unknown>).fxClipsEnabled = true;
+    (s.challenge as Record<string, unknown>).giftBandFx = {
+      enabled: true,
+      bands: [
+        { id: 'band1', min: 1, max: 1000, clip: 'gift-band1', durationSec: 6, enabled: true, bgm: 'bgm-band1' },
+      ],
+      excludeGiftIds: [],
+      overflow: 'top',
+      bgmEnabled: false,
+      bgmVolume: 0,
+    };
+    return s;
+  };
+  test.use({ settingsPatch: bandSettings() });
+
+  test('窓中の帯域ギフトは fxQueue に barrier 印で待ち、窓明けに解放される', async ({ main }) => {
+    const baseline = await diagBaseline(main);
+    await rpc(main, 'challenge.start', undefined);
+    // モニターを開かない = プレーン即発動(窓は着弾と同時に開く)。
+    await rpc(main, 'conn.startReplay', { file: FIXTURE, speed: 0 });
+    await expect
+      .poll(async () => (await challengeGet(main)).revolution?.multiplier ?? null, { timeout: 20_000 })
+      .toBe(REV_MULT);
+
+    // 窓中: 帯域ギフト(o=600・窓の中に着弾)はバリアで待たされ、予告に barrier 印が載る。
+    await expect
+      .poll(
+        async () =>
+          ((await challengeGet(main)).fxQueue ?? []).some(
+            (q) => q.kind === 'band' && q.barrier === true
+          ),
+        { timeout: 20_000 }
+      )
+      .toBe(true);
+
+    // 窓明け(10秒)に pendingOps へ移送され、プレーンは即ドレインで待ちが消える。
+    await expect
+      .poll(async () => ((await challengeGet(main)).fxQueue ?? []).length, {
+        timeout: (REV_SHORT_SEC + 15) * 1000,
+      })
+      .toBe(0);
+    expect((await challengeGet(main)).revolution ?? null).toBe(null);
+
     const errors = await diagErrorsSince(main, baseline);
     expect(errors.map((e) => `[${e.scope}] ${e.message}`)).toEqual([]);
   });

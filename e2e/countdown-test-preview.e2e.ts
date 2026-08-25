@@ -25,8 +25,12 @@ import { challengeGet, diagBaseline, diagErrorsSince, rpc } from './helpers/rpc'
  * 伸ばすのは、この E2E の主題が「tick 非依存で最後まで流れる」ことだから)。
  */
 
-/** REVOLUTION_DURATION_MIN_SEC / QUIZ_DURATION_MIN_SEC / QUIZ_VOTE_MIN_SEC そのもの。 */
-const REV_SHORT_SEC = 10;
+/**
+ * QUIZ_* は最小尺そのもの。革命だけ 20 秒 — 走行タリー(ドック)は
+ * 「intro 5秒明け〜終了5秒前」しか出ないので、最小尺 10 秒だと表示窓がゼロ幅になる
+ * (タリーの検証に 5〜15 秒の実表示区間が要る)。
+ */
+const REV_SHORT_SEC = 20;
 const QUIZ_SHORT_SEC = 10;
 const VOTE_SHORT_SEC = 5;
 const REV_MULT = 3;
@@ -140,6 +144,14 @@ test.describe('▶テスト実演(革命)— 未接続でも窓と結果カッ�
     expect((await challengeGet(main)).value).toBe(100);
     expect(await segValue(monitor)).toBe(100);
 
+    // ③b 走行タリー(二者HUD・2026-08-26)。intro 5秒明けにドックが出て、実演の
+    //     計数(testRevolutionTapCount / testRevolutionDown)が実発動と同じ
+    //     revolution キー経由で届く。実演にいいね反転は無いので いいね側は -0。
+    await expect(monitor.locator('.revolution-tally')).toHaveCount(1, { timeout: 15_000 });
+    await expect(monitor.locator('.rvt-tap .rvt-amt')).toHaveText(`-${2 * REV_MULT}`);
+    await expect(monitor.locator('.rvt-tap .rvt-meta')).toContainText('タップ2回');
+    await expect(monitor.locator('.rvt-like .rvt-amt')).toHaveText('-0');
+
     // ④ 窓が閉じて結果カットシーンへ。**armFreezeTimer が唯一の出口**なので、
     //    tick に相乗りしているだけの実装ならここで固まる。
     await expect
@@ -178,8 +190,9 @@ test.describe('▶テスト実演(革命)— 未接続でも窓と結果カッ�
     await expect
       .poll(async () => (await challengeGet(main)).revolution ?? null, { timeout: 10_000 })
       .toBeNull();
-    // モニター側も state 駆動 abort で片付く。
+    // モニター側も state 駆動 abort で片付く(走行タリーはドックごと消える)。
     await expect(monitor.locator('.revolution-overlay')).toHaveCount(0, { timeout: 10_000 });
+    await expect(monitor.locator('.revolution-hud-dock')).toHaveCount(0);
     await expect(monitor.locator('.revolution-timer')).toHaveCount(0);
 
     // 中断は締めくくりを出さない。
