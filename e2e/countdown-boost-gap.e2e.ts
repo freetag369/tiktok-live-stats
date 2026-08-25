@@ -55,6 +55,7 @@ const SETTINGS = {
     },
     giftFullCut: { enabled: false, rules: [] },
     fanStamp: { enabled: false },
+    commentHelper: { enabled: false },
     finalGate: { enabled: false, taps: 30 },
     tapBoost: {
       enabled: true,

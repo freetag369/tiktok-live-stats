@@ -118,7 +118,7 @@ import {
   planBoostSettle,
   rollupDisplayAt,
 } from '@shared/boost-settle';
-import { planRevolutionResult } from '@shared/revolution-settle';
+import { countupDisplayAt, planRevolutionResult } from '@shared/revolution-settle';
 import { quizSpinTicks, type QuizSpinCue } from '@shared/quiz-spin';
 import { quizBoxPx, quizFit, quizLabelWidthPx, type QuizFitWhere } from '@shared/quiz-fit';
 import { quizPromptFontPx } from '@shared/quiz-type';
@@ -852,6 +852,16 @@ export function MonitorView(): React.JSX.Element {
    */
   const prevDownFills = useRef<number | null>(null);
   const prevStockDownFills = useRef<number | null>(null);
+  /**
+   * 反転減算の通算 stats(likeDown / likeStockDown)の前回値。反転の**額**は
+   * fills 差分 × step(名目額 — 倍率もクランプも知らない)ではなく stats の差分で
+   * 復元する — worker の会計(倍率込み・実減少量)と厳密に一致し、窓が閉じた直後の
+   * 境界 tick(state.revolution が既に null)でも正確。fills 側(prevDownFills)は
+   * 加算側の分解(units = allUnits − dnUnits)に引き続き必要なので残している。
+   * **prevFills と必ず同じ場所で前進させること**(据え置き会計の基準ズレ防止)。
+   */
+  const prevLikeDownStat = useRef<number | null>(null);
+  const prevStockDownStat = useRef<number | null>(null);
   const strikeTimers = useRef<number[]>([]);
   /**
    * 着弾までバナーを我慢させる保留。「アニメーション → セグ通知」の順序を守るため、
@@ -1052,23 +1062,38 @@ export function MonitorView(): React.JSX.Element {
     url: string | null;
     out: boolean;
   } | null>(null);
-  /** 戦果の発表オーバーレイ。stage で見せる段を進める(roll → lock → tap → like)。 */
+  /**
+   * 戦果の発表オーバーレイ(二者対決)。stage で段を進める:
+   * intro(動画立ち上がり・両者とも未登場)→ tap(タップ側ロールアップ)→
+   * tap-lock → like(いいね側ロールアップ)→ like-lock → charge(両者の溜め)→
+   * fly(中央へ飛翔)→ clash(衝突 = 合計カウントアップ)→ lock(合計確定)。
+   */
   const [revSettle, setRevSettle] = useState<{
     key: number;
-    stage: 'roll' | 'lock' | 'tap' | 'like';
+    stage: 'intro' | 'tap' | 'tap-lock' | 'like' | 'like-lock' | 'charge' | 'fly' | 'clash' | 'lock';
     down: number;
+    /** タップ由来の減算(plan が downTotal − likeDown から一元計算)。 */
+    tapDown: number;
     tap: number;
     like: number;
     mult: number;
     seed: number;
-    rollupMs: number;
+    tapRollupMs: number;
+    likeRollupMs: number;
+    countupMs: number;
   } | null>(null);
   /** 据え置きの持ち主…ではない印。結果は据え置きを張らないが、幕とホールドは持つ。 */
   const revolutionResultHold = useRef(false);
   const revolutionResultTimers = useRef<number[]>([]);
-  /** ロールアップの rAF id(clearRevolutionResultTimers が必ず止める)。 */
+  /**
+   * ロールアップ / カウントアップの rAF id(clearRevolutionResultTimers が必ず止める)。
+   * タップ → いいね → 合計の3本は時間軸上排他なので 1 本で足りる。
+   */
   const revResultRaf = useRef<number | null>(null);
   const revSettleAmtRef = useRef<HTMLDivElement | null>(null);
+  /** 二者パネルの数字(rAF の直書き先)。 */
+  const revTapAmtRef = useRef<HTMLElement | null>(null);
+  const revLikeAmtRef = useRef<HTMLElement | null>(null);
   /** 発表中の revolution-end effect(締めのバナー文言に使う — 同期値は ref)。 */
   const revolutionResultEffect = useRef<ChallengeEffect | null>(null);
 
@@ -1561,15 +1586,21 @@ export function MonitorView(): React.JSX.Element {
     // だけを 0 に倒す。
     const dnFills = challenge.likeGauge ? (challenge.likeGauge.downFills ?? 0) : null;
     const sDnFills = stock ? (stock.downFills ?? 0) : null;
+    const likeDownStat = challenge.stats.likeDown;
+    const stockDownStat = challenge.stats.likeStockDown;
     const prevF = prevFills.current;
     const prevSF = prevStockFills.current;
     const prevDF = prevDownFills.current;
     const prevSDF = prevStockDownFills.current;
+    const prevLD = prevLikeDownStat.current;
+    const prevSD = prevStockDownStat.current;
     const prevV = prevValue.current;
     prevFills.current = fills;
     prevStockFills.current = sFills;
     prevDownFills.current = dnFills;
     prevStockDownFills.current = sDnFills;
+    prevLikeDownStat.current = likeDownStat;
+    prevStockDownStat.current = stockDownStat;
     prevValue.current = challenge.value;
     // prevValue と**必ず同じ場所で**前進させる — heldValueFor は prevValue を原点に
     // 使うので、押下追従の基準がそれより古い delta のものだと、据え置きに既に
@@ -1588,7 +1619,11 @@ export function MonitorView(): React.JSX.Element {
     const dnUnits = dnFills !== null && prevDF !== null ? Math.max(0, dnFills - prevDF) : 0;
     const units = allUnits - dnUnits;
     const likeDelta = units > 0 ? units * step : 0;
-    const likeDownDelta = dnUnits > 0 ? dnUnits * step : 0;
+    // 反転の**額**は stats の差分(倍率込み・クランプ後の実減少量 — worker の会計と
+    // 厳密一致)。fills 差分 × step の名目額に戻さないこと: 倍率を知らず、0 到達間際の
+    // クランプで据え置き追従(strikeDownNow の h − down)が実値とズレて幕明けに飛ぶ。
+    // start/reset で stats が 0 に戻る負差分は 0 に倒す(prevV null の adapt と同じ思想)。
+    const likeDownDelta = prevLD !== null ? Math.max(0, likeDownStat - prevLD) : 0;
     // ストック満杯はゲージ満タンと同じ tick でしか起きない(worker の従属関係)。
     // 満杯分も据え置いて2段目の着弾まで持ち越す — 引き忘れるとボーナスが
     // ゲージ演出より先に7セグへ出る(因果逆転)。
@@ -1596,7 +1631,8 @@ export function MonitorView(): React.JSX.Element {
     const dnStockUnits = sDnFills !== null && prevSDF !== null ? Math.max(0, sDnFills - prevSDF) : 0;
     const stockUnits = allStockUnits - dnStockUnits;
     const stockDelta = stockUnits > 0 ? stockUnits * (stock?.step ?? 0) : 0;
-    const stockDownDelta = dnStockUnits > 0 ? dnStockUnits * (stock?.step ?? 0) : 0;
+    // ゲージ側と同じく stats 差分(likeStockDown)で復元する。
+    const stockDownDelta = prevSD !== null ? Math.max(0, stockDownStat - prevSD) : 0;
 
     // 「値が変わっていない」だけでは帰れない — 押下(−1)といいね満タン(+1)が
     // 同一デルタで相殺すると value は不変のまま fills だけ進む。ここで帰ると
@@ -4279,17 +4315,18 @@ export function MonitorView(): React.JSX.Element {
     }
   }
 
-  /** 結果バナー(発表を出さない経路でも数字だけは残す)。 */
+  /** 結果バナー(発表を出さない経路でも数字だけは残す)。二者の内訳ごと出す。 */
   function revolutionResultNode(e: ChallengeEffect): React.JSX.Element {
     const down = e.revolutionDownTotal ?? 0;
     const tap = e.revolutionTapCount ?? 0;
     const like = e.revolutionLikeDown ?? 0;
+    const tapDown = Math.max(0, down - like);
     return (
       <>
         <span className="f-amt">{down > 0 ? `-${num(down)}` : `×${num(e.revolutionMultiplier ?? 1)}`}</span>
         <span className="f-txt">
           革命タイム終了
-          {down > 0 ? ` タップ${num(tap)}回 / いいね反転 -${num(like)}` : ''}
+          {down > 0 ? ` タップ -${num(tapDown)}(${num(tap)}回)/ いいね反転 -${num(like)}` : ''}
         </span>
       </>
     );
@@ -4297,13 +4334,16 @@ export function MonitorView(): React.JSX.Element {
 
   /**
    * 結果カットシーンの開始。全面動画(revolutionResultMs)の**上に**戦果を重ねる。
+   * 二者対決の段組: タップ側 → いいね側 → 溜め → 飛翔 → 衝突(ドーン)→
+   * 合計カウントアップ → 確定。動画素材(6秒)は演出尺(12秒)より短く、終端は
+   * 最終フレーム静止で持つ(ホルダーに loop も onEnded も無い — 意図的)。
    *
    * ブーストの清算発表(finishBoostFx)と違い:
    *  - **据え置き(holdValue)を張らない** — 革命は窓中に即時反映済みで清算 lump が無い。
    *    したがって幕の裏でタップが効いても数字は飛ばない(worker 側の凍結上乗せの
    *    コメントと対)。
    *  - **7セグへの発射も着弾も無い** — 動かす数字が無いので飛翔ぶんの予算が要らない。
-   * その結果、発表シーケンスは動画尺の中に完全に収まる(planRevolutionResult の不変条件)。
+   * その結果、発表シーケンスは演出尺の中に完全に収まる(planRevolutionResult の不変条件)。
    *
    * 戻り値 false = 開始不可(呼び出し側はバナーへフォールバックすること)。
    */
@@ -4326,54 +4366,107 @@ export function MonitorView(): React.JSX.Element {
     refreshFxStock();
     revolutionResultEffect.current = e;
     const down = e.revolutionDownTotal ?? 0;
+    const like = e.revolutionLikeDown ?? 0;
     const seed = e.id;
     setRevolutionResult({ key: ++fxKey, url: REVOLUTION_RESULT_CLIP_URL, out: false });
     setRevSettle({
       key: ++fxKey,
-      stage: 'roll',
+      stage: 'intro',
       down,
+      tapDown: plan.tapDown,
       tap: e.revolutionTapCount ?? 0,
-      like: e.revolutionLikeDown ?? 0,
+      like,
       mult: e.revolutionMultiplier ?? 1,
       seed,
-      rollupMs: plan.rollupMs,
+      tapRollupMs: plan.tapRollupMs,
+      likeRollupMs: plan.likeRollupMs,
+      countupMs: plan.countupMs,
     });
     const push = (ms: number, fn: () => void) => {
       revolutionResultTimers.current.push(window.setTimeout(fn, ms));
     };
     const fx = fxRef.current;
-
-    // t=leadMs: ①減算合計のロールアップ開始(rAF が textContent へ直書き —
-    // 毎フレーム setState しない。finishBoostFx の startRoll と同じ手口)。
-    push(plan.leadMs, () => {
-      if (!revolutionResultHold.current) return;
-      const rollStart = performance.now();
+    // 数字の rAF 直書き(毎フレーム setState しない — finishBoostFx の startRoll と
+    // 同じ手口)。タップ → いいね → 合計は時間軸上排他なので rAF は 1 本を使い回す。
+    // 要素は毎フレーム引き直す — 開始 tick と同フレームではまだマウント前のことがある。
+    const runNumberRaf = (
+      el: () => HTMLElement | null,
+      at: (elapsedMs: number) => { text: string; done: boolean }
+    ) => {
+      if (revResultRaf.current !== null) cancelAnimationFrame(revResultRaf.current);
+      const start = performance.now();
       const tick = (): void => {
         revResultRaf.current = null;
         if (!revolutionResultHold.current) return;
-        const r = rollupDisplayAt(down, performance.now() - rollStart, plan.rollupMs, seed);
-        const el = revSettleAmtRef.current;
-        if (el) el.textContent = `-${r.text}`;
+        const r = at(performance.now() - start);
+        const node = el();
+        if (node) node.textContent = `-${r.text}`;
         if (!r.done) revResultRaf.current = requestAnimationFrame(tick);
       };
       revResultRaf.current = requestAnimationFrame(tick);
-    });
+    };
 
-    // t=lockAtMs: 全桁確定 — フラッシュ + 確定パンチ(CSS .lock)+ 粒子。
-    push(plan.lockAtMs, () => {
+    // t=leadMs: タップ側パネル登場 + ロールアップ。
+    push(plan.leadMs, () => {
       if (!revolutionResultHold.current) return;
-      setRevSettle((v) => (v ? { ...v, stage: 'lock' } : v));
+      setRevSettle((v) => (v ? { ...v, stage: 'tap' } : v));
+      runNumberRaf(
+        () => revTapAmtRef.current,
+        (t) => rollupDisplayAt(plan.tapDown, t, plan.tapRollupMs, seed)
+      );
+    });
+    // t=tapLockAtMs: タップ側確定(パンチは CSS — key の再マウントで発火)。
+    push(plan.tapLockAtMs, () => {
+      if (revolutionResultHold.current) setRevSettle((v) => (v ? { ...v, stage: 'tap-lock' } : v));
+    });
+    // t=likeAtMs: いいね側パネル登場 + ロールアップ(seed は別値 — 同じ暴れ方をしない)。
+    push(plan.likeAtMs, () => {
+      if (!revolutionResultHold.current) return;
+      setRevSettle((v) => (v ? { ...v, stage: 'like' } : v));
+      runNumberRaf(
+        () => revLikeAmtRef.current,
+        (t) => rollupDisplayAt(like, t, plan.likeRollupMs, seed + 1)
+      );
+    });
+    push(plan.likeLockAtMs, () => {
+      if (revolutionResultHold.current) setRevSettle((v) => (v ? { ...v, stage: 'like-lock' } : v));
+    });
+    // t=chargeAtMs / flyAtMs: 溜め(振動)→ 中央への飛翔(どちらも CSS 任せ)。
+    push(plan.chargeAtMs, () => {
+      if (revolutionResultHold.current) setRevSettle((v) => (v ? { ...v, stage: 'charge' } : v));
+    });
+    push(plan.flyAtMs, () => {
+      if (revolutionResultHold.current) setRevSettle((v) => (v ? { ...v, stage: 'fly' } : v));
+    });
+    // t=clashAtMs: 衝突(ドーン)— フラッシュ + シェイク + 粒子 + SE、合計の
+    // カウントアップ開始。合計要素はこの setState でマウントされるので、粒子の座標は
+    // 中央フォールバック(pointFor はまだ測れない)。
+    push(plan.clashAtMs, () => {
+      if (!revolutionResultHold.current) return;
+      setRevSettle((v) => (v ? { ...v, stage: 'clash' } : v));
       pushFlash('gift-t3');
       pushShake('shake');
+      const cx = (landscape ? STAGE_LW : STAGE_W) / 2;
+      const cy = (landscape ? STAGE_LH : STAGE_H) / 2;
+      if (fx) {
+        fx.ringWave(cx, cy, { hue: 350, radius: 260 });
+        fx.sparkBurst(cx, cy, 48, { hue: 350, speed: 720 });
+      }
+      const c = cfgRef.current;
+      if (c?.challenge.seEnabled) {
+        playSe('bong', effectiveSeVolume(c.challenge.seVolume, 100));
+      }
+      runNumberRaf(
+        () => revSettleAmtRef.current,
+        (t) => countupDisplayAt(down, t, plan.countupMs)
+      );
+    });
+    // t=totalLockAtMs: 合計確定 — パンチ(CSS)+ 小さめの粒子。
+    push(plan.totalLockAtMs, () => {
+      if (!revolutionResultHold.current) return;
+      setRevSettle((v) => (v ? { ...v, stage: 'lock' } : v));
       const o = fx?.pointFor(revSettleAmtRef.current);
       if (fx && o) fx.sparkBurst(o.x, o.y, 32, { hue: 350, speed: 620 });
-    });
-    // t=tapAtMs / likeAtMs: ②タップ回数 →③いいね反転 を順に出す。
-    push(plan.tapAtMs, () => {
-      if (revolutionResultHold.current) setRevSettle((v) => (v ? { ...v, stage: 'tap' } : v));
-    });
-    push(plan.likeAtMs, () => {
-      if (revolutionResultHold.current) setRevSettle((v) => (v ? { ...v, stage: 'like' } : v));
     });
     // t=fadeAtMs: 幕引き(.fx-clip-opaque の transition 400ms と一致)。
     push(plan.fadeAtMs, () => {
@@ -7147,37 +7240,95 @@ export function MonitorView(): React.JSX.Element {
           </div>
         ) : null}
         {/*
-          革命の戦果発表。結果カットシーン(不透明動画)の**上**に重ねる —
+          革命の戦果発表(二者対決)。結果カットシーン(不透明動画)の**上**に重ねる —
           .fx-layer 内なので DOM 順だけで手前に来る(z-index は付けないこと。
-          fx-backdrop.spec が凍結している)。①減算合計 →②タップ回数 →③いいね反転 の
-          順に stage が進む。roll 中の桁は startRevolutionResultFx の rAF が
-          revSettleAmtRef.textContent へ直書きする(stage が変わると key で再マウント)。
+          fx-backdrop.spec が凍結している)。タップ側 → いいね側 → 溜め → 飛翔 →
+          衝突(合計カウントアップ)→ 確定 の順に stage が進む。数字の暴れ・駆け上がりは
+          startRevolutionResultFx の rAF が各 ref の textContent へ直書きする
+          (ロール中とロック後で key が変わり、再マウントで React の静的値へ戻る)。
+          飛翔で消えた二者は clash 以降 opacity:0 で**残す**(display:none にしない —
+          E2E が :not(.hidden) の枚数を数える)。
         */}
         {revSettle ? (
           <div className={`revolution-settle ${revSettle.stage}`}>
-            <div className="rs-main">
+            <div className="rs-duel">
+              <div className={`rs-fighter rs-tap${revSettle.stage === 'intro' ? ' hidden' : ''}`}>
+                <span className="rs-f-label">タップの戦果</span>
+                <b
+                  className="rs-f-amt"
+                  key={`${revSettle.key}:tap:${revSettle.stage === 'tap' ? 'roll' : 'fix'}`}
+                  ref={(el) => {
+                    revTapAmtRef.current = el;
+                  }}
+                >
+                  -
+                  {revSettle.stage === 'tap'
+                    ? rollupDisplayAt(revSettle.tapDown, 0, revSettle.tapRollupMs, revSettle.seed)
+                        .text
+                    : String(revSettle.tapDown)}
+                </b>
+                <span className="rs-f-meta">
+                  タップ{num(revSettle.tap)}回
+                  {revSettle.mult > 1 ? <em>×{num(revSettle.mult)}</em> : null}
+                </span>
+              </div>
               <div
-                className="rs-amt"
-                key={`${revSettle.key}:${revSettle.stage}`}
-                ref={revSettleAmtRef}
+                className={`rs-plus${
+                  revSettle.stage === 'intro' ||
+                  revSettle.stage === 'tap' ||
+                  revSettle.stage === 'tap-lock'
+                    ? ' hidden'
+                    : ''
+                }`}
               >
-                -
-                {revSettle.stage === 'roll'
-                  ? rollupDisplayAt(revSettle.down, 0, revSettle.rollupMs, revSettle.seed).text
-                  : String(revSettle.down)}
+                +
               </div>
-              <div className="rs-cap">革命タイムの成果</div>
+              <div
+                className={`rs-fighter rs-like${
+                  revSettle.stage === 'intro' ||
+                  revSettle.stage === 'tap' ||
+                  revSettle.stage === 'tap-lock'
+                    ? ' hidden'
+                    : ''
+                }`}
+              >
+                <span className="rs-f-label">いいね反転</span>
+                <b
+                  className="rs-f-amt"
+                  key={`${revSettle.key}:like:${revSettle.stage === 'like' ? 'roll' : 'fix'}`}
+                  ref={(el) => {
+                    revLikeAmtRef.current = el;
+                  }}
+                >
+                  -
+                  {revSettle.stage === 'like'
+                    ? rollupDisplayAt(revSettle.like, 0, revSettle.likeRollupMs, revSettle.seed + 1)
+                        .text
+                    : String(revSettle.like)}
+                </b>
+                <span className="rs-f-meta">
+                  いいね
+                  {revSettle.mult > 1 ? <em>×{num(revSettle.mult)}</em> : null}
+                </span>
+              </div>
             </div>
-            <div className="rs-sub">
-              <div className={`rs-tile${revSettle.stage === 'tap' || revSettle.stage === 'like' ? '' : ' hidden'}`}>
-                <span className="rs-t">タップ</span>
-                <b>{num(revSettle.tap)}</b>回{revSettle.mult > 1 ? <em>×{num(revSettle.mult)}</em> : null}
+            {revSettle.stage === 'clash' || revSettle.stage === 'lock' ? (
+              <div className="rs-main">
+                <div className="rs-box">
+                  <div
+                    className="rs-amt"
+                    key={`${revSettle.key}:${revSettle.stage}`}
+                    ref={revSettleAmtRef}
+                  >
+                    -
+                    {revSettle.stage === 'clash'
+                      ? countupDisplayAt(revSettle.down, 0, revSettle.countupMs).text
+                      : String(revSettle.down)}
+                  </div>
+                  <div className="rs-cap">革命タイムの成果</div>
+                </div>
               </div>
-              <div className={`rs-tile${revSettle.stage === 'like' ? '' : ' hidden'}`}>
-                <span className="rs-t">いいね反転</span>
-                <b>-{num(revSettle.like)}</b>
-              </div>
-            </div>
+            ) : null}
           </div>
         ) : null}
         {/*

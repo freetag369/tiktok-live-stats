@@ -234,8 +234,10 @@ export const REVOLUTION_INTRO_CLIP_URL: string =
   giftBand1Url;
 
 /**
- * 革命の結果カットシーン(6秒 = REVOLUTION_RESULT_MS・不透明)。窓が満了したとき、
- * この動画の**上に**戦果(減算合計・タップ回数・いいね反転)を重ねて発表する。
+ * 革命の結果カットシーン(素材6秒 = REVOLUTION_RESULT_VIDEO_MS・不透明)。窓が
+ * 満了したとき、この動画の**上に**戦果(タップ側 / いいね側 → 衝突 → 合計)を重ねて
+ * 発表する。演出尺(REVOLUTION_RESULT_MS = 12秒)のほうが長く、動画の終端以降は
+ * 最終フレーム静止で持つ(ホルダーに loop / onEnded を付けない — 意図的)。
  *
  * 導入と違い**フォールバックを持たない**(null = 同尺の暗幕 `.revolution-screen` を
  * 出し、数字だけは必ず出し切る — boost の result-* が url null で `.boost-screen` へ

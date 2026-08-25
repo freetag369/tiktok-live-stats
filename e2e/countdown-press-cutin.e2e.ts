@@ -38,6 +38,7 @@ const BAND_SETTINGS = {
     giftFullCut: { enabled: false, rules: [] },
     tapBoost: { enabled: false, rules: [] },
     fanStamp: { enabled: false },
+    commentHelper: { enabled: false },
     // カットインの映像を実際に再生させる(これが無いと据え置きの持ち主が生まれない)。
     fxClipsEnabled: true,
     miniFxEnabled: false,

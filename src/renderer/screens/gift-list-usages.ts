@@ -80,7 +80,7 @@ export function usagesOf(cfg: ChallengeConfig, r: GiftCatalogRow): Usage[] {
   const out: Usage[] = [];
   // FanStampConfig は単一設定でラベルを持たない — 増減量をそのまま見出しにする。
   const fs = matchFanStamp(cfg, g);
-  if (fs) out.push({ key: 'fanStamp', detail: `1個あたり ${fs.amountEach}` });
+  if (fs) out.push({ key: 'fanStamp', detail: `1回 ${fs.amountEach}` });
   const tb = matchTapBoost(cfg, g);
   if (tb) out.push({ key: 'tapBoost', detail: tb.label || `×${tb.multiplier}` });
   const rv = matchRevolution(cfg, g);

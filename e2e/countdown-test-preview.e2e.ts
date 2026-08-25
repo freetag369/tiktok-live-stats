@@ -53,7 +53,7 @@ function previewSettings(): Record<string, unknown> {
       giftBandFx: { enabled: false, bands: [] },
       giftFullCut: { enabled: false, rules: [] },
       fanStamp: { enabled: false },
-      stampTriggers: { enabled: false, rules: [] },
+      commentHelper: { enabled: false },
       tapBoost: { enabled: false, rules: [] },
       tapLock: { enabled: false, rules: [] },
       revolution: {

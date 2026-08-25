@@ -8,9 +8,8 @@ import type {
   ChallengeRouletteSegment,
   ChallengeSeSlot,
   ChallengeState,
+  CommentHelperConfig,
   FanStampConfig,
-  StampTriggerConfig,
-  StampTriggerRule,
   TapBoostConfig,
   TapBoostRule,
   TapLockConfig,
@@ -1527,61 +1526,18 @@ export const DEFAULT_FAN_STAMP: FanStampConfig = {
 };
 
 /**
- * v0.7.8(SETTINGS_VERSION 8)で出荷したスタンプ行。**この配列は増やさない** —
- * 設定移行(migrateChallengeStampTriggers)が配るのはこの15行だけで、
- * DEFAULT_STAMP_TRIGGERS.rules を参照させると次の世代で既定が増えたときに
- * v8 の段が新しい行まで配って二重適用になる(FULL_CUT_CLIPS_V3 と同じ理由)。
- *
- * 番号は「ようくん☀️🦊ﾒﾀﾙｱｰﾄ / @metafact8」のサブスクエモートの emoteId で、
- * 2026-08-17 に実配信のチャットから取得し画像と照合した実測値(プロジェクト直下の
- * 「ファンスタ番号一覧_metafact8.md」が権威)。**emoteId は配信者ごとに違う**ので、
- * 他の配信者の環境ではこの15行は構造的に一度も一致しない — 設定画面に15行並ぶ
- * だけで誤発火は起きない。それを承知のうえで出荷既定に載せるという判断。
- *
- * 量は全行 -1(お助け)。DEFAULT_FAN_STAMP.amountEach と設定画面の新規行の
- * 既定に揃えてある — 増やしたい人は行ごとに設定画面で変える前提。
+ * コメントお助けの既定。**既定オン・-1** — 旧チャットスタンプトリガー
+ * (emoteId 一致・個数比例)の置き換え(2026-08-25 ユーザー決定)で、出荷挙動は
+ * 「コメントが届くたびに 1 減る」。旧機能と違い照合する ID が無いので、
+ * 配信者ごとの既定行(STAMP_TRIGGER_RULES_V8 のような同梱データ)は不要になった。
+ * 保存済み settings.json への配布は validateCommentHelper の欠損フォールバックが
+ * 移行を兼ねる(SETTINGS_VERSION は上げない — dto.ts の v8 の注記参照)。
  */
-export const STAMP_TRIGGER_RULES_V8: readonly StampTriggerRule[] = [
-  { id: 'stamp-okaeri', label: 'おかえり', emoteId: '7673028474703203092', amountEach: -1, enabled: true },
-  { id: 'stamp-yahho', label: 'やっほー', emoteId: '7673028113942088469', amountEach: -1, enabled: true },
-  { id: 'stamp-menlevup', label: 'メンレベUP↗', emoteId: '7672235836915747604', amountEach: -1, enabled: true },
-  { id: 'stamp-naigifu', label: 'ナイギフ', emoteId: '7672236083434703637', amountEach: -1, enabled: true },
-  { id: 'stamp-welcome', label: 'ようこそ', emoteId: '7671092908083137301', amountEach: -1, enabled: true },
-  { id: 'stamp-matane', label: 'またね', emoteId: '7671092908083170069', amountEach: -1, enabled: true },
-  { id: 'stamp-ganbare', label: 'がんばれ', emoteId: '7671092908083202837', amountEach: -1, enabled: true },
-  { id: 'stamp-pachipachi', label: 'ぱちぱち', emoteId: '7671092908083235605', amountEach: -1, enabled: true },
-  { id: 'stamp-warai', label: '笑', emoteId: '7671092908083333909', amountEach: -1, enabled: true },
-  { id: 'stamp-omedeto', label: 'おめでとう', emoteId: '7671092908083366677', amountEach: -1, enabled: true },
-  { id: 'stamp-e', label: 'え?', emoteId: '7671092908083399445', amountEach: -1, enabled: true },
-  { id: 'stamp-iine', label: 'いいね♡', emoteId: '7671092908083432213', amountEach: -1, enabled: true },
-  { id: 'stamp-tap', label: 'TAP', emoteId: '7671093685229472533', amountEach: -1, enabled: true },
-  { id: 'stamp-good', label: 'グッド(👍)', emoteId: '7671094445665700628', amountEach: -1, enabled: true },
-  { id: 'stamp-hightouch', label: 'ハイタッチ(🙌)', emoteId: '7671096936174439188', amountEach: -1, enabled: true },
-];
-
-/**
- * チャットスタンプ(サブスクエモート)トリガーの既定。
- *
- * v0.7.7 までは行が空だった(「emoteId はクリエイター固有なので既定を置きようがない」)
- * が、v0.7.8 で STAMP_TRIGGER_RULES_V8 の15行を出荷既定として載せた。既に
- * settings.json を持っているユーザーには既定を直しても届かないので、同じ15行を
- * migrateChallengeStampTriggers(SETTINGS_VERSION 8)が一度だけ配る。
- */
-export const DEFAULT_STAMP_TRIGGERS: StampTriggerConfig = {
+export const DEFAULT_COMMENT_HELPER: CommentHelperConfig = {
   enabled: true,
+  amountEach: -1,
   flash: true,
-  // readonly 配列から可変配列を作る(DEFAULT_GIFT_FULL_CUT が
-  // FULL_CUT_CLIPS.map(fullCutRuleFor) でやっているのと同じ形)。
-  rules: STAMP_TRIGGER_RULES_V8.map((r) => ({ ...r })),
 };
-
-/**
- * スタンプトリガーの行数上限。サブスクエモートは1配信者につき十数種が実勢
- * (実測: 15種)なので、その倍を天井にする(TAP_BOOST_RULES_MAX と同じ役割)。
- * v0.7.8 で出荷既定が15行になったため、内訳は「出荷の15 + 利用者の15」。
- * 他の配信者は出荷分を消して自分の番号を入れる想定なので枠は足りる。
- */
-export const STAMP_TRIGGER_RULES_MAX = 30;
 
 /** タップブーストの倍率の clamp。1 は「溜めて一括反映」だけ欲しい人向けに許す。 */
 export const TAP_BOOST_MULT_MIN = 1;
@@ -1857,8 +1813,8 @@ export const REVOLUTION_MULT_MAX = 100;
  * (24fps で **192 フレームちょうど**)。モニターは onEnded ではなく JS タイマーで
  * 打ち切る(startBandFx と同じ規約)。
  *
- * **結果カットシーン(REVOLUTION_RESULT_MS = 6秒)とは別の尺**。導入は「戦闘モードに
- * 入る」山場なので長く、結果は戦果を読ませるだけなので短い(2026-08-20 ユーザー決定で
+ * **結果カットシーン(REVOLUTION_RESULT_MS = 12秒・素材は REVOLUTION_RESULT_VIDEO_MS =
+ * 6秒)とは別の尺**。導入は「戦闘モードに入る」山場(2026-08-20 ユーザー決定で
  * 6秒 → 8秒へ変更)。前置き合計は導入8秒 + カウントダウン5秒 = **13秒**。
  */
 export const REVOLUTION_INTRO_MS = 8_000;
@@ -2121,7 +2077,8 @@ export const QUIZ_BGM_XFADE_MS = 400;
 
 /**
  * 結果発表カットシーン(票数→判定→±のロールアップ)の尺(ms)。
- * REVOLUTION_RESULT_MS と同じ 6 秒(全画面 DOM のみ・動画素材なし)。
+ * 6 秒(全画面 DOM のみ・動画素材なし)。革命の結果(REVOLUTION_RESULT_MS)は
+ * 2026-08-25 に 12 秒へ延びたので、もう同じ値ではない — 等しいと仮定しないこと。
  */
 export const QUIZ_RESULT_MS = 6_000;
 
@@ -2570,7 +2527,7 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   giftBandFx: structuredClone(DEFAULT_GIFT_BAND_FX),
   giftRepeatFx: structuredClone(DEFAULT_GIFT_REPEAT_FX),
   fanStamp: structuredClone(DEFAULT_FAN_STAMP),
-  stampTriggers: structuredClone(DEFAULT_STAMP_TRIGGERS),
+  commentHelper: { ...DEFAULT_COMMENT_HELPER },
   tapBoost: structuredClone(DEFAULT_TAP_BOOST),
   tapLock: structuredClone(DEFAULT_TAP_LOCK),
   revolution: structuredClone(DEFAULT_REVOLUTION),
@@ -3331,14 +3288,11 @@ export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number
           migrateChallengeQuizIntro(
             migrateChallengeRouletteDjGlasses(
               migrateChallengeTapBoostNebaaru(
-                migrateChallengeStampTriggers(
-                  migrateChallengeTapBoostCorgi(
-                    migrateChallengeGiftFullCutTriggersV5(
-                      migrateChallengeGiftFullCutTriggers(
-                        migrateChallengeGiftFullCut(
-                          migrateChallengeSeSounds(cfg, fromVersion),
-                          fromVersion
-                        ),
+                migrateChallengeTapBoostCorgi(
+                  migrateChallengeGiftFullCutTriggersV5(
+                    migrateChallengeGiftFullCutTriggers(
+                      migrateChallengeGiftFullCut(
+                        migrateChallengeSeSounds(cfg, fromVersion),
                         fromVersion
                       ),
                       fromVersion
@@ -3660,45 +3614,6 @@ export function migrateChallengeTapBoostNebaaru(
   return { ...cfg, tapBoost: { ...cfg.tapBoost, rules } };
 }
 
-/**
- * v8: お助けのスタンプ行(STAMP_TRIGGER_RULES_V8 の15件)を、**まだ持っていない
- * 番号だけ**1回だけ足す。v0.7.7 までの既定は空配列だったので、既定を直しただけでは
- * 保存済みの settings.json(stampTriggers キーを持っている)には届かない。
- *
- * ⚠ validateStampTriggers の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
- * ユーザーが消した行がその場で復活する(migrateChallengeGiftFullCut と同じ理由)。
- *
- * 既存判定は id ではなく **emoteId 一致** — 自分で同じ番号の行を作っている人に
- * 二重に配らないため(migrateChallengeTapBoostCorgi の giftId 照合と同型)。
- * id の重複も避ける: validateStampTriggers は validateTapBoost と違って id を振り直さない
- * ので、同じ id が2行並ぶと設定画面の `key={r.id}` が壊れる(手編集の設定への保険。
- * UI が作る id は `stamp-<base36>-<n>` なので実際にはぶつからない)。
- * 上限に達している設定には足さない・残り枠ぶんだけ足す。
- *
- * 行を消した人に世代印経由で配り直すことは無い(上がるのは1回だけ)。ただし
- * 「チャレンジ設定をすべて既定に戻す」「同梱デフォで更新」は既定を読み直すので、
- * そこからは15行が戻る — 世代とは無関係の、既定に戻すボタン本来の挙動。
- */
-export function migrateChallengeStampTriggers(
-  cfg: ChallengeConfig,
-  fromVersion: number
-): ChallengeConfig {
-  if (fromVersion >= 8) return cfg;
-  const rules = cfg.stampTriggers.rules;
-  const room = STAMP_TRIGGER_RULES_MAX - rules.length;
-  if (room <= 0) return cfg;
-  const have = new Set(rules.map((r) => r.emoteId));
-  const usedIds = new Set(rules.map((r) => r.id));
-  const add = STAMP_TRIGGER_RULES_V8.filter(
-    (r) => !have.has(r.emoteId) && !usedIds.has(r.id)
-  ).slice(0, room);
-  if (add.length === 0) return cfg;
-  return {
-    ...cfg,
-    stampTriggers: { ...cfg.stampTriggers, rules: [...rules, ...add.map((r) => ({ ...r }))] },
-  };
-}
-
 export function migrateChallengeSeSounds(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
   let out = cfg;
 
@@ -3870,7 +3785,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     giftBandFx: validateGiftBandFx(c.giftBandFx),
     giftRepeatFx: validateGiftRepeatFx(c.giftRepeatFx),
     fanStamp: validateFanStamp(c.fanStamp),
-    stampTriggers: validateStampTriggers(c.stampTriggers),
+    commentHelper: validateCommentHelper(c.commentHelper),
     tapBoost: validateTapBoost(c.tapBoost),
     tapLock: validateTapLock(c.tapLock),
     revolution: validateRevolution(c.revolution),
@@ -4135,37 +4050,25 @@ function validateFanStamp(raw: unknown): FanStampConfig {
 }
 
 /**
- * チャットスタンプ(サブスクエモート)トリガーの検証。既存流儀どおり throw せず
- * サニタイズする。旧 settings.json(stampTriggers キー無し)は既定 = 出荷の15行へ倒れる
- * ので、**キーを持たない設定にはこの欠損フォールバックが移行を兼ねる**。キーを持っていて
- * rules が空配列の設定(v0.7.7 の保存済み)にはここは効かない — そちらは
- * migrateChallengeStampTriggers(SETTINGS_VERSION 8)だけが配れる。
- * emoteId は数字の ID 文字列なので小文字化はしない(trim のみ)。id の無い行は捨てる
- * (validateGiftFullCut と同じ規約 — UI の key と行の同一性が立たないため)。
+ * コメントお助けの検証。既存流儀どおり throw せずサニタイズする。
+ * 旧 settings.json(commentHelper キー無し)は既定(オン・-1)へ倒れる —
+ * **この欠損フォールバックが移行を兼ねる**(stockCutinVolume と同じ手口。
+ * SETTINGS_VERSION は上げない)。真偽値の向き(既定 true は `!== false`)と
+ * amountEach の clamp は validateFanStamp と同じ規約。
  */
-function validateStampTriggers(raw: unknown): StampTriggerConfig {
-  const d = DEFAULT_STAMP_TRIGGERS;
-  const c = raw as Partial<StampTriggerConfig> | null | undefined;
-  if (!c || typeof c !== 'object') return structuredClone(d);
-  const rules: StampTriggerRule[] = [];
-  if (Array.isArray(c.rules)) {
-    for (const r of c.rules as Array<Partial<StampTriggerRule>>) {
-      if (rules.length >= STAMP_TRIGGER_RULES_MAX) break;
-      if (typeof r.id !== 'string' || r.id === '') continue;
-      rules.push({
-        id: r.id,
-        label: typeof r.label === 'string' ? r.label.trim() : '',
-        emoteId: typeof r.emoteId === 'string' ? r.emoteId.trim() : '',
-        // 負数を許すので Math.max(0, ...) はしない(fanStamp.amountEach と同じ clamp)。
-        amountEach:
-          typeof r.amountEach === 'number' && Number.isFinite(r.amountEach)
-            ? Math.min(999_999, Math.max(-999_999, Math.round(r.amountEach)))
-            : 0,
-        enabled: r.enabled !== false,
-      });
-    }
-  }
-  return { enabled: c.enabled !== false, flash: c.flash !== false, rules };
+function validateCommentHelper(raw: unknown): CommentHelperConfig {
+  const d = DEFAULT_COMMENT_HELPER;
+  const c = raw as Partial<CommentHelperConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return { ...d };
+  return {
+    enabled: c.enabled !== false,
+    // 負数を許すので Math.max(0, ...) はしない(fanStamp.amountEach と同じ clamp)。
+    amountEach:
+      typeof c.amountEach === 'number' && Number.isFinite(c.amountEach)
+        ? Math.min(999_999, Math.max(-999_999, Math.round(c.amountEach)))
+        : d.amountEach,
+    flash: c.flash !== false,
+  };
 }
 
 /** 旧・単一 tapBoost の形。**export しない** — 読むのは validateTapBoost だけ。 */
@@ -5063,41 +4966,6 @@ export function judgeQuizVote(
   const bad = badWords.some((w) => w !== '' && c.includes(w.toLowerCase()));
   if (good && bad) return null;
   return good ? 'good' : bad ? 'bad' : null;
-}
-
-/** matchStampTriggers の結果。1メッセージ内の一致スタンプを合算した値。 */
-export interface StampTriggerMatch {
-  /** 一致した全スタンプの増減合計(符号込み)。 */
-  amount: number;
-  /** 一致したスタンプの個数(バナーの ×N)。 */
-  count: number;
-  /** StampTriggerConfig.flash(一致が1つでもあれば設定値をそのまま)。 */
-  flash: boolean;
-}
-
-/**
- * チャットスタンプ(サブスクエモート)の判定。1メッセージに複数スタンプが載るので
- * boolean ではなく**合算結果**を返す — 同じスタンプ2連打(emoteIds に同じ id が
- * 2回)は2個ぶん数える。行は emoteId 完全一致・上から先勝ち(同じ emoteId を
- * 2行に書いた誤設定では上の行の量が勝つ)。一致ゼロは null。
- */
-export function matchStampTriggers(
-  cfg: ChallengeConfig,
-  emoteIds: readonly string[] | undefined
-): StampTriggerMatch | null {
-  const c = cfg.stampTriggers;
-  if (!c.enabled || c.rules.length === 0) return null;
-  if (!emoteIds || emoteIds.length === 0) return null;
-  let amount = 0;
-  let count = 0;
-  for (const id of emoteIds) {
-    if (id === '') continue;
-    const r = c.rules.find((x) => x.enabled && x.emoteId !== '' && x.emoteId === id);
-    if (!r) continue;
-    amount += r.amountEach;
-    count += 1;
-  }
-  return count === 0 ? null : { amount, count, flash: c.flash };
 }
 
 /**

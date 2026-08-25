@@ -28,6 +28,9 @@ function cfg(enabled: boolean, over: Partial<ChallengeConfig> = {}): ChallengeCo
   base.giftFullCut.enabled = false;
   base.tapBoost.enabled = false;
   base.fanStamp.enabled = false;
+  // コメントお助け(既定オン)も落とす — 「コメントの妨害が入らない」の ON 側で
+  // 一致コメントの +5 に -1 が混ざるのを防ぐ(機能自体は challenge-comment-helper.spec.ts)。
+  base.commentHelper.enabled = false;
   base.roulettes = [];
   return { ...base, enabled, initialValue: 1000, pressStep: 1, followStep: 10, ...over };
 }

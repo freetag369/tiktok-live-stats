@@ -30,7 +30,7 @@ const GATE_SETTINGS = {
     giftBandFx: { enabled: false, bands: [] },
     giftFullCut: { enabled: false, rules: [] },
     fanStamp: { enabled: false },
-    stampTriggers: { enabled: false, rules: [] },
+    commentHelper: { enabled: false },
     tapBoost: { enabled: false, rules: [] },
     fxClipsEnabled: false,
     miniFxEnabled: false,

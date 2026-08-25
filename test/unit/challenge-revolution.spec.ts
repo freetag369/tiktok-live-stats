@@ -423,14 +423,15 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
   const likeCfg = (over: Partial<ChallengeConfig> = {}): ChallengeConfig =>
     cfg({ likeEvery: 10, likeStep: 5, likeStockCount: 2, likeStockStep: 25, ...over });
 
-  it('ゲージ満タンで value が減り、会計は likeUp ではなく likeDown へ載る', () => {
+  it('ゲージ満タンで value が減り、会計は likeUp ではなく likeDown へ載る(倍率込み)', () => {
     const e = plain(likeCfg());
     openPlain(e);
     e.handleEvent(like(10));
     const s = e.get();
-    expect(s.value).toBe(1000 - 5);
+    // 反転の減算にはタップと同じ倍率が掛かる(2026-08-25)。
+    expect(s.value).toBe(1000 - 5 * MULT);
     // likeUp = 加算 fills × step の検算を壊さないため、減算は別枠(likeStockUp と同じ判断)。
-    expect(s.stats.likeDown).toBe(5);
+    expect(s.stats.likeDown).toBe(5 * MULT);
     expect(s.stats.likeUp).toBe(0);
     // downFills は据え置き会計の符号復元の唯一のソース。fills は符号を問わず数える。
     expect(s.likeGauge?.fills).toBe(1);
@@ -448,7 +449,7 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     e.handleEvent(like(10)); // 1件目: 合算窓の頭なので即時に出る
     const first = e.get().recentEffects.filter((x) => x.kind === 'like');
     expect(first).toHaveLength(1);
-    expect(first[0]!.amount).toBe(-5);
+    expect(first[0]!.amount).toBe(-5 * MULT);
     // 2件目は合算窓の中なので push されず保留(負)へ積まれる。
     e.handleEvent(like(10));
     expect(e.get().recentEffects.filter((x) => x.kind === 'like')).toHaveLength(1);
@@ -457,7 +458,7 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     e.drainIfChanged();
     const after = e.get().recentEffects.filter((x) => x.kind === 'like');
     expect(after).toHaveLength(2);
-    expect(after[0]!.amount).toBe(-5);
+    expect(after[0]!.amount).toBe(-5 * MULT);
   });
 
   it('ストック満杯のボーナスも反転する(likeStockDown / stock.downFills)', () => {
@@ -466,15 +467,15 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     e.handleEvent(like(10)); // 満タン1回目
     e.handleEvent(like(10)); // 満タン2回目 = ストック 2/2 → 満杯
     const s = e.get();
-    expect(s.value).toBe(1000 - 5 - 5 - 25);
-    expect(s.stats.likeDown).toBe(10);
-    expect(s.stats.likeStockDown).toBe(25);
+    expect(s.value).toBe(1000 - (5 + 5 + 25) * MULT);
+    expect(s.stats.likeDown).toBe(10 * MULT);
+    expect(s.stats.likeStockDown).toBe(25 * MULT);
     expect(s.stats.likeStockUp).toBe(0);
     expect(s.likeGauge?.downFills).toBe(2);
     expect(s.likeGauge?.stock?.fills).toBe(1);
     expect(s.likeGauge?.stock?.downFills).toBe(1);
     // バナーも減算方向で出る(-0 は作らない規約)。
-    expect(s.recentEffects.find((x) => x.kind === 'stock-full')!.amount).toBe(-25);
+    expect(s.recentEffects.find((x) => x.kind === 'stock-full')!.amount).toBe(-25 * MULT);
   });
 
   it('0 到達はクランプされ、達成になる(押さずに 0 へ落ちる唯一の新経路)', () => {
@@ -483,7 +484,7 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     e.handleEvent(like(10));
     const s = e.get();
     expect(s.value).toBe(0);
-    expect(s.stats.likeDown).toBe(3); // 名目 5 ではなく実減少量
+    expect(s.stats.likeDown).toBe(3); // 名目 5×MULT ではなく実減少量
     expect(s.status).toBe('achieved');
     // 達成で窓も畳む(達成後のイベントは無視される規約なので残す意味がない)。
     expect(s.revolution).toBeUndefined();
@@ -496,14 +497,15 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     // `e.amount < 0` で分岐するので**加算枝へ落ちて赤い「+0 いいねストック満杯!」**が
     // 出る — お助けの真っ最中に妨害の色で ±0 が出る最悪の見え方。
     // いいね側の `likeFxPending !== 0` ガードと同じ扱いに揃える。
-    const e = plain(likeCfg({ initialValue: 10 }));
+    // 5×MULT がちょうど2発で尽きる初期値(倍率導入前は 10)。
+    const e = plain(likeCfg({ initialValue: 5 * MULT * 2 }));
     openPlain(e);
-    e.handleEvent(like(10)); // 満タン1回目 — 10 → 5(ストック 1/2)
-    e.handleEvent(like(10)); // 満タン2回目 — 5 → 0 で使い切り、満杯の取り分が無い
+    e.handleEvent(like(10)); // 満タン1回目 — 30 → 15(ストック 1/2)
+    e.handleEvent(like(10)); // 満タン2回目 — 15 → 0 で使い切り、満杯の取り分が無い
     const s = e.get();
     expect(s.value).toBe(0);
     expect(s.status).toBe('achieved');
-    expect(s.stats.likeStockDown).toBe(0); // 実減少量は 0(名目 25 ではない)
+    expect(s.stats.likeStockDown).toBe(0); // 実減少量は 0(名目 25×MULT ではない)
     expect(s.recentEffects.filter((x) => x.kind === 'stock-full')).toHaveLength(0);
     // 満杯そのものは起きているので累計は進む(据え置き会計の符号復元のソース)。
     expect(s.likeGauge?.stock?.fills).toBe(1);
@@ -516,15 +518,16 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     const e = plain(likeCfg({ likeStockCount: 0 }), () => t);
     openPlain(e);
     e.handleEvent(like(10));
-    expect(e.get().value).toBe(995);
+    expect(e.get().value).toBe(1000 - 5 * MULT);
     t = NOW + DUR_MS;
     e.drainIfChanged();
     expect(e.get().revolution).toBeUndefined();
     e.handleEvent(like(10));
     const s = e.get();
-    expect(s.value).toBe(1000); // 減った 5 が戻る
+    // 窓の外は等倍の加算に戻る(倍率は反転の窓の中だけ)。
+    expect(s.value).toBe(1000 - 5 * MULT + 5);
     expect(s.stats.likeUp).toBe(5);
-    expect(s.stats.likeDown).toBe(5);
+    expect(s.stats.likeDown).toBe(5 * MULT);
     expect(s.likeGauge?.fills).toBe(2);
     expect(s.likeGauge?.downFills).toBe(1); // 反転したのは1回だけ
   });
@@ -542,8 +545,8 @@ describe('いいねの反転 — 妨害がお助けになる', () => {
     e.revolutionCue({ action: 'start', effectId: startFxId(e), startedAtMs: NOW, preMs: PRE_MS });
     t = e.get().revolution!.startsAtMs + GIFT_FX_FREEZE_MARGIN_MS;
     const s = e.drainIfChanged()!;
-    expect(s.value).toBe(995);
-    expect(s.stats.likeDown).toBe(5);
+    expect(s.value).toBe(1000 - 5 * MULT);
+    expect(s.stats.likeDown).toBe(5 * MULT);
   });
 });
 

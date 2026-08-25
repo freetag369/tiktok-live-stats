@@ -8,8 +8,8 @@ import type {
   ChallengeRouletteSegment,
   ChallengeSeSlot,
   ChallengeTestEffectSpec,
+  CommentHelperConfig,
   FanStampConfig,
-  StampTriggerConfig,
   TapBoostConfig,
   TapBoostRule,
   TapLockConfig,
@@ -36,8 +36,8 @@ import {
   CHALLENGE_MINI_IDS,
   CHALLENGE_SE_SLOTS,
   COMMENT_RULES_MAX,
+  DEFAULT_COMMENT_HELPER,
   DEFAULT_FAN_STAMP,
-  STAMP_TRIGGER_RULES_MAX,
   DEFAULT_TAP_BOOST,
   DEFAULT_TAP_BOOST_RULE,
   DEFAULT_TAP_LOCK,
@@ -182,7 +182,7 @@ const SE_SLOT_LABELS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   'gift-t2': 'ギフト(中)',
   'gift-t3': 'ギフト(大)',
   'gift-t4': 'ギフト(特大)',
-  helper: 'お助け(ファンスタンプ)',
+  helper: 'お助け(コメント/ギフト)',
   roulette: 'ルーレット回転',
   'roulette-near': 'ルーレット 止まりそう(あと1個の溜め)',
   'roulette-kick': 'ルーレット キック(衝撃系パターンの一撃)',
@@ -210,20 +210,20 @@ const SE_SLOT_HINTS: Record<(typeof CHALLENGE_SE_SLOTS)[number], string> = {
   'gauge-full': 'ゲージが満タンになり、弾が7セグに着弾して数字が増える瞬間(モニター表示中のみ)',
   'stock-full':
     'ドットが全部埋まったあと、カットイン(約5秒)が終わって7セグに +N が乗る瞬間(モニター表示中のみ)。カットイン動画そのものの音量は「演出」タブ',
-  comment: 'コメント応援で数字が減った瞬間',
+  comment: 'コメント妨害(指定キーワード)の +N が流れる瞬間',
   'gift-t1': 'ダイヤ 1〜99 のギフトを受け取った瞬間',
   'gift-t2': 'ダイヤ 100〜999 のギフトを受け取った瞬間',
   'gift-t3': 'ダイヤ 1000〜4999 のギフトを受け取った瞬間',
   'gift-t4': 'ダイヤ 5000〜 のギフトを受け取った瞬間',
   helper:
-    'お助けギフト(ファンスタンプ)を受け取った瞬間と、出目の方向が「減らす(応援)」の' +
+    'コメントお助け・お助けギフト(ファンスタンプ)が届いた瞬間と、出目の方向が「減らす(応援)」の' +
     'ルーレットが止まって出目が確定する瞬間。「お助け」タブでも同じ設定を変えられます',
   roulette: 'リールが回り始める瞬間',
   'roulette-near': '当たりの1つ手前に着いて溜めに入る瞬間(モニター表示中のみ)',
   'roulette-kick': 'フェイク停止から蹴り出される瞬間。この演出が出たときだけ(モニター表示中のみ)',
   'roulette-hit':
     'リールが止まって出目が確定する瞬間(モニター表示中のみ)。出目の方向が「減らす(応援)」の' +
-    '行では、代わりに「お助け(ファンスタンプ)」の音が鳴ります',
+    '行では、代わりに「お助け(コメント/ギフト)」の音が鳴ります',
   'roulette-hype':
     '超激アツ(全画面動画つき)でリールが再加速し切った瞬間。ここから出目が ×2 → ×3 → ' +
     '×4 → ×5 と膨らんでいきます(モニター表示中のみ)',
@@ -3426,13 +3426,16 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
 
   return (
     <>
-      <h3>お助け機能(ファンスタンプ)</h3>
+      <CommentHelperBlock cfg={cfg} onPatch={onPatch} onTest={onTest} testBusy={testBusy} />
+
+      <h3 style={{ marginTop: 18 }}>お助け機能(ファンスタンプ)</h3>
       <label className="row" style={{ cursor: 'pointer' }}>
         <input type="checkbox" checked={fs.enabled} onChange={(e) => patchFs({ enabled: e.target.checked })} />
         <span>ファンスタンプでカウントを減らす</span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
-        あなた専用のカスタムギフト(ファンスタンプ)が届いたら、<b>個数 × 指定量</b>だけカウントを動かします。
+        あなた専用のカスタムギフト(ファンスタンプ)が届いたら、<b>1回(1ギフトメッセージ)につき指定量</b>だけ
+        カウントを動かします(連打しても1回ぶんです)。
         <b>ギフト増減規則・ギフトルーレットより先に評価</b>され、一致したギフトはそちらの規則を通りません。
       </div>
 
@@ -3458,7 +3461,7 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
               />
             </label>
             <label className="field" style={{ width: 110 }}>
-              1個あたりの増減
+              1回あたりの増減
               <input
                 type="number"
                 value={fs.amountEach}
@@ -3468,7 +3471,8 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
           </div>
           <GiftIdPicker selected={fs.giftId} onPick={(giftId) => patchFs({ giftId })} />
           <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
-            負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)。10連打なら この値 × 10 です。
+            負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)。連打(コンボ)でも
+            1メッセージにつき この値 だけ動きます。
           </div>
 
           <label className="row" style={{ cursor: 'pointer' }}>
@@ -3559,8 +3563,8 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
             </div>
           ) : null}
           <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-            この2つは<b>お助けギフト専用</b>で、ほかのギフト(小)には影響しません。同じ設定は
-            「効果音」タブ・「演出 &gt; 簡易演出」の<b>お助け(ファンスタンプ)</b>の行にも出ます。
+            この2つは<b>お助け(コメント/ギフト)専用</b>で、ほかのギフト(小)には影響しません。同じ設定は
+            「効果音」タブ・「演出 &gt; 簡易演出」の<b>お助け(コメント/ギフト)</b>の行にも出ます。
           </div>
 
           <div className="row" style={{ marginTop: 10 }}>
@@ -3590,10 +3594,16 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
         </>
       ) : null}
 
-      <StampTriggerBlock cfg={cfg} onPatch={onPatch} />
-
       <div className="row" style={{ marginTop: 10 }}>
-        <button className="btn small" onClick={() => onPatch({ fanStamp: structuredClone(DEFAULT_FAN_STAMP) })}>
+        <button
+          className="btn small"
+          onClick={() =>
+            onPatch({
+              fanStamp: structuredClone(DEFAULT_FAN_STAMP),
+              commentHelper: { ...DEFAULT_COMMENT_HELPER },
+            })
+          }
+        >
           お助け設定を既定に戻す
         </button>
       </div>
@@ -3602,123 +3612,70 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
 }
 
 /**
- * チャットスタンプ(サブスクエモート)トリガーの編集ブロック。HelperSection の
- * 一部 — 演出(バナー・効果音・簡易演出)はお助けの設定を丸ごと流用するので、
- * ここにあるのはトリガー(emoteId)と増減量の表だけ。
- *
- * emoteId が type="text" なのはお助けの giftId と同じ理由(前置ゼロ・19桁の長い ID
- * を number にすると精度で壊れる)。
+ * コメントお助けの編集ブロック。HelperSection の一部 — 演出(バナー・効果音・
+ * 簡易演出)はお助け(fanStamp)の設定を丸ごと流用するので、ここにあるのは
+ * 量と照明とテストだけ。旧チャットスタンプ(サブスクエモート)トリガーの
+ * 置き換え(2026-08-25 — emoteId の照合をやめ、すべてのコメントで1回動かす)。
  */
-function StampTriggerBlock({
+function CommentHelperBlock({
   cfg,
   onPatch,
+  onTest,
+  testBusy,
 }: {
   cfg: ChallengeConfig;
   onPatch: (p: Partial<ChallengeConfig>) => void;
+  onTest: OnTest;
+  testBusy: boolean;
 }): React.JSX.Element {
-  const st = cfg.stampTriggers;
-  const patchSt = (p: Partial<StampTriggerConfig>): void => {
-    onPatch({ stampTriggers: { ...st, ...p } });
-  };
-  const patchRule = (i: number, p: Partial<StampTriggerConfig['rules'][number]>): void => {
-    patchSt({ rules: st.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  const chh = cfg.commentHelper;
+  const patchCh = (p: Partial<CommentHelperConfig>): void => {
+    onPatch({ commentHelper: { ...chh, ...p } });
   };
 
   return (
     <>
-      <h4 style={{ margin: '18px 0 6px' }}>チャットのスタンプ(サブスクエモート)でも発動</h4>
+      <h3>コメントでお助け</h3>
       <label className="row" style={{ cursor: 'pointer' }}>
-        <input type="checkbox" checked={st.enabled} onChange={(e) => patchSt({ enabled: e.target.checked })} />
-        <span>スタンプでカウントを動かす</span>
+        <input type="checkbox" checked={chh.enabled} onChange={(e) => patchCh({ enabled: e.target.checked })} />
+        <span>コメントが届くたびにカウントを動かす</span>
       </label>
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
-        コメント欄に送られる<b>スタンプ(メンバー特典のエモート)</b>で発動します。ギフトではないので
-        ギフトの増減規則・カットインとは無関係です。バナー・効果音・照明は上の<b>お助けと同じ演出</b>を
-        使います(1つのメッセージに複数スタンプが載っていたら合計で1回動きます)。
+        <b>すべてのコメント</b>(スタンプだけのコメントも含む)が対象で、<b>1コメント=1回</b>だけ動きます —
+        スタンプが何個載っていても1回です。同じ人の連投も毎回数えます。ただし、クイズの投票として
+        成立したコメントと、「コメント妨害」のキーワードに一致したコメントは対象外です(妨害だけが効きます)。
+        バナー・効果音・照明は下の<b>お助けと同じ演出</b>(緑リングの専用バナー)を使います。
       </div>
 
-      {st.enabled ? (
+      {chh.enabled ? (
         <>
-          {st.rules.map((r, i) => (
-            <div key={r.id} className="row" style={{ gap: 8, marginBottom: 4 }}>
+          <div className="row" style={{ gap: 8 }}>
+            <label className="field" style={{ width: 110 }}>
+              1回あたりの増減
               <input
-                type="checkbox"
-                checked={r.enabled}
-                title="この行を有効にする"
-                onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                type="number"
+                value={chh.amountEach}
+                onChange={(e) => patchCh({ amountEach: Number(e.target.value) })}
               />
-              <label className="field" style={{ width: 120 }}>
-                {i === 0 ? '表示名(メモ)' : null}
-                <input
-                  type="text"
-                  placeholder="例: ようこそ"
-                  value={r.label}
-                  onChange={(e) => patchRule(i, { label: e.target.value })}
-                />
-              </label>
-              <label className="field" style={{ flex: 1 }}>
-                {i === 0 ? 'スタンプの番号(emoteId)' : null}
-                <input
-                  type="text"
-                  placeholder="例: 7671092908083137301"
-                  value={r.emoteId}
-                  onChange={(e) => patchRule(i, { emoteId: e.target.value.trim() })}
-                />
-              </label>
-              <label className="field" style={{ width: 110 }}>
-                {i === 0 ? '1個あたりの増減' : null}
-                <input
-                  type="number"
-                  value={r.amountEach}
-                  onChange={(e) => patchRule(i, { amountEach: Number(e.target.value) })}
-                />
-              </label>
-              <button
-                className="btn small"
-                title="この行を削除します"
-                onClick={() => patchSt({ rules: st.rules.filter((_, j) => j !== i) })}
-              >
-                削除
-              </button>
-            </div>
-          ))}
-
-          <div className="row" style={{ marginTop: 6, gap: 8 }}>
-            <button
-              className="btn small"
-              disabled={st.rules.length >= STAMP_TRIGGER_RULES_MAX}
-              onClick={() =>
-                patchSt({
-                  rules: [
-                    ...st.rules,
-                    {
-                      id: `stamp-${Date.now().toString(36)}-${clipSeq++}`,
-                      label: '',
-                      emoteId: '',
-                      amountEach: -1,
-                      enabled: true,
-                    },
-                  ],
-                })
-              }
-            >
-              スタンプを追加
-            </button>
-            <span className="faint" style={{ fontSize: 11 }}>
-              最大 {STAMP_TRIGGER_RULES_MAX} 件(現在 {st.rules.length} 件)
-            </span>
+            </label>
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
+            負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)、<b>0=演出だけ</b>(値は動かない)。
           </div>
 
-          <label className="row" style={{ cursor: 'pointer', marginTop: 6 }}>
-            <input type="checkbox" checked={st.flash} onChange={(e) => patchSt({ flash: e.target.checked })} />
+          <label className="row" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={chh.flash} onChange={(e) => patchCh({ flash: e.target.checked })} />
             <span>照明フラッシュ</span>
           </label>
 
-          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
-            負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)、<b>0=演出だけ</b>(値は動かない)。
-            スタンプの番号(emoteId)は、チャレンジ実行中にスタンプが届くと診断ログ
-            (logs/diag.log の <b>[challenge/stamp] 受信</b> の行)に出ます — 設定と違う番号が
-            届いていないかもそこで確認できます。emoteId が空の行は何にも一致しません。
+          <div className="row" style={{ marginTop: 8 }}>
+            <MonitorTestBtn
+              spec={{ kind: 'commentHelper' }}
+              onTest={onTest}
+              busy={testBusy}
+              label="▶ コメントお助けをテスト"
+              title="モニターウィンドウでお助けバナーを実演再生します(この設定の量で出ます)"
+            />
           </div>
         </>
       ) : null}
@@ -4189,7 +4146,8 @@ function RevolutionSection({
         発動すると<b>導入カットイン({Math.round(REVOLUTION_INTRO_MS / 1000)}秒)→
         画面一杯のカウントダウン({Math.round(REVOLUTION_COUNT_MS / 1000)}秒)</b>のあと窓が開き、
         窓の間は<b>タップが倍率ぶん即時に効き、いいね妨害・いいねストック妨害が反転して
-        カウントを減らすお助け</b>になります。導入の約{preSec}秒間のタップは溜まり、
+        カウントを減らすお助け</b>になります(<b>反転の減算にも同じ倍率</b>が掛かります)。
+        導入の約{preSec}秒間のタップは溜まり、
         窓が開いた瞬間に等倍でまとめて反映されます(取りこぼしなし)。
         <b>お助け・ブーストの次・お邪魔より先</b>に判定され、一致したギフトは増減規則も
         カットインも通りません。<b>フィーバーのタップ窓と重なったときはフィーバーの倍率が
@@ -4260,8 +4218,8 @@ function RevolutionSection({
                   </span>
                 </label>
               </div>
-              <label className="field" style={{ width: 96 }} title={`タップ1回の効きが倍率ぶんになります(${REVOLUTION_MULT_MIN}〜${REVOLUTION_MULT_MAX})`}>
-                タップ倍率
+              <label className="field" style={{ width: 96 }} title={`タップ1回の効きと、いいね反転の減算がどちらも倍率ぶんになります(${REVOLUTION_MULT_MIN}〜${REVOLUTION_MULT_MAX})`}>
+                倍率
                 <input
                   type="number"
                   min={REVOLUTION_MULT_MIN}

@@ -1,8 +1,8 @@
 import type { NormalizedEvent, NormViewer, UserId } from '@shared/events';
-import type { StampTriggerMatch } from '@shared/challenge';
 import type {
   ChallengeBoostCue,
   ChallengeConfig,
+  CommentHelperConfig,
   ChallengeEffect,
   ChallengeFxQueueItem,
   ChallengeRankRow,
@@ -50,7 +50,6 @@ import {
   matchGiftFullCut,
   matchGiftRule,
   matchRoulette,
-  matchStampTriggers,
   matchTapBoost,
   matchTapLock,
   matchRevolution,
@@ -158,8 +157,8 @@ interface RunParticipant {
  */
 /**
  * お助け合算経路(accumulateFanStampFx / fanStampCoalesceOp)の入力。gift イベントの
- * 部分型 — スタンプ(サブスクエモート)トリガーも同じ経路を通すために、実際に
- * 読むフィールドだけへ絞ってある(スタンプは repeatCount=一致個数・diamonds=0)。
+ * 部分型 — コメントお助けも同じ経路を通すために、実際に読むフィールドだけへ
+ * 絞ってある(コメントお助けは repeatCount=1・diamonds=0)。
  */
 interface FanStampFxSource {
   viewer: NormViewer;
@@ -172,7 +171,7 @@ interface FanStampAcc {
   amount: number;
   /** 畳んだメッセージ件数(履歴ログの ×N = ChallengeEffect.coalesced)。 */
   count: number;
-  /** 畳んだ総個数(各イベントの repeatCount の総和 = バナーの ×N)。 */
+  /** 畳んだ件数(バナーの ×N。量が連打に比例しないので count と同値になる)。 */
   giftCount: number;
   /** 畳んだ総ダイヤ数。 */
   diamonds: number;
@@ -261,6 +260,11 @@ export class ChallengeEngine {
   private seenCommentMsgIds = new BoundedSet<string>(1024);
   /** emote(WebcastEmoteChatMessage)の msgId 重複排除(comment と同じ対策)。 */
   private seenEmoteMsgIds = new BoundedSet<string>(512);
+  /**
+   * コメントお助けの初回発動ログを1ランに1回へ絞るラッチ(helperDiag の doc 参照)。
+   * start/reset でクリアする。
+   */
+  private helperDiagFired = false;
   /**
    * ラン中の参加者集計。CLEAR リザルトの TOP5 と、モニターに常時出るライブ TOP3
    * (ChallengeState.runRank)の**唯一のソース**。集計範囲は「開始→達成」の
@@ -834,6 +838,14 @@ export class ChallengeEngine {
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
     this.resetFollowDiagCounters();
+    // コメントお助けはラン開始時に設定を1行だけ残す(per-event では書かない —
+    // helperDiag の doc 参照)。「効かない」の一次切り分けはこの行を見る。
+    this.helperDiagFired = false;
+    this.helperDiag(
+      cfg.commentHelper.enabled
+        ? `コメントお助け 有効 1回あたり=${cfg.commentHelper.amountEach}`
+        : 'コメントお助け 無効'
+    );
     this.seenJoiners.clear();
     // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
     // チャレンジで、開始直後の入室が黙って捨てられるのを防ぐ。
@@ -973,6 +985,7 @@ export class ChallengeEngine {
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
     this.resetFollowDiagCounters();
+    this.helperDiagFired = false;
     this.seenJoiners.clear();
     // クールダウンも一緒に流す — 前回の最後の抽選から 10 秒以内に始めた
     // チャレンジで、開始直後の入室が黙って捨てられるのを防ぐ。
@@ -1428,8 +1441,8 @@ export class ChallengeEngine {
         break;
       }
       case 'fanStamp': {
-        // 設定中の値をそのまま1個ぶん適用する(連打は再現しない)。トリガー
-        // (giftId 等)は評価しない — 未設定でもバナーの見た目を確認できるのが目的。
+        // 設定中の値をそのまま1回ぶん適用する(本番も連打を問わず1メッセージ=1回)。
+        // トリガー(giftId 等)は評価しない — 未設定でもバナーの見た目を確認できるのが目的。
         const fs = cfg.fanStamp;
         e = {
           kind: 'gift',
@@ -1450,6 +1463,21 @@ export class ChallengeEngine {
             : { amount: fs.amountEach, nickname: 'テスト' }),
           // 演出 tier は t1(1ダイヤ)相当。実運用のファンスタンプも1ダイヤ。
           diamonds: 1,
+        };
+        break;
+      }
+      case 'commentHelper': {
+        // コメントお助けの実演。設定中の commentHelper.amountEach/flash をそのまま
+        // 使う — 演出は fanStamp のバナーを丸ごと流用しているので、fanStamp ケースの
+        // 1人ぶん形と同型(giftName は載せない — 本番のコメント経路も載せない)。
+        const chh = cfg.commentHelper;
+        e = {
+          kind: 'gift',
+          ...(chh.flash ? { flash: true } : {}),
+          fanStamp: true,
+          amount: chh.amountEach,
+          nickname: 'テスト',
+          diamonds: 0,
         };
         break;
       }
@@ -1994,60 +2022,59 @@ export class ChallengeEngine {
           }
         }
       }
-      // スタンプ(サブスクエモート)トリガー。コメント妨害より**先勝ち** — スタンプ
-      // だけのメッセージは content が ' ' なのでキーワードに当たらないが、本文と
-      // スタンプが同居するメッセージで両方発動する紛らわしさを作らない(fanStamp が
-      // ギフト規則に対して果たすのと同じ役割)。emoteId は設定と突き合わせる唯一の
-      // 手掛かりなので、載っていたら一致の成否まで必ず記録する(gift の受信行と同じ)。
-      if (e.emoteIds !== undefined && e.emoteIds.length > 0) {
-        const st = matchStampTriggers(cfg, e.emoteIds);
-        this.stampDiag(
-          `受信 emoteIds=[${e.emoteIds.join(',')}]` +
-            (st ? ` → 一致 ×${st.count} 合計=${st.amount}` : ' → 不一致')
-        );
-        if (st) return this.applyStampTrigger(e.viewer, st);
-      }
       // 規則は到着時点の cfg で確定させる(バンド判定と同じ規約 — 凍結明けに
       // 読み直すと、同じコメントの判定が設定変更のタイミングで揺れる)。
+      // 妨害キーワードはコメントお助けより**先勝ち** — 一致したコメントは +N だけで、
+      // お助けの減算は併発しない(1コメントが「妨害とお助け」に二重発動しない。
+      // fanStamp がギフト規則に対して果たすのと同じ二重適用防止)。
       const rule = matchCommentRule(cfg, e.content);
-      if (!rule) return false;
-      const nickname = e.viewer.nickname ?? e.viewer.displayId;
-      const commentOp = (allowFx: boolean): boolean => {
-        this.value += rule.amount; // 加算方向のみなので maybeAchieve もクランプも不要
-        this.stats.commentUp += rule.amount;
-        if (allowFx) {
-          this.pushEffect({
-            kind: 'comment',
-            amount: rule.amount,
-            nickname,
-            commentKeyword: rule.keyword,
-            atMs: this.now(),
-          });
-        }
-        this.dirty = true;
-        return true;
-      };
-      // キュー溢れ時はバナーを捨てて値だけ適用する(follow と同じ縮退)。
-      return this.applyOrQueue(
-        () => commentOp(true),
-        () => commentOp(false)
-      );
+      if (rule) {
+        const nickname = e.viewer.nickname ?? e.viewer.displayId;
+        const commentOp = (allowFx: boolean): boolean => {
+          this.value += rule.amount; // 加算方向のみなので maybeAchieve もクランプも不要
+          this.stats.commentUp += rule.amount;
+          if (allowFx) {
+            this.pushEffect({
+              kind: 'comment',
+              amount: rule.amount,
+              nickname,
+              commentKeyword: rule.keyword,
+              atMs: this.now(),
+            });
+          }
+          this.dirty = true;
+          return true;
+        };
+        // キュー溢れ時はバナーを捨てて値だけ適用する(follow と同じ縮退)。
+        return this.applyOrQueue(
+          () => commentOp(true),
+          () => commentOp(false)
+        );
+      }
+      // コメントお助け — 上のどれにも食われなかった**すべてのコメント**が対象
+      // (スタンプだけの content=' ' も文字コメントも同じ扱い)。1コメント=1回、
+      // 量は amountEach(旧スタンプトリガーの「個数ぶん合算」の置き換え —
+      // 2026-08-25 ユーザー決定)。質問(isQuestion・questionNew 由来)は対象外:
+      // Q&A がチャットへも二重配信されたときの二重減算を構造的に避ける
+      // (msgId は別合成なので dedup では防げない)。連投対策は妨害コメントと
+      // 同じで入れない(祭り方向・ユーザーの明示選択)。
+      const ch = cfg.commentHelper;
+      if (!ch.enabled || e.isQuestion) return false;
+      return this.applyCommentHelper(e.viewer, ch);
     }
 
     // スタンプ(サブスクエモート)単独メッセージ(WebcastEmoteChatMessage)。実データの
-    // 本線はチャット添付(上の comment 分岐)だが、ライブラリはエモート専用型も
-    // 定義しているので、どちらで届いても同じトリガーが効くようにする。
+    // 本線はチャット添付(上の comment 分岐 — スタンプのみは content=' ' で届く)だが、
+    // ライブラリはエモート専用型も定義しているので、どちらで届いても「1行=1回」の
+    // コメントお助けが効くようにする。スタンプの個数(emoteIds の要素数)は見ない。
+    // 同一メッセージが両型で届く環境なら2回数まるが、(a) 実配信で emote 型は観測されて
+    // いない(世代違いの保険)、(b) 旧スタンプトリガーも両分岐で発動しておりリスク量は
+    // 不変、(c) 祭り方向(連投対策なし)なので1件の過剰は許容 — という判断。
     if (e.kind === 'emote') {
       if (!this.seenEmoteMsgIds.add(e.msgId)) return false;
-      const ids = e.emoteIds ?? (e.emoteId !== undefined ? [e.emoteId] : []);
-      if (ids.length === 0) return false;
-      const st = matchStampTriggers(cfg, ids);
-      this.stampDiag(
-        `受信(単独) emoteIds=[${ids.join(',')}]` +
-          (st ? ` → 一致 ×${st.count} 合計=${st.amount}` : ' → 不一致')
-      );
-      if (!st) return false;
-      return this.applyStampTrigger(e.viewer, st);
+      const ch = cfg.commentHelper;
+      if (!ch.enabled) return false;
+      return this.applyCommentHelper(e.viewer, ch);
     }
 
     // いいね = 妨害。likeEvery 件ごとに likeStep 増える(余りは繰り越し)。
@@ -2102,7 +2129,10 @@ export class ChallengeEngine {
           // 「加算方向のみなのでクランプ不要」の前提がこの枝でだけ崩れるので、
           // stats は likeUp に混ぜず likeDown へ(likeUp = fills×step の検算を守る)。
           // downFills は据え置き会計の符号復元の唯一のソース(dto.ts の doc 参照)。
-          const applied = Math.min(amount, this.value);
+          // 倍率はタップと同じ焼き込み値を反転にも掛ける(2026-08-25 決定)。
+          // `amount` は通常枝(加算)と共有なのでここで掛ける — 変数側に掛けると
+          // 窓外のいいね妨害まで倍率ぶん加算されてしまう。
+          const applied = Math.min(amount * this.revolutionMultiplier, this.value);
           this.value -= applied;
           this.stats.likeDown += applied;
           this.likeDownFills += units;
@@ -2151,8 +2181,9 @@ export class ChallengeEngine {
             this.stockFills += stockUnits;
             const bonus = stockUnits * cfg.likeStockStep;
             if (rev) {
-              // ゲージ側と同じ反転会計(likeStockDown / stockDownFills)。
-              const appliedBonus = Math.min(bonus, this.value);
+              // ゲージ側と同じ反転会計(likeStockDown / stockDownFills)。倍率も
+              // ゲージ側と同じ理由でここで掛ける(`bonus` は通常枝と共有)。
+              const appliedBonus = Math.min(bonus * this.revolutionMultiplier, this.value);
               this.value -= appliedBonus;
               this.stats.likeStockDown += appliedBonus;
               this.stockDownFills += stockUnits;
@@ -2220,7 +2251,7 @@ export class ChallengeEngine {
       // お助けは最初に評価され、一致すると増減の写像を丸ごと置き換える。設定した
       // giftId が合っているかを配信中に確かめる唯一の手掛かりなので必ず記録する
       // (ファンスタンプはカスタムギフトで、ID を取り違えても「効かない」としか見えない)。
-      if (fs) this.giftDiag(`→ お助け(ファンスタンプ)一致 1個あたり=${fs.amountEach}`);
+      if (fs) this.giftDiag(`→ お助け(ファンスタンプ)一致 1メッセージにつき=${fs.amountEach}`);
 
       // タップブースト(フィーバー)。fanStamp の**次・ルーレットより先**に評価する
       // (matchTapBoost の規約 — 同じ giftId を両方に登録した誤設定では fanStamp が
@@ -2522,12 +2553,13 @@ export class ChallengeEngine {
       // 揺れるため。増減規則に一致しないギフトでもバンド一致なら演出は出す
       // (overFlash の「規則が空でも照明だけは出す」と同じ精神)。
       //
-      // お助けの「1個につき -N」は **repeatCount 基準**。diamonds(= diamondEach ×
-      // repeatCount)を使うと、2ダイヤ以上のカスタムギフトを作られた瞬間に N 倍ずれる。
-      // repeatCount も normalize.ts の確定値で、ここでは再計算しない(diamonds と同じ規約)。
+      // お助けは **1ギフトメッセージ(連打コンボ全体)につき amountEach**。
+      // repeatCount は掛けない(2026-08-25 ユーザー決定「1回=1減算」— コメント
+      // お助けの「1コメント=1回」と同じ数え方)。diamonds も見ない — 2ダイヤ以上の
+      // カスタムギフトを作られても意味が変わらないようにするため。
       const m = fs
         ? {
-            amount: fs.amountEach * Math.max(1, e.repeatCount),
+            amount: fs.amountEach,
             // 高額ギフトの照明は規則を問わず出す(matchGiftRule の overFlash と同じ精神)。
             flash: fs.flash || (cfg.flashMinDiamonds != null && e.diamonds >= cfg.flashMinDiamonds),
           }
@@ -2594,7 +2626,9 @@ export class ChallengeEngine {
           nickname: e.viewer.nickname ?? e.viewer.displayId,
           ...(e.giftName ? { giftName: e.giftName } : {}),
           // 連打数。diamonds と同じく normalize.ts の確定値をそのまま載せる。
-          ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+          // お助け(fanStamp)は載せない — 量が連打に比例しなくなった(1メッセージ=
+          // 1回)ので、「−1 なのに ×10」という読み違いをバナーに作らないため。
+          ...(!fs && e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
           ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
           // バナー合流のキー(下の coalesce)と履歴に使う(増減量の判定とは別経路)。
           ...(e.canonical ? { canonical: e.canonical } : {}),
@@ -3303,13 +3337,15 @@ export class ChallengeEngine {
   }
 
   /**
-   * スタンプ(サブスクエモート)トリガーの診断ログ。giftDiag と同じ出口・同じ
-   * 生存条件(handleEvent 冒頭の status ガードの後段でしか呼ばれない)。
-   * emoteId は配信中に設定値と突き合わせる唯一の手掛かり(gift の受信行と同じ理由)
-   * なので、emote が載ったメッセージは一致の成否まで必ず記録する。
+   * コメントお助けの診断ログ。giftDiag と同じ出口。旧スタンプトリガーの
+   * stampDiag と違い **per-event では書かない** — あちらは emoteId と設定値の
+   * 突き合わせという診断価値があったが、こちらは全コメントが無条件に一致する
+   * (照合対象が無い)ので、1件ごとのログは量だけが増える(実配信のコメントは
+   * 数千件/枠 — like 経路がログ 0 行なのと同じ性格)。出すのは start() の
+   * 有効/無効+量と、ラン中の初回発動の2行だけ(「効かない」の一次切り分け用)。
    */
-  private stampDiag(message: string): void {
-    this.diag(`[challenge/stamp] ${message}`);
+  private helperDiag(message: string): void {
+    this.diag(`[challenge/helper] ${message}`);
   }
 
   /**
@@ -5659,7 +5695,9 @@ export class ChallengeEngine {
     };
     acc.amount += amount;
     acc.count += 1;
-    acc.giftCount += Math.max(1, e.repeatCount);
+    // 件数として数える(旧: repeatCount の総和)。量が連打に比例しなくなったので、
+    // 合算バナーの ×N も「畳んだメッセージ件数」に揃える(×N と ±N が食い違わない)。
+    acc.giftCount += 1;
     acc.diamonds += e.diamonds;
     if (flash) acc.flash = true;
     // 人数は userId で数える — nickname は空や配信中に変わりうる。
@@ -5746,17 +5784,24 @@ export class ChallengeEngine {
   }
 
   /**
-   * スタンプ(サブスクエモート)トリガーの適用。**お助け(fanStamp)のギフト経路の
-   * 縮図** — バンド/カットイン/ルーレットが構造的に絡まない(スタンプはギフトでは
-   * ない)ので、giftOp から値適用と fanStamp バナー・合算窓だけを写した形。
-   * 統計も giftUp/giftDown を使う — モニター・リザルトの「お助け」集計と同じ枠で
-   * 見えるのがユーザー決定(演出をお助けと同じにする、の一部)。
+   * コメントお助けの適用。**お助け(fanStamp)のギフト経路の縮図** — バンド/
+   * カットイン/ルーレットが構造的に絡まない(コメントはギフトではない)ので、
+   * giftOp から値適用と fanStamp バナー・合算窓だけを写した形。1コメント=1回、
+   * 量は cfg.commentHelper.amountEach。統計も giftUp/giftDown を使う — モニター・
+   * リザルトの「お助け」集計と同じ枠で見えるのがユーザー決定(旧スタンプトリガー
+   * 時代からの継承 — 演出をお助けと同じにする、の一部)。
    *
    * 合算窓の判定・クランプは gift 経路(handleEvent の fs 分岐)と同じ形。窓の中は
    * 縮退 op(fanStampCoalesceOp)へ、外は effect 1件+窓張りへ。
    */
-  private applyStampTrigger(viewer: NormViewer, st: StampTriggerMatch): boolean {
-    const src: FanStampFxSource = { viewer, repeatCount: st.count, diamonds: 0 };
+  private applyCommentHelper(viewer: NormViewer, ch: CommentHelperConfig): boolean {
+    if (!this.helperDiagFired) {
+      this.helperDiagFired = true;
+      this.helperDiag(
+        `コメントお助け 初回発動 1回あたり=${ch.amountEach}(以降のコメントは記録しません)`
+      );
+    }
+    const src: FanStampFxSource = { viewer, repeatCount: 1, diamonds: 0 };
     if (this.fanStampFxUntilMs !== null) {
       // 時計の後方ステップ対策(gift 経路のクランプと同じ理由・同じ上限)。
       const gNow = this.now();
@@ -5767,12 +5812,12 @@ export class ChallengeEngine {
       );
     }
     if (this.fanStampFxUntilMs !== null && this.now() < this.fanStampFxUntilMs) {
-      return this.applyOrQueue(() => this.fanStampCoalesceOp(src, st.amount, st.flash));
+      return this.applyOrQueue(() => this.fanStampCoalesceOp(src, ch.amountEach, ch.flash));
     }
-    const stampOp = (allowFx: boolean): void => {
+    const helperOp = (allowFx: boolean): void => {
       // 値まわりは fanStampCoalesceOp / giftOp と一字一句同じにしてある
       // (応援方向の残量クランプ含む — clampDownAmount の doc 参照)。
-      const amount = this.clampDownAmount(st.amount);
+      const amount = this.clampDownAmount(ch.amountEach);
       if (amount < 0) this.stats.giftDown += -amount;
       else if (amount > 0) this.stats.giftUp += amount;
       this.value = Math.max(0, this.value + amount);
@@ -5782,14 +5827,13 @@ export class ChallengeEngine {
           kind: 'gift',
           fanStamp: true,
           amount,
-          ...(st.flash ? { flash: true as const } : {}),
+          ...(ch.flash ? { flash: true as const } : {}),
           nickname: viewer.nickname ?? viewer.displayId,
-          ...(st.count > 1 ? { giftCount: st.count } : {}),
           diamonds: 0,
           atMs,
         });
       }
-      // 合算窓を張る(gift 経路の fs 分岐と同じ式)。スタンプにカットインは無いが、
+      // 合算窓を張る(gift 経路の fs 分岐と同じ式)。コメントにカットインは無いが、
       // 凍結中に届いた場合は凍結明けまで窓を伸ばす — バナーが出るのは明けてからなので。
       // 縮退時も張る — 窓は「以降を合算に回す」ためのもので、後続の見た目は
       // flushFanStampFx が出す。
@@ -5799,8 +5843,8 @@ export class ChallengeEngine {
     };
     // キュー溢れ時はバナーを捨てて値だけ適用する(follow / like と同じ縮退)。
     return this.applyOrQueue(
-      () => stampOp(true),
-      () => stampOp(false)
+      () => helperOp(true),
+      () => helperOp(false)
     );
   }
 

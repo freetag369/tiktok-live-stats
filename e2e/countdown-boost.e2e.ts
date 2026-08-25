@@ -37,6 +37,7 @@ const BOOST_SETTINGS = {
     giftBandFx: { enabled: false, bands: [] },
     giftFullCut: { enabled: false, rules: [] },
     fanStamp: { enabled: false },
+    commentHelper: { enabled: false },
     tapBoost: {
       enabled: true,
       rules: [

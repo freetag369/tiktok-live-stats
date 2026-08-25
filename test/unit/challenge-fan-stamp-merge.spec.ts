@@ -201,26 +201,28 @@ describe('お助け合算 — カットイン無し', () => {
     expect(tail.nickname).toBe('名前b');
   });
 
-  it('連打(repeatCount>1)を含めても値・統計は畳まれず全件ぶん動く', () => {
+  it('連打(repeatCount>1)は値もバナーも1メッセージ=1件として畳む', () => {
+    // 2026-08-25「1回=1減算」— 連打数は量に掛けず、合算バナーの ×N も件数で数える
+    // (×N と ±N が食い違わない)。
     const clock = { t: NOW };
     const e = engineAt(fsCfg(), clock);
     e.start();
-    e.handleEvent(fanStampFrom('a')); // 1個
+    e.handleEvent(fanStampFrom('a')); // 1メッセージ
     clock.t = NOW + 100;
-    e.handleEvent(fanStampFrom('b', { repeatCount: 3, diamonds: 3 })); // 3個
+    e.handleEvent(fanStampFrom('b', { repeatCount: 3, diamonds: 3 })); // 3連打でも1回
     clock.t = NOW + 200;
-    e.handleEvent(fanStampFrom('c', { repeatCount: 2, diamonds: 2 })); // 2個
+    e.handleEvent(fanStampFrom('c', { repeatCount: 2, diamonds: 2 })); // 2連打でも1回
     clock.t = NOW + FAN_STAMP_FX_WINDOW_MS;
     e.drainIfChanged();
 
     const s = e.get();
-    expect(s.value).toBe(V0 - 6);
-    expect(s.stats.giftDown).toBe(6);
+    expect(s.value).toBe(V0 - 3);
+    expect(s.stats.giftDown).toBe(3);
     expect(s.stats.giftUp).toBe(0);
     const tail = gifts(e)[1]!;
-    expect(tail.amount).toBe(-5);
-    expect(tail.giftCount).toBe(5); // 3 + 2
-    expect(tail.coalesced).toBe(2); // メッセージは2件
+    expect(tail.amount).toBe(-2);
+    expect(tail.giftCount).toBe(2); // 件数(b + c)
+    expect(tail.coalesced).toBe(2); // メッセージも2件(giftCount と同値になる)
   });
 
   it('ランキング(runRank)は畳まれず全員ぶん載る', () => {

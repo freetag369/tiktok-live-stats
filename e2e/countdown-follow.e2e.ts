@@ -36,6 +36,7 @@ const FOLLOW_SETTINGS = {
     giftFullCut: { enabled: false, rules: [] },
     tapBoost: { enabled: false, rules: [] },
     fanStamp: { enabled: false },
+    commentHelper: { enabled: false },
     fxClipsEnabled: true,
     miniFxEnabled: false,
     // SE の再生経路を生かす(音自体は --mute-audio。プローブで play() を観測する)。

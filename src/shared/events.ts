@@ -54,8 +54,10 @@ export type CommentEvent = EventBase & {
   isQuestion: boolean;
   /**
    * コメントに添付されたスタンプ(サブスクエモート)の emoteId。**出現順・重複込み**
-   * (同じスタンプ2連打は2要素)— スタンプトリガー(matchStampTriggers)が個数で
-   * 数えるため。スタンプだけのメッセージは content が ' ' で届く。無ければ省略。
+   * (同じスタンプ2連打は2要素)。スタンプだけのメッセージは content が ' ' で届く。
+   * 無ければ省略。旧スタンプトリガー(個数で数える)の廃止(2026-08-25)後、
+   * challenge はこの配列を読まなくなったが、normalize の観測をそのまま運ぶ規約と
+   * 診断・将来用に載せ続ける。
    */
   emoteIds?: string[];
 };

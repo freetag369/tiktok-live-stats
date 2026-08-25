@@ -68,7 +68,7 @@ function revSettings(durationSec: number): Record<string, unknown> {
       giftBandFx: { enabled: false, bands: [] },
       giftFullCut: { enabled: false, rules: [] },
       fanStamp: { enabled: false },
-      stampTriggers: { enabled: false, rules: [] },
+      commentHelper: { enabled: false },
       tapBoost: { enabled: false, rules: [] },
       tapLock: { enabled: false, rules: [] },
       revolution: {
@@ -113,13 +113,14 @@ function revSettings(durationSec: number): Record<string, unknown> {
 const FIXTURE = resolve('fixtures/e2e-revolution-trigger.ndjson').replaceAll('\\', '/');
 
 /**
- * fixture が流し終わったときの累計。窓の外の1件(+5)と窓の中の2件(-5 / -10)。
+ * fixture が流し終わったときの累計。窓の外の1件(+5)と窓の中の2件(反転は
+ * タップと同じ倍率が掛かる: -5×3 / -10×3)。
  * likeDown は「反転が全部落ちた」ことの終端条件としても使う — speed: 0 の
  * リプレイは非同期にドレインされるので、件数で待たないと途中を観測しうる。
  */
-const LIKE_UP_TOTAL = 5; // 窓の外: count=1 → 1満タン × step 5
-const LIKE_DOWN_TOTAL = 15; // 窓の中: count=1(5) + count=2(10)
-const LIKE_DOWN_FILLS = 3; // 反転側の満タン回数(1 + 2)
+const LIKE_UP_TOTAL = 5; // 窓の外: count=1 → 1満タン × step 5(加算は等倍のまま)
+const LIKE_DOWN_TOTAL = (5 + 10) * REV_MULT; // 窓の中: (count=1 + count=2) × 倍率 = 45
+const LIKE_DOWN_FILLS = 3; // 反転側の満タン回数(1 + 2 — fills は倍率と無関係)
 
 test.describe('革命(プレーン・いいね反転 + タップ×3)', () => {
   test.use({ settingsPatch: revSettings(60) });
@@ -151,8 +152,8 @@ test.describe('革命(プレーン・いいね反転 + タップ×3)', () => {
     const s1 = await challengeGet(main);
     expect(s1.stats.likeUp).toBe(LIKE_UP_TOTAL);
     expect(s1.likeGauge?.downFills).toBe(LIKE_DOWN_FILLS);
-    // 99(対照タップ後) + 5(窓の外) - 5 - 10(窓の中)= 89。
-    expect(s1.value).toBe(89);
+    // 99(対照タップ後) + 5(窓の外) - 45(窓の中・反転×3)= 59。
+    expect(s1.value).toBe(59);
     // トリガーギフト(699💎)自体は値を動かさない — 革命一致で先勝ちし、
     // 増減規則(giftDefault / giftRules)は評価すらされない。
     expect(s1.stats.giftDown).toBe(0);
@@ -162,7 +163,7 @@ test.describe('革命(プレーン・いいね反転 + タップ×3)', () => {
     //    溜めて清算しない)なので、押した直後に効く。
     await rpc(main, 'challenge.press', undefined);
     const s2 = await challengeGet(main);
-    expect(s2.value).toBe(86);
+    expect(s2.value).toBe(56);
     expect(s2.stats.presses).toBe(2); // 対照の1回 + 窓中の1回
 
     // main / worker / renderer のどれもエラーを出していない。
@@ -269,8 +270,8 @@ test.describe('革命の期限切れ(窓が閉じて通常挙動へ戻る)', () 
       .toBe(LIKE_DOWN_TOTAL);
     const open = await challengeGet(main);
     expect(open.revolution?.multiplier).toBe(REV_MULT);
-    // 対照タップ無しなので 100 + 5 - 5 - 10 = 90。
-    expect(open.value).toBe(90);
+    // 対照タップ無しなので 100 + 5 - 45(反転×3)= 60。
+    expect(open.value).toBe(60);
 
     // 終了5秒前の大型カウントダウン(5..1)。開始側の 5..1 は既に終わって窓が
     // 開いている(上で反転を確認済み)ので、ここで再び出るのは**終了側**
@@ -287,9 +288,9 @@ test.describe('革命の期限切れ(窓が閉じて通常挙動へ戻る)', () 
     await expect(monitor.locator('.revolution-count')).toHaveCount(0, { timeout: 10_000 });
 
     // ── 結果カットシーン(窓の締めくくり)──────────────────────────────
-    // 窓が閉じた瞬間に「6秒の全面動画 + 戦果の発表」が出る。ここが出ない =
-    // 1分かけた窓の結末が無言で消える(バナー1枚だけだった v0.11.0 の状態)。
-    // この fixture は反転いいねだけで 15 減らし、タップは窓の中で1度も押していない。
+    // 窓が閉じた瞬間に「発表 12 秒(全面動画は素材 6 秒 + 最終フレーム静止)」が出る。
+    // ここが出ない = 1分かけた窓の結末が無言で消える(バナー1枚だけだった v0.11.0 の状態)。
+    // この fixture は反転いいねだけで 45 減らし、タップは窓の中で1度も押していない。
     const end = (await challengeGet(main)).recentEffects.find((x) => x.kind === 'revolution-end');
     expect(end, 'revolution-end が積まれていない').toBeDefined();
     expect(end!.revolutionDownTotal).toBe(LIKE_DOWN_TOTAL);
@@ -298,16 +299,17 @@ test.describe('革命の期限切れ(窓が閉じて通常挙動へ戻る)', () 
 
     const settle = monitor.locator('.revolution-settle');
     await expect(settle).toHaveCount(1, { timeout: 10_000 });
-    // ロールアップが確定したら実数が出る(回転中は別の桁が出ているので poll する)。
-    await expect(settle.locator('.rs-amt')).toHaveText(`-${LIKE_DOWN_TOTAL}`, { timeout: 10_000 });
-    // ②タップ回数 →③いいね反転 の順に出そろう。
-    await expect(settle.locator('.rs-tile:not(.hidden)')).toHaveCount(2, { timeout: 10_000 });
-    // 尺は REVOLUTION_RESULT_MS(6秒)— タイマーが権威なので必ず自分で畳む。
-    await expect(settle).toHaveCount(0, { timeout: 15_000 });
+    // 二者パネル(タップの戦果 / いいね反転)が出そろう(likeAt ≈ 3 秒)。
+    await expect(settle.locator('.rs-fighter:not(.hidden)')).toHaveCount(2, { timeout: 10_000 });
+    // 衝突(≈ 5.8 秒)後、合計のカウントアップが確定したら実数が出る
+    // (駆け上がり中は途中の値が出ているので poll する)。
+    await expect(settle.locator('.rs-amt')).toHaveText(`-${LIKE_DOWN_TOTAL}`, { timeout: 15_000 });
+    // 尺は REVOLUTION_RESULT_MS(12秒)— タイマーが権威なので必ず自分で畳む。
+    await expect(settle).toHaveCount(0, { timeout: 20_000 });
 
-    // タップが等倍へ戻る(×3 のままなら 87 になる)。
+    // タップが等倍へ戻る(×3 のままなら 57 になる)。
     await rpc(main, 'challenge.press', undefined);
-    await expect.poll(() => segValue(monitor), { timeout: 10_000 }).toBe(89);
-    expect((await challengeGet(main)).value).toBe(89);
+    await expect.poll(() => segValue(monitor), { timeout: 10_000 }).toBe(59);
+    expect((await challengeGet(main)).value).toBe(59);
   });
 });

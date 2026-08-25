@@ -6242,24 +6242,188 @@ body {
 }
 
 /*
- * 戦果の発表(fx-layer 内 = 不透明動画より必ず手前・z-index は付けない)。
- * .boost-settle 群の写しだが、飛翔が無いので fly の段は持たない。
+ * 戦果の発表(二者対決)。fx-layer 内 = 不透明動画より必ず手前・z-index は付けない。
+ * ルートは inset:0 のステージ、.rs-duel(二者)と .rs-main(合計)はそれぞれ全面の
+ * 絶対配置センタリング — 合計の登場(clash)で二者の行が押し下げられないよう独立させる。
  * 素材は被写体が中央に来るので、数字は必ず暗いパネルの上に置く(可読性の担保)。
  */
 .revolution-settle {
   position: absolute;
   inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 18px;
   pointer-events: none;
   animation: boost-overlay-in 260ms ease-out both;
 }
 
+.revolution-settle .rs-duel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 34px;
+}
+
+/* 二者のパネル(.rs-main の縮小写し)。登場はパンチ(hidden が外れた瞬間に発火)。 */
+.revolution-settle .rs-fighter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 42px 22px;
+  border-radius: 24px;
+  background: rgba(20, 2, 6, 0.72);
+  box-shadow:
+    inset 0 0 0 3px rgba(255, 90, 90, 0.8),
+    0 0 44px rgba(255, 50, 60, 0.5),
+    0 8px 26px rgba(0, 0, 0, 0.6);
+  animation: boost-settle-lock 320ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/* 出番前は場所ごと消す(visibility だと隙間が空いて中央がズレる)。 */
+.revolution-settle .rs-fighter.hidden,
+.revolution-settle .rs-plus.hidden {
+  display: none;
+}
+
+.revolution-settle .rs-f-label {
+  font-family: var(--font);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #ffb4b4;
+  text-shadow: 0 0 12px rgba(255, 80, 80, 0.75);
+}
+
+/* 二者の数字。ロール中の桁文字は rAF が textContent 直書きで回す。 */
+.revolution-settle .rs-f-amt {
+  font-family: var(--num);
+  font-size: 96px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #ffdada;
+  text-shadow:
+    0 0 16px rgba(255, 80, 80, 0.95),
+    0 0 52px rgba(255, 30, 40, 0.6),
+    0 3px 0 rgba(90, 0, 6, 0.8);
+}
+
+.revolution-settle .rs-f-meta {
+  font-family: var(--font);
+  font-size: 22px;
+  font-weight: 700;
+  color: #ffe2e2;
+  text-shadow: 0 0 12px rgba(255, 80, 80, 0.75);
+}
+
+.revolution-settle .rs-f-meta em {
+  font-style: normal;
+  color: #ff9a9a;
+  margin-left: 4px;
+}
+
+.revolution-settle .rs-plus {
+  font-family: var(--num);
+  font-size: 72px;
+  font-weight: 700;
+  color: #ff9a9a;
+  text-shadow: 0 0 18px rgba(255, 80, 80, 0.8);
+  animation: boost-settle-lock 320ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/* ロール中: ドラムロールの微振動(.boost-settle と同じ手口 — blur を外した理由も同じ)。 */
+.revolution-settle.tap .rs-tap .rs-f-amt,
+.revolution-settle.like .rs-like .rs-f-amt {
+  animation: boost-settle-jitter 120ms steps(2) infinite;
+}
+
+/* 確定: パンチ(key の再マウントで発火)。 */
+.revolution-settle.tap-lock .rs-tap .rs-f-amt,
+.revolution-settle.like-lock .rs-like .rs-f-amt {
+  animation: boost-settle-lock 400ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/* 溜め: 両者が震える(衝突の予兆)。 */
+.revolution-settle.charge .rs-fighter {
+  animation: boost-settle-jitter 120ms steps(2) infinite;
+}
+
+/*
+ * 飛翔: 中央へ突っ込み、接触の瞬間に消える。animation-duration は
+ * REVOLUTION_CLASH_TRAVEL_MS(300ms)と対 — 変えるときは両方いっしょに。
+ * 正確な接触座標は要らない(衝突フレームはフラッシュが覆う)。
+ */
+.revolution-settle.fly .rs-fighter.rs-tap {
+  animation: rev-clash-left 300ms cubic-bezier(0.6, -0.1, 1, 0.6) forwards;
+}
+
+.revolution-settle.fly .rs-fighter.rs-like {
+  animation: rev-clash-right 300ms cubic-bezier(0.6, -0.1, 1, 0.6) forwards;
+}
+
+.revolution-settle.fly .rs-plus {
+  opacity: 0;
+}
+
+/*
+ * 衝突後: 二者は消えたまま**残す**(display:none にしない — E2E が
+ * .rs-fighter:not(.hidden) の枚数を数える。据え置きの中央ズレも起きない:
+ * opacity は場所を保つ)。
+ */
+.revolution-settle.clash .rs-fighter,
+.revolution-settle.lock .rs-fighter,
+.revolution-settle.clash .rs-plus,
+.revolution-settle.lock .rs-plus {
+  opacity: 0;
+}
+
+@keyframes rev-clash-left {
+  0% {
+    transform: none;
+    opacity: 1;
+  }
+
+  92% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateX(180px) scale(0.62);
+    opacity: 0;
+  }
+}
+
+@keyframes rev-clash-right {
+  0% {
+    transform: none;
+    opacity: 1;
+  }
+
+  92% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateX(-180px) scale(0.62);
+    opacity: 0;
+  }
+}
+
+/*
+ * 合計(衝突で登場)。.rs-main は全面センタリングの枠、.rs-box が内容サイズの
+ * パネル本体 — パンチ(transform 系 animation)は .rs-box に掛ける。.rs-main 側を
+ * translate で中央寄せしないのは、keyframes の transform に上書きされてズレるため。
+ */
 .revolution-settle .rs-main {
-  position: relative;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.revolution-settle .rs-box {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -6273,8 +6437,9 @@ body {
     0 10px 34px rgba(0, 0, 0, 0.6);
 }
 
-/* 減算合計の大型数字。roll 中の桁文字は rAF が textContent 直書きで回す。 */
+/* 合計の大型数字。clash 中の駆け上がりは rAF が textContent 直書きで回す。 */
 .revolution-settle .rs-amt {
+  position: relative;
   font-family: var(--num);
   font-size: 170px;
   line-height: 1;
@@ -6288,6 +6453,7 @@ body {
 }
 
 .revolution-settle .rs-cap {
+  position: relative;
   font-family: var(--font);
   font-size: 26px;
   font-weight: 700;
@@ -6296,61 +6462,14 @@ body {
   text-shadow: 0 0 14px rgba(255, 80, 80, 0.8);
 }
 
-/* 回転中: ドラムロールの微振動(.boost-settle と同じ手口 — blur を外した理由も同じ)。 */
-.revolution-settle.roll .rs-amt {
-  animation: boost-settle-jitter 120ms steps(2) infinite;
+/* 衝突の登場はドン(強めのパンチ)。 */
+.revolution-settle.clash .rs-box {
+  animation: boost-settle-lock 360ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
 }
 
-/* 確定: パンチ。 */
-.revolution-settle.lock .rs-amt,
-.revolution-settle.tap .rs-amt,
-.revolution-settle.like .rs-amt {
+/* 合計の確定: パンチ(key の再マウントで発火)。 */
+.revolution-settle.lock .rs-amt {
   animation: boost-settle-lock 400ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
-}
-
-.revolution-settle .rs-sub {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-.revolution-settle .rs-tile {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 10px 22px;
-  border-radius: 999px;
-  background: rgba(20, 2, 6, 0.72);
-  box-shadow: inset 0 0 0 2px rgba(255, 90, 90, 0.55);
-  font-family: var(--font);
-  font-size: 26px;
-  font-weight: 700;
-  color: #ffe2e2;
-  text-shadow: 0 0 12px rgba(255, 80, 80, 0.75);
-  animation: boost-settle-lock 320ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
-}
-
-/* 出番前は場所ごと消す(visibility だと隙間が空いて中央がズレる)。 */
-.revolution-settle .rs-tile.hidden {
-  display: none;
-}
-
-.revolution-settle .rs-tile b {
-  font-family: var(--num);
-  font-size: 40px;
-  font-variant-numeric: tabular-nums;
-}
-
-.revolution-settle .rs-tile em {
-  font-style: normal;
-  font-size: 22px;
-  color: #ff9a9a;
-}
-
-.revolution-settle .rs-t {
-  font-size: 22px;
-  letter-spacing: 0.1em;
-  color: #ffb4b4;
 }
 
 /* 横ステージは高さが足りないので一回り小さく(.boost-settle と同じ判断)。 */
@@ -6358,8 +6477,16 @@ body {
   font-size: 132px;
 }
 
-.landscape .revolution-settle .rs-main {
+.landscape .revolution-settle .rs-box {
   padding: 18px 48px 22px;
+}
+
+.landscape .revolution-settle .rs-f-amt {
+  font-size: 72px;
+}
+
+.landscape .revolution-settle .rs-fighter {
+  padding: 14px 30px 16px;
 }
 
 @media (prefers-reduced-motion: reduce) {

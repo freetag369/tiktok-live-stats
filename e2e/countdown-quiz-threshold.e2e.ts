@@ -50,7 +50,9 @@ function thresholdSettings(): Record<string, unknown> {
       giftBandFx: { enabled: false, bands: [] },
       giftFullCut: { enabled: false, rules: [] },
       fanStamp: { enabled: false },
-      stampTriggers: { enabled: false, rules: [] },
+      // 既定オンのコメントお助けを落とす — この E2E は投票コメントを流すので、
+      // 有効のままだと無効票・投票時間外のコメントが値を -1 ずつ汚す。
+      commentHelper: { enabled: false },
       tapBoost: { enabled: false, rules: [] },
       tapLock: { enabled: false, rules: [] },
       revolution: { enabled: false, rules: [] },

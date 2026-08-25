@@ -493,7 +493,8 @@ function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
       if (down <= 0) return `革命終了 ×${num(e.revolutionMultiplier ?? 1)}`;
       const tap = e.revolutionTapCount ?? 0;
       const like = e.revolutionLikeDown ?? 0;
-      return `革命終了 ×${num(e.revolutionMultiplier ?? 1)} -${num(down)}(タップ${num(tap)}回 / いいね反転 -${num(like)})`;
+      // モニターの結果バナー(revolutionResultNode)と同型の二者表記。
+      return `革命終了 ×${num(e.revolutionMultiplier ?? 1)} -${num(down)}(タップ -${num(Math.max(0, down - like))}〔${num(tap)}回〕/ いいね反転 -${num(like)})`;
     }
     case 'quiz-start': {
       // お題本文は effect の焼き込み(tap-lock と同じ規約 — 設定を引き直さない)。

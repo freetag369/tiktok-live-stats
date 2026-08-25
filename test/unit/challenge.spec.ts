@@ -29,6 +29,10 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   // 「30タップで1減算」に変わり、小さい値で press する既存テストの意味が変わって
   // しまう。ゲート自体の検査は challenge-final-gate.spec.ts が明示的に有効化する。
   base.finalGate.enabled = false;
+  // コメントお助け(既定オン)も無効にする — コメントを流す既存テスト(妨害の
+  // 「規則なしは何も起きない」等)の値が 1 ずつ静かに汚れてしまう。機能自体の
+  // 検査は challenge-comment-helper.spec.ts が持つ。
+  base.commentHelper.enabled = false;
   return { ...base, enabled: true, ...over };
 }
 
@@ -3483,25 +3487,28 @@ describe('ChallengeEngine — お助け機能(ファンスタンプ)', () => {
     // ラッチ開始値 = 現在値になるよう valueAfter は value + amount(testEffect の規約)。
     expect(fx.valueAfter).toBe(V0 - 3);
   });
-  it('連打は個数倍で効く(repeatCount 基準)', () => {
+  it('連打を無視して1メッセージ=1回(repeatCount を掛けない・×N も載せない)', () => {
+    // 2026-08-25 ユーザー決定「1回=1減算」。×N を載せると「−3 なのに ×10」と
+    // 読み違えるので、お助けのバナーには連打数を出さない。
     const e = engine(fsCfg({ amountEach: -3 }));
     e.start();
     e.handleEvent(fanStamp({ repeatCount: 10, diamonds: 10 }));
     const s = e.get();
-    expect(s.value).toBe(V0 - 30);
+    expect(s.value).toBe(V0 - 3);
     const fx = s.recentEffects[0]!;
-    expect(fx.amount).toBe(-30);
-    expect(fx.giftCount).toBe(10);
+    expect(fx.amount).toBe(-3);
+    expect(fx.giftCount).toBeUndefined();
     // 💎は normalize.ts の確定値をそのまま載せる(再計算しない)。
     expect(fx.diamonds).toBe(10);
   });
 
-  it('ダイヤ単価が 1 でなくても個数倍(perDiamond ではない)', () => {
-    // 5💎 × 3個 = 15💎 だが、減るのは 3個ぶんの -3。perDiamond 流用なら -15 になる。
+  it('ダイヤ単価・個数のどちらにも比例しない(perDiamond ではない)', () => {
+    // 5💎 × 3個 = 15💎 でも減るのは 1回ぶんの -1。perDiamond 流用なら -15、
+    // 旧・個数比例なら -3 になる。
     const e = engine(fsCfg());
     e.start();
     e.handleEvent(fanStamp({ diamondEach: 5, repeatCount: 3, diamonds: 15 }));
-    expect(e.get().value).toBe(V0 - 3);
+    expect(e.get().value).toBe(V0 - 1);
   });
 
   it('同じ giftId のギフト増減規則より優先される', () => {
@@ -3566,9 +3573,10 @@ describe('ChallengeEngine — お助け機能(ファンスタンプ)', () => {
   });
 
   it('0 でクランプし、到達すると達成する', () => {
-    const e = engine(fsCfg({}, { initialValue: 2 }));
+    // 連打では届かなくなった(1メッセージ=1回)ので、量そのもので 0 を跨がせる。
+    const e = engine(fsCfg({ amountEach: -5 }, { initialValue: 2 }));
     e.start();
-    e.handleEvent(fanStamp({ repeatCount: 5, diamonds: 5 }));
+    e.handleEvent(fanStamp());
     const s = e.get();
     expect(s.value).toBe(0);
     expect(s.status).toBe('achieved');

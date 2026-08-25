@@ -279,7 +279,7 @@ export interface LikeSeriesPoint {
  *
  * 出所は **gift_catalog(受信のたびに自動で育つ実測テーブル)** で、創作値は無い。
  * チャレンジの各機能(giftFullCut / roulettes / tapBoost / tapLock / fanStamp /
- * stampTriggers / revolution / giftRules)は giftId 完全一致が本線なので、
+ * revolution / giftRules)は giftId 完全一致が本線なので、
  * 「この配信に実際に届いた giftId はどれか」を一覧で引けることが設定作業の前提になる。
  * ギフト名は同名別ID・前後スペース・綴り揺れがあり、名前では特定できない。
  */
@@ -901,7 +901,7 @@ export interface GiftRepeatFxConfig {
 
 /**
  * お助け機能(ファンスタンプ)の設定。クリエイター専用のカスタムギフトが届いたら
- * 「個数 × amountEach」だけカウントを動かす。単一設定だが、将来複数化したくなった
+ * 1ギフトメッセージにつき amountEach だけカウントを動かす。単一設定だが、将来複数化したくなった
  * ときのために matchFanStamp は boolean ではなく行そのものを返す(matchRoulette と
  * 同じ形)— 呼び出し側のコードを変えずに配列化できる。
  *
@@ -920,9 +920,10 @@ export interface FanStampConfig {
   /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
   canonical: string;
   /**
-   * ギフト1個(repeatCount 1)あたりの増減。負=減らす(お助け)、正=増える(妨害)。
-   * ダイヤ数ではなく**個数**に比例させる — 2ダイヤ以上のカスタムギフトを作られても
-   * 「1個につき -N」の意味が変わらないようにするため(perDiamond を流用しない理由)。
+   * 1ギフトメッセージ(連打コンボ全体)あたりの増減。負=減らす(お助け)、
+   * 正=増える(妨害)。repeatCount は掛けない — 連打しても1回ぶん
+   * (2026-08-25 ユーザー決定「1回=1減算」。ダイヤ数も見ない — 2ダイヤ以上の
+   * カスタムギフトを作られても意味が変わらないようにするため)。
    */
   amountEach: number;
   /**
@@ -936,39 +937,26 @@ export interface FanStampConfig {
 }
 
 /**
- * チャットスタンプ(サブスクエモート)トリガーの1行。ギフトではなく
- * WebcastChatMessage / WebcastEmoteChatMessage の emote として届くスタンプを
- * お助け(fanStamp)と同じ演出・同じ合算窓で増減に割り当てる。
+ * コメントお助け。**すべての chat コメント**(スタンプだけのコメント — content が
+ * ' ' — も含む)を1コメント=1回の増減に割り当てる。旧チャットスタンプトリガー
+ * (emoteId 一致・個数比例)の置き換え(2026-08-25 ユーザー決定)。
  *
- * emoteId は**完全一致のみ**(giftName のような部分一致の保険が無いのは、
- * emote に名前がそもそも載って来ないため — 表示用の label はマッチに使わない)。
+ * 対象外は worker の先勝ち順で決まる: クイズ投票として成立したコメントと
+ * コメント妨害(commentRules)のキーワードに一致したコメントは減算しない。
+ * 質問(isQuestion)も対象外 — Q&A がチャットへ二重配信されたときの二重減算を
+ * 構造的に避ける。連投対策は入れない(妨害コメントと同じ「祭り」方向。二重適用
+ * 防止は msgId dedup だけ)。演出・SE(helper)・統計(giftDown/giftUp)・
+ * 合算窓はお助け(fanStamp)を丸ごと流用する。
  */
-export interface StampTriggerRule {
-  /** 行の識別子。UI の key 用(GiftFullCutRule.id と同じ役割)。 */
-  id: string;
-  /** 設定画面の行見出し(例: ようこそ)。表示専用でマッチには一切使わない。 */
-  label: string;
-  /** エモートの emoteId 完全一致。'' はどのスタンプにも一致しない。 */
-  emoteId: string;
+export interface CommentHelperConfig {
+  enabled: boolean;
   /**
-   * スタンプ1個あたりの増減。負=減らす(お助け)、正=増える(妨害)。
+   * コメント1件あたりの増減。負=減らす(お助け)、正=増える(妨害)。
    * 0 は「演出だけ出して値は動かさない」(FanStampConfig.amountEach と同じ clamp)。
    */
   amountEach: number;
-  enabled: boolean;
-}
-
-/**
- * チャットスタンプ(サブスクエモート)トリガー。**1メッセージに複数スタンプ**が
- * 載って届くので、一致した全スタンプの合計を1回で適用し、演出はお助けの
- * 合算バナー(fanStamp effect)を流用する。値の増減はギフトの増減規則とは
- * 独立(スタンプはギフトではないので、そもそもあちらの規則を通らない)。
- */
-export interface StampTriggerConfig {
-  enabled: boolean;
   /** true ならモニターに照明フラッシュ演出(FanStampConfig.flash と同じ)。 */
   flash: boolean;
-  rules: StampTriggerRule[];
 }
 
 /**
@@ -1122,7 +1110,11 @@ export interface RevolutionRule {
    * 'black swan' 等への部分一致誤爆で1分間ゲーム経済が変わる)。
    */
   exactName: boolean;
-  /** 窓中のタップ倍率。既定 3(clamp REVOLUTION_MULT_MIN〜MAX)。 */
+  /**
+   * 窓中の倍率。タップの効きと、いいね反転(ゲージ満タン / ストック満杯)の減算の
+   * **両方**に掛かる(2026-08-25 にいいね側へも適用)。既定 3
+   * (clamp REVOLUTION_MULT_MIN〜MAX)。
+   */
   multiplier: number;
   /** 窓の長さ(秒)。既定 60・clamp REVOLUTION_DURATION_MIN_SEC〜MAX_SEC。 */
   durationSec: number;
@@ -1479,10 +1471,10 @@ export interface ChallengeConfig {
    */
   fanStamp: FanStampConfig;
   /**
-   * チャットスタンプ(サブスクエモート)トリガー。ギフト経路とは独立に
-   * comment / emote イベントの emoteId で発動し、演出は fanStamp を流用する。
+   * コメントお助け。ギフト経路とは独立に comment / emote イベントで発動し
+   * (1コメント=1回)、演出は fanStamp を流用する。
    */
-  stampTriggers: StampTriggerConfig;
+  commentHelper: CommentHelperConfig;
   /**
    * タップブースト(フィーバー)。fanStamp の**次・ルーレットより先**に評価され、
    * 一致したギフトは増減規則を通らない(matchTapBoost — fanStamp と同じ先勝ち規約)。
@@ -2025,6 +2017,12 @@ export type ChallengeTestEffectSpec =
        */
       multi?: true;
     }
+  /**
+   * コメントお助け。設定中の commentHelper.amountEach/flash をそのまま使って
+   * fanStamp と同じ専用バナーを実演する(コメントお助けは演出を丸ごと fanStamp
+   * から流用しているので、見た目の違いは量と名前だけ)。
+   */
+  | { kind: 'commentHelper' }
   /**
    * タップブースト。設定中の multiplier/durationSec/clip をそのまま使って
    * カットイン+タップカウンタを実演する — fanStamp と同じくトリガー一致は
@@ -2657,6 +2655,10 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  * 8: お助けのスタンプトリガーの既定行15件を追加(migrateChallengeStampTriggers)。
  *    v0.7.7 までの既定は空配列だったので、stampTriggers キーを既に持っている
  *    保存済み設定には既定の変更が届かない。配るのは STAMP_TRIGGER_RULES_V8 だけ。
+ *    (この機能は 2026-08-25 に廃止 — コメントお助け commentHelper へ置き換え。
+ *    移行段もコードごと削除した。保存済みの stampTriggers キーは validate の
+ *    リテラル return が黙って落とし、commentHelper は欠損フォールバックが移行を
+ *    兼ねるので世代は上げない。)
  * 9: タップブーストの既定行を黒豹(723500・限定ギフトで実質受け取れない)から
  *    ねば〜る君(14463)へ**差し替え**(migrateChallengeTapBoostNebaaru)。
  *    足す移行ではなく寄せ替えなので、旧既定と完全に同じ boost-1 行だけを触り、

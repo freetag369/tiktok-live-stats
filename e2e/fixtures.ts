@@ -80,7 +80,10 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
       // 「いいねで +N 増える」前提が静かに壊れるのを防ぐ(tapBoost と同じ規約)。
       revolution: { enabled: false, rules: [] },
       fanStamp: { enabled: false },
-      stampTriggers: { enabled: false, rules: [] },
+      // コメントお助けは既定オン(欠損はオンへ倒れる)なので明示的に落とす —
+      // コメントを流すテスト(quiz 投票など)の値が -1 ずつ静かに汚れるのを防ぐ
+      // (revolution と同じ規約)。機能そのものの検証は unit が持つ。
+      commentHelper: { enabled: false },
       fxClipsEnabled: false,
       miniFxEnabled: false,
       seEnabled: false,

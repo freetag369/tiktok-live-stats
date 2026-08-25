@@ -92,6 +92,9 @@ function cfg(qz: Partial<QuizConfig> = {}, over: Partial<ChallengeConfig> = {}):
   base.giftFullCut.enabled = false;
   base.roulettes = [];
   base.finalGate.enabled = false;
+  // コメントお助け(既定オン)も落とす — 非投票コメント・無効票が -1 ずつ値を
+  // 汚し、清算の期待値が揺れる。先勝ちの検証は challenge-comment-helper.spec.ts が持つ。
+  base.commentHelper.enabled = false;
   base.quiz = {
     ...structuredClone(DEFAULT_QUIZ),
     enabled: true,
