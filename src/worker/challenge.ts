@@ -74,6 +74,7 @@ import {
   QUIZ_RESULT_MS,
   QUIZ_DEFERRED_OPS_MAX,
   QUIZ_PREP_MAX_SEC,
+  REVOLUTION_DEFERRED_OPS_MAX,
   QUIZ_DURATION_MAX_SEC,
   QUIZ_VOTE_MAX_SEC,
   QUIZ_QUEUE_MAX,
@@ -752,6 +753,18 @@ export class ChallengeEngine {
    */
   private quizDeferredOps: Array<{ run: () => void; fx: ChallengeFxQueueItem | null }> = [];
   /**
+   * 革命バリア(2026-08-26 ユーザー決定「革命の起動中はカットイン系すべてキューへ」):
+   * 発動(アーム)〜窓終了に届いた**カットイン級(fx 付き)**イベントの保留列。
+   * quiz バリアと違い ±バナー級(fx なし = like/comment/バナーのみギフト)と
+   * follow(実体は±浮上バナー)/revolution(2発目 = 重ねがけ延長の契約)は
+   * 素通しする — 「±バナーは通常どおり流す=数字の即時性を維持」の決定と対。
+   * 窓終了時(flushRevolution)に到着順のまま pendingOps へ移送し、結果カット
+   * シーンぶんの既存凍結の明けにドレイン直列化で1本ずつ流れる。
+   * 上限 REVOLUTION_DEFERRED_OPS_MAX、溢れ弁と critical 破棄は quiz と同型。
+   * **永続化しない**(revolutionUntilMs 自体が非永続なので整合)。
+   */
+  private revolutionDeferredOps: Array<{ run: () => void; fx: ChallengeFxQueueItem | null }> = [];
+  /**
    * 凍結中に届いたイベントの値適用+演出の保留キュー(dedup・ランキング集計は
    * 凍結中も即時に回る — 取りこぼしゼロの肝)。解除時に到着順で実行し、途中で
    * 新たなバンドギフトが出たら再凍結してドレインを中断する(連続ギフトが
@@ -913,6 +926,10 @@ export class ChallengeEngine {
       this.pendingOps.push(...this.quizDeferredOps);
       this.quizDeferredOps = [];
       this.clearQuiz();
+      // 革命バリアの溜め分も同じ規約で移送 — 後段の clearRevolution は残りを破棄する
+      // 側の出口なので、必ずここ(forceApplyPendingOps より前)で空にしておく。
+      this.pendingOps.push(...this.revolutionDeferredOps);
+      this.revolutionDeferredOps = [];
       // まだ映像が始まっていない予約は無言で捨てる。タップも値も1つも動いて
       // いないので清算するものが無く、停止後にフィーバーを始める意味も無い
       // (settleBoost は boostUntilMs null で早期 return するのでここが唯一の出口)。
@@ -2390,6 +2407,22 @@ export class ChallengeEngine {
           this.giftDiag('→ お題ルーレット中 — 封印は清算後に発動を判定');
           return false;
         }
+        // 革命の起動中も同じく後回し(2026-08-26 ユーザー決定 — 8/20 の「窓中でも
+        // 封じが勝つ」を上書き: 窓中は封印されず、革命の清算後に封印が発動する)。
+        // fx なしの deferred なので applyOrQueue の fx 判別には乗らない — quiz と
+        // 同じくここで個別に張る。実行時に排他(フィーバー在航)を再判定するのも同じ。
+        if (this.revolutionBarrierActive()) {
+          if (this.revolutionDeferredOps.length >= REVOLUTION_DEFERRED_OPS_MAX) {
+            this.giftDiag('→ 革命バリア満杯 — 封印を破棄');
+            return false;
+          }
+          this.revolutionDeferredOps.push({
+            run: () => void this.applyTapLockTrigger(tl, e),
+            fx: null,
+          });
+          this.giftDiag('→ 革命タイム中 — 封印は清算後に発動を判定');
+          return false;
+        }
         return this.applyTapLockTrigger(tl, e);
       }
 
@@ -2764,11 +2797,20 @@ export class ChallengeEngine {
       // cinematic:false — 機能OFF は逃げ道であって祝う場面ではない
       // (結果カットシーンの 6 秒を挟むと「切ったのに黙る」になる)。
       this.pushRevolutionEnd(this.now(), { cinematic: false });
+      // バリアの溜め分は pendingOps へ移送して値を消さない(stop / quiz OFF と同じ規約。
+      // clearRevolution は残りを破棄する側の出口なので必ずこの順)。窓の走行中は
+      // 無凍結なので「期限切れ済みの凍結」を立てて下の flushFxFreeze に即ドレインさせる。
+      this.pendingOps.push(...this.revolutionDeferredOps);
+      this.revolutionDeferredOps = [];
+      if (this.pendingOps.length > 0 && this.fxFreezeUntilMs === null) {
+        this.fxFreezeUntilMs = this.now();
+      }
       this.clearRevolution();
       if ((armed || introPending) && this.fxFreezeUntilMs !== null) {
         this.fxFreezeUntilMs = this.now();
-        this.flushFxFreeze(this.now());
       }
+      // 移送した保留分を通常のドレインに乗せる(quiz OFF と同型 — 非凍結なら何もしない)。
+      this.flushFxFreeze(this.now());
       this.armFreezeTimer();
     }
     // お題ルーレットだけを OFF にしたら進行中の窓・投票・予約・バリアを畳む —
@@ -2831,6 +2873,10 @@ export class ChallengeEngine {
       // cinematic:false — 機能OFF は逃げ道であって祝う場面ではない
       // (結果カットシーンの 6 秒を挟むと「切ったのに黙る」になる)。
       this.pushRevolutionEnd(this.now(), { cinematic: false });
+      // 革命バリアの溜め分も下の forceApplyPendingOps に乗せて値を消さない
+      // (clearRevolution は残りを破棄する側の出口なので必ずこの順)。
+      this.pendingOps.push(...this.revolutionDeferredOps);
+      this.revolutionDeferredOps = [];
       this.clearRevolution();
       // お題も逃げ道に含める。溜め分は下の forceApplyPendingOps に乗せて値を消さない
       // (stop() と同じ規約)。quiz-end は積まない — チャレンジ全体 OFF は status 級の
@@ -2896,6 +2942,12 @@ export class ChallengeEngine {
         kind: 'boost' as const,
         nickname: d.e.viewer.nickname ?? d.e.viewer.displayId,
       })),
+      // 革命バリアで窓明け待ちの演出予告も同じ「待ち」なので合流させる(barrier 印の
+      // コピー規約は quiz と同じ — 下のコメント参照。両バリアは in-flight 相互排他
+      // なので順は形式的)。
+      ...this.revolutionDeferredOps
+        .filter((p) => p.fx !== null)
+        .map((p) => ({ ...p.fx!, barrier: true as const })),
       // お題バリアで清算待ちの演出予告も同じ「待ち」なので合流させる(解放時は
       // pendingOps 側へ同じ fx オブジェクトごと移送されるため表示キーは安定)。
       // **barrier の印はここでコピーに乗せる**(保持している fx を汚すと、清算で
@@ -3471,6 +3523,36 @@ export class ChallengeEngine {
         fx: fx ? { id: ++this.fxQueueSeq, ...fx } : null,
       });
       if (fx) this.dirty = true;
+      return false;
+    }
+    // 革命バリア(quiz バリアの下・凍結判定の上): 窓の走行中は無凍結なので、ここで
+    // 止めないとカットインが革命 HUD の上に即再生される(2026-08-26 ユーザー決定
+    // 「革命の起動中はカットイン系すべてキューへ・±バナーは流す」)。quiz と違い
+    // **fx 付き(カットイン級)だけ**を落とす — fx なし(like/comment/バナーのみ
+    // ギフト/press 導入分/封印の値適用)は素通しで数字の即時性を守る。例外2種:
+    //  - follow: fx は凍結中の予告表示専用で、実体は優先ランク①の±浮上バナー。
+    //  - revolution: 2発目の 699💎 は activateRevolution の「重ねがけ = 延長」契約で
+    //    処理される。バリアで落とすと延長ではなく清算後の新窓になり契約が壊れる。
+    // 値も演出も一緒に保留するのは quiz バリア・凍結キューと同じ既存契約
+    // (クランプは実行時 — 窓中のタップで残量が減っていれば移送後の適用で効く)。
+    if (this.revolutionBarrierActive() && fx && fx.kind !== 'follow' && fx.kind !== 'revolution') {
+      if (this.revolutionDeferredOps.length >= REVOLUTION_DEFERRED_OPS_MAX) {
+        if (critical) {
+          this.diag('[challenge] 革命バリア満杯 — フィーバー級の op を破棄');
+          return false;
+        }
+        if (this.pendingOverflowCount++ === 0) {
+          this.diag(
+            `[challenge] 革命バリア上限(${REVOLUTION_DEFERRED_OPS_MAX}件)— 以降は演出を捨て値のみ即時適用`
+          );
+        }
+        return (overflowOp ?? op)() !== false;
+      }
+      this.revolutionDeferredOps.push({
+        run: () => void op(),
+        fx: { id: ++this.fxQueueSeq, ...fx },
+      });
+      this.dirty = true;
       return false;
     }
     if (!this.isFxFrozen()) return op() !== false;
@@ -4701,6 +4783,16 @@ export class ChallengeEngine {
         nowMs + resultMs + REVOLUTION_SETTLE_BUDGET_MS + GIFT_FX_FREEZE_MARGIN_MS
       );
     }
+    // バリアで溜めたカットイン級を到着順のまま pendingOps へ移送(settleQuiz と同型)。
+    // 挿入時に上限を通さないのは意図的 — 通すと溜まった値が消える。revolution-end の
+    // effect id が先に確定しているので「発表 → 溜め分」の順は構造的に保たれる。
+    // プレーン経路(resultMs 0)でも「期限切れ済みの凍結」を立てて呼び出し元の
+    // flushFxFreeze に即ドレインさせる(pendingOps 非空 ⟹ 凍結非 null の不変条件)。
+    this.pendingOps.push(...this.revolutionDeferredOps);
+    this.revolutionDeferredOps = [];
+    if (this.pendingOps.length > 0 && this.fxFreezeUntilMs === null) {
+      this.fxFreezeUntilMs = nowMs;
+    }
     this.clearRevolution();
     // 窓の符号境界(閉じる側)。開く側(commitRevolutionState)と対。
     this.forceFlushLikeFx();
@@ -4746,7 +4838,12 @@ export class ChallengeEngine {
     return resultMs;
   }
 
-  /** 革命の破棄(start/stop/reset/達成/機能OFFの共通出口 — 予約ごと落とす)。 */
+  /**
+   * 革命の破棄(start/stop/reset/達成/機能OFFの共通出口 — 予約ごと落とす)。
+   * バリアの残りも破棄する — 達成/reset/start は「以降のイベントは無視される」規約
+   * なので溜め分ごと消えるのが正しい。**値を残したい出口(自然満了・stop・機能OFF)は
+   * 呼ぶ前に pendingOps へ移送しておくこと**(flushRevolution / stop / onConfigChanged)。
+   */
   private clearRevolution(): void {
     this.armedRevolution = null;
     this.revolutionUntilMs = null;
@@ -4760,6 +4857,7 @@ export class ChallengeEngine {
     this.revTapDown = 0;
     this.revLikeDown = 0;
     this.revStockDown = 0;
+    this.revolutionDeferredOps = [];
   }
 
   // ── お題ルーレット(quiz) ─────────────────────────────────────────────────
@@ -4774,6 +4872,19 @@ export class ChallengeEngine {
    */
   private quizBarrierActive(): boolean {
     return this.armedQuiz !== null || this.quizVoteUntilMs !== null;
+  }
+
+  /**
+   * 革命バリアの生存判定。アーム(発動)〜窓終了 — quizBarrierActive の鏡像だが
+   * 対象は**カットイン級(fx 付き)だけ**(applyOrQueue 側で判別)。
+   * **結果カットシーン期間は含めない** — flushRevolution が張る凍結が既存の
+   * pendingOps 直列化でカットイン級もバナーも保留するので、バリアの出番がない。
+   * **▶テスト実演の窓(testRevolutionUntilMs)も見ない** — 実演は値・統計・凍結に
+   * 触れないモニター側リハーサルで、実視聴者のイベントを遅らせる理由がない
+   * (実演中のカットイン被りは全実演共通の既知挙動)。
+   */
+  private revolutionBarrierActive(): boolean {
+    return this.armedRevolution !== null || this.revolutionUntilMs !== null;
   }
 
   /** 到着時点の cfg・行・イベントから発動スナップショットを焼き込む(お題の抽選込み)。 */

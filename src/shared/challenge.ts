@@ -2089,6 +2089,13 @@ export const QUIZ_RESULT_MS = 6_000;
  */
 export const QUIZ_DEFERRED_OPS_MAX = 512;
 
+/**
+ * 革命バリア(発動〜窓終了に届いたカットイン級イベントの後回し・2026-08-26)の上限。
+ * quiz と同じ判断 — 窓は最長 REVOLUTION_MAX_MS(180秒)を跨ぐので pendingOps より大きく。
+ * quiz バリアと違い**カットイン級(fx 付き)だけ**を溜める(±バナーは素通しで即時)。
+ */
+export const REVOLUTION_DEFERRED_OPS_MAX = 512;
+
 // ── 数値到達トリガー(2026-08-22 ユーザー決定) ──────────────────────────────
 
 /**

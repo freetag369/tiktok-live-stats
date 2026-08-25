@@ -655,11 +655,12 @@ describe('窓中は最終ゲート免除・お邪魔は封じが勝つ', () => {
     expect(e.get().gauntlet).toEqual({ taps: 0, needed: 30 });
   });
 
-  it('お邪魔(タップ封じ)中は窓でもタップが効かない — 封じが勝つ(2026-08-20 ユーザー決定)', () => {
-    // press() の革命窓分岐は tapLock 分岐より**下**。革命は 699💎 の課金ギフトだが、
-    // 封印は「押させない」というゲームの状態そのものなので、そちらの契約を上書き
-    // しない。フィーバーの窓が封印より上に居るのは排他スケジューリングの防御であって
-    // 「窓は封印より強い」という一般則ではない(worker/challenge.ts の該当コメント)。
+  it('革命前から張られていた封印は勝つ — 窓が開いても解けない(8/20決定の残る半分)', () => {
+    // press() の革命窓分岐は tapLock 分岐より**下**。封印は「押させない」という
+    // ゲームの状態そのものなので、窓が後から開いてもその契約を上書きしない。
+    // **2026-08-26 の上書きはこの逆向きだけ**: 窓の最中に「届いた」お邪魔は革命
+    // バリアで清算後へ回る(revolution-barrier の describe 参照)。8/20 の
+    // 「封じが勝つ」が残るのは、封印が先に張られていたこのケース。
     const c = cfg();
     c.tapLock = {
       ...structuredClone(DEFAULT_TAP_LOCK),
@@ -667,10 +668,13 @@ describe('窓中は最終ゲート免除・お邪魔は封じが勝つ', () => {
       rules: [{ ...structuredClone(DEFAULT_TAP_LOCK_RULE), giftId: '5555' }],
     };
     const e = plain(c);
-    openPlain(e);
+    e.start();
+    e.handleEvent(revGift({ giftId: '5555', giftName: 'Jam Gift' })); // 先に封印
+    expect(e.get().tapLock).toBeDefined();
+    // 封印中の 699💎 — 効果はゲームの状態なので窓は開く(演出ではない)。
+    e.handleEvent(revGift());
+    expect(e.get().revolution).toBeDefined();
     const endsAtBefore = e.get().revolution!.endsAtMs;
-    e.handleEvent(revGift({ giftId: '5555', giftName: 'Jam Gift' }));
-    expect(e.get().tapLock).toBeDefined(); // 封印は張られている
     e.press();
     const s = e.get();
     expect(s.value).toBe(1000); // 封じが勝つ = タップは捨てられる(溜まらない)
@@ -989,6 +993,8 @@ describe('ギフト評価の先勝ち列: fanStamp → tapBoost → 革命 → t
   });
 
   it('フィーバーの窓と重なったらフィーバーの倍率が勝つ(press の分岐順)', () => {
+    // 重なりが今も起きるのは**フィーバーが先**の向きだけ — 革命の窓中に届いた
+    // フィーバーギフトは革命バリアで清算後へ回る(revolution-barrier の describe)。
     const c = cfg();
     c.tapBoost = {
       ...structuredClone(DEFAULT_TAP_BOOST),
@@ -998,8 +1004,10 @@ describe('ギフト評価の先勝ち列: fanStamp → tapBoost → 革命 → t
       ],
     };
     const e = plain(c);
-    openPlain(e); // 革命の窓(×3)
-    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' }));
+    e.start();
+    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' })); // 先にフィーバー窓
+    e.handleEvent(revGift()); // 走行中のフィーバーに革命が重なる(この向きは非排他のまま)
+    expect(e.get().revolution).toBeDefined();
     // プレーンのフィーバー窓は即時×5(DEFAULT_TAP_BOOST_RULE.multiplier)。
     e.press();
     expect(e.get().value).toBe(1000 - DEFAULT_TAP_BOOST_RULE.multiplier);
@@ -1072,22 +1080,33 @@ describe('窓の戦果 — 減算合計 / タップ回数 / いいね反転', ()
   });
 
   it('★フィーバー窓と重なってもタップ数が汚染されない', () => {
-    // activateBoost が延期するのは tapLock だけで革命は見ていないので、窓は重なりうる。
-    // press の分岐はフィーバーが先に return するため、革命枝のフックには入らない。
+    // 重なりが起きるのは**フィーバーが先**の向き(革命窓中のフィーバーギフトは
+    // バリアで清算後へ)。press の分岐はフィーバーが先に return するため、
+    // 重なっている間のタップは革命枝のフックに入らない。
     const c = cfg();
     c.tapBoost = {
       ...structuredClone(DEFAULT_TAP_BOOST),
       enabled: true,
       rules: [
-        { ...structuredClone(DEFAULT_TAP_BOOST_RULE), giftId: '9999', introClip: 'off', countClip: 'off' },
+        {
+          ...structuredClone(DEFAULT_TAP_BOOST_RULE),
+          giftId: '9999',
+          durationSec: 10, // 革命(60秒)より先に明ける尺
+          introClip: 'off',
+          countClip: 'off',
+        },
       ],
     };
     let t = NOW;
     const e = plain(c, () => t);
-    openPlain(e);
-    e.press(); // 革命の窓のタップ(数える)
-    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' }));
+    e.start();
+    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' })); // 先にフィーバー窓
+    e.handleEvent(revGift()); // 革命の窓が重なる
     e.press(); // フィーバー窓のタップ(数えない)
+    e.press();
+    // フィーバーだけ満了 → 以降のタップは革命枝(数える)。
+    t = NOW + 10_000 + 100;
+    e.drainIfChanged();
     e.press();
     const end = endOf(e, () => {
       t = NOW + DUR_MS * 4;
@@ -1264,5 +1283,121 @@ describe('窓の戦果 — 減算合計 / タップ回数 / いいね反転', ()
     c.revolution.enabled = false;
     e.onConfigChanged();
     expect(e.get().recentEffects.filter((x) => x.kind === 'revolution-end')).toHaveLength(0);
+  });
+});
+
+describe('革命バリア — 起動中のカットイン級はキューへ、±バナーは素通し(2026-08-26 ユーザー決定)', () => {
+  // 窓の走行中は無凍結なので、ここで止めないとカットインが革命 HUD の上に即再生
+  // される。quiz バリアと違い**カットイン級(fx 付き)だけ**を溜め、±バナー級は
+  // 素通しで数字の即時性を守る。解放は窓の清算(flushRevolution)で pendingOps へ
+  // 移送 — 結果カットシーンぶんの凍結明けに既存ドレインが1本ずつ流す。
+  const boostCfg = (): ChallengeConfig => {
+    const c = cfg();
+    c.tapBoost = {
+      ...structuredClone(DEFAULT_TAP_BOOST),
+      enabled: true,
+      rules: [
+        { ...structuredClone(DEFAULT_TAP_BOOST_RULE), giftId: '9999', introClip: 'off', countClip: 'off' },
+      ],
+    };
+    return c;
+  };
+
+  it('窓中のフィーバーギフトは発動せず清算後へ(fxQueue に barrier 印で予告)', () => {
+    let t = NOW;
+    const e = plain(boostCfg(), () => t);
+    openPlain(e);
+    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' }));
+    const s = e.get();
+    expect(s.boost == null).toBe(true); // フィーバーは始まっていない
+    expect(s.recentEffects.some((x) => x.kind === 'boost-start')).toBe(false);
+    expect((s.fxQueue ?? []).some((q) => q.kind === 'boost' && q.barrier === true)).toBe(true);
+    // 窓中のタップは革命の倍率のまま(フィーバーに乗っ取られない)。
+    e.press();
+    expect(e.get().value).toBe(1000 - MULT);
+    // 満了 → 移送 → プレーンは即ドレイン → フィーバーが発動する。
+    t = NOW + DUR_MS + 25;
+    e.drainIfChanged();
+    const after = e.get();
+    expect(after.boost).toBeDefined();
+    const end = after.recentEffects.find((x) => x.kind === 'revolution-end')!;
+    const bs = after.recentEffects.find((x) => x.kind === 'boost-start')!;
+    // 「発表 → 溜め分」の順(revolution-end の id が先に確定している)。
+    expect(end.id).toBeLessThan(bs.id);
+  });
+
+  it('窓中のお邪魔はラッチされず、清算後に封印が発動する(8/20「封じが勝つ」の上書き)', () => {
+    const c = cfg();
+    c.tapLock = {
+      ...structuredClone(DEFAULT_TAP_LOCK),
+      enabled: true,
+      rules: [{ ...structuredClone(DEFAULT_TAP_LOCK_RULE), giftId: '5555' }],
+    };
+    let t = NOW;
+    const e = plain(c, () => t);
+    openPlain(e);
+    e.handleEvent(revGift({ giftId: '5555', giftName: 'Jam Gift' }));
+    expect(e.get().tapLock).toBeUndefined(); // 窓中は封印されない
+    e.press();
+    expect(e.get().value).toBe(1000 - MULT); // タップは倍率で効き続ける
+    t = NOW + DUR_MS + 25;
+    e.drainIfChanged();
+    expect(e.get().tapLock).toBeDefined(); // 清算後に封印が発動
+  });
+
+  it('±バナー級(fx なし)は素通しで値が即時に動く', () => {
+    const c = cfg();
+    // 既定の帯域カットインは 1💎 から当たる(バナーのみのギフトを作るため落とす)。
+    c.giftBandFx.enabled = false;
+    const e = plain(c);
+    openPlain(e);
+    // 既定 perDiamond +1 のバナーのみギフト(カットイン無し)。
+    e.handleEvent(revGift({ giftId: '1234', giftName: 'NoSuchGift', diamondEach: 30, diamonds: 30 }));
+    expect(e.get().value).toBe(1000 + 30);
+  });
+
+  it('窓中の帯域カットインギフトも清算後へ(既定バンドは 1💎 から当たる)', () => {
+    let t = NOW;
+    const e = plain(cfg(), () => t);
+    openPlain(e);
+    e.handleEvent(revGift({ giftId: '1234', giftName: 'NoSuchGift', diamondEach: 30, diamonds: 30 }));
+    const s = e.get();
+    expect(s.value).toBe(1000); // 値も演出も一緒に保留(凍結キューと同じ契約)
+    expect((s.fxQueue ?? []).some((q) => q.kind === 'band' && q.barrier === true)).toBe(true);
+    t = NOW + DUR_MS + 25;
+    e.drainIfChanged();
+    expect(e.get().value).toBe(1000 + 30); // 清算後に適用
+  });
+
+  it('2発目の 699💎 は素通しで延長(重ねがけ契約はバリア対象外)', () => {
+    const e = plain(cfg());
+    openPlain(e);
+    const before = e.get().revolution!.endsAtMs;
+    e.handleEvent(revGift());
+    expect(e.get().revolution!.endsAtMs).toBe(before + DUR_MS);
+    expect(e.get().fxQueue ?? []).toHaveLength(0); // バリアに積まれていない
+  });
+
+  it('革命だけ OFF でも溜め分は捨てない(移送 → 即ドレインで発動する)', () => {
+    const c = boostCfg();
+    const e = plain(c);
+    openPlain(e);
+    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' }));
+    expect(e.get().boost == null).toBe(true);
+    c.revolution.enabled = false;
+    e.onConfigChanged();
+    // OFF は逃げ道 — 窓は畳まれ、溜めていたフィーバーはその場で解放される。
+    expect(e.get().revolution).toBeUndefined();
+    expect(e.get().boost).toBeDefined();
+  });
+
+  it('reset はバリアごと破棄する(達成/start と同じ「以降は無視」の規約)', () => {
+    const e = plain(boostCfg());
+    openPlain(e);
+    e.handleEvent(revGift({ giftId: '9999', giftName: 'Boost Gift' }));
+    expect((e.get().fxQueue ?? []).some((q) => q.barrier === true)).toBe(true);
+    e.reset();
+    expect(e.get().fxQueue ?? []).toHaveLength(0);
+    expect(e.get().recentEffects.some((x) => x.kind === 'boost-start')).toBe(false);
   });
 });
