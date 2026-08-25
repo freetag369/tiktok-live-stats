@@ -4353,6 +4353,8 @@ export function MonitorView(): React.JSX.Element {
       tapCount: e.revolutionTapCount ?? 0,
       likeDown: e.revolutionLikeDown ?? 0,
       resultMs: e.revolutionResultMs ?? 0,
+      // ▶実演は downTotal 0 でも発表を出す(worker が実演専用に resultMs を焼く契約と対)。
+      test: e.test === true,
     });
     if (plan.totalMs === 0 || prefersReducedMotion()) return false;
     // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。幕を立てる**前**に

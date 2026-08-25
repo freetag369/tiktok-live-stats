@@ -137,7 +137,13 @@ function rollupMsFor(amount: number): number {
  *
  * 減らせなかった窓(downTotal 0)は全段 0 — 発表するものが無いので呼び出し側は
  * バナーだけで畳む(planBoostSettle がタップ 0 で全段 0 を返すのと同じ判断)。
- * worker 側も同じ条件で revolutionResultMs を焼かないので、ここは二重の防御。
+ * 本番は worker 側も同じ条件で revolutionResultMs を焼かないので二重の防御。
+ *
+ * **▶テスト実演だけは例外**(test): worker は実演では downTotal 0 でも
+ * testRevolutionResultMs を焼く(プレビューの目的は段を見ることなので、押さなかった
+ * 人に結末が出ないのは目的に反する — worker/challenge.ts の実演コメントと対)。
+ * effect の test 印を受けて downTotal 0 でも発表を組む。resultMs 0(reduced-motion /
+ * モニター不在)は実演でも出さない。
  */
 export function planRevolutionResult(input: {
   /** 窓の総減算量(タップ + 反転いいね)。クランプ後の実減少量。 */
@@ -148,10 +154,12 @@ export function planRevolutionResult(input: {
   likeDown: number;
   /** worker が焼き込んだ結果カットシーンの尺。0 = 演出なし。 */
   resultMs: number;
+  /** ▶テスト実演(effect.test)。実演は downTotal 0 でも発表を出す。 */
+  test?: boolean;
 }): RevolutionResultPlan {
   const downTotal = Math.max(0, Math.floor(input.downTotal));
   const resultMs = Math.max(0, Math.floor(input.resultMs));
-  if (downTotal <= 0 || resultMs <= 0) return EMPTY;
+  if (resultMs <= 0 || (downTotal <= 0 && !input.test)) return EMPTY;
 
   // likeDown は downTotal を超えない(worker の恒等式)。壊れた入力でも
   // tapDown が負にならないよう両側からクランプする。

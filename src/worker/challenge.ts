@@ -1681,7 +1681,8 @@ export class ChallengeEngine {
           this.testRevolutionMs = durMs;
           // 実演は downTotal 0 でも結果カットシーンを出す(本番の「downTotal>0 の
           // ときだけ」規約はそのまま — プレビューの目的は段を見ることなので、
-          // 押さなかった人に結末が出ないのは目的に反する)。
+          // 押さなかった人に結末が出ないのは目的に反する)。renderer 側は effect の
+          // test 印で downTotal 0 を許す(planRevolutionResult の test 引数と対)。
           this.testRevolutionResultMs = cine ? REVOLUTION_RESULT_MS : 0;
           this.armFreezeTimer();
         }

@@ -25,15 +25,35 @@ const FULL = { downTotal: 128, tapCount: 42, likeDown: 2, resultMs: REVOLUTION_R
 
 describe('planRevolutionResult — 発表のタイムライン', () => {
   it('減算 0 は全段 0(発表を丸ごとスキップ = バナーだけ)', () => {
-    // worker も同じ条件で revolutionResultMs を焼かないので、ここは二重の防御。
+    // 本番経路(test なし)では worker も同じ条件で revolutionResultMs を焼かないので
+    // 二重の防御。▶実演だけは test 印で例外(次の it)。
     const p = planRevolutionResult({ ...FULL, downTotal: 0 });
     expect(p.totalMs).toBe(0);
     expect(p.resultMs).toBe(0);
     expect(p.countupMs).toBe(0);
   });
 
-  it('resultMs 0(プレーン発動・機能OFF)も全段 0', () => {
+  it('▶実演(test)は減算 0 でも発表を出す — 押さなかった人にも結末を見せる', () => {
+    // worker は実演では downTotal 0 でも testRevolutionResultMs を焼く
+    // (worker/challenge.ts の実演コメントと対)。段の単調増加も 0 額で保たれること。
+    const p = planRevolutionResult({
+      ...FULL,
+      downTotal: 0,
+      tapCount: 0,
+      likeDown: 0,
+      test: true,
+    });
+    expect(p.totalMs).toBe(REVOLUTION_RESULT_MS);
+    expect(p.tapDown).toBe(0);
+    expect(p.leadMs).toBeLessThan(p.tapLockAtMs);
+    expect(p.clashAtMs).toBeLessThan(p.totalLockAtMs);
+    expect(p.totalLockAtMs).toBeLessThan(p.fadeAtMs);
+  });
+
+  it('resultMs 0(プレーン発動・機能OFF)も全段 0 — 実演の test 印でも覆らない', () => {
     expect(planRevolutionResult({ ...FULL, resultMs: 0 }).totalMs).toBe(0);
+    // reduced-motion / モニター不在では worker が実演でも resultMs 0 を焼く。
+    expect(planRevolutionResult({ ...FULL, resultMs: 0, test: true }).totalMs).toBe(0);
   });
 
   it('tapDown は downTotal − likeDown を plan が一元計算する(DTO には載せない)', () => {
