@@ -196,42 +196,45 @@ describe('横ステージの詳細度上書き', () => {
   });
 });
 
-describe('革命の残り時間ピル(.revolution-timer)は小窓と場所を取り合わない', () => {
+describe('革命の走行ドック(.revolution-hud-dock)は小窓と場所を取り合わない', () => {
+  // 位置の算術はドック(ピル+走行タリーの器・2026-08-26)が一手に持つ。
+  // ピル(.revolution-timer)は中で static なので、見張る対象はドックの座標。
   it('z-index を持たない(小窓と同じ理由)', () => {
+    expect(ruleBody('.revolution-hud-dock')).not.toContain('z-index');
     expect(ruleBody('.revolution-timer')).not.toContain('z-index');
   });
 
   it('横ステージでは小窓の右端より右に置く', () => {
-    // 小窓は left:14 / width:460(横長上書き)。ピルの left がその右端より小さいと
+    // 小窓は left:14 / width:460(横長上書き)。ドックの left がその右端より小さいと
     // 残数の桁の上に文字が乗る。.count-mirror の幅を変えたらここが落ちる。
     const mirror = ruleBody('.stage-scale.landscape .count-mirror');
     const width = px(mirror, 'width');
     const left = px(ruleBody('.count-mirror'), 'left');
-    const pill = px(ruleBody('.stage-scale.landscape .revolution-timer.at-mirror'), 'left');
+    const pill = px(ruleBody('.stage-scale.landscape .revolution-hud-dock.at-mirror'), 'left');
     expect(width, '横長の .count-mirror の width が px で読めない').not.toBeNull();
     expect(left, '.count-mirror の left が px で読めない').not.toBeNull();
-    expect(pill, 'ピルの left が px で読めない').not.toBeNull();
-    expect(pill!, `ピルの left ${pill}px が小窓の右端 ${left! + width!}px に食い込んでいる`).toBeGreaterThanOrEqual(
+    expect(pill, 'ドックの left が px で読めない').not.toBeNull();
+    expect(pill!, `ドックの left ${pill}px が小窓の右端 ${left! + width!}px に食い込んでいる`).toBeGreaterThanOrEqual(
       left! + width!,
     );
   });
 
-  it('横ステージで演出ストックと重ならない(ピルの左端 < ストックの左端)', () => {
+  it('横ステージで演出ストックと重ならない(ドックの左端 < ストックの左端)', () => {
     const stage = /const STAGE_LW = (\d+);/.exec(view);
     expect(stage, 'STAGE_LW が MonitorView.tsx に無い').not.toBeNull();
     const stock = ruleBody('.fx-stock');
     const stockLeftEdge = Number(stage![1]) - px(stock, 'right')! - px(stock, 'width')!;
-    const pill = px(ruleBody('.stage-scale.landscape .revolution-timer.at-mirror'), 'left')!;
+    const pill = px(ruleBody('.stage-scale.landscape .revolution-hud-dock.at-mirror'), 'left')!;
     expect(pill).toBeLessThan(stockLeftEdge);
   });
 
   it('縦ステージでは右へ逃がさず小窓の真上へ置く', () => {
     // 縦は小窓(right:258)とストック(left端 296)の隙間が 14px しかないので、
     // 右隣に置く余地は無い。left は据え置き、bottom で小窓を跨ぐ。
-    const body = ruleBody('.revolution-timer.at-mirror');
+    const body = ruleBody('.revolution-hud-dock.at-mirror');
     expect(px(body, 'left')).toBe(px(ruleBody('.count-mirror'), 'left'));
     const bottom = px(body, 'bottom');
-    expect(bottom, 'ピルの bottom が px で読めない').not.toBeNull();
-    expect(bottom!, 'ピルが小窓(bottom:12)に重なっている').toBeGreaterThan(px(ruleBody('.count-mirror'), 'bottom')!);
+    expect(bottom, 'ドックの bottom が px で読めない').not.toBeNull();
+    expect(bottom!, 'ドックが小窓(bottom:12)に重なっている').toBeGreaterThan(px(ruleBody('.count-mirror'), 'bottom')!);
   });
 });

@@ -59,6 +59,9 @@ describe('RevolutionHud', () => {
         startsAtMs: null,
         endsAtMs: null,
         multiplier: 3,
+        tapCount: 0,
+        tapDown: 0,
+        likeDown: 0,
         revCount: null,
         mirrorOn: false,
         mirrorLg: false,
@@ -85,23 +88,44 @@ describe('RevolutionHud', () => {
     expect(html).not.toContain('revolution-timer');
   });
 
-  it('intro 明けは7セグ脇のピルへ引き継ぐ(盤面を1分間ふさがない)', () => {
+  it('intro 明けは7セグ脇のドック(ピル+走行タリー)へ引き継ぐ(盤面を1分間ふさがない)', () => {
     freeze(NOW);
     const html = render({
       startsAtMs: NOW - REVOLUTION_HUD_INTRO_MS - 1000,
       endsAtMs: NOW + 30_000,
     });
     expect(html).not.toContain('revolution-overlay');
+    expect(html).toContain('revolution-hud-dock');
     expect(html).toContain('revolution-timer');
     expect(html).toContain('残り30秒');
+    // 走行タリー(2026-08-26)— 結果カットシーンの二者と同じラベル・タップ左。
+    expect(html).toContain('revolution-tally');
+    expect(html).toContain('タップの戦果');
+    expect(html).toContain('いいね反転');
+    expect(html.indexOf('rvt-tap')).toBeLessThan(html.indexOf('rvt-like'));
   });
 
-  it('ピルの位置クラスは小窓の有無に追従する', () => {
+  it('走行タリーは worker の窓カウンタを素通し表示する(0 でも -0 で出す)', () => {
     freeze(NOW);
     const base = { startsAtMs: NOW - REVOLUTION_HUD_INTRO_MS - 1000, endsAtMs: NOW + 30_000 };
-    expect(render({ ...base, mirrorOn: true })).toContain('revolution-timer at-mirror');
+    const zero = render(base);
+    // 0 額でもパネルは出す — 「なぜいいねで数字が減るのか」の説明の本体。
+    expect(zero).toMatch(/rvt-amt[^>]*>-0</);
+    const html = render({ ...base, tapCount: 12, tapDown: 36, likeDown: 45 });
+    expect(html).toMatch(/rvt-amt[^>]*>-36</);
+    expect(html).toMatch(/rvt-amt[^>]*>-45</);
+    expect(html).toContain('タップ12回');
+    // 倍率は両パネルの meta に出る(×1 のときは出さない)。
+    expect([...html.matchAll(/×3/g)].length).toBeGreaterThanOrEqual(2);
+    expect(render({ ...base, multiplier: 1 })).not.toMatch(/rvt-meta[^>]*>[^<]*×/);
+  });
+
+  it('ドックの位置クラスは小窓の有無に追従する', () => {
+    freeze(NOW);
+    const base = { startsAtMs: NOW - REVOLUTION_HUD_INTRO_MS - 1000, endsAtMs: NOW + 30_000 };
+    expect(render({ ...base, mirrorOn: true })).toContain('revolution-hud-dock at-mirror');
     expect(render({ ...base, mirrorOn: true, mirrorLg: true })).toContain(
-      'revolution-timer at-mirror mirror-lg'
+      'revolution-hud-dock at-mirror mirror-lg'
     );
   });
 
@@ -129,6 +153,8 @@ describe('MonitorView の配線(HUD を本体へ書き戻していないこと)'
     // 旧インライン実装のクラスが本体に残っていない(二重管理の防止)。
     expect(SRC).not.toContain('"tap-lock-overlay"');
     expect(SRC).not.toContain('"revolution-timer');
+    expect(SRC).not.toContain('"revolution-hud-dock');
+    expect(SRC).not.toContain('"revolution-tally');
   });
 
   it('導入カットイン中は HUD を出さないゲートが本体に残る(tap-lock-cutin.spec の対)', () => {

@@ -217,6 +217,9 @@ describe('発動 — worker はアームするだけ(窓はモニターの合図
       startsAtMs: NOW,
       endsAtMs: NOW + DUR_MS,
       multiplier: MULT,
+      tapCount: 0,
+      tapDown: 0,
+      likeDown: 0,
       nickname: 'なまえ',
       label: '白鳥',
     });
@@ -416,6 +419,89 @@ describe('起動演出中のタップは溜めて、窓オープンで**等倍**
     // ドレイン直後の押下は窓の中なので×3。
     e.press();
     expect(e.get().value).toBe(1000 - 5 - MULT);
+  });
+});
+
+describe('走行タリー — revolution スナップショットの tapCount / tapDown / likeDown(2026-08-26)', () => {
+  // モニターの二者HUD(タップ側/いいね側)の唯一のソース。worker の窓カウンタを
+  // そのまま載せる(第2の真実を作らない)。press は nudge で即時 delta、
+  // いいね反転は 2Hz 相乗り — 配送の速さはここでは見ず、値の正しさだけ固定する。
+  it('窓中の press で tapCount / tapDown が即時に進む(倍率込みの実減少量)', () => {
+    const e = plain(cfg());
+    openPlain(e);
+    e.press();
+    e.press();
+    const r = e.get().revolution!;
+    expect(r.tapCount).toBe(2);
+    expect(r.tapDown).toBe(MULT * 2);
+    expect(r.likeDown).toBe(0);
+  });
+
+  it('導入中の溜めタップは走行タリーに混ぜない(「まだ押す時間ではない」規約が DTO にも及ぶ)', () => {
+    let t = NOW;
+    const e = engine(cfg(), () => t);
+    e.start();
+    e.handleEvent(revGift());
+    e.revolutionCue({ action: 'start', effectId: startFxId(e), startedAtMs: NOW, preMs: PRE_MS });
+    const startsAtMs = e.get().revolution!.startsAtMs;
+    for (let i = 0; i < 5; i += 1) e.press();
+    t = startsAtMs + GIFT_FX_FREEZE_MARGIN_MS;
+    const s = e.drainIfChanged()!;
+    // 溜め5発は等倍で値に効いた(:393 の契約)が、窓の戦果としては数えない。
+    expect(s.revolution!.tapCount).toBe(0);
+    expect(s.revolution!.tapDown).toBe(0);
+    // 窓の中の1押しからが戦果。
+    e.press();
+    const r = e.get().revolution!;
+    expect(r.tapCount).toBe(1);
+    expect(r.tapDown).toBe(MULT);
+  });
+
+  it('いいね反転はゲージ+ストックの合算が likeDown へ載り、タップ側は動かない', () => {
+    const e = plain(cfg({ likeEvery: 10, likeStep: 5, likeStockCount: 2, likeStockStep: 25 }));
+    openPlain(e);
+    e.press();
+    e.handleEvent(like(10)); // 満タン1回目
+    e.handleEvent(like(10)); // 満タン2回目 → ストック満杯ボーナスも反転
+    const r = e.get().revolution!;
+    expect(r.tapCount).toBe(1);
+    expect(r.tapDown).toBe(MULT);
+    expect(r.likeDown).toBe((5 + 5 + 25) * MULT);
+  });
+
+  it('満了直前のタリーと revolution-end の戦果が接続する(恒等式)', () => {
+    // モニターは走行タリーの最終値から結果カットシーンの二者へそのまま繋がる —
+    // revolutionDownTotal = tapDown + likeDown / revolutionTapCount = tapCount。
+    vi.useFakeTimers();
+    try {
+      let t = NOW;
+      const e = plain(cfg({ likeEvery: 10, likeStep: 5 }), () => t);
+      openPlain(e);
+      e.press();
+      e.press();
+      e.handleEvent(like(10));
+      const r = e.get().revolution!;
+      expect(r.tapDown).toBe(MULT * 2);
+      expect(r.likeDown).toBe(5 * MULT);
+      t = NOW + DUR_MS + 25;
+      vi.advanceTimersByTime(DUR_MS + 25);
+      const end = e.get().recentEffects.find((x) => x.kind === 'revolution-end')!;
+      expect(end.revolutionTapCount).toBe(r.tapCount);
+      expect(end.revolutionLikeDown).toBe(r.likeDown);
+      expect(end.revolutionDownTotal).toBe(r.tapDown + r.likeDown);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('重ねがけの延長でタリーは継続する(リセットしない)', () => {
+    const e = plain(cfg());
+    openPlain(e);
+    e.press();
+    e.handleEvent(revGift()); // 走行中の再着弾 = 期限へ加算(:661 の契約)
+    const r = e.get().revolution!;
+    expect(r.tapCount).toBe(1);
+    expect(r.tapDown).toBe(MULT);
   });
 });
 

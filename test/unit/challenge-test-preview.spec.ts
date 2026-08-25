@@ -133,6 +133,11 @@ describe('▶テスト実演(革命)— 前置き → 窓 → 結果カットシ
     advance(REV_PRE + 1000);
     e.press();
     e.press();
+    // 走行タリー(二者HUD)も実演の計数で動く。いいね反転は実演に無いので恒等 0。
+    const r = e.get().revolution!;
+    expect(r.tapCount).toBe(2);
+    expect(r.tapDown).toBe(2 * 3); // pressStep 1 × 倍率 3
+    expect(r.likeDown).toBe(0);
     advance(REV_SEC * 1000 - 1000 + REVOLUTION_RESULT_MS);
     const end = e.get().recentEffects.find((x) => x.kind === 'revolution-end');
     expect(end).toBeDefined();

@@ -2448,11 +2448,26 @@ export interface ChallengeState {
     startsAtMs: Ms;
     endsAtMs: Ms;
     multiplier: number;
+    /**
+     * 窓中の実タップ数(worker の revTapCount が権威)。boost.tapCount と同じ規約:
+     * press RPC は nudge を通るので押すたび即時 delta。走行タリーの唯一のソース。
+     */
+    tapCount: number;
+    /** タップ由来の実減少量(クランプ後)。tapCount と同じく押下ごと即時。 */
+    tapDown: number;
+    /**
+     * いいね反転由来の実減少量(ゲージ + ストック、倍率適用後)。いいねの既存規約
+     * どおり 2Hz 相乗り。恒等式: revolution-end の revolutionDownTotal は最終
+     * スナップショットの tapDown + likeDown、revolutionTapCount は tapCount に一致
+     * (走行タリーと結果カットシーンの数字が接続する根拠)。
+     */
+    likeDown: number;
     nickname?: string;
     label?: string;
     /**
      * ▶テスト実演の窓(testEffect 'revolution')。値・統計・凍結には触れない。
      * 表示コードは実発動と区別しなくてよい — 設定画面の「■ 停止」判定だけが見る。
+     * 実演にいいね反転は無いので likeDown は恒等 0。
      */
     test?: true;
   };

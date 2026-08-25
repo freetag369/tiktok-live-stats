@@ -1988,6 +1988,25 @@ export function MonitorView(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shownBoostTap]);
 
+  // 革命▶実演中のタップ検知。実発動の窓は press effect が毎押下積まれて
+  // useChallengeSe が鳴らすが、実演は worker が数えるだけ(値・統計・凍結に
+  // 触れない規約)なので、タリーの増分を見るこの経路だけが手応えを受け持つ。
+  // **test ガード必須** — 実発動で鳴らすと press effect と二重になる。
+  const prevRevTap = useRef(0);
+  const shownRevTap = revolution?.tapCount ?? 0;
+  useEffect(() => {
+    const prev = prevRevTap.current;
+    prevRevTap.current = shownRevTap;
+    // 減る方向(窓クローズで 0 へ巻き戻る)では鳴らさない(boost と同じガード)。
+    if (shownRevTap > prev && revolution?.test === true && cfg?.challenge.seEnabled) {
+      playSe(
+        cfg.challenge.seSounds['press'],
+        effectiveSeVolume(cfg.challenge.seVolume, cfg.challenge.seVolumes['press'])
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownRevTap]);
+
   // 効果音(視覚とは独立の watermark)。モニターが開いている間はここが鳴らし、
   // ダッシュボード側は monitorOpen ゲートで黙る。設定は 120 秒ポーリング(CFG_POLL_MS)(上の
   // cfg 再取得)経由なので、音量変更の反映は最大 120 秒遅れる。
@@ -7210,6 +7229,9 @@ export function MonitorView(): React.JSX.Element {
             startsAtMs={revolution?.startsAtMs ?? null}
             endsAtMs={revolution?.endsAtMs ?? null}
             multiplier={revolution?.multiplier ?? 1}
+            tapCount={revolution?.tapCount ?? 0}
+            tapDown={revolution?.tapDown ?? 0}
+            likeDown={revolution?.likeDown ?? 0}
             revCount={revCount}
             mirrorOn={Boolean(mirrorOn)}
             mirrorLg={Boolean(mirrorOn) && countView === 'large'}

@@ -6122,16 +6122,30 @@ body {
 }
 
 /*
- * 告知を引き継ぐ常設ピル(REVOLUTION_HUD_INTRO_MS 経過後〜終了5秒前まで)。
+ * 告知を引き継ぐ常設ドック(REVOLUTION_HUD_INTRO_MS 経過後〜終了5秒前まで)。
+ * ピル(残り秒+×N)と走行タリー(タップ側/いいね側の二者・2026-08-26)を縦積みする器。
  * 置き場所は「7セグの居場所に追従する」— 通常は7セグの真上・左寄せ、ルーレットの
  * 小窓(.count-mirror)が出ている間はその隣(2026-08-20 ユーザー決定・添付画像2枚)。
- * 地色と角は .count-mirror / .fxs-row と同格(暗幕と不透明動画の上に乗るので濃いめ)、
- * 色は .revolution-box の赤系。z-index は付けないこと(fx-backdrop.spec.ts が凍結)。
+ * 位置の算術はすべてこのドックが持ち、ピルとタリーは中で static(位置を1回だけ書く)。
+ * at-mirror は bottom アンカーなので column-reverse — ピルが従来座標に留まり、
+ * タリーはその上へ積み上がる。z-index は付けないこと(fx-backdrop.spec.ts が凍結)。
  */
-.revolution-timer {
+.revolution-hud-dock {
   position: absolute;
   left: 14px;
   top: 17%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none;
+}
+
+/*
+ * ピル本体。地色と角は .count-mirror / .fxs-row と同格(暗幕と不透明動画の上に
+ * 乗るので濃いめ)、色は .revolution-box の赤系。
+ */
+.revolution-timer {
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -6143,7 +6157,6 @@ body {
     inset 0 0 0 2px rgba(255, 120, 120, 0.75),
     0 0 24px rgba(255, 60, 60, 0.35),
     0 0 24px rgba(0, 0, 0, 0.6);
-  pointer-events: none;
   animation: tap-lock-in 240ms ease-out both;
 }
 
@@ -6179,19 +6192,21 @@ body {
  * 114 = 小窓の bottom 12 + 小窓の高さ約91(padding 14 + 4桁 shrink 後の桁高約77)+ 余白11。
  * lg は bottom:150 で桁 96px(高さ約173)なので 348 = 150 + 187 + 11。
  */
-.revolution-timer.at-mirror {
+.revolution-hud-dock.at-mirror {
   left: 14px;
   top: auto;
   bottom: 114px;
+  /* bottom アンカーなので反転 — ピルが従来座標に留まり、タリーは上へ積み上がる。 */
+  flex-direction: column-reverse;
 }
 
-.revolution-timer.at-mirror.mirror-lg {
+.revolution-hud-dock.at-mirror.mirror-lg {
   bottom: 348px;
 }
 
 /* 横長は7セグの上の余白が 12px しかない(.monitor-root の landscape 節参照)ので、
    タイトル帯の直下へ少し下げる。 */
-.stage-scale.landscape .revolution-timer {
+.stage-scale.landscape .revolution-hud-dock {
   left: 16px;
   top: 20%;
 }
@@ -6201,15 +6216,87 @@ body {
  * ストックの左端は x=1036(1280-14-230)なので、ピルの幅(約300px)でも届かない。
  * .count-mirror の width を動かしたらここも直すこと(count-mirror.spec が算術で見張る)。
  */
-.stage-scale.landscape .revolution-timer.at-mirror {
+.stage-scale.landscape .revolution-hud-dock.at-mirror {
   left: 488px;
   top: auto;
   bottom: 12px;
 }
 
 /* lg は width:560 = 右端 574。 */
-.stage-scale.landscape .revolution-timer.at-mirror.mirror-lg {
+.stage-scale.landscape .revolution-hud-dock.at-mirror.mirror-lg {
   left: 588px;
+}
+
+/*
+ * 走行タリー(タップ側/いいね側の二者)。構造・色軸は結果カットシーンの
+ * .rs-fighter(タップ左・いいね右)の縮小版 — 窓の走行中の姿なので、
+ * あちらの見た目を変えるときはこちらも対で直すこと。数値の権威は
+ * challenge.revolution.tapCount / tapDown / likeDown(worker の窓カウンタ)。
+ */
+.revolution-tally {
+  display: flex;
+  gap: 10px;
+}
+
+.rvt-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 18px 10px;
+  border-radius: 14px;
+  background: rgba(20, 2, 6, 0.72);
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 90, 90, 0.8),
+    0 0 24px rgba(255, 50, 60, 0.4),
+    0 4px 14px rgba(0, 0, 0, 0.6);
+  animation: tap-lock-in 240ms ease-out both;
+}
+
+.rvt-label {
+  font-family: var(--font);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #ffb4b4;
+  text-shadow: 0 0 10px rgba(255, 80, 80, 0.75);
+}
+
+/* 二者の数字。増分パンチは key=回数/額 の再マウント(.boost-count と同じ手口)。 */
+.rvt-amt {
+  font-family: var(--num);
+  font-size: 36px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #ffdada;
+  text-shadow:
+    0 0 14px rgba(255, 80, 80, 0.95),
+    0 0 40px rgba(255, 30, 40, 0.5);
+  animation: boost-count-punch 300ms ease-out;
+}
+
+.rvt-meta {
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffe2e2;
+  text-shadow: 0 0 10px rgba(255, 80, 80, 0.75);
+}
+
+.rvt-meta em {
+  font-style: normal;
+  color: #ff9a9a;
+  margin-left: 4px;
+}
+
+/* 横長は縦の余白が薄いぶん詰める(.landscape .boost-count と同じ判断)。 */
+.stage-scale.landscape .rvt-amt {
+  font-size: 30px;
+}
+
+.stage-scale.landscape .rvt-panel {
+  padding: 6px 14px 8px;
 }
 
 /* 革命バナー(発動/終了)。大当たり格 — banner-boost と同じ構造で変数差し替えのみ。 */
@@ -6509,6 +6596,12 @@ body {
   /* ピルも同じ理由で残す(状態の説明であって演出ではない)。 */
   .revolution-timer,
   .revolution-timer .rt-secs {
+    animation: none;
+  }
+
+  /* 走行タリーも表示は残す — 「なぜいいねで数字が減るのか」の説明の本体。動きだけ止める。 */
+  .rvt-panel,
+  .rvt-amt {
     animation: none;
   }
 }
