@@ -27,6 +27,7 @@ import {
   takeNextBanner,
   type StageNext,
 } from '@shared/fx-stage';
+import { BANNER_GIFT_SCALE_MS } from '@shared/gift-scale-fx';
 import { bannerRank, fxRank, type FxBannerKind } from '@shared/fx-priority';
 
 /**
@@ -58,14 +59,21 @@ describe('バナー尺と monitor.css の同期', () => {
     const card = overrides.find((o) => o.variant === 'gift-card');
     expect(card, '.float.gift-card の animation-duration 上書きが見つからない').toBeDefined();
     expect(card!.ms).toBe(BANNER_GIFT_CARD_MS);
+    // ダイヤ増減の浮上(2026-08-26)。CSS と JS 定数がズレると、ラッチが実尺より
+    // 短くなって次の演出がカウントアップの上に生える。
+    const scale = overrides.find((o) => o.variant === 'banner-gift-scale');
+    expect(scale, '.float.banner-gift-scale の animation-duration 上書きが見つからない').toBeDefined();
+    expect(scale!.ms).toBe(BANNER_GIFT_SCALE_MS);
     // 尺を上書きする variant が増えたら bannerDurationMs も更新が要る。
-    expect(overrides.map((o) => o.variant).sort()).toEqual(['gift-card']);
+    expect(overrides.map((o) => o.variant).sort()).toEqual(['banner-gift-scale', 'gift-card']);
   });
 
   it('既存の安全弁 FLOAT_ABORT_MS がラッチ+間合いを飲み込む', () => {
     // ラッチが切れたのにバナーがまだ画面に残っている、が起きない不等式。
     // 間合いを伸ばしたらここが落ちて気づく。
-    expect(FLOAT_ABORT_MS).toBeGreaterThanOrEqual(BANNER_GIFT_CARD_MS + STAGE_GAP_CUTIN_MS);
+    expect(FLOAT_ABORT_MS).toBeGreaterThanOrEqual(
+      Math.max(BANNER_GIFT_CARD_MS, BANNER_GIFT_SCALE_MS) + STAGE_GAP_CUTIN_MS
+    );
   });
 
   it('ルーレット短縮スピンの1周期はバナー尺を下回らない', () => {
@@ -86,8 +94,10 @@ describe('バナー尺と monitor.css の同期', () => {
 });
 
 describe('bannerDurationMs', () => {
-  it('gift-card だけ長い', () => {
+  it('尺を上書きする variant だけ長い', () => {
     expect(bannerDurationMs('gift-card t3 bad')).toBe(BANNER_GIFT_CARD_MS);
+    expect(bannerDurationMs('banner-gift-scale good')).toBe(BANNER_GIFT_SCALE_MS);
+    expect(bannerDurationMs('bad banner-gift-scale')).toBe(BANNER_GIFT_SCALE_MS);
     expect(bannerDurationMs('bad banner-follow')).toBe(BANNER_MS);
     expect(bannerDurationMs('bad like-float')).toBe(BANNER_MS);
     expect(bannerDurationMs('banner-helper good')).toBe(BANNER_MS);
@@ -97,6 +107,15 @@ describe('bannerDurationMs', () => {
   it('トークン境界で判定する(部分一致で誤爆しない)', () => {
     expect(bannerDurationMs('banner-gift-cardish')).toBe(BANNER_MS);
     expect(bannerDurationMs('gift-cards')).toBe(BANNER_MS);
+    expect(bannerDurationMs('banner-gift-scaled')).toBe(BANNER_MS);
+    expect(bannerDurationMs('banner-gift-scale-x')).toBe(BANNER_MS);
+  });
+
+  it('尺の上書きトークンは1つの cls に同居させない(同居すると書き順で尺が変わる)', () => {
+    // 走査は cls の並び順なので、両方持たせると結果が書き順に依存する。実装が
+    // そうなっていることを明示し、将来 cls を組むときの警告にする。
+    expect(bannerDurationMs('gift-card banner-gift-scale')).toBe(BANNER_GIFT_CARD_MS);
+    expect(bannerDurationMs('banner-gift-scale gift-card')).toBe(BANNER_GIFT_SCALE_MS);
   });
 });
 
@@ -584,7 +603,12 @@ describe('clampBannerEndAt — 時計の後方ステップからの回復', () =
   });
 
   it('上限は最長バナー尺と同値(これより短いと正常なギフトカードを切り詰める)', () => {
-    expect(BANNER_LATCH_MAX_AHEAD_MS).toBe(BANNER_GIFT_CARD_MS);
+    expect(BANNER_LATCH_MAX_AHEAD_MS).toBe(
+      Math.max(BANNER_MS, BANNER_GIFT_CARD_MS, BANNER_GIFT_SCALE_MS)
+    );
+    // 新しい長尺バナーを足したらここが落ちる — 放置すると clampBannerEndAt が
+    // ラッチを引き戻し、残り尺のあいだ次の演出が上に生える。
+    expect(BANNER_LATCH_MAX_AHEAD_MS).toBeGreaterThanOrEqual(BANNER_GIFT_SCALE_MS);
   });
 });
 
@@ -614,9 +638,11 @@ describe('ブースト結果バナーだけの追加間合い', () => {
   });
 
   it('上限は「最長バナー尺 + 追加間合い」(正当な待ちを切り詰めない)', () => {
-    expect(BOOST_GAP_LATCH_MAX_AHEAD_MS).toBe(BANNER_GIFT_CARD_MS + STAGE_GAP_BOOST_RESULT_MS);
+    expect(BOOST_GAP_LATCH_MAX_AHEAD_MS).toBe(
+      BANNER_LATCH_MAX_AHEAD_MS + STAGE_GAP_BOOST_RESULT_MS
+    );
     expect(BOOST_GAP_LATCH_MAX_AHEAD_MS).toBeGreaterThanOrEqual(
-      boostGapUntilFor(NOW + BANNER_GIFT_CARD_MS) - NOW
+      boostGapUntilFor(NOW + BANNER_LATCH_MAX_AHEAD_MS) - NOW
     );
   });
 });

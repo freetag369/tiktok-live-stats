@@ -152,6 +152,18 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
       // (お題・絶対時刻)がモニターの常設オーバーレイへ届いている必要がある。
       if (challenge.quizCue(p)) session.nudgeChallenge();
     },
+    'challenge.universeCue': async (p) => {
+      // quizCue と同じ理由で即時 nudge — 減算連打が始まるより先に
+      // ChallengeState.universe(**fromValue** と絶対時刻)がモニターへ届いて
+      // いる必要がある。30 段の割り方はこの fromValue が唯一の権威。
+      if (challenge.universeCue(p)) session.nudgeChallenge();
+    },
+    'challenge.lionCue': async (p) => {
+      // universeCue と同じ理由で即時 nudge — +N の連打が始まるより先に
+      // ChallengeState.lion(**each / steps** と絶対時刻)がモニターへ届いて
+      // いる必要がある。段組みはこの2つが唯一の権威。
+      if (challenge.lionCue(p)) session.nudgeChallenge();
+    },
 
     'q.viewerTable': async (p) => store.getSessionViewerTable(p.sessionId, p),
     'q.viewer': async (p) => store.getViewer(p.userId, p.sessionId),
@@ -260,6 +272,8 @@ type HandlerMap = {
   'challenge.boostCue': (p: D.ChallengeBoostCue) => Promise<void>;
   'challenge.revolutionCue': (p: D.ChallengeRevolutionCue) => Promise<void>;
   'challenge.quizCue': (p: D.ChallengeQuizCue) => Promise<void>;
+  'challenge.universeCue': (p: D.ChallengeUniverseCue) => Promise<void>;
+  'challenge.lionCue': (p: D.ChallengeLionCue) => Promise<void>;
   'q.viewerTable': (p: { sessionId: number | null } & D.ViewerTableQuery) => Promise<unknown>;
   'q.viewer': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;
   'q.recallCard': (p: { userId: string; sessionId: number | null }) => Promise<unknown>;

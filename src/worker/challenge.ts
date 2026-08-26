@@ -9,6 +9,8 @@ import type {
   ChallengeResult,
   ChallengeQuizCue,
   ChallengeRevolutionCue,
+  ChallengeUniverseCue,
+  ChallengeLionCue,
   ChallengeState,
   ChallengeStats,
   ChallengeStatus,
@@ -17,6 +19,8 @@ import type {
   QuizRule,
   QuizThresholdRule,
   RevolutionRule,
+  UniverseRule,
+  LionRule,
   RoulettePattern,
   TapBoostRule,
   TapLockRule,
@@ -53,6 +57,8 @@ import {
   matchTapBoost,
   matchTapLock,
   matchRevolution,
+  matchUniverse,
+  matchLion,
   matchQuiz,
   judgeQuizVote,
   tapBoostActivationCount,
@@ -85,6 +91,22 @@ import {
 } from '@shared/challenge';
 import { BOOST_SETTLE_BUDGET_MS, TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
 import { REVOLUTION_RESULT_MS, REVOLUTION_SETTLE_BUDGET_MS } from '@shared/revolution-settle';
+import {
+  UNIVERSE_ARM_MAX_MS,
+  UNIVERSE_DEFERRED_OPS_MAX,
+  UNIVERSE_MAX_MS,
+  UNIVERSE_TOTAL_MS,
+} from '@shared/universe';
+import {
+  LION_AMOUNT_EACH_DEFAULT,
+  LION_ARM_MAX_MS,
+  LION_DEFERRED_OPS_MAX,
+  LION_MAX_MS,
+  LION_STEPS_DEFAULT,
+  LION_TOTAL_DISPLAY_MS,
+  lionCutsceneMs,
+  lionSettleAtMs,
+} from '@shared/lion-settle';
 import { planTestQuizVotes, quizNominalAmount } from '@shared/quiz-settle';
 import { clampFutureMs } from '@shared/time';
 import { drawRoulettePattern } from '@shared/roulette-fx';
@@ -209,7 +231,7 @@ export class ChallengeEngine {
   /** 初回 start のラッチ(dto の firstStartedMs 参照)。stop/reset では消さない。 */
   private firstStartedMs: number | null = null;
   private achievedMs: number | null = null;
-  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0 };
+  private stats: ChallengeStats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0, universeDown: 0 };
   private recentEffects: ChallengeEffect[] = [];
   /**
    * get() が返す recentEffects のコピーのキャッシュ。press 連打(フィーバー中は
@@ -499,6 +521,32 @@ export class ChallengeEngine {
   private testRevolutionMs = 0;
   private testRevolutionResultMs = 0;
   /**
+   * ▶テスト実演(testEffect 'universe')の窓。null = 実演なし。revolution の実演窓と
+   * 同型で、get() は**実発動と同じ `universe` キー**へ合流させる。
+   *
+   * **armed は絶対に立てない** — 立てるとモニターの armed 監視が本物の
+   * universeCue{start} を撃ってしまう(quiz の実演と同じ罠)。
+   * 満了の合図も同じく **armFreezeTimer が唯一の出口**。
+   */
+  private testUniverseUntilMs: number | null = null;
+  private testUniverseStartMs = 0;
+  /** 実演の起点(現在値。0/未開始なら設定の initialValue)。値は動かさない。 */
+  private testUniverseFrom = 0;
+  private testUniverseBlocked = 0;
+  /**
+   * ▶テスト実演(testEffect 'lion')の窓。null = 実演なし。universe の実演窓と
+   * 同型で、get() は**実発動と同じ `lion` キー**へ合流させる。
+   *
+   * **armed は絶対に立てない** — 立てるとモニターの armed 監視が本物の
+   * lionCue{start} を撃ってしまう(universe / quiz の実演と同じ罠)。
+   * 満了の合図も同じく **armFreezeTimer が唯一の出口**。
+   */
+  private testLionUntilMs: number | null = null;
+  private testLionStartMs = 0;
+  /** 実演で見せる額と発数(対象行の値。**値は動かさない**)。 */
+  private testLionEach = 0;
+  private testLionSteps = 0;
+  /**
    * ▶テスト実演(testEffect 'quiz')の窓。null = 実演なし。revolution の実演窓と
    * 同型だが、**投票はダミー**(ライブ未接続ではコメントが来ないため)。
    * `testQuizVotes` は「到着時刻 → good/bad」の予定表で、登録時に this.rand で
@@ -765,6 +813,78 @@ export class ChallengeEngine {
    */
   private revolutionDeferredOps: Array<{ run: () => void; fx: ChallengeFxQueueItem | null }> = [];
   /**
+   * 一撃クリアバリア(2026-08-26 ユーザー決定「バリア方式」): 発動(アーム)〜清算に
+   * 届いた**全 op**(critical 含む)の保留列。**quiz バリアと同型で、革命の
+   * 「fx 付きだけ」方式は採らない** — applyOrQueue には fx を持たない値変更 op が
+   * 大量に入る(like / コメント妨害 / コメントお助け / 入室ルーレット / ギフト
+   * ルーレット / 素ギフト)。この演出は「commit 時点の残量 N を 30 分割して 0 まで
+   * 削る」絵なので、途中で N が動くとカウントダウンの意味そのものが壊れる。
+   * 革命の窓(60秒・数字は動いてよい・幕が無い)とは前提が逆。
+   * 加えて 25 秒間ずっと不透明な幕が張りっぱなしで、下に出せる演出が1つも無い。
+   * 上限 UNIVERSE_DEFERRED_OPS_MAX。**永続化しない**。
+   */
+  private universeDeferredOps: Array<{ run: () => void; fx: ChallengeFxQueueItem | null }> = [];
+  /**
+   * アーム済み一撃クリア(モニターが「発動時点で溜まっていたキュー」を消化し
+   * 終えるのを待っている)。不変条件: `armedUniverse !== null ⟹ universeUntilMs === null`。
+   */
+  private armedUniverse: {
+    id: number;
+    atMs: number;
+    deadlineMs: number;
+    nickname: string;
+    label: string;
+    flash: boolean;
+  } | null = null;
+  /** 演出の開始(commit で入る絶対時刻 = モニターが導入カットインを再生し始めた時刻)。 */
+  private universeStartMs = 0;
+  /**
+   * 演出の終端 = **清算時刻**。この時刻に value=0 と universe-end が確定する。
+   * `fxFreezeUntilMs` はこれより GIFT_FX_FREEZE_MARGIN_MS だけ後ろに置く —
+   * その差が「CLEAR は必ず締めのカットインの後」の構造保証になる。
+   */
+  private universeUntilMs: number | null = null;
+  /** commit の瞬間の value(モニターの 30 分割カウントダウンの権威)。 */
+  private universeFromValue = 0;
+  private universeNickname = '';
+  private universeLabel = '';
+  /** 演出中に破棄したタップ数(quizBlocked と同じ「押したのに効かない」手応え)。 */
+  private universeBlocked = 0;
+  /**
+   * ライオン(Lion 29,999💎)のバリアで清算待ちの op。universeDeferredOps の鏡像で
+   * 対象も同じく**全 op(critical 含む)**。43 秒のあいだ不透明な幕が張りっぱなしで
+   * 下に出せる演出が1つも無いのは universe と同じ。上限 LION_DEFERRED_OPS_MAX。
+   * **永続化しない**。
+   */
+  private lionDeferredOps: Array<{ run: () => void; fx: ChallengeFxQueueItem | null }> = [];
+  /**
+   * アーム済みライオン(モニターが「発動時点で溜まっていたキュー」を消化し
+   * 終えるのを待っている)。不変条件: `armedLion !== null ⟹ lionUntilMs === null`。
+   */
+  private armedLion: {
+    id: number;
+    atMs: number;
+    deadlineMs: number;
+    each: number;
+    steps: number;
+    nickname: string;
+    label: string;
+    flash: boolean;
+  } | null = null;
+  /** 演出の開始(commit で入る絶対時刻 = モニターが導入カットインを再生し始めた時刻)。 */
+  private lionStartMs = 0;
+  /**
+   * **値を動かす時刻**(= 段⑥「合計」の頭 = startMs + lionSettleAtMs(steps))。
+   * universe の「演出の終端 == 清算」とはここだけ形が違う — 清算のあとに 5 秒の
+   * 発表が残るので、`fxFreezeUntilMs` は更に LION_TOTAL_DISPLAY_MS ぶん後ろへ置く。
+   */
+  private lionUntilMs: number | null = null;
+  /** commit の瞬間に焼いた額と発数(モニターの段組みと合計発表の権威)。 */
+  private lionEach = 0;
+  private lionSteps = 0;
+  private lionNickname = '';
+  private lionLabel = '';
+  /**
    * 凍結中に届いたイベントの値適用+演出の保留キュー(dedup・ランキング集計は
    * 凍結中も即時に回る — 取りこぼしゼロの肝)。解除時に到着順で実行し、途中で
    * 新たなバンドギフトが出たら再凍結してドレインを中断する(連続ギフトが
@@ -846,7 +966,7 @@ export class ChallengeEngine {
     // stop→start・reset で張り直すと WakeRow の錨が前進して起床経過が巻き戻る。
     this.firstStartedMs ??= this.startedMs;
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0, universeDown: 0 };
     this.recentEffects = [];
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
@@ -889,6 +1009,10 @@ export class ChallengeEngine {
     // お題ルーレットも同じ — 窓・投票・予約 FIFO・バリアの溜め分をまとめて破棄
     // (pendingOps を捨てるのと同じ判断: 新ランは initialValue から素で始める)。
     this.clearQuiz();
+    // 一撃クリアも同じ(アーム・走行・バリアの溜め分をまとめて破棄)。
+    this.clearUniverse();
+    // ライオンも同じ。
+    this.clearLion();
     // 数値到達の再武装も新ランのぶんを作り直す。**this.value は上で initialValue に
     // なっている**ので、初期値より下のしきい値は armed に入らない = 開始した瞬間に
     // 鳴らない(initialQuizThresholdArmed の doc 参照)。
@@ -926,6 +1050,18 @@ export class ChallengeEngine {
       this.pendingOps.push(...this.quizDeferredOps);
       this.quizDeferredOps = [];
       this.clearQuiz();
+      // 一撃クリアのバリアの溜め分も同じ規約で移送。**値は 0 にしない** —
+      // stop は「値を残す」規約で、演出の途中で止めたぶんまで清算する理由が
+      // 無い(universe-end も積まない — status 遷移が合図)。
+      this.pendingOps.push(...this.universeDeferredOps);
+      this.universeDeferredOps = [];
+      this.clearUniverse();
+      // ライオンのバリアの溜め分も同じ規約で移送。**値は増やさない** — stop は
+      // 「値を残す」規約で、演出の途中で止めたぶんまで清算する理由が無い
+      // (lion-end も積まない — status 遷移が合図)。
+      this.pendingOps.push(...this.lionDeferredOps);
+      this.lionDeferredOps = [];
+      this.clearLion();
       // 革命バリアの溜め分も同じ規約で移送 — 後段の clearRevolution は残りを破棄する
       // 側の出口なので、必ずここ(forceApplyPendingOps より前)で空にしておく。
       this.pendingOps.push(...this.revolutionDeferredOps);
@@ -985,6 +1121,10 @@ export class ChallengeEngine {
     this.clearRevolution();
     // お題も全破棄(pendingOps と同じ判断 — 直後に initialValue で上書きする)。
     this.clearQuiz();
+    // 一撃クリアも同じ。
+    this.clearUniverse();
+    // ライオンも同じ。
+    this.clearLion();
     // 排他スケジューリングの予約も破棄(start/stop と同じ判断)。
     this.pendingTapLock = null;
     this.deferredBoosts = [];
@@ -997,7 +1137,7 @@ export class ChallengeEngine {
     this.resetQuizThresholds();
     this.startedMs = null;
     this.achievedMs = null;
-    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0 };
+    this.stats = { presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0, universeDown: 0 };
     this.recentEffects = [];
     this.effectsSnapshot = null;
     this.seenFollowers.clear();
@@ -1091,6 +1231,16 @@ export class ChallengeEngine {
         return this.get();
       }
     }
+    // 一撃クリアの実演窓も**破棄**する(本番と同じ — 25 秒の演出中は効かない)。
+    // 手応えの blocked だけ増やす。
+    if (this.testUniverseUntilMs !== null) {
+      const nowMs = this.now();
+      if (nowMs >= this.testUniverseStartMs && nowMs < this.testUniverseUntilMs) {
+        this.testUniverseBlocked++;
+        this.dirty = true;
+        return this.get();
+      }
+    }
     // お題の実演窓は**破棄**する(本番と同じ — 窓・投票中のタップは効かない)。
     // 手応えの blocked だけ増やす。前置き中(startMs 前)は破棄しない — 本番でも
     // バリアはボタンを殺さないので、実演でもそこは素通しにする。
@@ -1110,6 +1260,29 @@ export class ChallengeEngine {
     const nowMs = this.now();
     // 期限切れブーストの清算は flushFxFreeze の冒頭(settleBoost)が行う。
     this.flushFxFreeze(nowMs);
+    // ── 一撃クリア(universe)の走行中はタップを**破棄** ────────────────────
+    // **この位置が仕様そのもの**なので動かさないこと:
+    //  - flushFxFreeze(すぐ上)より**下** = 期限切れの清算を必ず先に見る。上に
+    //    置くと、連打している配信者が唯一の呼び出し元なのに清算へ到達せず
+    //    **演出が自分自身を閉じ込める**(tapLock 分岐と同じ罠)。
+    //  - **フィーバーのタップ窓(すぐ下)より上** = 既存4例外(フィーバー窓 /
+    //    3・2・1 / お邪魔 / お題投票中)の中でここだけが最上位。プレーンの
+    //    フィーバー窓は凍結を張らないので一撃クリアと重なりうる。重なったら
+    //    **ランを終わらせる側が勝つ** — 25 秒の幕の裏でフィーバーの倍率が値を
+    //    動かすと、モニターが fromValue から 0 へ落としている絵が嘘になる。
+    //  - ▶実演ブロック / enabled・status ガードより下は既存どおり。
+    // これは恒久ルール「走行中のタップは演出より優先」の**4つ目の例外**
+    // (例外はゲームの状態を持つ演出だけ — こちらはゲームの**結末**そのもの)。
+    // ガードは universeUntilMs(コミット〜清算の生存印)— **アーム中
+    // (armedUniverse)はここに入れない**。まだ何も映っていない間に押下を殺すと
+    // 44,999💎 の着弾から最大 120 秒ボタンが無反応になる(革命・お題と同じ判断)。
+    // アーム中の押下は通常経路へ落ちて即時に効き、commit が universeFromValue を
+    // 採り直すので、減った残量がそのままカウントダウンの起点になる。
+    if (this.universeActive(nowMs)) {
+      this.universeBlocked++;
+      this.dirty = true;
+      return this.get();
+    }
     // タップウィンドウ中のタップは applyOrQueue に入れない — シネマティック
     // モードでは「数えるだけ」(値・統計・effect は settleBoost が一括で確定する。
     // effect を積まないので ring を食い潰さない)、プレーンモードでは即時×倍率。
@@ -1499,7 +1672,7 @@ export class ChallengeEngine {
         break;
       }
       case 'gift': {
-        const m = matchGiftRule(cfg, { giftId: 'test', diamonds: spec.diamonds });
+        const m = matchGiftRule(cfg, { giftId: 'test', giftName: '', diamonds: spec.diamonds });
         const band = spec.bandId ? (cfg.giftBandFx.bands.find((b) => b.id === spec.bandId) ?? null) : null;
         const usableBand = band && band.clip !== 'off' ? band : null;
         // 全面カット行の実演。bandId と同じ流儀で「行を名指ししたら一致判定は
@@ -1517,7 +1690,9 @@ export class ChallengeEngine {
           : giftFxRepeat(cfg, spec.repeat ?? 1, { banded: false, fxDurationMs: 0 });
         e = {
           kind: 'gift',
-          amount: m?.amount ?? 0,
+          // spec.amount は設定画面の行ごとの ▶ が渡す「その行が実際に出す額」。
+          // 無指定なら従来どおり写像(giftRules → giftScale → giftDefault)の結果。
+          amount: spec.amount ?? m?.amount ?? 0,
           ...(m?.flash ? { flash: true } : {}),
           nickname: 'テスト',
           // 角括弧付きなのは実データと見分けるため — モニターは実名の無いギフトを
@@ -1537,6 +1712,9 @@ export class ChallengeEngine {
           // 連打反復の実演。カットイン併用時は 1 に倒す — testEffect は凍結を
           // 張らない契約なので、反復させると数字が演出中に動いてしまう。
           ...(testRep > 1 ? { fxRepeat: testRep, fxRepeatIntervalMs: cfg.giftRepeatFx.intervalMs } : {}),
+          // ダイヤ増減の浮上演出の実演。bandId / fullCutId と同じ流儀で「名指ししたら
+          // 一致判定もしきい値も評価しない」— 設定行の見た目を確認するのが目的。
+          ...(spec.scale === true ? { giftScale: true as const } : {}),
           diamonds: spec.diamonds,
         };
         break;
@@ -1717,6 +1895,67 @@ export class ChallengeEngine {
         };
         break;
       }
+      case 'universe': {
+        // 一撃クリアの試写。25 秒の通し(導入カット → 30 段の減算連打 → 締めカット)を
+        // 実演する。**値・統計・status には触れない**(revolution の実演と同じ規約)
+        // ので CLEAR は出ない — 締めのカットインで終わる。
+        const rule =
+          cfg.universe.rules.find((r) => r.id === spec.universeId) ??
+          cfg.universe.rules.find((r) => r.enabled) ??
+          cfg.universe.rules[0];
+        const cine = this.fxAllowed();
+        // 起点は現在値。未開始・0 のときは設定の initialValue を使う
+        // (「0 → 0」の無意味な絵を出さないため)。
+        const from = this.value > 0 ? this.value : cfg.initialValue;
+        if (this.testPreviewAllowed()) {
+          this.testUniverseStartMs = atMs;
+          this.testUniverseUntilMs = atMs + (cine ? UNIVERSE_TOTAL_MS : 0);
+          this.testUniverseFrom = from;
+          this.testUniverseBlocked = 0;
+          this.armFreezeTimer();
+        }
+        e = {
+          kind: 'universe-start',
+          amount: 0,
+          universeEndsAtMs: atMs + (cine ? UNIVERSE_TOTAL_MS : 0),
+          fxDurationMs: cine ? UNIVERSE_TOTAL_MS : 0,
+          ...(rule?.flash ? { flash: true } : {}),
+          nickname: 'テスト',
+        };
+        break;
+      }
+      case 'lion': {
+        // ライオンの試写。43 秒の通し(導入カット → +N の連打 → 全面カット →
+        // 合計発表)を実演する。**値・統計・凍結には触れない**(universe の実演と
+        // 同じ規約)ので 7セグは動かない — 幕の中の札と合計だけが出る。
+        const rule =
+          cfg.lion.rules.find((r) => r.id === spec.lionId) ??
+          cfg.lion.rules.find((r) => r.enabled) ??
+          cfg.lion.rules[0];
+        const cine = this.fxAllowed();
+        const each = rule?.amountEach ?? LION_AMOUNT_EACH_DEFAULT;
+        const steps = rule?.steps ?? LION_STEPS_DEFAULT;
+        const cutMs = cine ? lionCutsceneMs(steps) : 0;
+        if (this.testPreviewAllowed()) {
+          this.testLionStartMs = atMs;
+          this.testLionUntilMs = atMs + cutMs;
+          this.testLionEach = each;
+          this.testLionSteps = steps;
+          this.armFreezeTimer();
+        }
+        e = {
+          kind: 'lion-start',
+          amount: 0,
+          lionEach: each,
+          lionSteps: steps,
+          lionTotal: each * steps,
+          lionEndsAtMs: atMs + cutMs,
+          fxDurationMs: cutMs,
+          ...(rule?.flash ? { flash: true } : {}),
+          nickname: 'テスト',
+        };
+        break;
+      }
       case 'quiz': {
         // お題ルーレットの試写。前置き(導入カット → 回転 → 決定表示)に続けて
         // **挑戦ウィンドウ・投票・結果発表まで通しで**実演する(2026-08-21 ユーザー決定)。
@@ -1808,7 +2047,11 @@ export class ChallengeEngine {
     // 実演窓を開いた種別だけが「■ 停止」の対象。尺は worker が権威(設定画面へ
     // 算術を複製しない)— 結果カットシーンぶんも足した「見終わるまで」の長さ。
     const previewMs =
-      this.testRevolutionUntilMs !== null
+      this.testUniverseUntilMs !== null
+        ? this.testUniverseUntilMs - atMs
+        : this.testLionUntilMs !== null
+        ? this.testLionUntilMs - atMs
+        : this.testRevolutionUntilMs !== null
         ? this.testRevolutionUntilMs - atMs + this.testRevolutionResultMs
         : this.testQuizVoteEndsMs !== null
           ? this.testQuizVoteEndsMs - atMs + this.testQuizResultMs
@@ -2118,7 +2361,10 @@ export class ChallengeEngine {
       // 積まない — 溜めると清算後に一括加算され「蓄積されない」に反する。
       // アーム中(バリア消化待ち)から捨てるのはバリアとの整合 — ここで素通しすると
       // applyOrQueue のバリアが like op を deferred へ積み、結局「蓄積」になる。
-      if (this.quizBarrierActive()) return false;
+      // 一撃クリアの走行中も同じ判断で**完全破棄** — 25 秒の減算連打は
+      // 「commit 時点の残量 N を 0 まで削る」絵で、清算後の一括加算は
+      // その結末(CLEAR)そのものを覆してしまう。
+      if (this.universeBarrierActive() || this.quizBarrierActive()) return false;
       // ここから下は「いいね妨害」= カウント加算。無効なら値には触らない。
       if (cfg.likeEvery <= 0 || cfg.likeStep <= 0) return false;
       const likeOp = (allowFx: boolean): boolean => {
@@ -2339,8 +2585,63 @@ export class ChallengeEngine {
         );
       }
 
-      // お題ルーレット。fanStamp・タップブースト・革命の**次・お邪魔より先**に評価
-      // (matchQuiz の規約 — 同じ giftId の誤設定では革命が勝つ)。一致したらこの
+      // 一撃クリア(TIKTOK UNIVERSE)。fanStamp・タップブースト・革命の**次・お題より
+      // 先**に評価する(matchUniverse の規約)。一致したらこのギフトはお題もお邪魔も
+      // ルーレットも増減規則も全面カットも通らない(先勝ち)。
+      // 革命より下なのは matchTapLock が matchTapBoost より下なのと同じ「安全側」の
+      // 論法 — 一撃クリアはランを終わらせるので、誤設定で**勝ってしまう**ほうが
+      // 代償が大きい(巻き戻せない)。トリガーは実際には別ギフト(44,999💎)なので
+      // 上に置いても得は無い。**演出順位(fx-priority)と評価順は別軸**で、
+      // 揃えてあるのは可読性のためであって前者が後者を決めるからではない。
+      const uv = fs
+        ? null
+        : matchUniverse(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+      if (uv) {
+        this.giftDiag(
+          `→ 一撃クリア一致 id=${uv.id}(お題/お邪魔/ルーレット/全面カットは評価されません)`
+        );
+        // 連打は畳む(2発目以降は activateUniverse が冪等に受け流す — 効果が
+        // 「0 にする」で飽和しており、延長も重畳も定義できない)。
+        if (e.repeatCount > 1) {
+          this.giftDiag(`→ 一撃クリアの連打 ${e.repeatCount}個 — 発動は1回に畳む`);
+        }
+        return this.applyOrQueue(
+          () => this.activateUniverse(uv, e),
+          undefined,
+          { kind: 'universe', nickname: e.viewer.nickname ?? e.viewer.displayId },
+          // critical: 溢れ弁の即時実行で凍結中に走らせない(44,999💎 は破棄より積む)。
+          true
+        );
+      }
+
+      // ライオン(Lion 29,999💎)。一撃クリアの**次・お題より先**に評価する
+      // (matchLion の規約)。一致したらこのギフトはお題もお邪魔もルーレットも
+      // 増減規則も全面カットも通らない(先勝ち)。一撃クリアより下なのは、同じ
+      // giftId を両方に登録した誤設定では**結末を決めるほう(クリア)が勝つ**ほうが
+      // 説明しやすいから。**演出順位(fx-priority ではお助けの直後)と評価順は別軸。**
+      const ln = fs
+        ? null
+        : matchLion(cfg, { canonical: e.canonical, giftId: e.giftId, giftName: e.giftName });
+      if (ln) {
+        this.giftDiag(
+          `→ ライオン一致 id=${ln.id} +${ln.amountEach}×${ln.steps}(お題/お邪魔/ルーレット/全面カットは評価されません)`
+        );
+        // 連打は畳む(2発目以降は activateLion が冪等に受け流す — 43 秒の幕は
+        // 直列化しかできず、延長も重畳も定義できない)。
+        if (e.repeatCount > 1) {
+          this.giftDiag(`→ ライオンの連打 ${e.repeatCount}個 — 発動は1回に畳む`);
+        }
+        return this.applyOrQueue(
+          () => this.activateLion(ln, e),
+          undefined,
+          { kind: 'lion', nickname: e.viewer.nickname ?? e.viewer.displayId },
+          // critical: 溢れ弁の即時実行で凍結中に走らせない(29,999💎 は破棄より積む)。
+          true
+        );
+      }
+
+      // お題ルーレット。fanStamp・タップブースト・革命・一撃クリアの**次・お邪魔より
+      // 先**に評価(matchQuiz の規約 — 同じ giftId の誤設定では革命が勝つ)。一致したらこの
       // ギフトはお邪魔もルーレットも増減規則も全面カットも通らない(先勝ち)。
       const qz = fs
         ? null
@@ -2370,6 +2671,12 @@ export class ChallengeEngine {
           this.boostUntilMs !== null ||
           this.armedRevolution !== null ||
           this.revolutionUntilMs !== null ||
+          // 一撃クリア中も同じ扱い(進行中の演出の終了を待って予約)。
+          this.armedUniverse !== null ||
+          this.universeUntilMs !== null ||
+          // ライオン中も同じ扱い(進行中の演出の終了を待って予約)。
+          this.armedLion !== null ||
+          this.lionUntilMs !== null ||
           this.armedQuiz !== null ||
           this.quizVoteUntilMs !== null
         ) {
@@ -2398,6 +2705,37 @@ export class ChallengeEngine {
         // 買った 30 秒が無意味になる。deferred op は実行時に改めて排他(フィーバー
         // 在航)を判定し直す — 実行時点の状態が基準(clampDownAmount と同じ哲学)。
         // 封印は applyOrQueue を通らない唯一のトリガーなので、バリアもここで個別に張る。
+        // 一撃クリアの進行中も同じ理由で後回し(封印は applyOrQueue を通らない
+        // 唯一のトリガーなので、バリアはここで個別に張る)。溜めた op は達成で
+        // 破棄される — それが正しい(ランが終わるので、誰も押せないボタンを
+        // 封印する意味が無い)。
+        if (this.universeBarrierActive()) {
+          if (this.universeDeferredOps.length >= UNIVERSE_DEFERRED_OPS_MAX) {
+            this.giftDiag('→ 一撃クリアバリア満杯 — 封印を破棄');
+            return false;
+          }
+          this.universeDeferredOps.push({
+            run: () => void this.applyTapLockTrigger(tl, e),
+            fx: null,
+          });
+          this.giftDiag('→ 一撃クリア中 — 封印は清算後に発動を判定');
+          return false;
+        }
+        // ライオンの進行中も同じ理由で後回し(封印は applyOrQueue を通らない唯一の
+        // トリガーなので、バリアはここで個別に張る)。溜めた op は清算で pendingOps
+        // へ移送される — 一撃クリアと違い走行が続くので破棄しない。
+        if (this.lionBarrierActive()) {
+          if (this.lionDeferredOps.length >= LION_DEFERRED_OPS_MAX) {
+            this.giftDiag('→ ライオンバリア満杯 — 封印を破棄');
+            return false;
+          }
+          this.lionDeferredOps.push({
+            run: () => void this.applyTapLockTrigger(tl, e),
+            fx: null,
+          });
+          this.giftDiag('→ ライオン中 — 封印は清算後に発動を判定');
+          return false;
+        }
         if (this.quizBarrierActive()) {
           if (this.quizDeferredOps.length >= QUIZ_DEFERRED_OPS_MAX) {
             this.giftDiag('→ お題バリア満杯 — 封印を破棄');
@@ -2597,7 +2935,12 @@ export class ChallengeEngine {
             // 高額ギフトの照明は規則を問わず出す(matchGiftRule の overFlash と同じ精神)。
             flash: fs.flash || (cfg.flashMinDiamonds != null && e.diamonds >= cfg.flashMinDiamonds),
           }
-        : matchGiftRule(cfg, { canonical: e.canonical, giftId: e.giftId, diamonds: e.diamonds });
+        : matchGiftRule(cfg, {
+            canonical: e.canonical,
+            giftId: e.giftId,
+            giftName: e.giftName,
+            diamonds: e.diamonds,
+          });
       // カットイン抑止。giftBandFx.excludeGiftIds は書き換えない(設定の二重管理を作らない)。
       // 両方 null なら fxDurationMs は 0 になり、下の `if (cutClip)` を通らないので
       // **凍結も張られない** — 1ダイヤのファンスタンプが届くたびに 6 秒カウントが
@@ -2626,6 +2969,21 @@ export class ChallengeEngine {
           : fullCut
             ? `→ 全面カット一致 id=${fullCut.id} clip=${fullCut.clip}`
             : `→ 全面カット不一致 → 帯域=${band ? band.id : 'なし'}`
+      );
+      // ダイヤ増減の「N 浮上 → カウントアップ → ドン」演出の可否。判定は matchGiftRule が
+      // 到着時点で済ませている(scaleFx) — ここではお助けだけを落とす。お助けは専用の
+      // 合算バナーが主役で、そこへ浮上を重ねると据え置きの持ち主が2人になる。
+      //
+      // カットイン(全面カット/帯域)とは**併発させる**(2026-08-26 ユーザー決定) —
+      // モニターがカットインを終えてから浮上へバトンタッチする(finishBandFx)。
+      // 排他6機能(お助け/フィーバー/革命/お題/お邪魔/ルーレット)はここより上で
+      // return 済みなので、この行に来た時点で「他の機能が優先」は成立している。
+      const scaleFx = fs == null && m?.scaleFx === true;
+      // 一致・不一致とも必ず残す(giftDiag 規約 — v3 で40行が無言のまま死んでいた教訓)。
+      this.giftDiag(
+        scaleFx
+          ? `→ ダイヤ増減演出あり amount=${m?.amount ?? 0}`
+          : `→ ダイヤ増減演出なし(${fs ? 'お助け' : m == null ? '増減規則に一致せず' : '対象外 / しきい値未満'})`
       );
       if (!m && !band && !fullCut) return false;
       const giftOp = (allowBand: boolean): void => {
@@ -2671,6 +3029,9 @@ export class ChallengeEngine {
           // 全面カットの印。モニターはこれを見て mp4 の焼き込み音声を鳴らす
           //(帯域カットインは muted のままで、音は下の fxBandBgm 側)。
           ...(fc ? { fxFullCut: true as const } : {}),
+          // ダイヤ増減の浮上演出の印。到着時点の判定を焼き込む(fxBandClip と同じ
+          // 「effect 1件で自己完結」の流儀 — モニターの cfg は 120 秒ポーリングで古くなる)。
+          ...(scaleFx ? { giftScale: true as const } : {}),
           // BGM も同じ流儀で id を effect に載せる(音量だけは cfg から読む)。
           // 判定は到着時点の cfg — fxBandClip と同じタイミングで確定させる。
           // 全面カット(fc)には載せない — 音声は素材に焼き込んであるので、
@@ -2779,6 +3140,52 @@ export class ChallengeEngine {
     // 「機能OFF は逃げ道」と同じ判断)。行ごとの enabled: false では消さない
     // (到着時点で確定の規約)。アーム中は暫定凍結が張られているので、引き戻して
     // 保留 op を次の tick で解放する(clearRevolution 単体だと凍結が期限まで残る)。
+    // 一撃クリアだけを OFF にしたら進行中の演出・アーム・バリアの溜め分を畳む
+    // (革命・お題の機能OFF と同じ判断)。**値は 0 にしない・universe-end も
+    // 積まない** — 一度も 0 になっていないので「終了」は履歴でも演出でも嘘になる
+    // (pushRevolutionEnd の「アーム止まりでは積まない」規約と同じ)。
+    // バリアの溜め分は pendingOps へ移送して値を消さない(stop と同じ規約)。
+    if (
+      !this.getConfig().universe.enabled &&
+      (this.universeUntilMs !== null ||
+        this.armedUniverse !== null ||
+        this.universeDeferredOps.length > 0)
+    ) {
+      this.pendingOps.push(...this.universeDeferredOps);
+      this.universeDeferredOps = [];
+      // 凍結 null のまま移送すると下の flushFxFreeze が早期 return してドレインに
+      // 到達しない(settleQuiz / 革命の OFF と同じ「期限切れ済みの凍結」)。
+      if (this.pendingOps.length > 0 && this.fxFreezeUntilMs === null) {
+        this.fxFreezeUntilMs = this.now();
+      }
+      const hadUniverse = this.universeBarrierActive();
+      this.clearUniverse();
+      // 一撃クリアが張っていた凍結(アームの暫定期限 = 最長 145 秒未来、または
+      // 走行中の 25 秒)を引き戻す — 機能OFF は逃げ道なので即時解放が正しい。
+      if (hadUniverse && this.fxFreezeUntilMs !== null) this.fxFreezeUntilMs = this.now();
+      this.flushFxFreeze(this.now());
+      this.armFreezeTimer();
+    }
+    // ライオンだけを OFF にしたら進行中の演出・アーム・バリアの溜め分を畳む
+    // (一撃クリアの機能OFF と同じ判断)。**値は増やさない・lion-end も積まない** —
+    // 一度も加算していないので「終了」は履歴でも演出でも嘘になる。
+    if (
+      !this.getConfig().lion.enabled &&
+      (this.lionUntilMs !== null || this.armedLion !== null || this.lionDeferredOps.length > 0)
+    ) {
+      this.pendingOps.push(...this.lionDeferredOps);
+      this.lionDeferredOps = [];
+      if (this.pendingOps.length > 0 && this.fxFreezeUntilMs === null) {
+        this.fxFreezeUntilMs = this.now();
+      }
+      const hadLion = this.lionBarrierActive();
+      this.clearLion();
+      // ライオンが張っていた凍結(アームの暫定期限 = 最長 163 秒未来、または
+      // 走行中の 43 秒)を引き戻す — 機能OFF は逃げ道なので即時解放が正しい。
+      if (hadLion && this.fxFreezeUntilMs !== null) this.fxFreezeUntilMs = this.now();
+      this.flushFxFreeze(this.now());
+      this.armFreezeTimer();
+    }
     if (
       !this.getConfig().revolution.enabled &&
       (this.revolutionUntilMs !== null || this.armedRevolution !== null)
@@ -2884,6 +3291,16 @@ export class ChallengeEngine {
       this.pendingOps.push(...this.quizDeferredOps);
       this.quizDeferredOps = [];
       this.clearQuiz();
+      // 一撃クリアも逃げ道に含める(溜め分は移送して値を消さない・
+      // universe-end は積まない — 一度も 0 になっていないので「終了」は嘘)。
+      this.pendingOps.push(...this.universeDeferredOps);
+      this.universeDeferredOps = [];
+      this.clearUniverse();
+      // ライオンも逃げ道に含める(溜め分は移送して値を消さない・lion-end は
+      // 積まない — 一度も加算していないので「終了」は嘘)。
+      this.pendingOps.push(...this.lionDeferredOps);
+      this.lionDeferredOps = [];
+      this.clearLion();
       // フィーバーと凍結も逃げ道に含める — 封印だけ解除しても、アーム済みの
       // フィーバーが 60 秒後の期限切れで「無効化済み機能の全画面演出」を強制発動し、
       // 凍結が保留 op を抱えたまま生き続けていた。stop() と同じ規約で畳む:
@@ -2914,6 +3331,8 @@ export class ChallengeEngine {
       this.clearBoost();
       this.clearRevolution();
       this.clearQuiz();
+      this.clearUniverse();
+      this.clearLion();
       if (this.tapLockUntilMs !== null) this.clearTapLock();
       this.pendingTapLock = null;
       this.deferredBoosts = [];
@@ -2953,6 +3372,11 @@ export class ChallengeEngine {
       // **barrier の印はここでコピーに乗せる**(保持している fx を汚すと、清算で
       // pendingOps へ移送されたあとも印が残って次のお題の armed 監視が狂う)。
       ...this.quizDeferredOps
+        .filter((p) => p.fx !== null)
+        .map((p) => ({ ...p.fx!, barrier: true as const })),
+      // 一撃クリアバリアで清算待ちの演出予告も同じ「待ち」なので合流させる
+      // (barrier の印はコピーに乗せる — 上の quiz と同じ理由)。
+      ...this.universeDeferredOps
         .filter((p) => p.fx !== null)
         .map((p) => ({ ...p.fx!, barrier: true as const })),
     ].slice(0, CHALLENGE_FX_QUEUE_MAX);
@@ -3052,6 +3476,9 @@ export class ChallengeEngine {
       this.boostUntilMs === null &&
       this.revolutionUntilMs === null &&
       this.quizVoteUntilMs === null &&
+      // 一撃クリア中のタップは破棄されゲートに蓄積されないので、リングを出すと
+      // 「押しても進まないリング」になる(revolution / quiz と同じ理由)。
+      this.universeUntilMs === null &&
       !this.anyTestPreviewActive() &&
       this.value > 0 &&
       this.value <= cfg.lowThreshold
@@ -3178,6 +3605,90 @@ export class ChallengeEngine {
               },
             }
           : {}),
+      // 一撃クリアが進行中(アーム〜清算)だけ載せる(quiz と同じ「キーの有無 =
+      // 状態」規約)。アーム中(バリア消化待ち)は armed: true + 時刻 0 —
+      // モニターはこのキーの出現でキューが空になるのを待ち、空になったら
+      // universeCue を撃つ。**fromValue が 30 分割の唯一の権威**。
+      ...(this.armedUniverse !== null || this.universeUntilMs !== null
+        ? {
+            universe: {
+              ...(this.armedUniverse !== null ? { armed: true as const } : {}),
+              startsAtMs: this.universeStartMs,
+              endsAtMs: this.universeUntilMs ?? 0,
+              fromValue: this.universeFromValue,
+              blocked: this.universeBlocked,
+              ...((this.armedUniverse !== null
+                ? this.armedUniverse.nickname
+                : this.universeNickname) !== ''
+                ? {
+                    nickname:
+                      this.armedUniverse !== null
+                        ? this.armedUniverse.nickname
+                        : this.universeNickname,
+                  }
+                : {}),
+              ...((this.armedUniverse !== null ? this.armedUniverse.label : this.universeLabel) !==
+              ''
+                ? {
+                    label:
+                      this.armedUniverse !== null ? this.armedUniverse.label : this.universeLabel,
+                  }
+                : {}),
+            },
+          }
+        : this.testUniverseUntilMs !== null
+          ? {
+              // ▶テスト実演の窓(quiz / revolution と同じ「同じキーへ合流」)。
+              // **armed は載せない** — 載せるとモニターの armed 監視が本物の
+              // universeCue{start} を撃ってしまう。
+              universe: {
+                startsAtMs: this.testUniverseStartMs,
+                endsAtMs: this.testUniverseUntilMs,
+                fromValue: this.testUniverseFrom,
+                blocked: this.testUniverseBlocked,
+                nickname: 'テスト',
+                test: true as const,
+              },
+            }
+          : {}),
+      // ライオンが進行中(アーム〜清算)だけ載せる(universe と同じ「キーの有無 =
+      // 状態」規約)。アーム中(バリア消化待ち)は armed: true + 時刻 0 —
+      // モニターはこのキーの出現でキューが空になるのを待ち、空になったら
+      // lionCue を撃つ。**each / steps が段組みの唯一の権威**。
+      ...(this.armedLion !== null || this.lionUntilMs !== null
+        ? {
+            lion: {
+              ...(this.armedLion !== null ? { armed: true as const } : {}),
+              startsAtMs: this.lionStartMs,
+              endsAtMs: this.lionUntilMs ?? 0,
+              each: this.armedLion !== null ? this.armedLion.each : this.lionEach,
+              steps: this.armedLion !== null ? this.armedLion.steps : this.lionSteps,
+              ...((this.armedLion !== null ? this.armedLion.nickname : this.lionNickname) !== ''
+                ? {
+                    nickname:
+                      this.armedLion !== null ? this.armedLion.nickname : this.lionNickname,
+                  }
+                : {}),
+              ...((this.armedLion !== null ? this.armedLion.label : this.lionLabel) !== ''
+                ? { label: this.armedLion !== null ? this.armedLion.label : this.lionLabel }
+                : {}),
+            },
+          }
+        : this.testLionUntilMs !== null
+          ? {
+              // ▶テスト実演の窓(universe と同じ「同じキーへ合流」)。
+              // **armed は載せない** — 載せるとモニターの armed 監視が本物の
+              // lionCue{start} を撃ってしまう。
+              lion: {
+                startsAtMs: this.testLionStartMs,
+                endsAtMs: this.testLionUntilMs,
+                each: this.testLionEach,
+                steps: this.testLionSteps,
+                nickname: 'テスト',
+                test: true as const,
+              },
+            }
+          : {}),
     };
   }
 
@@ -3195,7 +3706,12 @@ export class ChallengeEngine {
     // 革命・お題の実演も進める。**権威は armFreezeTimer** — ライブ未接続では
     // 2Hz tick 自体が回らない(startTimers は接続/リプレイでしか呼ばれない)ので、
     // ここは配信中に票の反映を滑らかにするための相乗り。
-    if (this.testRevolutionUntilMs !== null || this.testQuizVoteEndsMs !== null) {
+    if (
+      this.testRevolutionUntilMs !== null ||
+      this.testQuizVoteEndsMs !== null ||
+      this.testUniverseUntilMs !== null ||
+      this.testLionUntilMs !== null
+    ) {
       this.stepTestPreviews(this.now());
     }
     this.flushLikeFx();
@@ -3247,7 +3763,15 @@ export class ChallengeEngine {
     // 存在しない。入れないと 699💎 の着弾からモニターが導入を再生し始めるまで
     // (最長 60 秒)タップの手応えだけが無音になる = ブーストで実際に起きた
     // 「アーム無音」と同型の事故。
-    return this.isFxFrozen() && this.armedBoost === null && this.armedRevolution === null;
+    return (
+      this.isFxFrozen() &&
+      this.armedBoost === null &&
+      this.armedRevolution === null &&
+      // 一撃クリアのアームも同じ理由で除く — アーム中は暫定凍結が張られているが
+      // まだ何も映っていないので、押下 SE を畳む理由が無い。入れないと
+      // 44,999💎 の着弾から最長 120 秒タップの手応えだけが無音になる。
+      this.armedUniverse === null
+    );
   }
 
   /** 凍結期限に合わせてワンショットタイマーを張り直す(null なら外すだけ)。 */
@@ -3271,7 +3795,15 @@ export class ChallengeEngine {
       // 実演モードでは 2Hz tick(drainIfChanged)が一度も回らないので、ここを
       // 落とすと窓が永久に閉じず結果カットシーンも来ない。
       this.testRevolutionUntilMs === null &&
-      this.testQuizVoteEndsMs === null
+      this.testQuizVoteEndsMs === null &&
+      // 一撃クリアのアーム期限と清算の期限もこのタイマーが唯一の出口。
+      this.armedUniverse === null &&
+      this.universeUntilMs === null &&
+      this.testUniverseUntilMs === null &&
+      // ライオンのアーム期限と清算の期限もこのタイマーが唯一の出口。
+      this.armedLion === null &&
+      this.lionUntilMs === null &&
+      this.testLionUntilMs === null
     ) {
       return;
     }
@@ -3300,6 +3832,13 @@ export class ChallengeEngine {
       // 配信切断・モニター閉でも worker 権威で自走 settle する(投票ゼロ = ±0)。
       this.armedQuiz?.deadlineMs ?? Infinity,
       this.quizVoteUntilMs ?? Infinity,
+      // 一撃クリアのアーム期限と**清算の期限**もこのタイマーが唯一の出口。
+      // 凍結期限は清算より GIFT_FX_FREEZE_MARGIN_MS だけ後ろなので、これが
+      // 無いと 2Hz tick が止まった瞬間(配信終了・切断・リプレイ終了)に
+      // カウントが 0 にならず CLEAR も出ない。「2Hz tick は相乗りであって
+      // 権威ではない」— settleBoost と同じ轍を踏まないための登録。
+      this.armedUniverse?.deadlineMs ?? Infinity,
+      this.universeUntilMs ?? Infinity,
       // 数値到達の告知の満了。**ライブ未接続では 2Hz tick が回らない**ので、
       // ラッチを畳んで delta を押し出す出口はここだけになる。
       this.quizAnnounceUntilMs ?? Infinity,
@@ -3307,6 +3846,10 @@ export class ChallengeEngine {
       // 到着**でも起こす — 票が増えるたびに delta を押し出さないと、投票
       // オーバーレイの数字が締切まで 0 のまま止まって見える。
       this.testRevolutionUntilMs ?? Infinity,
+      this.testUniverseUntilMs ?? Infinity,
+      this.testLionUntilMs ?? Infinity,
+      this.armedLion?.deadlineMs ?? Infinity,
+      this.lionUntilMs ?? Infinity,
       this.testQuizVotes[0]?.atMs ?? Infinity,
       this.testQuizAnnounceUntilMs ?? Infinity,
       this.testQuizVoteEndsMs ?? Infinity
@@ -3337,7 +3880,13 @@ export class ChallengeEngine {
           this.quizVoteUntilMs !== null ||
           // 実演も張り直しの対象 — お題は票が残っている限り何度も起こされる。
           this.testRevolutionUntilMs !== null ||
-          this.testQuizVoteEndsMs !== null) &&
+          this.testQuizVoteEndsMs !== null ||
+          this.armedUniverse !== null ||
+          this.universeUntilMs !== null ||
+          this.testUniverseUntilMs !== null ||
+          this.armedLion !== null ||
+          this.lionUntilMs !== null ||
+          this.testLionUntilMs !== null) &&
         this.freezeTimer === null
       ) {
         this.armFreezeTimer();
@@ -3426,6 +3975,14 @@ export class ChallengeEngine {
     this.plainCommitArmedBoost(this.now(), 'モニター閉 / 動きの抑制');
     // 革命の予約も同じ判断でプレーン即発動(破棄しない — 効果はゲームの状態)。
     this.plainCommitArmedRevolution(this.now(), 'モニター閉 / 動きの抑制');
+    // 一撃クリアの予約も同じ判断でプレーン即クリア(破棄しない — 44,999💎 の
+    // 結末はゲームの状態であって演出ではない)。
+    this.plainCommitArmedUniverse(this.now(), 'モニター閉 / 動きの抑制');
+    // **走行中の演出は強制清算する**(革命の窓を強制終了しないのとは逆の判断)—
+    // 革命の窓は「タップ×N・いいね反転」というゲームの状態が走っているが、
+    // 一撃クリアの 25 秒は 100% 映像で、誰も見ていない画面のために結末を待たせる
+    // 理由がゼロだから。期限を now へ引き戻すだけで下の flushFxFreeze が拾う。
+    if (this.universeUntilMs !== null) this.universeUntilMs = this.now();
     this.fxFreezeUntilMs = this.now();
     this.flushFxFreeze(this.now());
     this.armFreezeTimer();
@@ -3496,6 +4053,58 @@ export class ChallengeEngine {
     fx?: Omit<ChallengeFxQueueItem, 'id'>,
     critical = false
   ): boolean {
+    // 一撃クリアのバリア(**第1関門**): 発動(アーム)〜清算の 25 秒間に届いた
+    // イベントは critical も含めて**全部**を後回しにする。quiz バリアより上に
+    // 置くのは「ランを終わらせる演出が最上位」という読みやすさのため — 二重に
+    // 生きることは構造的に起きない(universe 中は quiz が arm されず、quiz 中の
+    // universe 発動 op は quiz バリアへ落ちる)ので順序自体は形式的。
+    // 溢れ弁は quiz と同じ「値のみ即時適用・critical は破棄」。512 件を超える
+    // 異常系で値が即時適用されても、結局 settleUniverse が 0 に飲むので実害は絵の乱れだけ。
+    if (this.universeBarrierActive()) {
+      if (this.universeDeferredOps.length >= UNIVERSE_DEFERRED_OPS_MAX) {
+        if (critical) {
+          this.diag('[challenge] 一撃クリアバリア満杯 — フィーバー級の op を破棄');
+          return false;
+        }
+        if (this.pendingOverflowCount++ === 0) {
+          this.diag(
+            `[challenge] 一撃クリアバリア上限(${UNIVERSE_DEFERRED_OPS_MAX}件)— 以降は演出を捨て値のみ即時適用`
+          );
+        }
+        return (overflowOp ?? op)() !== false;
+      }
+      this.universeDeferredOps.push({
+        run: () => void op(),
+        fx: fx ? { id: ++this.fxQueueSeq, ...fx } : null,
+      });
+      if (fx) this.dirty = true;
+      return false;
+    }
+    // ライオンのバリア(**第2関門**): universe とまったく同じ形。43 秒間に届いた
+    // イベントは critical も含めて全部を清算後へ後回しにする。universe より下なのは
+    // 評価順(matchLion が matchUniverse の次)と揃えた可読性のためで、二重に
+    // 生きることは構造的に起きない(universe 中は lion の発動 op が universe バリアへ
+    // 落ちる)。溢れ弁は quiz と同じ「値のみ即時適用・critical は破棄」。
+    if (this.lionBarrierActive()) {
+      if (this.lionDeferredOps.length >= LION_DEFERRED_OPS_MAX) {
+        if (critical) {
+          this.diag('[challenge] ライオンバリア満杯 — フィーバー級の op を破棄');
+          return false;
+        }
+        if (this.pendingOverflowCount++ === 0) {
+          this.diag(
+            `[challenge] ライオンバリア上限(${LION_DEFERRED_OPS_MAX}件)— 以降は演出を捨て値のみ即時適用`
+          );
+        }
+        return (overflowOp ?? op)() !== false;
+      }
+      this.lionDeferredOps.push({
+        run: () => void op(),
+        fx: fx ? { id: ++this.fxQueueSeq, ...fx } : null,
+      });
+      if (fx) this.dirty = true;
+      return false;
+    }
     // お題ルーレットのバリア(**凍結判定より上**): 発動(アーム)〜清算に届いた
     // イベントは、優先度が高い op(critical = フィーバー/革命の発動)も含めて
     // **全部**を清算後へ後回しにする(2026-08-21 ユーザー決定「発動以降に作動した
@@ -3625,6 +4234,18 @@ export class ChallengeEngine {
     // 封印の解除は**この位置**(下の早期 return より上)でなければならない —
     // 下だと凍結が同時に切れるときにしか解除されず、事実上いつまでも解けない。
     this.flushTapLock(nowMs);
+    // 一撃クリアの強制発動と清算も**早期 return より上**(flushRevolution /
+    // flushQuiz / flushTapLock と同じ理由)。**このブロックの末尾**に置くのは、
+    // 他機能の時計を全部進めてから「ランを終わらせる」ため — 履歴の順序が因果
+    // どおりに読め、maybeAchieve が呼ぶ clearBoost / clearRevolution / clearQuiz /
+    // clearTapLock が「まだ清算していない窓」を畳んでしまう確率が下がる。
+    // settleUniverse は凍結中なので maybeAchieve を見送り、下の早期 return を経て
+    // GIFT_FX_FREEZE_MARGIN_MS 後の発火で末尾の maybeAchieve が CLEAR を出す。
+    this.commitArmedUniverseIfExpired(nowMs);
+    this.flushUniverse(nowMs);
+    // ライオンのアーム期限切れと清算も**早期 return より上**(universe と同じ理由)。
+    this.commitArmedLionIfExpired(nowMs);
+    this.flushLion(nowMs);
     if (this.fxFreezeUntilMs === null || nowMs < this.fxFreezeUntilMs) {
       // 封印明けのフィーバー予約の解放(自然解除の本線)。早期 return 側に置くのは
       // 安全なケースだけ: 凍結なし(1本目が即アーム — 封印だけが切れる経路はここ)
@@ -4085,6 +4706,24 @@ export class ChallengeEngine {
     this.clearTestBoost();
     this.clearTestRevolution();
     this.clearTestQuiz();
+    this.clearTestUniverse();
+    this.clearTestLion();
+  }
+
+  /** ▶テスト実演(一撃クリア)の窓の破棄。clearTestRevolution と同じ規約。 */
+  private clearTestUniverse(): void {
+    this.testUniverseUntilMs = null;
+    this.testUniverseStartMs = 0;
+    this.testUniverseFrom = 0;
+    this.testUniverseBlocked = 0;
+  }
+
+  /** ▶テスト実演(ライオン)の窓の破棄。clearTestUniverse と同じ規約。 */
+  private clearTestLion(): void {
+    this.testLionUntilMs = null;
+    this.testLionStartMs = 0;
+    this.testLionEach = 0;
+    this.testLionSteps = 0;
   }
 
   /**
@@ -4129,6 +4768,35 @@ export class ChallengeEngine {
         nowMs
       );
     }
+    // 一撃クリア: 満了 → universe-end(実演なので **achieved は積まない** —
+    // 実演は status に触れない規約)。amount も 0(値を動かさない)で、
+    // 減算量は表示専用の universeDownTotal に載せる。
+    if (this.testUniverseUntilMs !== null && nowMs >= this.testUniverseUntilMs) {
+      const from = this.testUniverseFrom;
+      this.clearTestUniverse();
+      this.pushTestEffect(
+        { kind: 'universe-end', amount: 0, universeDownTotal: from, nickname: 'テスト' },
+        nowMs
+      );
+    }
+    // ライオン: 満了 → lion-end(実演なので値は動かさない。amount 0 で、額は
+    // 表示専用の lionTotal に載せる — universe の実演と同型)。
+    if (this.testLionUntilMs !== null && nowMs >= this.testLionUntilMs) {
+      const each = this.testLionEach;
+      const steps = this.testLionSteps;
+      this.clearTestLion();
+      this.pushTestEffect(
+        {
+          kind: 'lion-end',
+          amount: 0,
+          lionEach: each,
+          lionSteps: steps,
+          lionTotal: each * steps,
+          nickname: 'テスト',
+        },
+        nowMs
+      );
+    }
     if (this.testQuizVoteEndsMs === null) return;
     // お題: 到着済みのダミー票を反映(投票オーバーレイの票数が伸びる)。
     while (this.testQuizVotes.length > 0 && nowMs >= this.testQuizVotes[0]!.atMs) {
@@ -4168,7 +4836,9 @@ export class ChallengeEngine {
     return (
       this.testBoostUntilMs !== null ||
       this.testRevolutionUntilMs !== null ||
-      this.testQuizVoteEndsMs !== null
+      this.testQuizVoteEndsMs !== null ||
+      this.testUniverseUntilMs !== null ||
+      this.testLionUntilMs !== null
     );
   }
 
@@ -4201,6 +4871,10 @@ export class ChallengeEngine {
       this.tapLockUntilMs === null &&
       this.armedQuiz === null &&
       this.quizVoteUntilMs === null &&
+      this.armedUniverse === null &&
+      this.universeUntilMs === null &&
+      this.armedLion === null &&
+      this.lionUntilMs === null &&
       !this.anyTestPreviewActive()
     );
   }
@@ -4887,6 +5561,510 @@ export class ChallengeEngine {
     return this.armedRevolution !== null || this.revolutionUntilMs !== null;
   }
 
+  // ── 一撃クリア(universe / TIKTOK UNIVERSE 44,999💎) ──────────────────────
+
+  /**
+   * 一撃クリアバリアの生存判定。アーム(発動)〜清算 — quizBarrierActive の完全な
+   * 鏡像で、対象も同じく**全 op(critical 含む)**。理由は universeDeferredOps の
+   * 宣言に書いたとおり(30 分割の起点 N が途中で動くと絵の意味が壊れる)。
+   * **▶テスト実演の窓(testUniverseUntilMs)は見ない**(revolutionBarrierActive と同じ)。
+   */
+  private universeBarrierActive(): boolean {
+    return this.armedUniverse !== null || this.universeUntilMs !== null;
+  }
+
+  /** 演出が走行中(コミット〜清算)。press() の破棄枝と get() のゲート省略が読む。 */
+  private universeActive(nowMs: number): boolean {
+    return this.universeUntilMs !== null && nowMs < this.universeUntilMs;
+  }
+
+  /**
+   * 一撃クリアの発動(applyOrQueue の op)。activateRevolution の骨格。
+   *
+   * **値はここでは動かさない** — 25 秒の演出が終わった瞬間に settleUniverse が
+   * 一括で 0 にする(シネマのフィーバーが settleBoost で一括反映するのと同じ形)。
+   * この順序のおかげで stop() が「まだ 0 になっていない値」を守れる。
+   */
+  private activateUniverse(uv: UniverseRule, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
+    // 幽霊ガード(activateRevolution と同じ — 凍結ドレイン中に設定が変わりうる)。
+    if (
+      this.stopping ||
+      this.status !== 'running' ||
+      !this.getConfig().enabled ||
+      !this.getConfig().universe.enabled
+    ) {
+      return;
+    }
+    // **重ねがけは冪等。** 効果が「0 にする」で飽和しており、延長も重畳も定義
+    // できない。黙って消さず必ず記録する(44,999💎 が無反応に見える唯一の説明)。
+    // ダイヤ集計(touchParticipant)は handleEvent の冒頭で済んでいるのでランキングには乗る。
+    if (this.universeBarrierActive()) {
+      this.giftDiag('→ 一撃クリアは既に進行中 — 2発目は冪等に受け流す(効果は 0 到達で飽和)');
+      return;
+    }
+    const atMs = this.now();
+    this.clearTestPreviews(); // 実発動が実演に勝つ(revolution と同じ規約)
+    const nickname = e.viewer.nickname ?? e.viewer.displayId ?? '';
+    const cinematic = this.fxAllowed();
+    const deadlineMs = atMs + UNIVERSE_ARM_MAX_MS;
+    if (cinematic) {
+      this.armedUniverse = { id: 0, atMs, deadlineMs, nickname, label: uv.label, flash: uv.flash };
+    }
+    const effectId = this.pushEffect({
+      kind: 'universe-start',
+      amount: 0,
+      ...(cinematic ? { universeEndsAtMs: deadlineMs + UNIVERSE_TOTAL_MS } : {}),
+      fxDurationMs: cinematic ? UNIVERSE_TOTAL_MS : 0,
+      ...(uv.flash ? { flash: true } : {}),
+      ...(nickname !== '' ? { nickname } : {}),
+      ...(e.giftName ? { giftName: e.giftName } : {}),
+      ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+      ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+      diamonds: e.diamonds,
+      atMs,
+    });
+    if (cinematic) {
+      this.armedUniverse!.id = effectId;
+      // ★**アーム中は凍結を張らない**(armQuiz と同じ。activateRevolution を写した
+      //   初版はここで暫定凍結を張っていたが、それだと演出が**アーム期限(120秒)
+      //   切れの強制発動まで一度も始まらない**)。
+      //   理由: モニターの armed 監視は待ちの条件に
+      //   `challenge.fxFreezeUntilMs != null` を含む(worker の pendingOps が
+      //   まだ吐き切っていない印)。ここで凍結を張ると**その条件が自分自身のせいで
+      //   永久に成立しない**。25 秒のあいだ全 op を止めるのは
+      //   universeDeferredOps(バリア)の仕事で、凍結は commitUniverse が
+      //   「実再生に合わせて」初めて張る。
+      //   アーム期限の出口は armFreezeTimer が armedUniverse.deadlineMs で起こす。
+      //   検出器は e2e/countdown-universe.e2e.ts のシネマ経路(2026-08-26 修正。
+      //   同型のバグをライオンでも踏んだ — [[tiktok-lion]])。
+      this.armFreezeTimer();
+    } else {
+      this.giftDiag('→ 一撃クリアはプレーンモードで発動(モニター未表示 / 動きの抑制)— 演出なし、即 0 + CLEAR');
+      // プレーンは待つ理由がない(映像が無い)。尺 0 の窓を開いてその場で清算する。
+      // **pushEffect の後**に呼ぶこと(universe-start の id < universe-end の id)。
+      this.universeStartMs = atMs;
+      this.universeUntilMs = atMs;
+      this.universeFromValue = this.value;
+      this.universeNickname = nickname;
+      this.universeLabel = uv.label;
+      this.universeBlocked = 0;
+      this.settleUniverse(atMs);
+    }
+    this.dirty = true;
+  }
+
+  /** 演出の状態を一括で開く(commitRevolutionState の鏡像)。 */
+  private commitUniverseState(startMs: number, nickname: string, label: string): void {
+    this.clearTestPreviews();
+    this.universeStartMs = startMs;
+    this.universeUntilMs = startMs + UNIVERSE_TOTAL_MS;
+    // ★カウントダウンの権威をここで焼く。アーム中のタップは通常どおり効くので、
+    //   減ったあとの値がそのまま 30 分割の起点になる。
+    this.universeFromValue = this.value;
+    this.universeNickname = nickname;
+    this.universeLabel = label;
+    this.universeBlocked = 0;
+    // 幕の境界で合算中のいいねバナーを切る(commitRevolutionState と同じ理由)。
+    this.forceFlushLikeFx();
+    this.armFreezeTimer();
+    this.dirty = true;
+  }
+
+  /**
+   * アーム済み一撃クリアの発動(**唯一の commit 経路**)。
+   * startMs はモニターが導入カットインを再生し始めた時刻。
+   */
+  private commitUniverse(a: NonNullable<ChallengeEngine['armedUniverse']>, startMs: number): void {
+    this.armedUniverse = null;
+    this.commitUniverseState(startMs, a.nickname, a.label);
+    // 暫定期限(deadline 起点)から実再生に合わせて張り直す = 必ず短縮方向。
+    // **清算(universeUntilMs)より GIFT_FX_FREEZE_MARGIN_MS 後ろ**に置くのが肝 —
+    // settleUniverse は凍結中なので maybeAchieve を見送り、その差ぶん後に
+    // flushFxFreeze の末尾が CLEAR を出す = 「CLEAR は必ず締めのカットインの後」。
+    this.fxFreezeUntilMs = this.universeUntilMs! + GIFT_FX_FREEZE_MARGIN_MS;
+    this.armFreezeTimer();
+  }
+
+  /**
+   * モニターの RPC(challenge.universeCue)から。revolutionCue / quizCue の鏡像。
+   * 戻り値 = 状態が変わった(呼び出し側は nudge)。
+   * drop は**プレーン即クリアへ倒す**(破棄しない)— 44,999💎 の結末は
+   * ゲームの状態であって演出ではない。
+   */
+  universeCue(p: ChallengeUniverseCue): boolean {
+    const a = this.armedUniverse;
+    if (a === null) return false;
+    const nowMs = this.now();
+    if (p.action === 'drop') {
+      if (p.effectId !== 0 && p.effectId !== a.id) return false;
+      this.plainCommitArmedUniverse(nowMs, 'モニターが再生を見送った');
+      this.flushFxFreeze(nowMs);
+      return true;
+    }
+    if (p.effectId !== a.id) return false;
+    // 丸めは boostCue / revolutionCue と同じ(now を超えさせない・遅れも上限で抑える)。
+    const startMs = Math.min(Math.max(p.startedAtMs, nowMs - BOOST_COMMIT_MAX_LAG_MS), nowMs);
+    this.commitUniverse(a, startMs);
+    return true;
+  }
+
+  /**
+   * アーム期限切れ = モニターがキューを消化し切れなかった / 再生しなかった。
+   * **破棄ではなく強制発動**(commitArmedRevolutionIfExpired / …Quiz… と同じ判断)。
+   * 起点は deadlineMs — effect に焼いた universeEndsAtMs がそのまま真になる。
+   */
+  private commitArmedUniverseIfExpired(nowMs: number): void {
+    const a = this.armedUniverse;
+    if (a === null || nowMs < a.deadlineMs) return;
+    this.giftDiag(
+      `→ 一撃クリアのアーム期限切れ(${Math.round(UNIVERSE_ARM_MAX_MS / 1000)}秒)— モニターの再生を待たず強制発動`
+    );
+    this.commitUniverse(a, a.deadlineMs);
+  }
+
+  /** アーム中をプレーンで即クリア(plainCommitArmedRevolution の鏡像)。 */
+  private plainCommitArmedUniverse(nowMs: number, why: string): void {
+    const a = this.armedUniverse;
+    if (a === null) return;
+    this.giftDiag(`→ アーム中の一撃クリアをプレーンモードで即クリア(${why})— 映像なし、結果だけ`);
+    this.armedUniverse = null;
+    this.universeStartMs = nowMs;
+    this.universeUntilMs = nowMs; // 尺 0 = この場で清算
+    this.universeFromValue = this.value;
+    this.universeNickname = a.nickname;
+    this.universeLabel = a.label;
+    this.universeBlocked = 0;
+    this.fxFreezeUntilMs = nowMs; // 暫定凍結を引き戻す(プレーンは凍結しない契約)
+    this.armFreezeTimer();
+    // ドレインは呼び出し側に任せる(ここで flushFxFreeze を呼ぶと再入する)。
+  }
+
+  /**
+   * 清算の遅延解除。**flushFxFreeze の早期 return より上**から呼ぶこと
+   * (flushRevolution / flushQuiz と同じ理由)。
+   */
+  private flushUniverse(nowMs: number): void {
+    if (this.universeUntilMs === null) return;
+    // 時計飛び・NTP 巻き戻しの安全弁(時刻ラッチの規約)。
+    this.universeUntilMs = clampFutureMs(this.universeUntilMs, nowMs, UNIVERSE_MAX_MS);
+    if (nowMs < this.universeUntilMs) return;
+    this.settleUniverse(nowMs);
+  }
+
+  /**
+   * 清算: カウントを 0 にし、universe-end を積んでバリアを解く。
+   *
+   * **achieved はここでは出さない** — 凍結中なので `isFxFrozen()` ガードで見送り、
+   * flushFxFreeze 末尾の maybeAchieve が締めのカットイン明け
+   * (+ GIFT_FX_FREEZE_MARGIN_MS)に出す。これが「CLEAR は必ず締めのカットインの
+   * 後」の構造保証で、モニターがクラッシュしても worker 単独で成立する。
+   * プレーン経路(凍結なし)はこの場で即 CLEAR になる。
+   */
+  private settleUniverse(nowMs: number): void {
+    const applied = this.clampDownAmount(-this.value); // ≤ 0(-0 は 0 へ正規化済み)
+    const down = -applied;
+    this.stats.universeDown += down;
+    this.value = 0;
+    const nickname = this.universeNickname;
+    // 先にラッチを畳む(バリア解除)— settleQuiz と同じ「pushEffect の時点で
+    // state は配られうる」の規約。
+    this.clearUniverseState();
+    this.pushEffect({
+      kind: 'universe-end',
+      amount: applied,
+      universeDownTotal: down,
+      ...(nickname !== '' ? { nickname } : {}),
+      atMs: nowMs,
+    });
+    if (!this.isFxFrozen()) this.maybeAchieve(nowMs);
+    // ★バリアの溜め分は **pendingOps へ移送せず破棄する**(quiz / 革命の機能OFF とは
+    // 逆の判断)。理由は二段凍結の構造そのもの: settle の時点では必ず凍結中なので
+    // maybeAchieve は見送られ、CLEAR は GIFT_FX_FREEZE_MARGIN_MS 後の凍結明けに出る。
+    // そこへ移送した op を先にドレインすると**値が 0 から押し上げられ**、直後の
+    // maybeAchieve が `value > 0` で早期 return して **CLEAR が永久に出ない**。
+    // 破棄が正しいのは「達成後のイベントは元のタイムラインでも無視される」既存規約
+    // どおりで、ダイヤ集計(touchParticipant)は handleEvent の冒頭で済んでいるので
+    // ランキングと課金額の記録は残る。
+    this.universeDeferredOps = [];
+    this.dirty = true;
+    this.armFreezeTimer();
+  }
+
+  /** 進行中ラッチの破棄(バリアの溜め分には触れない — clearQuizState の流儀)。 */
+  private clearUniverseState(): void {
+    this.armedUniverse = null;
+    this.universeStartMs = 0;
+    this.universeUntilMs = null;
+    this.universeFromValue = 0;
+    this.universeNickname = '';
+    this.universeLabel = '';
+    this.universeBlocked = 0;
+  }
+
+  /** 全破棄(start / reset / stop / 達成 / 機能OFF の共通出口)。 */
+  private clearUniverse(): void {
+    this.clearUniverseState();
+    this.universeDeferredOps = [];
+  }
+
+  // ── ライオン(lion / Lion 29,999💎) ──────────────────────────────────────
+
+  /**
+   * ライオンバリアの生存判定。アーム(発動)〜清算 — universeBarrierActive の
+   * 鏡像で、対象も同じく**全 op(critical 含む)**。
+   * **▶テスト実演の窓(testLionUntilMs)は見ない**(universe と同じ)。
+   */
+  private lionBarrierActive(): boolean {
+    return this.armedLion !== null || this.lionUntilMs !== null;
+  }
+
+  /**
+   * ライオンの発動(applyOrQueue の op)。activateUniverse の骨格。
+   *
+   * **値はここでは動かさない** — 43 秒のカットシーンが段⑥へ差し掛かった瞬間に
+   * settleLion が一括で積む(そこが「数字が跳ねる」見せ場だから)。
+   *
+   * **タップは止めない**(universe との唯一の振る舞い差)。あちらは 0 へ向けて
+   * 削る絵なので押下を破棄したが、こちらは残量が増える妨害で「走行中のタップは
+   * 演出より優先」の恒久ルールがそのまま生きる — 幕の裏で押した分は 7セグの
+   * 数字に即時に効き、段⑥の跳ね上がりはその減った値からの上乗せになる。
+   */
+  private activateLion(ln: LionRule, e: Extract<NormalizedEvent, { kind: 'gift' }>): void {
+    // 幽霊ガード(activateUniverse と同じ — 凍結ドレイン中に設定が変わりうる)。
+    if (
+      this.stopping ||
+      this.status !== 'running' ||
+      !this.getConfig().enabled ||
+      !this.getConfig().lion.enabled
+    ) {
+      return;
+    }
+    // **重ねがけは冪等**(activateUniverse と同じ判断)。43 秒の幕は直列化しか
+    // できず、延長も重畳も定義できない。黙って消さず必ず記録する。
+    // ダイヤ集計(touchParticipant)は handleEvent の冒頭で済んでいるのでランキングには乗る。
+    if (this.lionBarrierActive()) {
+      this.giftDiag('→ ライオンは既に進行中 — 2発目は冪等に受け流す(43秒の幕は直列化できない)');
+      return;
+    }
+    const atMs = this.now();
+    this.clearTestPreviews(); // 実発動が実演に勝つ(universe と同じ規約)
+    const nickname = e.viewer.nickname ?? e.viewer.displayId ?? '';
+    const cinematic = this.fxAllowed();
+    const deadlineMs = atMs + LION_ARM_MAX_MS;
+    const each = ln.amountEach;
+    const steps = ln.steps;
+    if (cinematic) {
+      this.armedLion = {
+        id: 0,
+        atMs,
+        deadlineMs,
+        each,
+        steps,
+        nickname,
+        label: ln.label,
+        flash: ln.flash,
+      };
+    }
+    const effectId = this.pushEffect({
+      kind: 'lion-start',
+      amount: 0,
+      lionEach: each,
+      lionSteps: steps,
+      lionTotal: each * steps,
+      ...(cinematic ? { lionEndsAtMs: deadlineMs + lionSettleAtMs(steps) } : {}),
+      fxDurationMs: cinematic ? lionCutsceneMs(steps) : 0,
+      ...(ln.flash ? { flash: true } : {}),
+      ...(nickname !== '' ? { nickname } : {}),
+      ...(e.giftName ? { giftName: e.giftName } : {}),
+      ...(e.repeatCount > 1 ? { giftCount: e.repeatCount } : {}),
+      ...(e.iconUrl ? { giftIconUrl: e.iconUrl } : {}),
+      diamonds: e.diamonds,
+      atMs,
+    });
+    if (cinematic) {
+      this.armedLion!.id = effectId;
+      // ★**アーム中は凍結を張らない**(armQuiz と同じ・activateUniverse とは違う)。
+      //   バリア方式のアームは「モニターが**溜まっていた演出キューを消化し切る**のを
+      //   待つ」時間で、モニター側の armed 監視は待ちの条件に
+      //   `challenge.fxFreezeUntilMs != null` を含んでいる(worker の pendingOps が
+      //   まだ吐き切っていない印だから)。ここで暫定凍結を張ると**その条件が自分自身の
+      //   せいで永久に成立せず**、アーム期限(120秒)切れの強制発動まで演出が始まらない。
+      //   E2E(countdown-lion のシネマ)で実際に踏んだ。凍結が要らないのは、43 秒の
+      //   あいだ全 op を止めるのは**バリア(lionDeferredOps)の仕事**だから —
+      //   凍結は commitLion で「実再生に合わせて」初めて張る。
+      //   アーム期限の出口は armFreezeTimer が armedLion.deadlineMs で起こす。
+      this.armFreezeTimer();
+    } else {
+      this.giftDiag('→ ライオンはプレーンモードで発動(モニター未表示 / 動きの抑制)— 演出なし、即加算');
+      // プレーンは待つ理由がない(映像が無い)。尺 0 の窓を開いてその場で清算する。
+      // **pushEffect の後**に呼ぶこと(lion-start の id < lion-end の id)。
+      this.lionStartMs = atMs;
+      this.lionUntilMs = atMs;
+      this.lionEach = each;
+      this.lionSteps = steps;
+      this.lionNickname = nickname;
+      this.lionLabel = ln.label;
+      this.settleLion(atMs);
+    }
+    this.dirty = true;
+  }
+
+  /** 演出の状態を一括で開く(commitUniverseState の鏡像)。 */
+  private commitLionState(
+    startMs: number,
+    each: number,
+    steps: number,
+    nickname: string,
+    label: string
+  ): void {
+    this.clearTestPreviews();
+    this.lionStartMs = startMs;
+    // ★清算は**カットシーンの終端ではなく段⑥の頭**。理由は lionSettleAtMs の doc。
+    this.lionUntilMs = startMs + lionSettleAtMs(steps);
+    this.lionEach = each;
+    this.lionSteps = steps;
+    this.lionNickname = nickname;
+    this.lionLabel = label;
+    // 幕の境界で合算中のいいねバナーを切る(commitUniverseState と同じ理由)。
+    this.forceFlushLikeFx();
+    this.armFreezeTimer();
+    this.dirty = true;
+  }
+
+  /**
+   * アーム済みライオンの発動(**唯一の commit 経路**)。
+   * startMs はモニターが導入カットインを再生し始めた時刻。
+   */
+  private commitLion(a: NonNullable<ChallengeEngine['armedLion']>, startMs: number): void {
+    this.armedLion = null;
+    this.commitLionState(startMs, a.each, a.steps, a.nickname, a.label);
+    // 暫定期限(deadline 起点)から実再生に合わせて張り直す = 必ず短縮方向。
+    // **清算(lionUntilMs)の更に段⑥の 5 秒ぶん後ろ**に置くのが肝 — 合計の発表が
+    // 終わって幕が引けるまで他の演出を出さない。
+    this.fxFreezeUntilMs =
+      this.lionUntilMs! + LION_TOTAL_DISPLAY_MS + GIFT_FX_FREEZE_MARGIN_MS;
+    this.armFreezeTimer();
+  }
+
+  /**
+   * モニターの RPC(challenge.lionCue)から。universeCue の鏡像。
+   * 戻り値 = 状態が変わった(呼び出し側は nudge)。
+   * drop は**プレーン即発動へ倒す**(破棄しない)— 29,999💎 の効果は
+   * ゲームの状態であって演出ではない。
+   */
+  lionCue(p: ChallengeLionCue): boolean {
+    const a = this.armedLion;
+    if (a === null) return false;
+    const nowMs = this.now();
+    if (p.action === 'drop') {
+      if (p.effectId !== 0 && p.effectId !== a.id) return false;
+      this.plainCommitArmedLion(nowMs, 'モニターが再生を見送った');
+      this.flushFxFreeze(nowMs);
+      return true;
+    }
+    if (p.effectId !== a.id) return false;
+    // 丸めは universeCue と同じ(now を超えさせない・遅れも上限で抑える)。
+    const startMs = Math.min(Math.max(p.startedAtMs, nowMs - BOOST_COMMIT_MAX_LAG_MS), nowMs);
+    this.commitLion(a, startMs);
+    return true;
+  }
+
+  /**
+   * アーム期限切れ = モニターがキューを消化し切れなかった / 再生しなかった。
+   * **破棄ではなく強制発動**(commitArmedUniverseIfExpired と同じ判断)。
+   * 起点は deadlineMs — effect に焼いた lionEndsAtMs がそのまま真になる。
+   */
+  private commitArmedLionIfExpired(nowMs: number): void {
+    const a = this.armedLion;
+    if (a === null || nowMs < a.deadlineMs) return;
+    this.giftDiag(
+      `→ ライオンのアーム期限切れ(${Math.round(LION_ARM_MAX_MS / 1000)}秒)— モニターの再生を待たず強制発動`
+    );
+    this.commitLion(a, a.deadlineMs);
+  }
+
+  /** アーム中をプレーンで即発動(plainCommitArmedUniverse の鏡像)。 */
+  private plainCommitArmedLion(nowMs: number, why: string): void {
+    const a = this.armedLion;
+    if (a === null) return;
+    this.giftDiag(`→ アーム中のライオンをプレーンモードで即発動(${why})— 映像なし、結果だけ`);
+    this.armedLion = null;
+    this.lionStartMs = nowMs;
+    this.lionUntilMs = nowMs; // 尺 0 = この場で清算
+    this.lionEach = a.each;
+    this.lionSteps = a.steps;
+    this.lionNickname = a.nickname;
+    this.lionLabel = a.label;
+    this.fxFreezeUntilMs = nowMs; // 暫定凍結を引き戻す(プレーンは凍結しない契約)
+    this.armFreezeTimer();
+    // ドレインは呼び出し側に任せる(ここで flushFxFreeze を呼ぶと再入する)。
+  }
+
+  /**
+   * 清算の遅延解除。**flushFxFreeze の早期 return より上**から呼ぶこと
+   * (flushUniverse と同じ理由)。
+   */
+  private flushLion(nowMs: number): void {
+    if (this.lionUntilMs === null) return;
+    // 時計飛び・NTP 巻き戻しの安全弁(時刻ラッチの規約)。
+    this.lionUntilMs = clampFutureMs(this.lionUntilMs, nowMs, LION_MAX_MS);
+    if (nowMs < this.lionUntilMs) return;
+    this.settleLion(nowMs);
+  }
+
+  /**
+   * 清算: カウントを `each × steps` だけ増やし、lion-end を積んでバリアを解く。
+   *
+   * **増加なので 0 クランプも maybeAchieve も要らない**(妨害はクリアを遠ざける
+   * 向きにしか働かない)。上限クランプも入れない — 妨害は妨害として効かせる
+   * (7セグは SevenSeg が桁を自動で増やす)。
+   */
+  private settleLion(nowMs: number): void {
+    const total = this.lionEach * this.lionSteps;
+    const each = this.lionEach;
+    const steps = this.lionSteps;
+    this.stats.giftUp += total;
+    this.value += total;
+    const nickname = this.lionNickname;
+    // 先にラッチを畳む(バリア解除)— settleUniverse と同じ「pushEffect の時点で
+    // state は配られうる」の規約。
+    this.clearLionState();
+    this.pushEffect({
+      kind: 'lion-end',
+      amount: total,
+      lionEach: each,
+      lionSteps: steps,
+      lionTotal: total,
+      ...(nickname !== '' ? { nickname } : {}),
+      atMs: nowMs,
+    });
+    // ★バリアの溜め分は **pendingOps へ移送する**(universe とは逆の判断)。
+    // あちらが破棄なのは「0 到達 → CLEAR」の直後で、移送すると値が押し上げられて
+    // CLEAR が永久に出なくなるため。ライオンは走行が続くので、43 秒のあいだ届いた
+    // ギフト・いいね・コメントを捨てる理由が無い(革命・お題の機能OFF と同じ流儀)。
+    this.pendingOps.push(...this.lionDeferredOps);
+    this.lionDeferredOps = [];
+    this.dirty = true;
+    this.armFreezeTimer();
+  }
+
+  /** 進行中ラッチの破棄(バリアの溜め分には触れない — clearUniverseState の流儀)。 */
+  private clearLionState(): void {
+    this.armedLion = null;
+    this.lionStartMs = 0;
+    this.lionUntilMs = null;
+    this.lionEach = 0;
+    this.lionSteps = 0;
+    this.lionNickname = '';
+    this.lionLabel = '';
+  }
+
+  /** 全破棄(start / reset / stop / 達成 / 機能OFF の共通出口)。 */
+  private clearLion(): void {
+    this.clearLionState();
+    this.lionDeferredOps = [];
+  }
+
   /** 到着時点の cfg・行・イベントから発動スナップショットを焼き込む(お題の抽選込み)。 */
   private makeQuizSnapshot(
     cfg: ChallengeConfig,
@@ -5021,6 +6199,9 @@ export class ChallengeEngine {
         this.boostUntilMs !== null ||
         this.armedRevolution !== null ||
         this.revolutionUntilMs !== null ||
+        // 一撃クリア中も同じ扱い(ギフト経路のゲートと同じ条件式)。
+        this.armedUniverse !== null ||
+        this.universeUntilMs !== null ||
         this.armedQuiz !== null ||
         this.quizVoteUntilMs !== null
       ) {
@@ -5382,6 +6563,9 @@ export class ChallengeEngine {
     if (this.armedQuiz !== null || this.quizVoteUntilMs !== null) return;
     if (this.armedBoost !== null || this.boostUntilMs !== null) return;
     if (this.armedRevolution !== null || this.revolutionUntilMs !== null) return;
+    // 一撃クリアの走行中・アーム中は次のお題を始めない(バリアで全 op が止まって
+    // いるので届かないはずだが、予約 FIFO はバリアを通らないのでここで見る)。
+    if (this.armedUniverse !== null || this.universeUntilMs !== null) return;
     if (this.pendingOps.length > 0 || this.isFxFrozen()) return;
     const snap = this.quizQueue.shift()!;
     this.giftDiag(`→ 予約していたお題ルーレットを発動(残り ${this.quizQueue.length} 件)`);
@@ -5594,6 +6778,16 @@ export class ChallengeEngine {
     // お題も予約・バリアごと畳む(達成後のイベントは元のタイムラインでも無視される
     // 規約 — settleQuiz の -amount で 0 到達した直後の CLEAR がこの経路を通る)。
     this.clearQuiz();
+    // 一撃クリアも畳む(冪等 — settleUniverse は clearUniverseState 済み)。
+    // バリアの溜め分ごと破棄するのが正しい: 達成後のイベントは元のタイム
+    // ラインでも無視される規約で、この経路は**その一撃クリア自身**の結末だから。
+    this.clearUniverse();
+    // ライオンも畳む。**バリアの溜め分は pendingOps へ移送する**(一撃クリアの
+    // 破棄とは逆)— あちらは自分自身の結末(0 到達)なので捨てるのが正しいが、
+    // ライオンは妨害なので「別の理由で達成した」ときに巻き添えで消す理由が無い。
+    this.pendingOps.push(...this.lionDeferredOps);
+    this.lionDeferredOps = [];
+    this.clearLion();
     // 排他スケジューリングの予約も破棄 — 達成後のイベントは元のタイムラインでも
     // 無視される規約(pendingTapLock は settleBoost のフックが status で捨てるが、
     // ここでも対にして「達成 = 予約ゼロ」を一目で保証する)。

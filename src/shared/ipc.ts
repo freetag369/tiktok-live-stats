@@ -79,6 +79,22 @@ export type RpcMap = {
    * drop はプレーン即発動へ倒す(投票と±の効果は破棄しない)。
    */
   'challenge.quizCue': { p: D.ChallengeQuizCue; r: void };
+  /**
+   * アーム済み一撃クリア(TIKTOK UNIVERSE)の合図(quizCue の鏡像)。worker は
+   * ギフト着弾で予約するだけで、25 秒の時計はモニターが「発動時点の演出キューを
+   * 消化し切った」あと導入カットインを再生し始めた瞬間から回る。**preMs は無い**
+   * (25 秒まるごとが演出で、その先に開く窓が無いため)。
+   * drop はプレーン即クリアへ倒す(結末は破棄しない)。
+   */
+  'challenge.universeCue': { p: D.ChallengeUniverseCue; r: void };
+  /**
+   * アーム済みライオン(Lion 29,999💎)の合図(universeCue の鏡像)。worker は
+   * ギフト着弾で予約するだけで、43 秒の時計はモニターが「発動時点の演出キューを
+   * 消化し切った」あと導入カットインを再生し始めた瞬間から回る。**preMs は無い**
+   * (43 秒まるごとが演出で、その先に開く窓が無いため)。
+   * drop はプレーン即発動へ倒す(効果は破棄しない)。
+   */
+  'challenge.lionCue': { p: D.ChallengeLionCue; r: void };
 
   // queries
   'q.viewerTable': { p: { sessionId: number | null } & D.ViewerTableQuery; r: D.Page<D.ViewerTableRow> };
@@ -226,6 +242,8 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'challenge.boostCue': 'worker',
   'challenge.revolutionCue': 'worker',
   'challenge.quizCue': 'worker',
+  'challenge.universeCue': 'worker',
+  'challenge.lionCue': 'worker',
   'q.viewerTable': 'worker',
   'q.viewer': 'worker',
   'q.recallCard': 'worker',

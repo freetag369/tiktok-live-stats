@@ -9,6 +9,10 @@ import {
   STOCK_FULL_CLIP_URL,
   STRIKE_CLIP_URL,
   TAP_LOCK_INTRO_CLIP_URL,
+  LION_BLAST_CLIP_URL,
+  LION_INTRO_CLIP_URL,
+  UNIVERSE_INTRO_CLIP_URL,
+  UNIVERSE_OUTRO_CLIP_URL,
   fxClipUrl,
 } from './fx';
 import { prewarmSe } from './se';
@@ -76,6 +80,11 @@ export function selectPrewarmTargets(): PrewarmTarget[] {
     { label: 'revolution-result', url: REVOLUTION_RESULT_CLIP_URL },
     { label: 'quiz-intro', url: QUIZ_INTRO_CLIP_URL },
     { label: 'quiz-result', url: QUIZ_RESULT_CLIP_URL },
+    { label: 'universe-intro', url: UNIVERSE_INTRO_CLIP_URL },
+    { label: 'universe-outro', url: UNIVERSE_OUTRO_CLIP_URL },
+    // ライオンは 2 本で 2.3MB と重いので**リストの後ろ**へ(予熱は 1 本ずつ直列)。
+    { label: 'lion-intro', url: LION_INTRO_CLIP_URL },
+    { label: 'lion-blast', url: LION_BLAST_CLIP_URL },
     { label: 'achieved', url: ACHIEVED_CLIP_URL },
   ]);
 }

@@ -307,6 +307,56 @@ export const QUIZ_INTRO_CLIP_URL: string | null =
 export const QUIZ_RESULT_CLIP_URL: string | null =
   quizGlob['../assets/fx/quiz/result.mp4'] ?? null;
 
+/**
+ * 一撃クリア(TIKTOK UNIVERSE)の 2 本(各 8 秒 = UNIVERSE_INTRO_MS /
+ * UNIVERSE_OUTRO_MS・不透明・音声焼き込み)。素材は assets/fx/universe/
+ * (専用サブディレクトリなのは rl/hot・revolution・tap-lock・quiz と同じ理由:
+ * 既存カタログの「id ⇄ ファイル 1:1」の孤児検査を踏まない)。
+ *
+ * 導入と締めは**同じホルダーを使い回す**(革命・お題が別ホルダーを要求したのは
+ * 導入と結果が最大 130〜180 秒離れた別の生存期間だからで、こちらは 1 つの
+ * universeHold の中で 9 秒しか離れていない — boost の intro/window/result が
+ * 1 ホルダーを位相で使い回しているのと同じ形)。
+ *
+ * **どちらもフォールバックを持たない**(null = 暗幕 `.universe-screen` へ落として
+ * 30 段の減算だけは必ず出し切る)。gift-t1〜t4 で代用してはいけない —
+ * あちらは screen 合成前提の黒背景素材で、不透明ホルダーに出すと黒画面 8 秒になる。
+ */
+const universeGlob = import.meta.glob('../assets/fx/universe/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+export const UNIVERSE_INTRO_CLIP_URL: string | null =
+  universeGlob['../assets/fx/universe/intro.mp4'] ?? null;
+
+export const UNIVERSE_OUTRO_CLIP_URL: string | null =
+  universeGlob['../assets/fx/universe/outro.mp4'] ?? null;
+
+/**
+ * ライオン(Lion 29,999💎)の全画面カットイン2本。**0 件許容**(universe と同じ)—
+ * 素材が無ければ null へ縮退し、モニターは `.lion-screen` の暗幕で段だけ出す
+ * (43 秒の演出そのものは値の見せ場なので、絵が無くても札と合計は必ず出し切る)。
+ *
+ * **フォールバックは置かない** — 別の絵(ドラゴン等)でライオンが出るより、
+ * 暗幕のほうがマシ(REVOLUTION_RESULT_CLIP_URL と同じ判断)。
+ *
+ * intro.mp4 は**段②〜④(18 秒)を最終フレーム静止で持たせる**契約なので、
+ * 差し替えるときは終端が「正面を睨んで静止したライオン」であることを確認すること。
+ */
+const lionGlob = import.meta.glob('../assets/fx/lion/*.mp4', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+export const LION_INTRO_CLIP_URL: string | null =
+  lionGlob['../assets/fx/lion/intro.mp4'] ?? null;
+
+export const LION_BLAST_CLIP_URL: string | null =
+  lionGlob['../assets/fx/lion/blast.mp4'] ?? null;
+
 const BY_ID = new Map(FX_CLIPS.map((c) => [c.id, c]));
 
 /** クリップ id → URL。未知の id は null(設定が古い/壊れていても落とさない)。 */

@@ -52,15 +52,20 @@ describe('ホールド番犬(時間ベースの最後の脱出口)', () => {
     ['startBandFx', 'band'],
     ['startStockCutin', 'stock'],
     ['startBoostFx', 'boost'],
+    // ダイヤ増減の浮上(2026-08-26)。幕は張らないが**据え置きの持ち主**なので、
+    // 固着すると anyCutinHold() が立ちっぱなしになって舞台が全死する点は同じ。
+    ['startGiftScaleFx', 'giftScale'],
   ])('%s は hold を立てたら番犬の期限も書く', (fn, key) => {
     // 番犬は hold が真の間しか期限を読まない — hold を立てる側の書き込みが唯一の契約。
     expect(fnBody(fn)).toContain(`fxHoldDeadlines.current.${key} =`);
   });
 
-  it('hold を true にする箇所は4つの start* だけ(新しい持ち主は期限の書き込みも必要)', () => {
+  it('hold を true にする箇所は5つの start* だけ(新しい持ち主は期限の書き込みも必要)', () => {
     // このカウントが増えたら、その箇所にも fxHoldDeadlines の書き込みを足すこと。
-    const holds = [...SRC.matchAll(/(?:roulette|band|stockCutin|boost)Hold\.current = true/g)];
-    expect(holds.length).toBe(4);
+    const holds = [
+      ...SRC.matchAll(/(?:roulette|band|stockCutin|boost|giftScale)Hold\.current = true/g),
+    ];
+    expect(holds.length).toBe(5);
   });
 
   it('番犬 interval が存在し、4ホールドすべてを既存の締め関数で解除する', () => {
@@ -72,6 +77,22 @@ describe('ホールド番犬(時間ベースの最後の脱出口)', () => {
     expect(effect).toContain('finishBandFx()');
     expect(effect).toContain('abortStrike()');
     expect(effect).toContain('expireRoulette()');
+    expect(effect).toContain('expireGiftScaleFx()');
+  });
+
+  it('startGiftScaleFx は二重安全弁を張る(順番待ちで沈んでも据え置きが解ける)', () => {
+    // onShow 起点のビート連鎖だけだと、バナーが順番待ちへ回った/遮蔽で
+    // animationend が来ない場合に据え置きが解けない。startBandFx の
+    // finishBandFx ×2 と同じ役割の保険。
+    const fn = fnBody('startGiftScaleFx');
+    expect(fn).toContain('finishGiftScaleFx');
+    expect(fn).toContain('BANNER_GIFT_SCALE_MS + 2000');
+  });
+
+  it('startGiftScaleFx は実演(e.test)で据え置きを張らない', () => {
+    // testEffect は「値・統計・凍結に触らない」契約。張ると設定画面の ▶ を
+    // 押すだけで走行中のカウントが3秒固まる。
+    expect(fnBody('startGiftScaleFx')).toMatch(/if \(!e\.test\) holdValue\(/);
   });
 
   it('expireRoulette は持ち越しを捨てない(abortRoulette との役割の違い)', () => {
@@ -299,6 +320,44 @@ describe('確定バナー保護 — バナーは単枠置換なのでビート�
     expect(fn).not.toContain('immediate: true');
   });
 
+  it('startGiftScaleFx のバナーは immediate を維持する(自分のホールドで自沈しない)', () => {
+    /*
+     * この関数は pushFloat より**前**に giftScaleHold を立てて据え置きを張るので、
+     * pushFloat 側の bannerWillShowNow は `!anyCutinHold()` が false になり、
+     * immediate を外すと**自分のバナーを自分で順番待ちへ落とす**。そうなると
+     * pumpStage が anyCutinHold で毎回 return してバナーは永久に出ず、安全弁が
+     * 切れるまで据え置きだけが残る = 「数字が固まったまま演出が出ない」。
+     * 2026-08-26 に countdown-gift-scale.e2e.ts が実測で検出(onShow +5005ms /
+     * 安全弁 +5004ms)。表示中バナーの踏み潰しは、呼び出し側がホールドを立てる
+     * **前に**同じ bannerWillShowNow で舞台の空きを確認することで防いでいる。
+     */
+    const fn = fnBody('startGiftScaleFx');
+    expect(fn).toContain('immediate: true');
+    // ホールドは pushFloat より前に立てる(据え置きの先漏れ防止)— 順序も固定する。
+    expect(fn.indexOf('giftScaleHold.current = true')).toBeLessThan(fn.indexOf('pushFloat('));
+  });
+
+  it('ダイヤ増減の開始点は必ず bannerWillShowNow で舞台の空きを確認してから呼ぶ', () => {
+    // immediate:true は「確認済みだから踏み潰す相手が居ない」ことが前提。確認を
+    // 外すと、表示中のバナーを置換で消す側の実害へ倒れる。
+    // 舞台へ入れる口は2つ(直行 = playGiftVisual / 持ち越し = pumpStage)。どちらも
+    // 開始の直前でガードを通す — 3つ目の口を作るならここも更新すること。
+    const guards = [...SRC.matchAll(/bannerWillShowNow\('gift-scale'/g)];
+    expect(guards.length, '舞台の空き確認が2箇所(直行・持ち越し)ある').toBe(2);
+    // 呼び出し口は「直行・持ち越し・カットインからのバトンタッチ」の3つだけ。
+    // (バトンタッチは band の据え置きを引き継ぐので舞台は自分のもの = 確認不要。)
+    const calls = [...SRC.matchAll(/[^n] startGiftScaleFx\(e\)/g)];
+    expect(calls.length, '開始点は3箇所だけ').toBe(3);
+    // どの呼び出しも、直前 600 文字以内にガードか band のバトンタッチの印がある。
+    for (const m of calls) {
+      const before = SRC.slice(Math.max(0, m.index - 600), m.index);
+      expect(
+        before.includes("bannerWillShowNow('gift-scale'") || before.includes('bandHold.current = false'),
+        '確認もバトンタッチも無い開始点がある'
+      ).toBe(true);
+    }
+  });
+
   it('finishRoulette の確定バナーは immediate を維持する(逆方向の退行防止)', () => {
     // 確定バナーはリールのビートに同期する唯一のバナー。ラッチ判定に落とすと
     // コンボ中(rouletteHold 中はキューが開かない)に1枚も出なくなる。
@@ -372,16 +431,27 @@ describe('着弾の背面再生 — 遮蔽 occlusion(2026-08-17 ユーザー決�
     }
   });
 
-  it('横取り 8 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
+  it('横取り 10 箇所は「これから立つ幕」を渡す(hold は後で立つので ref では足りない)', () => {
     const calls = SRC.split('flushStrike(true, ').length - 1;
-    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(8);
+    expect(calls, 'flushStrike(true) の引数なし呼び出しが残っている').toBe(10);
     // revolution は 2026-08-20 追加(導入カットインが不透明フルフレームなので
     // band / boost と同じ 'opaque' の横取りが要る)。tap-lock も同日・同じ理由で追加。
     // 6 箇所目は同日追加の革命の**結果**カットシーン(導入と同じ 'revolution' の遮蔽を
     // 渡す — occlusionOfCutin は種別→遮蔽の 1:1 対応なので新しい種別は作らない)。
     // 7・8 箇所目は 2026-08-21 追加のお題ルーレット(前置きと結果発表 — どちらも
     // 'quiz' の 'opaque')。
-    for (const kind of ['roulette', 'band', 'boost', 'revolution', 'tap-lock', 'quiz']) {
+    // 9 箇所目は 2026-08-26 追加の一撃クリア(25 秒まるごと 'universe' の 'opaque')。
+    // 10 箇所目は同日追加のライオン(43 秒まるごと 'lion' の 'opaque')。
+    for (const kind of [
+      'roulette',
+      'band',
+      'boost',
+      'revolution',
+      'tap-lock',
+      'quiz',
+      'universe',
+      'lion',
+    ]) {
       expect(SRC, `${kind} の横取りが遮蔽を渡していない`).toContain(
         `flushStrike(true, occlusionOfCutin('${kind}'));`
       );

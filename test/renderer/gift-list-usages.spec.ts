@@ -81,6 +81,9 @@ function cfg(over: Record<string, unknown> = {}): ChallengeConfig {
     tapBoost: { enabled: false, rules: [] },
     tapLock: { enabled: false, rules: [] },
     revolution: { enabled: false, rules: [] },
+    // ダイヤ増減(既定オン)も土台では落とす — 全ギフトに一致する帯域なので、
+    // 入れたままだと既存の全ケースに giftScale 行が増える。専用の describe で戻す。
+    giftScale: { enabled: false },
     ...over,
   });
 }
@@ -173,5 +176,46 @@ describe('worker との整合(ソース検査)', () => {
     // この分岐の形が変わったら usagesOf の blockedBy モデルも同時に見直すこと。
     const src = readFileSync(resolve(__dirname, '../../src/worker/challenge.ts'), 'utf8');
     expect(src).toMatch(/fs\?\.suppressBandFx === true\s*\?\s*null\s*:\s*matchGiftFullCut/);
+  });
+});
+
+describe('ダイヤ増減(giftScale)の用途表示', () => {
+  it('帯域に一致するので、他が何も無ければ単独で発火する', () => {
+    const u = usageMap(cfg({ giftScale: { enabled: true } }), row({ diamonds: 100 }));
+    expect(u).toEqual({ giftScale: 'FIRES' }); // 100💎 × 30
+  });
+
+  it('手動行(giftRules)があればそちらが勝つ(ユーザー決定の表示側の写し)', () => {
+    const u = usageMap(cfg({ giftScale: { enabled: true }, giftRules: [GR_ROW] }), row());
+    expect(u).toEqual({ giftRule: 'FIRES', giftScale: 'giftRule' });
+  });
+
+  it('排他機能(お邪魔)が勝つと増減規則と同じく食われる', () => {
+    const u = usageMap(
+      cfg({ giftScale: { enabled: true }, tapLock: { enabled: true, rules: [TL_ROW] } }),
+      row()
+    );
+    expect(u).toEqual({ tapLock: 'FIRES', giftScale: 'tapLock' });
+  });
+
+  it('全面カットとは併発する(どちらも発火扱い)', () => {
+    const u = usageMap(
+      cfg({
+        giftScale: { enabled: true },
+        giftFullCut: { enabled: true, volume: 70, rules: [FC_ROW] },
+      }),
+      row()
+    );
+    expect(u).toEqual({ giftScale: 'FIRES', fullCut: 'FIRES' });
+  });
+
+  it('境界の表示: 9698💎 は ×30・9699💎 は ×50', () => {
+    const c = cfg({ giftScale: { enabled: true } });
+    expect(usagesOf(c, row({ diamonds: 9698 })).find((x) => x.key === 'giftScale')?.detail).toBe(
+      `+${9698 * 30}`
+    );
+    expect(usagesOf(c, row({ diamonds: 9699 })).find((x) => x.key === 'giftScale')?.detail).toBe(
+      `+${9699 * 50}`
+    );
   });
 });

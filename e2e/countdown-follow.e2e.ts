@@ -25,6 +25,10 @@ const FOLLOW_SETTINGS = {
     likeStockCount: 0,
     giftDefault: { mode: 'perDiamond', amount: 1 },
     giftRules: [],
+    // ダイヤ増減は既定オン(欠損はオンへ倒れる)なので明示的に落とす — settingsPatch は
+    // トップレベルの浅いマージで challenge を丸ごと差し替えるため、fixtures.ts の
+    // 既定は届かない(finalGate / commentHelper と同じ規約)。
+    giftScale: { enabled: false },
     commentRules: [],
     // ── 凍結を張るのは band1 だけ(countdown-press-cutin.e2e.ts と同じ構図)。
     roulettes: [],

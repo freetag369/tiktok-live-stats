@@ -26,6 +26,10 @@ const BAND_SETTINGS = {
     // Rose 1💎 → +1(この +1 がカットイン中は据え置かれる = 先漏れ防止の証明)。
     giftDefault: { mode: 'perDiamond', amount: 1 },
     giftRules: [],
+    // ダイヤ増減は既定オン(欠損はオンへ倒れる)なので明示的に落とす — settingsPatch は
+    // トップレベルの浅いマージで challenge を丸ごと差し替えるため、fixtures.ts の
+    // 既定は届かない(finalGate / commentHelper と同じ規約)。
+    giftScale: { enabled: false },
     commentRules: [],
     // ── 凍結を張るのは band1 だけにする。全面カットの既定行は「バラ」に
     //    一致してしまうので必ず落とすこと(落とさないと 5 秒の別の凍結が勝つ)。

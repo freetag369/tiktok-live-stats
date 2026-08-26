@@ -29,6 +29,21 @@
  * 選択(band と other の間。初見⑥・激熱確定⑥.5 は革命より上のまま)。革命は
  * お助け系だが helper(⑤)には同居させない — あちらはファンスタンプの±Nバナーで、
  * こちらは 11 秒の導入カットイン+窓を持つ別種の山場。
+ * ⑦.55 universe(一撃クリア・TIKTOK UNIVERSE 44,999💎)は 2026-08-26 にユーザーが
+ * revolution の直後(quiz の直前)を選択。カウントを 0 にしてランを終わらせる
+ * 25 秒の山場(導入カット8秒 + 30段の減算連打9秒 + 締めカット8秒)。band(⑦)より
+ * 下なのは revolution と同じ位置づけ。**開始順は quiz と同じくこの表では決まらない**
+ * — バリア方式(モニターの universe.armed 監視 + worker の universeDeferredOps)が
+ * 支配する。ここへの登録は universe-end の持ち越しとバナーの取り出し順の保険。
+ * ⑤.6 lion(ライオン・Lion 29,999💎)は 2026-08-26 にユーザーが「お助けの直後・
+ * 初見ルーレットより上」を選択。カウントを +1,499,950(29,999 × 50)積み上げる
+ * 43 秒の妨害(導入カット10秒 + 29,999 が1枚 + ボイス + 49 連打12秒 + 全面カット10秒
+ * + 合計発表5秒)。gift-scale(⑤.5)の直後なのは、あちらの「お助けの直後」という
+ * 決定(同日・fx-priority.spec が等式で凍結)を崩さずに実質の要件(初見・激熱確定・
+ * band より先)を満たせるから — gift-scale は 1.6 秒の浮上バナーなので、43 秒の幕の
+ * 前に通しても失うものが無い。**開始順は universe / quiz と同じくこの表では決まらない**
+ * — バリア方式(モニターの lion.armed 監視 + worker の lionDeferredOps)が支配する。
+ * ここへの登録は lion-end のバナーの取り出し順の保険。
  * ⑦.6 quiz(お題ルーレット)は 2026-08-21 に追加。序列上は revolution の直後だが、
  * **実際の開始順はこの表では決まらない** — ユーザー決定は「発動時点で溜まっていた
  * キューを全部消化してから開始・発動以降のキューは優先が高くても後回し」の
@@ -60,10 +75,21 @@ export const FX_PRIORITY_ORDER = [
   'boost',
   'tap-lock',
   'helper',
+  // ダイヤ増減の「N 浮上 → カウントアップ → ドン」(2026-08-26 ユーザー決定 —
+  // お助けの直後・入室ルーレットより先)。高額ギフトの手応えを他の演出に埋もれさせない。
+  'gift-scale',
+  // ライオン(Lion 29,999💎 の妨害・43秒のカットシーン)(2026-08-26 ユーザー決定 —
+  // 「お助けの直後・初見ルーレットより上」)。gift-scale の**直後**に置くのは、
+  // あちらが 1.6 秒の浮上バナーで「高額ギフトの手応えを埋もれさせない」ためだけの
+  // 軽い演出だから — 43 秒の幕の前に通してやっても失うものが無く、gift-scale 側の
+  // 「お助けの直後」というユーザー決定(fx-priority.spec が等式で凍結)も保てる。
+  // 実質の要件(初見・激熱確定・band より先に出す)はこの位置で満たされる。
+  'lion',
   'join-roulette',
   'hot-roulette',
   'band',
   'revolution',
+  'universe',
   'quiz',
   'other',
 ] as const;
@@ -117,6 +143,7 @@ export const FX_BANNER_KINDS = [
   'follow',
   'helper',
   'gift-card',
+  'gift-scale',
   'comment',
   'like-float',
   'stock-float',
@@ -129,6 +156,8 @@ export const FX_BANNER_KINDS = [
   'tap-lock',
   'revolution-announce',
   'revolution-result',
+  'universe',
+  'lion',
   'quiz-announce',
   'quiz-result',
 ] as const;
@@ -138,6 +167,11 @@ export const BANNER_PRIORITY = {
   follow: 'follow',
   helper: 'helper',
   'gift-card': 'other',
+  // ダイヤ増減のバナーは effect 側の分類(fxClassForEffect の 'gift-scale')と揃える。
+  // 'other' のままだと bannerWinsByRank の厳密 < 判定で band(⑨)のドレインに
+  // 構造的に永久に負け、飢餓弁(BANNER_STARVE_MS)が開くまで結果が出ない —
+  // boost-announce / tap-lock / roulette-*-hot / revolution / quiz が踏んだのと同じ罠。
+  'gift-scale': 'gift-scale',
   comment: 'other',
   'like-float': 'other',
   'stock-float': 'other',
@@ -162,6 +196,14 @@ export const BANNER_PRIORITY = {
   // boost-announce / tap-lock / roulette-*-hot が踏んだのと同じ罠(厳密 < 判定)の予防。
   'revolution-announce': 'revolution',
   'revolution-result': 'revolution',
+  // 一撃クリアのバナーも effect 側の分類(universe-start/-end → 'universe')と揃える。
+  // 1種類しか無いのは、25 秒の演出が終わってから「誰が撃ったか」を1枚出すだけだから
+  // (発動の告知は幕そのものが兼ねる)。
+  universe: 'universe',
+  // ライオンのバナーも effect 側の分類(lion-start/-end → 'lion')と揃える。
+  // universe と同じく1種類だけ — 43 秒のカットシーンが終わってから「誰が撃ったか」を
+  // 1枚出すだけで、発動の告知は幕そのものが兼ねる。
+  lion: 'lion',
   // お題ルーレットのバナーも effect 側の分類(quiz-start/-end → 'quiz')と揃える —
   // 'other' のままだと bannerWinsByRank の厳密 < 判定で band のドレインに永久に負ける
   // (boost-announce / tap-lock / revolution が踏んだのと同じ罠)。
@@ -198,6 +240,22 @@ export function fxClassForEffect(e: ChallengeEffect): FxPriorityClass | 'paralle
     case 'revolution-start':
     case 'revolution-end':
       return 'revolution';
+    case 'universe-start':
+    case 'universe-end':
+      // universe-start はドレインキューに積まない(モニターが universe.armed の
+      // 監視で始動するバリア方式)。universe-end も結果カットシーンを持たない
+      // (締めのカットインは 25 秒の中)ので、この分類が効くのはバナーの
+      // 取り出し順だけ — それでも登録するのは、'other' のままだと
+      // bannerWinsByRank の厳密 < 判定で band のドレインに永久に負けるため。
+      return 'universe';
+    case 'lion-start':
+    case 'lion-end':
+      // universe とまったく同じ構造 — lion-start はドレインキューに積まない
+      // (モニターが lion.armed の監視で始動するバリア方式)。lion-end も結果
+      // カットシーンを持たない(合計の発表は 43 秒の中の最後の段)ので、この分類が
+      // 効くのはバナーの取り出し順だけ。それでも登録するのは 'other' のままだと
+      // bannerWinsByRank の厳密 < 判定で band のドレインに永久に負けるため。
+      return 'lion';
     case 'quiz-start':
     case 'quiz-end':
       // quiz-start はドレインキューに積まない(モニターが armed 監視で始動する
@@ -212,8 +270,17 @@ export function fxClassForEffect(e: ChallengeEffect): FxPriorityClass | 'paralle
           ? 'hot-roulette'
           : 'other';
     case 'gift':
-      // お助け(ファンスタンプ)は⑤。カットイン付きギフトは⑦。素のギフトは⑧。
-      return e.fanStamp ? 'helper' : e.fxBandClip != null ? 'band' : 'other';
+      // お助け(ファンスタンプ)は⑥。ダイヤ増減の浮上は⑦。カットイン付きギフトは⑨。
+      // 素のギフトは⑫。giftScale をカットインより先に見るのは、カットインが
+      // 終わってから浮上へバトンタッチする(モニターの finishBandFx)ので、
+      // 順番待ちの中では浮上としての順位で扱うのが正しいため。
+      return e.fanStamp
+        ? 'helper'
+        : e.giftScale === true
+          ? 'gift-scale'
+          : e.fxBandClip != null
+            ? 'band'
+            : 'other';
     case 'press':
     case 'like':
     case 'comment':

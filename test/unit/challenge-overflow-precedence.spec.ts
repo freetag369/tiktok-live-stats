@@ -32,6 +32,9 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   // 既定で有効な演出は全部落とす。凍結を見るテストだけが個別に戻す。
   base.giftBandFx.enabled = false;
   base.giftFullCut.enabled = false;
+  // ダイヤ増減(既定オン)も落とす — 1💎につき +30/+50 に変わるので、giftDefault
+  // (perDiamond +1)を前提にしたこのファイルの期待値が一斉に狂う(challenge.spec.ts と同じ)。
+  base.giftScale.enabled = false;
   base.tapBoost.enabled = false;
   base.fanStamp.enabled = false;
   base.roulettes = [];

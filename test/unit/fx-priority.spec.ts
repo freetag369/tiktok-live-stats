@@ -22,7 +22,7 @@ import {
  */
 
 describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 2026-08-18)', () => {
-  it('12ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
+  it('15ランクの並びは固定(変更にはユーザー確認とこのテストの編集が要る)', () => {
     expect(FX_PRIORITY_ORDER).toEqual([
       'follow',
       'strike-like',
@@ -30,10 +30,20 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'boost',
       'tap-lock',
       'helper',
+      // ダイヤ増減の浮上(2026-08-26)。ユーザー決定はお助けの直後(入室ルーレットの
+      // 直前)。高額ギフトの手応えをルーレット・カットインに埋もれさせないため。
+      'gift-scale',
+      // ライオン(Lion 29,999💎・2026-08-26)。ユーザー決定は「お助けの直後・初見
+      // ルーレットより上」。gift-scale の直後なのは、あちらの「お助けの直後」という
+      // 同日の決定(下の等式で凍結)を崩さずに実質の要件を満たせるから。
+      'lion',
       'join-roulette',
       'hot-roulette',
       'band',
       'revolution',
+      // 一撃クリア(TIKTOK UNIVERSE・2026-08-26)。ユーザー決定は revolution の直後
+      // (quiz の直前)。開始順は quiz と同じくバリア方式が支配する。
+      'universe',
       // お題ルーレット(2026-08-21)。序列上は revolution の直後だが、実際の開始順は
       // バリア方式(モニターの armed 監視 + worker の quizDeferredOps)が支配する —
       // ここへの登録は quiz-end(結果発表)の持ち越しとバナーの取り出し順の保険。
@@ -50,6 +60,42 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
     expect(fxRank('revolution')).toBeLessThan(fxRank('other'));
     expect(fxRank('revolution')).toBeGreaterThan(fxRank('join-roulette'));
     expect(fxRank('revolution')).toBeGreaterThan(fxRank('hot-roulette'));
+  });
+
+  it('ライオンはダイヤ増減の直後・初見ルーレットの直前(2026-08-26 ユーザー決定)', () => {
+    // ユーザー決定は「お助けの直後・初見ルーレットより上」。同日に決まった
+    // gift-scale が helper の直後を取っているので、その**直後**に置いて両方の
+    // 決定を満たす(gift-scale は 1.6 秒の浮上バナーなので、43 秒の幕の前に
+    // 通しても失うものが無い)。
+    expect(fxRank('lion')).toBe(fxRank('gift-scale') + 1);
+    expect(fxRank('lion')).toBe(fxRank('join-roulette') - 1);
+    expect(fxRank('lion')).toBeGreaterThan(fxRank('helper'));
+    // 実質の要件: 初見・激熱確定・band・通常ルーレットより先に出る。
+    expect(fxRank('lion')).toBeLessThan(fxRank('hot-roulette'));
+    expect(fxRank('lion')).toBeLessThan(fxRank('band'));
+    expect(fxRank('lion')).toBeLessThan(fxRank('other'));
+    // effect 側の分類とバナー側が一致する(飢餓の罠の機械的な回帰止め)。
+    const e = {
+      kind: 'lion-end',
+      id: 1,
+      amount: 1_499_950,
+      atMs: 0,
+      valueAfter: 0,
+    } as unknown as Parameters<typeof fxClassForEffect>[0];
+    expect(fxClassForEffect(e)).toBe('lion');
+    expect(bannerRank('lion')).toBe(fxRank('lion'));
+    expect(bannerRank('lion')).toBeLessThan(fxRank(DRAIN_PRIORITY.band));
+    expect(bannerRank('lion')).toBeLessThan(fxRank(DRAIN_PRIORITY.roulette));
+  });
+
+  it('一撃クリアは革命の直後・お題の直前(2026-08-26 ユーザー決定)', () => {
+    // 位置の根拠: カウントを 0 にしてランを終わらせる 25 秒の山場(導入カット8秒
+    // + 30段の減算連打9秒 + 締めカット8秒)。band より下なのは revolution と同じ
+    // 位置づけで、カットインの列を追い越すほどではないという判断。
+    expect(fxRank('universe')).toBe(fxRank('revolution') + 1);
+    expect(fxRank('universe')).toBe(fxRank('quiz') - 1);
+    expect(fxRank('universe')).toBeGreaterThan(fxRank('band'));
+    expect(fxRank('universe')).toBeLessThan(fxRank('other'));
   });
 
   it('激熱確定は band より上・初見ルーレットより下(2026-08-18 ユーザー決定)', () => {
@@ -89,6 +135,7 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'follow',
       'helper',
       'gift-card',
+      'gift-scale',
       'comment',
       'like-float',
       'stock-float',
@@ -101,6 +148,8 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'tap-lock',
       'revolution-announce',
       'revolution-result',
+      'universe',
+      'lion',
       'quiz-announce',
       'quiz-result',
     ]);
@@ -133,6 +182,16 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
     expect(DRAIN_PRIORITY.quiz).toBe('quiz');
     expect(BANNER_PRIORITY['quiz-announce']).toBe('quiz');
     expect(BANNER_PRIORITY['quiz-result']).toBe('quiz');
+    // 一撃クリアのバナーも同じ理由(universe-start/-end → 'universe')。
+    // **ドレインキューは持たない**(バリア方式なので universe-start は積まれず、
+    // universe-end も結果カットシーンを持たない)ので DRAIN_PRIORITY には出てこない。
+    expect(BANNER_PRIORITY.universe).toBe('universe');
+    // ライオンも同じ理由(lion-start/-end → 'lion')。**ドレインキューは持たない**
+    // (universe と同じバリア方式)ので DRAIN_PRIORITY には出てこない。
+    expect(BANNER_PRIORITY.lion).toBe('lion');
+    // ダイヤ増減のバナーも同じ理由で effect 側(fxClassForEffect の gift + giftScale)と
+    // 揃える。'other' のままだと band のドレインに厳密 < 判定で永久に負ける。
+    expect(BANNER_PRIORITY['gift-scale']).toBe('gift-scale');
     const named = new Set([
       'follow',
       'helper',
@@ -143,8 +202,11 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
       'roulette-rest-hot',
       'revolution-announce',
       'revolution-result',
+      'universe',
+      'lion',
       'quiz-announce',
       'quiz-result',
+      'gift-scale',
     ]);
     for (const k of FX_BANNER_KINDS) {
       if (!named.has(k)) expect(BANNER_PRIORITY[k]).toBe('other');
@@ -155,6 +217,28 @@ describe('FX_PRIORITY_ORDER — 序列の凍結(ユーザー決定 2026-08-16 / 
     // 「勝てない」= 渋滞中にフィーバー結果が一度も出ない、という実害の回帰検知。
     expect(bannerRank('boost-result')).toBeLessThan(fxRank(DRAIN_PRIORITY.band));
     expect(bannerRank('boost-result')).toBeLessThan(fxRank(DRAIN_PRIORITY.roulette));
+  });
+
+  it('ダイヤ増減のバナーと effect の分類が一致する(飢餓の罠の機械的な回帰止め)', () => {
+    // バナー側と effect 側でクラスがズレると bannerWinsByRank の厳密 < 判定で
+    // band のドレインに構造的に永久に負ける — boost-announce / tap-lock /
+    // roulette-*-hot / revolution / quiz が4回踏んだ罠。ここで機械的に止める。
+    const e = {
+      kind: 'gift',
+      id: 1,
+      amount: -250_000,
+      atMs: 0,
+      valueAfter: 0,
+      giftScale: true,
+    } as unknown as Parameters<typeof fxClassForEffect>[0];
+    expect(fxClassForEffect(e)).toBe('gift-scale');
+    expect(bannerRank('gift-scale')).toBe(fxRank('gift-scale'));
+    // お助けより下・入室ルーレットより上(ユーザー決定の位置)。
+    expect(fxRank('gift-scale')).toBe(fxRank('helper') + 1);
+    expect(fxRank('gift-scale')).toBeLessThan(fxRank('join-roulette'));
+    // band / ギフトルーレットのドレインには勝てる(渋滞中でも「ドン」が出る)。
+    expect(bannerRank('gift-scale')).toBeLessThan(fxRank(DRAIN_PRIORITY.band));
+    expect(bannerRank('gift-scale')).toBeLessThan(fxRank(DRAIN_PRIORITY.roulette));
   });
 
   it('お邪魔のバナーも band / ギフトルーレットのドレインに勝てる', () => {

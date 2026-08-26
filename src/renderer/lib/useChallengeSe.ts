@@ -50,6 +50,11 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
       // カットイン判定より後に置くこと: suppressBandFx をオフにした設定で
       // カットインが出るとき、BGM とジングルを重ねない既存規約を守る。
       if (e.fanStamp) return 'helper';
+      // ダイヤ増減の浮上演出付きは、モニター側では**バナーが実際に出る瞬間**に鳴らす
+      // (pushFloat の se)。到着時に鳴らすと順番待ちのぶん音だけ先走る — follow /
+      // comment / roulette と同じ stageSynced 規約。ダッシュボード側(モニター閉時)は
+      // 順番待ちが無いので従来どおり到着時に鳴らす。
+      if (e.giftScale === true && stageSynced) return null;
       return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
     // 到着時 = 回転開始音。確定音('roulette-hit')はモニターがリール停止の瞬間に
     // 直接鳴らす(gauge-full の impactStrike と同型)。
@@ -91,6 +96,22 @@ function slotFor(e: ChallengeEffect, stageSynced: boolean): ChallengeSeSlot | nu
       return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
     // 終了は合図バナーだけ(専用の清算演出が無い)。到着時に鳴らす音も無し。
     case 'revolution-end':
+      return null;
+    // 一撃クリアの着弾音も revolution-start と同じ構造(トリガーギフトは gift
+    // effect を出さない)。**新しい ChallengeSeSlot は作らない**規約もそのまま。
+    case 'universe-start':
+      return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
+    // 清算の合図に音は無い — 30 段の減算 SE はモニターが直接鳴らし、締めの
+    // カットインは素材に音が焼き込まれている(boost-end / quiz-end と同型)。
+    case 'universe-end':
+      return null;
+    // ライオンの着弾音も universe-start と同じ構造(トリガーギフトは gift effect を
+    // 出さない)。**新しい ChallengeSeSlot は作らない**規約もそのまま。
+    case 'lion-start':
+      return `gift-t${tierForDiamonds(e.diamonds ?? 0)}`;
+    // 清算の合図に音は無い — ペタッ/爆発1×49/爆発2 はモニターが直接鳴らし、
+    // 2本のカットインは素材に音が焼き込まれている(universe-end と同型)。
+    case 'lion-end':
       return null;
     // お題ルーレットの着弾音は revolution-start と同じ構造(トリガーギフトは
     // gift effect を出さない)なので、ティアスロットが唯一の出どころ。

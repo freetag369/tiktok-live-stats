@@ -79,11 +79,24 @@ export function seedSettings(dataDir: string, patch: Record<string, unknown> = {
       // おく — 既定が将来 ON になったとき、いいね妨害が反転して全テストの
       // 「いいねで +N 増える」前提が静かに壊れるのを防ぐ(tapBoost と同じ規約)。
       revolution: { enabled: false, rules: [] },
+      // ライオンは**既定 ON**(唯一の既定 ON の妨害)なので明示的に落とす —
+      // 明示しないと欠損フォールバックで有効になり、Lion の giftId(6369)を
+      // 含むフィクスチャが 43 秒の幕とバリアを張って全テストの決定性が壊れる。
+      lion: { enabled: false, rules: [] },
+      // 一撃クリアも同じ規約で明示的に落とす。既定は OFF だが行は配られるので、
+      // 既定が将来 ON になったときに全テストの前提(カウントが 0 にならない)が
+      // 静かに壊れるのを防ぐ。
+      universe: { enabled: false, rules: [] },
       fanStamp: { enabled: false },
       // コメントお助けは既定オン(欠損はオンへ倒れる)なので明示的に落とす —
       // コメントを流すテスト(quiz 投票など)の値が -1 ずつ静かに汚れるのを防ぐ
       // (revolution と同じ規約)。機能そのものの検証は unit が持つ。
       commentHelper: { enabled: false },
+      // ダイヤ増減は既定オン(欠損はオンへ倒れる)なので明示的に落とす — 帯域が
+      // 全ギフトに当たるため、入れたままだと「ギフトで +1」を前提にした既存
+      // テストの値が 30 倍・50 倍に化ける(commentHelper と同じ規約)。
+      // 機能そのものの検証は countdown-gift-scale.e2e.ts が有効化する。
+      giftScale: { enabled: false },
       fxClipsEnabled: false,
       miniFxEnabled: false,
       seEnabled: false,

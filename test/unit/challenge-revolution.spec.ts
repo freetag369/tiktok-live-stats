@@ -58,6 +58,9 @@ function cfg(over: Partial<ChallengeConfig> = {}, durationSec = DUR_SEC): Challe
   const base = structuredClone(DEFAULT_CHALLENGE);
   // 既定の全面カットは「バラ」に一致して別の凍結を張るので落とす(他の spec と同じ)。
   base.giftFullCut.enabled = false;
+  // ダイヤ増減(既定オン)も落とす — 1💎につき +30/+50 に変わるので、giftDefault
+  // (perDiamond +1)を前提にしたこのファイルの期待値が一斉に狂う(challenge.spec.ts と同じ)。
+  base.giftScale.enabled = false;
   base.roulettes = [];
   // 最終ゲートは既定オン。窓中の1タップの意味が変わるので基本形では落とし、
   // ゲート免除は専用の describe で明示的に張る。

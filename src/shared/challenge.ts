@@ -16,6 +16,10 @@ import type {
   TapLockRule,
   RevolutionConfig,
   RevolutionRule,
+  UniverseConfig,
+  UniverseRule,
+  LionConfig,
+  LionRule,
   QuizConfig,
   QuizRule,
   QuizThresholdRule,
@@ -33,6 +37,8 @@ import type {
   RouletteSpinKey,
   RouletteTeaseConfig,
   GiftRepeatFxConfig,
+  GiftScaleConfig,
+  GiftScaleRow,
 } from './dto';
 import {
   ROULETTE_COUNT_VIEWS,
@@ -48,6 +54,14 @@ import {
   FULL_CUT_CLIP_IDS,
   type FullCutClipDef,
 } from './fx-cut';
+import {
+  LION_AMOUNT_EACH_DEFAULT,
+  LION_AMOUNT_EACH_MAX,
+  LION_AMOUNT_EACH_MIN,
+  LION_STEPS_DEFAULT,
+  LION_STEPS_MAX,
+  LION_STEPS_MIN,
+} from './lion-settle';
 
 /**
  * カウントダウンチャレンジ — 純関数のみ。状態機械は worker/challenge.ts。
@@ -674,6 +688,13 @@ function entryFor(e: ChallengeEffect, state: ChallengeState): ChallengeLogEntry 
     ...(e.revolutionDownTotal != null ? { revolutionDownTotal: e.revolutionDownTotal } : {}),
     ...(e.revolutionTapCount != null ? { revolutionTapCount: e.revolutionTapCount } : {}),
     ...(e.revolutionLikeDown != null ? { revolutionLikeDown: e.revolutionLikeDown } : {}),
+    // 一撃クリアの減算量(universe-end のみ)。amount は -0 正規化を通るので、
+    // 履歴が符号を気にせず読める正の数を別に引き継ぐ(revolutionDownTotal と同型)。
+    ...(e.universeDownTotal != null ? { universeDownTotal: e.universeDownTotal } : {}),
+    // ライオンの額と発数(lion-start/-end)。lionTotal は amount と同値なので
+    // 引き継がない — 履歴は「29,999 × 50」の内訳が読めれば足りる。
+    ...(e.lionEach != null ? { lionEach: e.lionEach } : {}),
+    ...(e.lionSteps != null ? { lionSteps: e.lionSteps } : {}),
     // お題ルーレットの本文・票数も同じ規約(quiz-start/-end の焼き込み値)。
     // quizResultMs は演出の尺なので引き継がない(revolutionResultMs と同じ判断)。
     ...(e.quizPrompt ? { quizPrompt: e.quizPrompt } : {}),
@@ -756,6 +777,18 @@ export const CHALLENGE_SE_SOUND_IDS: readonly string[] = [
   'back-kuh',
   'back-uh',
   'back-ite',
+  // 一撃クリア(TIKTOK UNIVERSE)の減算連打の刻み音(2026-08-26)。
+  // **どのスロットの既定でもない** — モニターが playSe で直接鳴らす専用音で、
+  // 'boost-final' と同じく「手で割り当てる用の選択肢」としてカタログに載せる
+  // (新しい ChallengeSeSlot は作らない — shared/challenge.ts の恒久方針)。
+  'gauge-recover',
+  // ライオン(Lion 29,999💎)の専用音3種(2026-08-26)。**どのスロットの既定でもない** —
+  // モニターが playSe で直接鳴らす(gauge-recover と同じ扱い。新しい ChallengeSeSlot は
+  // 作らない恒久方針)。'lion-blast' は 49 連打で鳴るので素材を 0.94 秒へ詰めてある
+  // (LION_BURST_STEP_MS × POOL_SIZE = 980ms を超えると尻尾が切られる — lion-settle.ts)。
+  'lion-peta',
+  'lion-blast',
+  'lion-boom',
 ];
 
 /**
@@ -1201,6 +1234,14 @@ export const CLIP_QUEUE_MAX = 3;
  */
 export const PENDING_BANDS_MAX = 4;
 /**
+ * 他演出中に届いたダイヤ増減(浮上演出)の持ち越し上限。1件あたり3秒 +
+ * 間合いなので4件で約 14 秒 — カットイン(最長 45 秒級)の裏で溜まるぶんは
+ * 飲みきれないが、**溢れてもギフトカードへ縮退するだけで演出も値も失われない**
+ * (カットインの持ち越しと違い、こちらは代替の見た目がある)ので浅くてよい。
+ * 深くすると高額ギフトの「ドン」が数十秒遅れて因果が読めなくなる側へ倒れる。
+ */
+export const PENDING_GIFT_SCALES_MAX = 4;
+/**
  * 他演出中に届いたブースト(boost-start)の持ち越し上限。連打コンボは worker が
  * 1メッセージあたり最大 TAP_BOOST_ACTIVATIONS_MAX 本を直列発動するので、旧上限の
  * 2 では3本目が無言で消えていた。死んだ持ち越しは boost-end 受信時に間引かれる
@@ -1280,12 +1321,14 @@ export const CLIP_ABORT_MS = 8_000;
  */
 export const FLOAT_MAX = 3;
 /**
- * フロートバナーの安全弁(ms)。最長は .float.gift-card の 2.2 秒なので余裕を見た値。
+ * フロートバナーの安全弁(ms)。最長は .float.banner-gift-scale の 3.0 秒なので余裕を見た値
+ * (2026-08-26 にダイヤ増減の浮上を足して 2.2 秒 → 3.0 秒になり、3000 では自分の
+ *  animation の終端でバナーが DOM ごと消えて着弾の飛び先が無くなるため 4000 へ)。
  * shake / mini / clip と同じ「animationend 単独依存にしない」規約 — 遮蔽ウィンドウでは
  * animationend が届かず、バナーが出たまま固着して FLOAT_MAX の枠を食い潰す。
  * CSS の実尺との整合は test/unit/float-abort.spec.ts が monitor.css を読んで固定する。
  */
-export const FLOAT_ABORT_MS = 3_000;
+export const FLOAT_ABORT_MS = 4_000;
 /** 同時に表示する簡易演出の上限(floats/flashes と同じ「積む」層)。 */
 export const MINI_MAX = 3;
 /** 簡易演出の安全弁(ms)。最長の mini が 880ms(panic)なので余裕を見た値。 */
@@ -1888,6 +1931,101 @@ export const DEFAULT_REVOLUTION: RevolutionConfig = {
   rules: [structuredClone(DEFAULT_REVOLUTION_RULE)],
 };
 
+// ── 一撃クリア(universe / TIKTOK UNIVERSE) ────────────────────────────────
+
+/** 登録できるトリガー行の上限。REVOLUTION_RULES_MAX と同じ 8。 */
+export const UNIVERSE_RULES_MAX = 8;
+
+/**
+ * 一撃クリア1行の既定 = **TIKTOK UNIVERSE(44,999💎)**。
+ *
+ * giftId が空なのは**未採取**だから — DEFAULT_REVOLUTION_RULE と同じ規約で、
+ * 実イベントで確認できていない giftId は推測で焼かない。初回の実受信を
+ * diag.log(`[challenge/gift] 受信 giftId=...`)で確認したらここへ焼き込む。
+ *
+ * **exactName は必ず true。** 部分一致のままだと `'tiktok universe'` が
+ * **別ギフト「TikTok Universe+」にも当たる**(gift-aliases.default.json が
+ * canonical を universe / universe_plus に分けているのがその実在の証拠)。
+ * 誤爆の代償は「ランが即終了して巻き戻せない」— 革命の誤爆(1分間ルールが
+ * 変わる)よりさらに重い。
+ *
+ * canonical にも 'universe' を入れてある。ライブ経路では乗らない補助段だが
+ * (NormalizedEvent.canonical はイベント側に無い)、リプレイ/テスト経路と
+ * ギフトリストの「現在の用途」列で効く。`'tiktok universe+'` は
+ * gift-aliases の nameRules が universe_plus を**先に**評価するので
+ * こちらへは落ちてこない。
+ */
+export const DEFAULT_UNIVERSE_RULE: UniverseRule = {
+  id: 'uni-1',
+  label: 'TIKTOK UNIVERSE',
+  enabled: true,
+  giftId: '',
+  giftName: 'tiktok universe',
+  canonical: 'universe',
+  exactName: true,
+  flash: true,
+};
+
+/**
+ * 一撃クリアの既定。**機能そのものは既定で OFF**(DEFAULT_REVOLUTION と同じ判断)—
+ * カウントを 0 にしてランを終わらせるので、キー欠損のフォールバックで勝手に
+ * 有効化されてはならない。行は 1 行だけ配り、配信者がスイッチを入れた瞬間から
+ * 使える状態にしておく。
+ */
+export const DEFAULT_UNIVERSE: UniverseConfig = {
+  enabled: false,
+  rules: [structuredClone(DEFAULT_UNIVERSE_RULE)],
+};
+
+// ── ライオン(lion / Lion 29,999💎) ────────────────────────────────────────
+
+/** 登録できるトリガー行の上限。UNIVERSE_RULES_MAX と同じ 8。 */
+export const LION_RULES_MAX = 8;
+
+/**
+ * ライオン1行の既定 = **Lion(29,999💎)**。
+ *
+ * **giftId は採取済み**(`6369`)— DEFAULT_UNIVERSE_RULE / DEFAULT_REVOLUTION_RULE が
+ * 空なのは未採取だからで、こちらは外部ギフト一覧(国別リスト)の絵柄を実物の
+ * スクリーンショットと突き合わせて確定させてある([[tiktok-unreceived-gift-id-lookup]]
+ * の手順)。だから既定で機能 ON にできる。
+ *
+ * **exactName は必ず true。** 部分一致のままだと `'lion'` が
+ * **「Leon and Lion」(34,000💎)と「獅子奮迅」にも当たる**
+ * (gift-aliases.default.json が canonical を lion_charge / leon_lion / lion に
+ * 分けているのがその実在の証拠)。
+ *
+ * canonical にも 'lion' を入れてある。ライブ経路では乗らない補助段だが
+ * (NormalizedEvent.canonical はイベント側に無い)、リプレイ/テスト経路と
+ * ギフトリストの「現在の用途」列で効く。`'leon and lion'` / `'獅子奮迅'` は
+ * gift-aliases の nameRules が leon_lion / lion_charge を**先に**評価するので
+ * こちらへは落ちてこない。
+ */
+export const DEFAULT_LION_RULE: LionRule = {
+  id: 'lion-1',
+  label: 'ライオン',
+  enabled: true,
+  giftId: '6369',
+  giftName: 'lion',
+  canonical: 'lion',
+  exactName: true,
+  amountEach: LION_AMOUNT_EACH_DEFAULT,
+  steps: LION_STEPS_DEFAULT,
+  flash: true,
+};
+
+/**
+ * ライオンの既定。**機能そのものが既定で ON**(ユーザー決定 2026-08-26)—
+ * DEFAULT_UNIVERSE / DEFAULT_REVOLUTION とは逆向きで、既定行の giftId が
+ * 実採取済み(6369)で誤爆の余地が無いのが根拠。既存の settings.json に
+ * `lion` キーは無いので、**欠損時のフォールバックがそのまま配布経路**になる
+ * (SETTINGS_VERSION は上げない — validateLion の doc も参照)。
+ */
+export const DEFAULT_LION: LionConfig = {
+  enabled: true,
+  rules: [structuredClone(DEFAULT_LION_RULE)],
+};
+
 // ── お題ルーレット(quiz) ──────────────────────────────────────────────────
 
 /**
@@ -2483,6 +2621,65 @@ export const DEFAULT_GIFT_REPEAT_FX: GiftRepeatFxConfig = {
   rouletteEnabled: true,
 };
 
+/** 登録できるダイヤ増減の例外ギフトの上限。COMMENT_RULES_MAX と同じ思想の暴走止め。 */
+export const GIFT_SCALE_ROWS_MAX = 20;
+
+/**
+ * ダイヤ増減層の既定。**出荷既定は ON**(2026-08-26 ユーザー決定)。
+ *
+ * 帯域は「9699💎 以上 = 1💎につき +50 / 未満 = +30」。9699 という境界は
+ * レオンとリリー(9699💎)がちょうど下端になるよう選ばれていて、フェニックス・
+ * パーティーは続く・ホワイトウルフ・ハヤブサ・夕暮れを背に・レオンとリリーの6件が
+ * **個別登録なしで全部この帯に入る**。新しい高額ギフトが出ても自動で正しく効く。
+ *
+ * 例外行は「応援(減る)」に倒したいギフト。**giftId が本線** — giftName はローマ字で
+ * 届く(日本限定ギフトも同じ)ので、日本語名を書いても一致しない。
+ */
+export const DEFAULT_GIFT_SCALE: GiftScaleConfig = {
+  enabled: true,
+  rows: [
+    // 幻のユニコーン(5000💎)。giftId は 'Unicorn Fantasy' として実測済み
+    // (roulette-hot-gifts.spec.ts が同じ ID を使っている)。giftName を空にしてあるのは
+    // 'unicorn' の部分一致だと別ギフトの 'Unicorn'(12453/2499💎)まで巻き込むため。
+    { id: 'gs-unicorn-fantasy', giftId: '7237', giftName: '', canonical: '', label: '幻のユニコーン', perDiamond: -50, diamonds: 5000 },
+    // 未来との遭遇(1500💎)。analytics.db の gift_catalog に受信実績あり。
+    { id: 'gs-future-encounter', giftId: '10668', giftName: '', canonical: '', label: '未来との遭遇', perDiamond: -50, diamonds: 1500 },
+    // 流星群(3000💎)。2026-08-26 に streamdps の日本向け一覧(?jp=1・全3ページ 470件)で
+    // 実測 — 3000 コインで 'Meteor Shower' はこの1件だけ(同名別IDの罠なし)。
+    { id: 'gs-meteor-shower', giftId: '6563', giftName: '', canonical: '', label: '流星群', perDiamond: -50, diamonds: 3000 },
+    // 富士花火(7999💎)。**giftId は未確定**だが、英語名は 'Summer Fuji Mountain'
+    // (7999💎・日本限定)と分かっているので **giftName の部分一致で拾う**。
+    // 部分一致を 'fuji' まで短くしてあるのは名前の揺れ('Summer Fuji Mountain' /
+    // 'Fuji Mountain' 等)を飲むため — 'unicorn' が別ギフトの 'Unicorn' を巻き込んだ
+    // 前例があるので短縮は慎重にすべきだが、**'fuji' は衝突しないことを実測済み**
+    // (streamdps の日本向け一覧 470 件・analytics.db の受信済み 221 件のどちらにも
+    //  'fuji' を含む名前は 0 件)。giftId が分かったら giftId を入れること — そちらが
+    // 本線で、名前一致は TikTok 側の表記変更で黙って外れうる保険にすぎない。
+    { id: 'gs-fuji-fireworks', giftId: '', giftName: 'fuji', canonical: '', label: '富士花火 (Summer Fuji Mountain)', perDiamond: -50, diamonds: 7999 },
+  ],
+  // 9699 は「レオンとリリー」(= 'Leon and Lili' / giftId 8916)のコイン数。ここを下端に
+  // すると、ユーザー指定の増加リストが**個別登録なしで全部この帯に入る** — 判定は
+  // ダイヤ数だけなので giftId を知らなくても正しく動く(新しい高額ギフトも自動で追従)。
+  //
+  // 参考: 増加リストの giftId(2026-08-27 時点の日本向け。**この層の判定には使わない**)
+  //   TikTok Stars 39999=8582 / ドラゴンの炎 26999=7610 / フェニックス 25999=7319 /
+  //   アダムの夢 25999=7400 / バラの馬車 25000=13352 / TikTokシャトル 20000=6751 /
+  //   パーティーは続く 15000=11586 / ローザの星雲 15000=8912 / ホワイトウルフ 12000=9608 /
+  //   ハヤブサ 10999=8503 / 夕暮れを背に 10000=6203 / 星から星へ 10000=6149 /
+  //   レオンとリリー 9699=8916
+  // ⚠ ハヤブサ(Falcon)とホワイトウルフ(White Wolf)は**地域ごとに別ID**がある
+  //   (Falcon: 日本 8503 / 米国 10164 / スペイン・インドネシア 6271、
+  //    White Wolf: 日本 9608 / ベトナム 10354)。古いカタログの 7627 は英語名 'Hawk'、
+  //   6367 は旧 Falcon なので、日本の配信で個別登録するなら 8503 を使うこと。
+  threshold: 9699,
+  highPerDiamond: 50,
+  lowPerDiamond: 30,
+  fxEnabled: true,
+  // バラ(1💎)の連打ごとに3秒の演出を出すと舞台の順番待ちが構造的に詰まるので、
+  // 見た目は高額ギフトに絞る。0 にすれば全ギフトで出る(増減は常に全ギフトへ効く)。
+  fxMinDiamonds: 1000,
+};
+
 export const DEFAULT_CHALLENGE: ChallengeConfig = {
   enabled: false,
   title: '0まで寝ない',
@@ -2503,7 +2700,9 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   commentRules: [],
   giftRules: [],
   // 既定はギフト=妨害: 1ダイヤにつき +1(設定画面で応援方向へ変更できる)。
+  // ただし giftScale が既定 ON なので、実際にここへ落ちるのは giftScale を切ったときだけ。
   giftDefault: { mode: 'perDiamond', amount: 1 },
+  giftScale: structuredClone(DEFAULT_GIFT_SCALE),
   roulettes: structuredClone(DEFAULT_ROULETTES) as ChallengeRouletteConfig[],
   joinRoulette: structuredClone(DEFAULT_JOIN_ROULETTE),
   rouletteSound: { ...DEFAULT_ROULETTE_SOUND },
@@ -2538,6 +2737,8 @@ export const DEFAULT_CHALLENGE: ChallengeConfig = {
   tapBoost: structuredClone(DEFAULT_TAP_BOOST),
   tapLock: structuredClone(DEFAULT_TAP_LOCK),
   revolution: structuredClone(DEFAULT_REVOLUTION),
+  universe: structuredClone(DEFAULT_UNIVERSE),
+  lion: structuredClone(DEFAULT_LION),
   quiz: structuredClone(DEFAULT_QUIZ),
   finalGate: { ...DEFAULT_FINAL_GATE },
 };
@@ -3288,7 +3489,8 @@ export function migrateChallengeGiftFullCut(cfg: ChallengeConfig, fromVersion: n
  * 全部通る)。boot-settings.ts の loadSettings からだけ呼ぶこと。
  */
 export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number): ChallengeConfig {
-  return migrateChallengeQuizThinkBgm(
+  return migrateChallengeGiftScaleRows(
+    migrateChallengeQuizThinkBgm(
     migrateChallengeQuizBgm(
       migrateChallengeRouletteHotGifts(
         migrateChallengeQuizPrompts(
@@ -3320,9 +3522,72 @@ export function migrateChallengeConfig(cfg: ChallengeConfig, fromVersion: number
       ),
       fromVersion
     ),
+      fromVersion
+    ),
     fromVersion
   );
 }
+
+/**
+ * v16: ダイヤ増減(giftScale)の既定行へ、**あとから足した欄だけ**を配る。
+ *
+ * v15 以前に保存された settings.json は `giftScale` **キー自体は持っている**ので、
+ * validateGiftScale の「キー欠損 → 既定へ倒す」フォールバックが効かない。結果として
+ * 行の中に後から増えたフィールド(単価 `diamonds` と富士花火の `giftName`)だけが
+ * 永久に欠けたままになり、実機では
+ *   - 設定画面の「単価(ダイヤ)」が空 → 「この1個で」が出ず ▶ も押せない
+ *   - 富士花火の行が **3キーとも空 = 何にも一致しない** → 減算にならず帯域(+30/💎)へ落ちる
+ * という壊れ方をしていた(2026-08-27 ユーザー報告「再起動したけどない」)。
+ *
+ * ⚠ validateGiftScale の中に入れてはいけない。あちらは UI の `cfg.set` も通るので、
+ *   ユーザーが空にした単価や消した名前がその場で復活する
+ *   (migrateChallengeQuizBgm / migrateChallengeGiftFullCut と同じ理由)。
+ *
+ * **行は足さない・消さない。** id が一致する既存行の、**欠けている欄だけ**を埋める —
+ * 自分で行を消した人に配り直さないのが migrateChallengeTapBoostCorgi 以来の規約。
+ * label は旧既定ちょうどのときだけ差し替える(migrateChallengeQuizThinkBgm の
+ * 「'keep' ちょうどのときだけ触る」と同じ判断 — 書き換えたメモは残す)。
+ */
+export function migrateChallengeGiftScaleRows(
+  cfg: ChallengeConfig,
+  fromVersion: number
+): ChallengeConfig {
+  if (fromVersion >= 16) return cfg;
+  // 配る値は DEFAULT_GIFT_SCALE から引く(数値を二重に持たない)。
+  const src = new Map(DEFAULT_GIFT_SCALE.rows.map((r) => [r.id, r]));
+  let touched = false;
+  const rows = cfg.giftScale.rows.map((r) => {
+    const d = src.get(r.id);
+    if (!d) return r; // ユーザーが自分で足した行 — 触らない
+    const next = { ...r };
+    if (next.diamonds == null && d.diamonds != null) {
+      next.diamonds = d.diamonds;
+      touched = true;
+    }
+    if (next.giftName === '' && d.giftName !== '') {
+      next.giftName = d.giftName;
+      touched = true;
+    }
+    // 旧既定ちょうどのラベルだけ、新しい既定へ寄せ替える。
+    if (r.label != null && GIFT_SCALE_LEGACY_LABELS.has(r.label) && d.label != null) {
+      next.label = d.label;
+      touched = true;
+    }
+    return next;
+  });
+  if (!touched) return cfg;
+  return { ...cfg, giftScale: { ...cfg.giftScale, rows } };
+}
+
+/**
+ * v16 の寄せ替え対象になる「旧既定ちょうど」のラベル。ユーザーが書き換えたメモを
+ * 巻き込まないための照合表なので、**新しい既定を足したらここへも旧文言を残す**こと。
+ */
+const GIFT_SCALE_LEGACY_LABELS: ReadonlySet<string> = new Set([
+  '富士花火(7999💎・ID未設定)',
+  '富士花火(ID未設定)',
+  '流星群(3000💎・ID未設定)',
+]);
 
 /**
  * v13: 激熱確定のユニコーン行(gift 12453)とバニーDJ行(gift 437679)を
@@ -3749,6 +4014,7 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     commentRules: validateCommentRules(c.commentRules),
     giftRules,
     giftDefault,
+    giftScale: validateGiftScale(c.giftScale),
     roulettes: validateRoulettes(raw),
     joinRoulette: validateJoinRoulette(c.joinRoulette),
     rouletteSound,
@@ -3796,6 +4062,8 @@ export function validateChallengeConfig(raw: unknown): ChallengeConfig {
     tapBoost: validateTapBoost(c.tapBoost),
     tapLock: validateTapLock(c.tapLock),
     revolution: validateRevolution(c.revolution),
+    universe: validateUniverse(c.universe),
+    lion: validateLion(c.lion),
     quiz: validateQuiz(c.quiz),
     finalGate: validateFinalGate(c.finalGate),
   };
@@ -4274,6 +4542,117 @@ function validateRevolutionRule(raw: unknown): RevolutionRule {
 }
 
 /**
+ * 一撃クリアの検証。validateRevolution の鏡像 — この機能にも出荷済みの旧形式は無い。
+ *
+ * **キー欠損は既定へ倒れるだけで移行(migrate*)は要らない。** 既定の行は giftId が
+ * 空、機能 enabled も false なので、既存の settings.json へ何も配らなくても挙動は
+ * 1 ミリも変わらない(revolution / tapLock と同じ前例。SETTINGS_VERSION は上げない)。
+ */
+function validateUniverse(raw: unknown): UniverseConfig {
+  const d = DEFAULT_UNIVERSE;
+  const c = raw as Partial<UniverseConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  // 既定が false の真偽値なので `=== true` で読む(revolution / tapLock と同じ向き)。
+  const enabled = c.enabled === true;
+  if (!Array.isArray(c.rules)) return { enabled, rules: structuredClone(d.rules) };
+
+  const out: UniverseRule[] = [];
+  const seen = new Set<string>();
+  for (const r of c.rules.slice(0, UNIVERSE_RULES_MAX)) {
+    const v = validateUniverseRule(r);
+    // 重複・欠損 id は振り直す(validateRevolution と同じ理由・同じ式)。
+    const id =
+      v.id !== '' && !seen.has(v.id) ? v.id : v.id !== '' ? `${v.id}-${out.length}` : `uni-${out.length}`;
+    seen.add(id);
+    out.push({ ...v, id });
+  }
+  // 明示的な空配列は空のまま通す(全行消したユーザーの意思を尊重する)。
+  return { enabled, rules: out };
+}
+
+/** 一撃クリア1行の検証。validateRevolutionRule から倍率・秒数を落としたもの。 */
+function validateUniverseRule(raw: unknown): UniverseRule {
+  const dr = DEFAULT_UNIVERSE_RULE;
+  const r = raw as Partial<UniverseRule> | null | undefined;
+  if (!r || typeof r !== 'object') return structuredClone(dr);
+  return {
+    id: typeof r.id === 'string' ? r.id.trim() : '',
+    label: typeof r.label === 'string' ? r.label.trim() : '',
+    enabled: r.enabled !== false,
+    giftId: typeof r.giftId === 'string' ? r.giftId.trim() : dr.giftId,
+    giftName: typeof r.giftName === 'string' ? r.giftName.trim().toLowerCase() : dr.giftName,
+    canonical: typeof r.canonical === 'string' ? r.canonical.trim().toLowerCase() : dr.canonical,
+    // **フォールバックは true**(revolution の `: false` から意図的に外している)。
+    // ここが false へ倒れると 'tiktok universe' が部分一致になり、別ギフトの
+    // 「TikTok Universe+」でランが即終了する。壊れた値(boolean 以外)から
+    // 復元するときは、取り返しがつかない側ではなく安全側へ倒す。
+    exactName: typeof r.exactName === 'boolean' ? r.exactName : true,
+    flash: r.flash !== false,
+  };
+}
+
+/**
+ * ライオンの検証。validateUniverse の鏡像 — この機能にも出荷済みの旧形式は無い。
+ *
+ * **キー欠損は既定へ倒れるだけで移行(migrate*)は要らない。** ここは universe /
+ * revolution と根拠が違う: あちらは「既定 OFF だから何も起きない」だったが、
+ * こちらは既定 ON なので**欠損フォールバックそのものが配布経路**になる
+ * (旧 settings.json に `lion` キーは存在しないので、全ユーザーが既定を受け取る)。
+ * 保存済み設定へ行を配るのに migrate が要るのは `roulettes` のように
+ * **既に存在するキー**の中身を足すときだけ。
+ */
+function validateLion(raw: unknown): LionConfig {
+  const d = DEFAULT_LION;
+  const c = raw as Partial<LionConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+  // 既定が true の真偽値なので `!== false` で読む(universe / revolution とは逆向き)。
+  const enabled = c.enabled !== false;
+  if (!Array.isArray(c.rules)) return { enabled, rules: structuredClone(d.rules) };
+
+  const out: LionRule[] = [];
+  const seen = new Set<string>();
+  for (const r of c.rules.slice(0, LION_RULES_MAX)) {
+    const v = validateLionRule(r);
+    // 重複・欠損 id は振り直す(validateUniverse と同じ理由・同じ式)。
+    const id =
+      v.id !== '' && !seen.has(v.id)
+        ? v.id
+        : v.id !== ''
+          ? `${v.id}-${out.length}`
+          : `lion-${out.length}`;
+    seen.add(id);
+    out.push({ ...v, id });
+  }
+  // 明示的な空配列は空のまま通す(全行消したユーザーの意思を尊重する)。
+  return { enabled, rules: out };
+}
+
+/** ライオン1行の検証。validateUniverseRule に額と発数の clamp を足したもの。 */
+function validateLionRule(raw: unknown): LionRule {
+  const dr = DEFAULT_LION_RULE;
+  const r = raw as Partial<LionRule> | null | undefined;
+  if (!r || typeof r !== 'object') return structuredClone(dr);
+  const n = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+  return {
+    id: typeof r.id === 'string' ? r.id.trim() : '',
+    label: typeof r.label === 'string' ? r.label.trim() : '',
+    enabled: r.enabled !== false,
+    giftId: typeof r.giftId === 'string' ? r.giftId.trim() : dr.giftId,
+    giftName: typeof r.giftName === 'string' ? r.giftName.trim().toLowerCase() : dr.giftName,
+    canonical: typeof r.canonical === 'string' ? r.canonical.trim().toLowerCase() : dr.canonical,
+    // **フォールバックは true**(validateUniverseRule と同じ判断)。ここが false へ
+    // 倒れると 'lion' が部分一致になり、「Leon and Lion」と「獅子奮迅」まで
+    // +1,499,950 の妨害に化ける。
+    exactName: typeof r.exactName === 'boolean' ? r.exactName : true,
+    amountEach: n(r.amountEach, dr.amountEach, LION_AMOUNT_EACH_MIN, LION_AMOUNT_EACH_MAX),
+    // **発数は演出尺そのもの**(lionCutsceneMs)なので clamp を外さないこと。
+    steps: n(r.steps, dr.steps, LION_STEPS_MIN, LION_STEPS_MAX),
+    flash: r.flash !== false,
+  };
+}
+
+/**
  * 文字列配列(お題・判定ワード)の検証。trim して空行を除去し、件数と長さを
  * clamp する。validateCommentRules と同じ「throw せずサニタイズ」の流儀。
  */
@@ -4671,6 +5050,61 @@ export const COMMENT_RULES_MAX = 20;
  * matchCommentRule が toLowerCase で行う)。amount 0 以下・非有限の行は捨てる —
  * 「一致しても何も起きない行」を残すと設定画面で無反応の原因が見えなくなる。
  */
+/**
+ * ダイヤ増減層の検証。既存流儀どおり throw せずサニタイズする。
+ * **キー欠損(このキーを知らない古い settings.json)は既定へ倒す — これが移行の代わり**
+ * (validateJoinRoulette / validateFanStamp と同じ思想。SETTINGS_VERSION は上げない)。
+ *
+ * enabled / fxEnabled は**既定 true なので `!== false`**。`=== true` にすると
+ * キー欠損の既存ユーザー全員で機能が死ぬ(この関数群で一番踏みやすい罠)。
+ *
+ * giftName / canonical は **trim + 小文字化して保存**する規約(matchGiftTrigger が
+ * 設定値を小文字前提で比較する)。perDiamond が 0 / 非有限の行は捨てる —
+ * 「一致しても何も起きない行」を残すと設定画面で無反応の原因が見えなくなる。
+ */
+function validateGiftScale(raw: unknown): GiftScaleConfig {
+  const d = DEFAULT_GIFT_SCALE;
+  const c = raw as Partial<GiftScaleConfig> | null | undefined;
+  if (!c || typeof c !== 'object') return structuredClone(d);
+
+  const numOf = (v: unknown, fb: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fb;
+
+  const rows: GiftScaleRow[] = Array.isArray(c.rows)
+    ? c.rows
+        .slice(0, GIFT_SCALE_ROWS_MAX)
+        .map((r) => r as Partial<GiftScaleRow> | null)
+        .filter((r): r is Partial<GiftScaleRow> => !!r && typeof r === 'object' && typeof r.id === 'string')
+        .map((r) => ({
+          id: r.id as string,
+          giftId: typeof r.giftId === 'string' ? r.giftId.trim() : '',
+          giftName: typeof r.giftName === 'string' ? r.giftName.trim().toLowerCase() : '',
+          canonical: typeof r.canonical === 'string' ? r.canonical.trim().toLowerCase() : '',
+          ...(typeof r.label === 'string' && r.label.trim() !== '' ? { label: r.label.trim() } : {}),
+          perDiamond:
+            typeof r.perDiamond === 'number' && Number.isFinite(r.perDiamond)
+              ? Math.round(r.perDiamond)
+              : 0,
+          // 単価は表示・実演専用。0 以下や非数値はキーごと落とす(未設定として扱う)。
+          ...(typeof r.diamonds === 'number' && Number.isFinite(r.diamonds) && r.diamonds > 0
+            ? { diamonds: Math.min(10_000_000, Math.round(r.diamonds)) }
+            : {}),
+        }))
+        .filter((r) => r.perDiamond !== 0)
+    : structuredClone(d.rows);
+
+  return {
+    enabled: c.enabled !== false,
+    rows,
+    // 境界は 1 以上。0 を許すと「未満」が空集合になり lowPerDiamond が死ぬ。
+    threshold: numOf(c.threshold, d.threshold, 1, 10_000_000),
+    highPerDiamond: numOf(c.highPerDiamond, d.highPerDiamond, -100_000, 100_000),
+    lowPerDiamond: numOf(c.lowPerDiamond, d.lowPerDiamond, -100_000, 100_000),
+    fxEnabled: c.fxEnabled !== false,
+    fxMinDiamonds: numOf(c.fxMinDiamonds, d.fxMinDiamonds, 0, 10_000_000),
+  };
+}
+
 function validateCommentRules(raw: unknown): ChallengeCommentRule[] {
   if (!Array.isArray(raw)) return [];
   const out: ChallengeCommentRule[] = [];
@@ -4756,8 +5190,8 @@ function isValidRule(r: unknown): r is ChallengeGiftRule {
  */
 export function matchGiftRule(
   cfg: ChallengeConfig,
-  g: { canonical?: string; giftId: string; diamonds: number }
-): { amount: number; flash: boolean } | null {
+  g: { canonical?: string; giftId: string; giftName?: string; diamonds: number }
+): { amount: number; flash: boolean; scaleFx?: true } | null {
   const overFlash = cfg.flashMinDiamonds != null && g.diamonds >= cfg.flashMinDiamonds;
   for (const r of cfg.giftRules) {
     const hit =
@@ -4767,6 +5201,13 @@ export function matchGiftRule(
     if (!hit) continue;
     const amount = r.mode === 'perDiamond' ? Math.round(g.diamonds * r.amount) : r.amount;
     return { amount, flash: r.flash === true || overFlash };
+  }
+  // ダイヤ増減層。**手動行(giftRules)の後・giftDefault の前** — 手動行は個別の例外を
+  // 作るためのものなので必ず勝たせ、この層に一致しなければ従来の既定へ落とす
+  // (2026-08-26 ユーザー決定)。
+  const scale = matchGiftScale(cfg, g);
+  if (scale) {
+    return { amount: scale.amount, flash: overFlash, ...(scale.fx ? { scaleFx: true as const } : {}) };
   }
   if (cfg.giftDefault) {
     const amount =
@@ -4778,6 +5219,41 @@ export function matchGiftRule(
   }
   // 規則が空でも高額ギフトの照明だけは出す。
   return overFlash ? { amount: 0, flash: true } : null;
+}
+
+/**
+ * ギフト → ダイヤ増減層の写像。**例外行を上から先勝ちで見て、外れたら帯域**
+ * (threshold 以上 = highPerDiamond / 未満 = lowPerDiamond)。
+ * 戻り null は「この層の対象外」= 呼び出し側は giftDefault へ落ちる。
+ *
+ * トリガー照合は matchGiftTrigger を共有する(3段マッチと `!== ''` ガードを分裂させない —
+ * ルーレット/お助け/ブースト/お邪魔/革命/お題が全部そうしている流儀)。
+ *
+ * diamonds は normalize.ts が diamondEach × repeatCount を一度だけ計算した確定値を
+ * そのまま使う(再計算禁止の全体規約)。
+ *
+ * fx は「N 浮上演出を出すか」。**増減そのものは fxMinDiamonds に関係なく効く** —
+ * しきい値は見た目だけの弁で、値の写像には影響しない。
+ */
+export function matchGiftScale(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string; diamonds: number }
+): { amount: number; fx: boolean } | null {
+  const c = cfg.giftScale;
+  if (!c.enabled || g.diamonds <= 0) return null;
+  let per: number | null = null;
+  for (const r of c.rows) {
+    if (matchGiftTrigger(r, g)) {
+      per = r.perDiamond;
+      break;
+    }
+  }
+  if (per == null) per = g.diamonds >= c.threshold ? c.highPerDiamond : c.lowPerDiamond;
+  const amount = Math.round(g.diamonds * per);
+  // ±0 は「何も起きない」= 層に一致しなかったのと同じ。ここで null に倒さないと
+  // giftDefault へ落ちなくなるうえ、±0 のギフトカードが毎回浮上する。
+  if (amount === 0) return null;
+  return { amount, fx: c.fxEnabled && g.diamonds >= c.fxMinDiamonds };
 }
 
 /**
@@ -4936,8 +5412,56 @@ export function matchRevolution(
 }
 
 /**
+ * 一撃クリアのトリガー判定。matchRevolution と同じ先勝ち。評価順は
+ * **revolution の次・quiz より先**(worker の gift 分岐)。
+ *
+ * 革命より下なのは `matchTapLock` が `matchTapBoost` より下に居るのと同じ
+ * 「安全側」の論法 — 同じ giftId を両方に誤登録したとき、**一撃クリアが
+ * 勝ってしまう**ほうが代償が大きい(ランが終わって巻き戻せない)。トリガーは
+ * 実際には別ギフト(44,999💎)なので、上に置いても得は無い。
+ * quiz より上なのは必須 — quiz は既定 131 秒の長丁場で、下に置くと
+ * 同 giftId 誤設定のときに事実上永久に出なくなる。
+ *
+ * 無効な行は飛ばすだけで**下の行の評価は続ける**(matchRevolution と同じ)。
+ */
+export function matchUniverse(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): UniverseRule | null {
+  const uv = cfg.universe;
+  if (!uv.enabled) return null;
+  for (const r of uv.rules) {
+    if (!r.enabled) continue;
+    if (matchGiftTrigger(r, g)) return r;
+  }
+  return null;
+}
+
+/**
+ * ライオンのトリガー判定。matchUniverse と同じ先勝ち。評価順は
+ * **universe の次・quiz より先**(worker の gift 分岐)— 同じ giftId を両方に
+ * 登録した誤設定では一撃クリアが勝つ(結末を決めるほうを尊重する)。
+ * quiz より上なのは universe と同じ理由 — quiz は既定 131 秒の長丁場で、
+ * 下に置くと同 giftId 誤設定のときに事実上永久に出なくなる。
+ *
+ * 無効な行は飛ばすだけで**下の行の評価は続ける**(matchUniverse と同じ)。
+ */
+export function matchLion(
+  cfg: ChallengeConfig,
+  g: { canonical?: string; giftId: string; giftName?: string }
+): LionRule | null {
+  const ln = cfg.lion;
+  if (!ln.enabled) return null;
+  for (const r of ln.rules) {
+    if (!r.enabled) continue;
+    if (matchGiftTrigger(r, g)) return r;
+  }
+  return null;
+}
+
+/**
  * お題ルーレットのトリガー判定。matchRevolution と同じ先勝ち。評価順は
- * **revolution の次・tapLock より先**(worker の gift 分岐)— 同じ giftId を
+ * **revolution / universe の次・tapLock より先**(worker の gift 分岐)— 同じ giftId を
  * 両方に登録した誤設定では革命が勝つ(先に登録された大技を尊重)。
  * お題は空(prompts 0件)でも一致は返す — 不発の診断は worker 側(giftDiag)で
  * 出す(ここで握りつぶすと「設定したのに無反応」の原因が追えない)。

@@ -19,6 +19,8 @@
  * 誰も何もしなくても自然に解放される(worker の fxFreezeUntilMs と同じ流儀)。
  */
 
+import { BANNER_GIFT_SCALE_MS } from './gift-scale-fx';
+
 /**
  * `.float` の浮上アニメーションの尺。**monitor.css:1666 の `floatup 1.6s` と同値**
  * でなければならない(fx-stage.spec.ts が CSS を読んで固定する)。
@@ -95,13 +97,26 @@ export type StageNext = 'drain' | 'banner' | 'idle';
  */
 export const DRAIN_STARVE_MS = 10_000;
 
+/** 尺を上書きするバナー variant の表。CSS の `.float.<token>` と1対1。 */
+const BANNER_MS_BY_TOKEN: Readonly<Record<string, number>> = {
+  'gift-card': BANNER_GIFT_CARD_MS,
+  'banner-gift-scale': BANNER_GIFT_SCALE_MS,
+};
+
 /**
  * バナーの実尺をクラス文字列から引く。`pushFloat(node, cls)` の cls は
  * `'gift-card t3 bad'` のような空白区切りなので、**トークン一致**で見る
  * (`includes` だと `banner-gift-cardish` のような将来のクラスで誤爆する)。
  */
 export function bannerDurationMs(cls: string): number {
-  return cls.split(/\s+/).includes('gift-card') ? BANNER_GIFT_CARD_MS : BANNER_MS;
+  // 走査は cls の並び順ではなく**トークン表の登録順**に依存しないよう、最初に
+  // 当たったトークンで確定させる。両方のトークンを同時に持つ cls は作らない
+  // (作ると尺が cls の書き順で変わる — fx-stage.spec.ts が決定性を固定する)。
+  for (const t of cls.split(/\s+/)) {
+    const ms = BANNER_MS_BY_TOKEN[t];
+    if (ms != null) return ms;
+  }
+  return BANNER_MS;
 }
 
 /**
@@ -130,11 +145,15 @@ export function stageWaitMs(
 
 /**
  * 舞台ラッチの正当な最大先行幅。`bannerEndAtFor` は `max(cur, now + 尺)` でしか
- * 前進せず、尺の最大は BANNER_GIFT_CARD_MS — つまり**時計が単調なら
- * `bannerEndAt ≤ now + BANNER_GIFT_CARD_MS` が不変条件**。これを超える先行は
+ * 前進せず、尺の最大はバナー尺の最大値 — つまり**時計が単調なら
+ * `bannerEndAt ≤ now + BANNER_LATCH_MAX_AHEAD_MS` が不変条件**。これを超える先行は
  * 時計の後方ステップ(NTP 巻き戻し・サスペンド/レジューム)でしか作れない。
  */
-export const BANNER_LATCH_MAX_AHEAD_MS = BANNER_GIFT_CARD_MS;
+export const BANNER_LATCH_MAX_AHEAD_MS = Math.max(
+  BANNER_MS,
+  BANNER_GIFT_CARD_MS,
+  BANNER_GIFT_SCALE_MS
+);
 
 /**
  * 後方ステップで未来に固着したラッチを不変条件の上限まで引き戻す(短縮方向のみ —
@@ -168,7 +187,7 @@ export function boostGapUntilFor(bannerEndAt: number): number {
 }
 
 /** boostGapUntil の正当な最大先行幅(clampBannerEndAt と同じ導出)。 */
-export const BOOST_GAP_LATCH_MAX_AHEAD_MS = BANNER_GIFT_CARD_MS + STAGE_GAP_BOOST_RESULT_MS;
+export const BOOST_GAP_LATCH_MAX_AHEAD_MS = BANNER_LATCH_MAX_AHEAD_MS + STAGE_GAP_BOOST_RESULT_MS;
 
 /**
  * 後方ステップ(NTP 巻き戻し・サスペンド/レジューム)で未来に固着した

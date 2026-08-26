@@ -31,6 +31,10 @@ function cfg(enabled: boolean, over: Partial<ChallengeConfig> = {}): ChallengeCo
   // コメントお助け(既定オン)も落とす — 「コメントの妨害が入らない」の ON 側で
   // 一致コメントの +5 に -1 が混ざるのを防ぐ(機能自体は challenge-comment-helper.spec.ts)。
   base.commentHelper.enabled = false;
+  // ダイヤ増減(既定オン)も無効にする — 1💎につき +30 / +50 に変わるので、
+  // giftDefault(perDiamond +1)を前提にした既存のギフトテストが一斉に狂う。
+  // 機能自体の検査は challenge-gift-scale.spec.ts が明示的に有効化する。
+  base.giftScale.enabled = false;
   base.roulettes = [];
   return { ...base, enabled, initialValue: 1000, pressStep: 1, followStep: 10, ...over };
 }

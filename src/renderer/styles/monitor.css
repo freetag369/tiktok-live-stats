@@ -2513,6 +2513,53 @@ body {
   animation-duration: 2.2s;
 }
 
+/*
+ * ダイヤ増減の浮上(「N 浮上 → 数字が合計値まで駆け上がる → ドンとカウントに着弾」)。
+ *
+ * 尺は shared/gift-scale-fx.ts の BANNER_GIFT_SCALE_MS が権威
+ * (test/unit/fx-stage.spec.ts が**この CSS を読んで** JS 定数との一致を凍結する)。
+ * 進行(count → lock → fly)は MonitorView の JS タイマーが権威で、ここの keyframes は
+ * 短い単発だけ — .boost-settle と同じ方針。
+ *
+ * .float は --fl-* 変数を差し替えるだけで variant を作れる設計なので、色以外は
+ * 基本形をそのまま使う。
+ */
+.float.banner-gift-scale {
+  animation-duration: 3s;
+  padding: calc(12px * var(--float-scale)) calc(18px * var(--float-scale));
+}
+
+/* 妨害(増える)側は赤金。高額ギフトの「効いた」を金の電飾で見せる。 */
+.float.banner-gift-scale.bad {
+  --fl-lamp: #ffcf5e;
+  --fl-glow: rgba(255, 150, 66, 0.6);
+  --fl-bg-1: rgba(62, 26, 14, 0.96);
+  --fl-bg-2: rgba(24, 8, 4, 0.94);
+}
+
+/* 応援(減る)側は青。減算ギフトが「味方」であることを色で分ける。 */
+.float.banner-gift-scale.good {
+  --fl-lamp: #7ee6ff;
+  --fl-glow: rgba(96, 200, 255, 0.6);
+  --fl-bg-1: rgba(10, 40, 62, 0.96);
+  --fl-bg-2: rgba(3, 14, 26, 0.94);
+}
+
+/*
+ * カウントアップ中の数字。桁が増えても横に暴れないよう tabular-nums を効かせる
+ * (.float .f-amt が既に指定しているが、ここは桁が毎フレーム変わる唯一の場所なので
+ *  意図として明示しておく)。
+ */
+.float.banner-gift-scale .f-amt {
+  font-size: calc(60px * var(--float-scale));
+  font-variant-numeric: tabular-nums;
+}
+
+/* 合計値へ到達した瞬間の確定パンチ。keyframes は既存を再利用する(増やさない)。 */
+.float.banner-gift-scale .f-amt.lock {
+  animation: boost-settle-lock 400ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
 .gc-icon {
   position: relative;
   width: calc(60px * var(--float-scale));
@@ -6315,6 +6362,531 @@ body {
  * 革命の結果カットシーン。素材が無いときの暗幕(.boost-screen の複製・赤系)。
  * 尺は startRevolutionResultFx のタイマーが権威で、ここは見た目だけ。
  */
+/*
+ * 一撃クリア(TIKTOK UNIVERSE)。
+ *
+ * 暗幕 = 素材が無い/再生失敗のときの縮退先(.revolution-screen の宇宙版)。
+ * **transition の 400ms は UNIVERSE_FADE_MS と一致させること** — ずらすと
+ * 幕引きが JS タイマーと食い違う。
+ */
+.universe-screen {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 46%, rgba(22, 42, 132, 0.94), rgba(2, 3, 14, 0.98) 70%);
+  opacity: 0.96;
+  transition: opacity 400ms ease-out;
+}
+
+.universe-screen.out {
+  opacity: 0;
+}
+
+/*
+ * 減算フェーズの -N 連打。**fx-layer 内 = 不透明動画より必ず手前・z-index は
+ * 付けない**(fx-backdrop.spec が凍結)。
+ *
+ * ★背景を敷かないこと — この 9 秒は7セグ(.countdown)を読ませるのが主役で、
+ * .roulette-screen のような暗幕を敷くと .count-mirror 相当の写しが要る。
+ * ポップの位置は6アンカー(s0〜s5)で、index % 6 で決定的に散らす
+ * (Math.random は使わない — 演出の決定性の規約)。中央の縦帯(7セグの居場所)と
+ * 右下(.fx-stock)・左下(.count-mirror)は避けてある。
+ */
+.universe-drain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/*
+ * ★ 文字サイズはユーザー決定で**初版の3倍**(2026-08-26: 64px → 192px /
+ * 横ステージ 48px → 144px)。
+ *
+ * 3倍にすると縦ステージ(540px)では「-1500」が実測 413px を占め、横に並べられる
+ * のは1枚だけになる。そこで**同時に見える枚数を 6 → 2 へ減らし**(MonitorView の
+ * UNIVERSE_TICK_SLOTS)、アンカーを上下に振って**中央の帯を空けた** — この 9 秒は
+ * 7セグ(数字が減っていくところ)が主役で、そこを覆っては本末転倒だから。
+ * ポップは 900ms → 600ms へ短縮(300ms 間隔なので同時に生きるのはちょうど2枚)。
+ * 枚数とアンカー数は必ず一致させること — s0/s1 しか定義していないので、
+ * スロットを増やすとクラス無しの要素が左上(0,0)に固まる。
+ */
+.universe-drain .ud-tick {
+  position: absolute;
+  /*
+   * **font-size はインライン style が権威**(shared/universe.ts の
+   * universeTickFontPx が桁数から逆算する)。ここの値は据わり値 = 3〜5 文字の最大。
+   */
+  text-align: center;
+  font-family: var(--num, inherit);
+  font-size: 192px;
+  line-height: 1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: #d6ecff;
+  text-shadow:
+    0 0 22px rgba(120, 180, 255, 0.98),
+    0 0 70px rgba(60, 90, 255, 0.7),
+    0 6px 0 rgba(4, 12, 54, 0.85);
+  animation: ud-tick-pop 600ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+
+/*
+ * 2アンカー(上・下)。中央の帯は 7セグの居場所なので空けてある。
+ * 300ms 間隔 × 600ms のポップなので同時に生きるのはちょうど2枚 = スロットと同数。
+ *
+ * **左右いっぱい + text-align:center で置く**のが要点 — left/right の片側固定だと
+ * 桁が増えたときに反対側へはみ出して `.fx-layer` の overflow:hidden に切られる。
+ * 左右の寄りは padding で作る(transform は使わない — ポップの keyframes が
+ * transform を丸ごと書き換えるので、`.float.gift-card.t4` と同じ罠を踏む)。
+ */
+.universe-drain .ud-tick.s0 {
+  left: 0;
+  right: 0;
+  top: 4%;
+  /* ★ shared/universe.ts の TICK_INNER_W と対(両側から引いてある)。 */
+  padding-right: 3%;
+}
+.universe-drain .ud-tick.s1 {
+  left: 0;
+  right: 0;
+  bottom: 6%;
+  padding-left: 3%;
+}
+
+@keyframes ud-tick-pop {
+  0% {
+    transform: translateY(16px) scale(0.8);
+    opacity: 0;
+  }
+  18% {
+    transform: translateY(-4px) scale(1.08);
+    opacity: 1;
+  }
+  30% {
+    transform: translateY(0) scale(1);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-48px) scale(0.96);
+    opacity: 0;
+  }
+}
+
+.stage-scale.landscape .universe-drain .ud-tick {
+  font-size: 144px;
+}
+
+/* 締めのバナー(.float の役物カラーだけ差し替える — 骨格は全バナー共通)。 */
+
+/*
+ * 減算合計の発表(「いくら減ったか」・2026-08-26 ユーザー要望)。
+ * 30 段を削り切った瞬間 = 締めのカットインの開始と同時に出て、
+ * UNIVERSE_TOTAL_REVEAL_MS(4.5秒)で消える。
+ *
+ * **暗いパネルの上に置くのが必須** — 締めの素材は画面いっぱいの白青の爆発で、
+ * 地のままだと数字が飛ぶ(.revolution-settle の .rs-box と同じ可読性の担保)。
+ * .universe-total は全面センタリングの枠、.ut-box が内容サイズのパネル本体で、
+ * パンチ(transform 系 animation)は .ut-box / .ut-amt に掛ける。
+ */
+.universe-total {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 400ms ease-out; /* ← UNIVERSE_FADE_MS と一致 */
+}
+
+.universe-total.out {
+  opacity: 0;
+}
+
+.universe-total .ut-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  /* ★ shared/universe.ts の TOTAL_INNER_W と対。片方を変えたら必ず両方直す。 */
+  padding: 26px 28px 30px;
+  border-radius: 28px;
+  background: rgba(2, 8, 34, 0.78);
+  box-shadow:
+    inset 0 0 0 3px rgba(120, 180, 255, 0.85),
+    0 0 56px rgba(60, 120, 255, 0.6),
+    0 10px 34px rgba(0, 0, 0, 0.65);
+  animation: boost-settle-lock 360ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/*
+ * 合計の大型数字。0 → 合計の駆け上がりは rAF が textContent 直書きで回す。
+ * **font-size / min-width はインライン style が権威**(shared/universe.ts の
+ * universeTotalFontPx / universeTotalWidthPx が桁数から逆算する)。ここの値は
+ * 据わり値で、3 桁までの最大サイズと同値(quiz の札と同じ流儀)。
+ */
+.universe-total .ut-amt {
+  position: relative;
+  text-align: center;
+  font-family: var(--num);
+  font-size: 170px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #dceaff;
+  text-shadow:
+    0 0 22px rgba(120, 180, 255, 0.98),
+    0 0 72px rgba(50, 90, 255, 0.7),
+    0 4px 0 rgba(2, 10, 60, 0.85);
+}
+
+.universe-total .ut-cap {
+  position: relative;
+  font-family: var(--font);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #b9d6ff;
+  text-shadow: 0 0 14px rgba(120, 180, 255, 0.85);
+}
+
+/* 合計の確定: パンチ(key の再マウントで発火)。 */
+.universe-total.lock .ut-amt {
+  animation: boost-settle-lock 400ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+
+/* 横ステージは高さが足りないので一回り小さく(.revolution-settle と同じ判断)。 */
+.landscape .universe-total .ut-amt {
+  font-size: 132px;
+}
+
+.landscape .universe-total .ut-box {
+  padding: 18px 48px 22px;
+}
+
+.float.banner-universe {
+  --fl-lamp: #9ec6ff;
+  --fl-glow: rgba(90, 140, 255, 0.7);
+  --fl-bg-1: rgba(12, 24, 84, 0.96);
+  --fl-bg-2: rgba(3, 5, 26, 0.94);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* JS 側(startUniverseFx の prefersReducedMotion ガード)と対にする。 */
+  .universe-drain,
+  .universe-total,
+  .universe-screen {
+    display: none;
+  }
+}
+
+/*
+ * ライオン(Lion 29,999💎)。
+ *
+ * ★**単位は px(vw ではない)**。モニターは固定サイズのステージ
+ * (縦 540×960 / 横 1280×720)を .stage-scale が transform: scale() で窓へ合わせる
+ * 構造なので、px がそのままステージ内の実寸になる。vw はウィンドウ基準で
+ * ステージのスケールと無関係に伸び縮みするため使ってはいけない
+ * (7セグ・バナー・お題など既存の全要素が px + .landscape 上書きで組まれている)。
+ *
+ * 暗幕 = 素材が無い/再生失敗のときの縮退先(.universe-screen の琥珀版)。
+ * **transition の 400ms は LION_FADE_MS と一致させること** — ずらすと幕引きが
+ * JS タイマーと食い違う。
+ */
+.lion-screen {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 46%, rgba(92, 44, 6, 0.94), rgba(12, 5, 1, 0.98) 70%);
+  opacity: 0.96;
+  transition: opacity 400ms ease-out;
+}
+
+.lion-screen.out {
+  opacity: 0;
+}
+
+/*
+ * 札(+N)・走行カウント・合計の発表。**fx-layer 内 = 不透明動画より必ず手前・
+ * z-index は付けない**(fx-backdrop.spec が凍結)。
+ *
+ * ★背景を敷かないこと — 段②〜④は導入動画の**最終フレーム静止**(正面を睨む
+ * ライオン)を背にして札を出すのが絵の主役。暗幕を敷くとその絵が死ぬ。
+ *
+ * ★寸法の根拠(2026-08-26 ユーザー指定「②は3倍・④は3.5倍」+「+ は別行」):
+ *   実測(tabular-nums)は `+29,999` = 約 **3.83em** / `29,999` = 約 **3.30em**。
+ *   **符号を別行の小さい span(.lc-plus)へ出した**ので、数字(.lc-n)は 3.30em で
+ *   済み、同じ幅により大きく入る。
+ *   - 縦(540): 左右 16px を引いた 508px ÷ 3.30em = **154px** が上限
+ *     (1行のままなら 132px だった)。3倍(276px)は物理的に入らない。
+ *   - 横(1280): 指定どおり **1枚目 276px(3.0倍)/ 札 224px(3.5倍)**。
+ *   数字を触るときは「3.30em × font-size ≤ ステージ幅 − 左右の余白」で検算すること。
+ *   **縦位置は下の走行カウント(.lc-count)と重ならないこと**も一緒に確認する
+ *   (2行になったぶん、札の高さは .lc-plus + .lc-n ≒ 1.35 × font-size)。
+ */
+.lion-cut {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 1枚目の +N(段②③。④では消して札に譲る)。 */
+.lion-cut .lc-first {
+  position: absolute;
+  left: 50%;
+  top: 38%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: lc-first-pop 520ms cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+.lion-cut .lc-first .lc-n {
+  font-size: 154px;
+}
+
+.lion-cut .lc-first .lc-plus {
+  font-size: 62px;
+}
+
+/*
+ * 段④の札。**2 箇所(s0/s1)の交互**で、寿命は 420ms
+ * (= LION_BURST_STEP_MS 245 × LION_TICK_SLOTS 2 = 490ms より短い)。
+ * 巨大なので位置を増やすと必ず重なって読めない。
+ */
+.lion-cut .lc-tick {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: lc-tick-pop 420ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+
+.lion-cut .lc-tick .lc-n {
+  font-size: 148px;
+}
+
+.lion-cut .lc-tick .lc-plus {
+  font-size: 58px;
+}
+
+.lion-cut .lc-tick.s0 {
+  top: 30%;
+}
+.lion-cut .lc-tick.s1 {
+  top: 48%;
+}
+
+/* 2行の共通スタイル(.lc-first / .lc-tick とも同じ字面)。 */
+.lion-cut .lc-n,
+.lion-cut .lc-plus {
+  font-family: var(--num, inherit);
+  line-height: 1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: #ffe6b8;
+  text-shadow:
+    0 0 22px rgba(255, 176, 60, 0.95),
+    0 0 72px rgba(255, 96, 0, 0.62);
+}
+
+/* 符号は数字に食い込ませて2行を1かたまりに見せる(行間の間延びを詰める)。 */
+.lion-cut .lc-plus {
+  margin-bottom: -0.14em;
+  opacity: 0.92;
+}
+
+/*
+ * 段②〜④の走行カウント(「残り」)。**これが「増えているのが見える」の本体** —
+ * 幕の裏では 7セグがまだ増えていない(worker が積むのは段⑥)ので、
+ * live 値 + 出した枚数 × 額 を毎フレーム書いている(MonitorView の runLionCount)。
+ */
+.lion-cut .lc-count {
+  position: absolute;
+  left: 50%;
+  bottom: 7%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 10px 26px;
+  border-radius: 20px;
+  background: rgba(28, 10, 2, 0.66);
+  box-shadow: inset 0 0 0 2px rgba(255, 176, 60, 0.4);
+  white-space: nowrap;
+}
+
+.lion-cut .lc-count .lc-c-cap {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #ffc98a;
+}
+
+.lion-cut .lc-count .lc-c-amt {
+  font-family: var(--num, inherit);
+  font-size: 76px;
+  line-height: 1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #fff2dc;
+  text-shadow:
+    0 0 16px rgba(255, 176, 60, 0.9),
+    0 0 48px rgba(255, 96, 0, 0.5);
+}
+
+/* 段⑥ 合計の発表。全面動画の**最終フレーム(ほぼ黒+赤い残り火)**の上に置く。 */
+.lion-cut .lc-total {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 26px 40px;
+  border-radius: 28px;
+  background: rgba(28, 10, 2, 0.72);
+  box-shadow: inset 0 0 0 2px rgba(255, 176, 60, 0.45);
+  animation: lc-total-pop 420ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+
+.lion-cut .lc-total .lc-cap {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #ffc98a;
+}
+
+.lion-cut .lc-total .lc-amt {
+  font-family: var(--num, inherit);
+  /* `+1,499,950` は約 5.4em。縦(540)の余白 80px を引いた 460px に収める。 */
+  font-size: 84px;
+  line-height: 1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: #fff2dc;
+  text-shadow:
+    0 0 24px rgba(255, 176, 60, 0.95),
+    0 0 80px rgba(255, 96, 0, 0.7);
+}
+
+@keyframes lc-first-pop {
+  0% {
+    transform: translateX(-50%) scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: translateX(-50%) scale(1.12);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(-50%) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes lc-tick-pop {
+  0% {
+    transform: translateX(-50%) translateY(14px) scale(0.82);
+    opacity: 0;
+  }
+  22% {
+    transform: translateX(-50%) translateY(-4px) scale(1.08);
+    opacity: 1;
+  }
+  40% {
+    transform: translateX(-50%) translateY(0) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(-50%) translateY(-38px) scale(0.98);
+    opacity: 0;
+  }
+}
+
+@keyframes lc-total-pop {
+  0% {
+    transform: translate(-50%, -50%) scale(0.72);
+    opacity: 0;
+  }
+  70% {
+    transform: translate(-50%, -50%) scale(1.06);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+}
+
+/*
+ * 横長(1280×720)。**ユーザー指定の倍率(②3.0倍 / ④3.5倍)が入るのはこちら** —
+ * 縦(540)は幅が足りず 1.4〜1.9 倍が上限。
+ * 縦位置は「札は上半分・走行カウントは下」で重ならないように振ってある
+ * (札 224px は 1 枚で高さの 3 割を占める)。
+ */
+.stage-scale.landscape .lion-cut .lc-first {
+  top: 14%;
+}
+.stage-scale.landscape .lion-cut .lc-first .lc-n {
+  font-size: 276px;
+}
+.stage-scale.landscape .lion-cut .lc-first .lc-plus {
+  font-size: 110px;
+}
+.stage-scale.landscape .lion-cut .lc-tick .lc-n {
+  font-size: 224px;
+}
+.stage-scale.landscape .lion-cut .lc-tick .lc-plus {
+  font-size: 90px;
+}
+.stage-scale.landscape .lion-cut .lc-tick.s0 {
+  top: 8%;
+}
+.stage-scale.landscape .lion-cut .lc-tick.s1 {
+  top: 26%;
+}
+.stage-scale.landscape .lion-cut .lc-count {
+  bottom: 6%;
+  gap: 18px;
+  padding: 12px 34px;
+}
+.stage-scale.landscape .lion-cut .lc-count .lc-c-cap {
+  font-size: 40px;
+}
+.stage-scale.landscape .lion-cut .lc-count .lc-c-amt {
+  font-size: 120px;
+}
+.stage-scale.landscape .lion-cut .lc-total .lc-amt {
+  font-size: 168px;
+}
+
+/* 締めのバナー(.float の役物カラーだけ差し替える — 骨格は全バナー共通)。 */
+.float.banner-lion {
+  --fl-lamp: #ffc98a;
+  --fl-glow: rgba(255, 150, 40, 0.7);
+  --fl-bg-1: rgba(92, 36, 4, 0.96);
+  --fl-bg-2: rgba(24, 8, 1, 0.94);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* JS 側(startLionFx の prefersReducedMotion ガード)と対にする。 */
+  .lion-cut,
+  .lion-screen {
+    display: none;
+  }
+}
+
 .revolution-screen {
   position: absolute;
   inset: 0;

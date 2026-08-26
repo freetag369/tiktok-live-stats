@@ -196,6 +196,9 @@ describe('screen 合成クリップ(assets/fx 直下)', () => {
     ['quiz', ['intro', 'result']],
     ['revolution', ['intro', 'result']],
     ['tap-lock', ['intro']],
+    // ライオン(2026-08-26)。intro = 導入(段①・最終フレーム静止で段②〜④も持つ)、
+    // blast = 全面の大爆発(段⑤・最終フレームが段⑥の暗い背景になる)。
+    ['lion', ['blast', 'intro']],
   ])('専用サブディレクトリ %s/ の mp4 は %s だけ', (dir, expected) => {
     const d = join(FX_DIR, dir);
     if (!existsSync(d)) return; // 未投入は許容(0 件許容 glob)

@@ -44,6 +44,10 @@ function baseCfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   base.tapBoost.enabled = false;
   base.fanStamp.enabled = false;
   base.commentHelper.enabled = false;
+  // ダイヤ増減(既定オン)も無効にする — 1💎につき +30 / +50 に変わるので、
+  // giftDefault(perDiamond +1)を前提にした既存のギフトテストが一斉に狂う。
+  // 機能自体の検査は challenge-gift-scale.spec.ts が明示的に有効化する。
+  base.giftScale.enabled = false;
   base.roulettes = [];
   return { ...base, enabled: true, initialValue: 100, pressStep: 1, ...over };
 }

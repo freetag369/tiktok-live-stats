@@ -57,6 +57,10 @@ describe('occlusionOfCutin — カットイン種別 → 幕の濃さ', () => {
       'stock-cutin': 'opaque',
       boost: 'opaque',
       revolution: 'opaque',
+      universe: 'opaque',
+      // ライオン(2026-08-26)。43 秒まるごとが幕 — 中の 12 秒(+N の連打)は動画が
+      // 出ていないが、導入カットの最終フレーム静止の上に札が降る山場なので不透明側。
+      lion: 'opaque',
       // お邪魔は 2026-08-20 に導入全面カット(5秒・音声焼き込み)を得て登録側へ移った。
       // それまでは「幕を張らない常設 HUD だけ」だったので、意図的に未登録だった。
       'tap-lock': 'opaque',

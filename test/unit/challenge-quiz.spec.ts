@@ -95,6 +95,10 @@ function cfg(qz: Partial<QuizConfig> = {}, over: Partial<ChallengeConfig> = {}):
   // コメントお助け(既定オン)も落とす — 非投票コメント・無効票が -1 ずつ値を
   // 汚し、清算の期待値が揺れる。先勝ちの検証は challenge-comment-helper.spec.ts が持つ。
   base.commentHelper.enabled = false;
+  // ダイヤ増減(既定オン)も無効にする — 1💎につき +30 / +50 に変わるので、
+  // giftDefault(perDiamond +1)を前提にした既存のギフトテストが一斉に狂う。
+  // 機能自体の検査は challenge-gift-scale.spec.ts が明示的に有効化する。
+  base.giftScale.enabled = false;
   base.quiz = {
     ...structuredClone(DEFAULT_QUIZ),
     enabled: true,

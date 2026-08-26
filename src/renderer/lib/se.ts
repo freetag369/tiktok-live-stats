@@ -28,6 +28,10 @@ import boostHitUrl from '../assets/se/boost-hit.mp3';
 import reelKickUrl from '../assets/se/reel-kick.mp3';
 import reelHitUrl from '../assets/se/reel-hit.mp3';
 import clearFanfareUrl from '../assets/se/clear-fanfare.mp3';
+import gaugeRecoverUrl from '../assets/se/gauge-recover.mp3';
+import lionPetaUrl from '../assets/se/lion-peta.mp3';
+import lionBlastUrl from '../assets/se/lion-blast.mp3';
+import lionBoomUrl from '../assets/se/lion-boom.mp3';
 import hypeKakugoUrl from '../assets/se/hype-kakugo.mp3';
 import hypeIyashiUrl from '../assets/se/hype-iyashi.mp3';
 import hypeYoroshikuUrl from '../assets/se/hype-yoroshiku.mp3';
@@ -98,6 +102,20 @@ export const SE_SOUNDS: readonly SeSound[] = [
   { id: 'reel-kick', label: 'ルーレット キック(専用)', url: reelKickUrl, gain: 0.9 },
   { id: 'reel-hit', label: 'ルーレット確定(専用)', url: reelHitUrl, gain: 0.9 },
   { id: 'clear-fanfare', label: '達成(専用)', url: clearFanfareUrl, gain: 0.9 },
+  // 一撃クリアの減算連打(30 段 × 300ms)の刻み音。**gain は 0.9 ではなく 0.6** —
+  // 連発される音は控えめに、という SeSound.gain の規約(pop と同格)。実素材は
+  // 可聴部 0.79 秒 + 末尾 0.57 秒の無音だったので、取り込み時に 0.85 秒へ
+  // トリムしてある。可聴部 < 300ms × POOL_SIZE(4) = 1.2 秒なので、
+  // 5 発目がプールの最古を巻き戻しても**鳴っている音は切らない**。
+  { id: 'gauge-recover', label: 'ゲージ回復(専用)', url: gaugeRecoverUrl, gain: 0.6 },
+  // ライオン(Lion 29,999💎)の専用音3種(作者提供・2026-08-26)。取り込み時に
+  // ピークを -1.5dB 前後へ揃えてある(reel-stop / like-jam と同じ規約)。
+  { id: 'lion-peta', label: 'ライオン「ペタッ」(専用)', url: lionPetaUrl, gain: 0.9 },
+  // **49 連発で鳴るので gain は控えめ**(SeSound.gain の doc「連発される音は控えめに」)。
+  // 素材も 0.94 秒へ詰めてある — LION_BURST_STEP_MS × POOL_SIZE(4)= 980ms を
+  // 超えると5発目がプールの最古を巻き戻して尻尾を切る(lion-settle.ts の不等式)。
+  { id: 'lion-blast', label: 'ライオン 爆発(連打・専用)', url: lionBlastUrl, gain: 0.6 },
+  { id: 'lion-boom', label: 'ライオン 大爆発(締め・専用)', url: lionBoomUrl, gain: 0.9 },
   // 超激アツ(ultra)のカウントダウン式演出のボイス(作者提供)。上のバッチと違い
   // **ピークではなく RMS を -17dB に揃えて**取り込んである — 素材の RMS が 7.6dB
   // ばらついていて、ピーク合わせだけでは体感音量が合わなかった(短い叫びほど

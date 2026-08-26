@@ -31,6 +31,10 @@ const BOOST_SETTINGS = {
     // (ブースト一致時は増減規則を通らないが、念のため素の状態にしておく)。
     giftDefault: null,
     giftRules: [],
+    // ダイヤ増減は既定オン(欠損はオンへ倒れる)なので明示的に落とす — settingsPatch は
+    // トップレベルの浅いマージで challenge を丸ごと差し替えるため、fixtures.ts の
+    // 既定は届かない(finalGate / commentHelper と同じ規約)。
+    giftScale: { enabled: false },
     commentRules: [],
     roulettes: [],
     joinRoulette: { enabled: false },

@@ -403,6 +403,10 @@ const LOG_ICON: Record<ChallengeLogEntry['kind'], string> = {
   'tap-lock': '🚫',
   'revolution-start': '🦢',
   'revolution-end': '🦢',
+  'universe-start': '🌌',
+  'universe-end': '🌌',
+  'lion-start': '🦁',
+  'lion-end': '🦁',
   'quiz-start': '🎤',
   'quiz-end': '🎤',
   achieved: '🏁',
@@ -496,6 +500,21 @@ function logWhat(e: ChallengeLogEntry, maskRoulette: boolean): string {
       // モニターの結果バナー(revolutionResultNode)と同型の二者表記。
       return `革命終了 ×${num(e.revolutionMultiplier ?? 1)} -${num(down)}(タップ -${num(Math.max(0, down - like))}〔${num(tap)}回〕/ いいね反転 -${num(like)})`;
     }
+    case 'universe-start': {
+      const gift = e.giftName ? `(${e.giftName})` : '';
+      return `一撃クリア発動${gift}`;
+    }
+    case 'universe-end':
+      // 減算量は effect の焼き込み(universeDownTotal)。amount は -0 正規化を
+      // 通るので符号を気にせず読める正の数をそのまま出す。
+      return `一撃クリア -${num(e.universeDownTotal ?? 0)} → 0`;
+    case 'lion-start': {
+      const gift = e.giftName ? `(${e.giftName})` : '';
+      return `ライオン発動${gift}`;
+    }
+    case 'lion-end':
+      // 内訳は effect の焼き込み(lionEach × lionSteps)。amount がそのまま加算量。
+      return `ライオン +${num(e.amount)}(${num(e.lionEach ?? 0)}×${num(e.lionSteps ?? 0)})`;
     case 'quiz-start': {
       // お題本文は effect の焼き込み(tap-lock と同じ規約 — 設定を引き直さない)。
       const gift = e.giftName ? `(${e.giftName})` : '';

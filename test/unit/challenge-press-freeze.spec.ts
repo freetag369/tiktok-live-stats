@@ -43,6 +43,9 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   // 全面カットは既定行が「バラ」に一致して別の凍結を張るので落とす。
   // 帯域カットイン(凍結を張る側)はこのファイルの主役なので既定のまま有効。
   base.giftFullCut.enabled = false;
+  // ダイヤ増減(既定オン)も落とす — 1💎につき +30/+50 に変わるので、giftDefault
+  // (perDiamond +1)を前提にしたこのファイルの期待値が一斉に狂う(challenge.spec.ts と同じ)。
+  base.giftScale.enabled = false;
   base.giftBandFx = structuredClone(DEFAULT_GIFT_BAND_FX);
   base.roulettes = [];
   // 最終ゲート(既定オン)は落とす — lowThreshold 以下の押下の意味が変わり、

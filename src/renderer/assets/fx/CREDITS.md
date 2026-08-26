@@ -1500,3 +1500,172 @@ ffmpeg -i RAW.mp4 \
 > 生成物の利用条件は Dreamina (CapCut) の利用規約に従う(**CC0 ではない**)。
 > **再配布可否は未了** — `quiz/intro.mp4` と同じ扱い。
 > 再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
+
+
+---
+
+## 一撃クリア(TIKTOK UNIVERSE)— `universe/intro.mp4` / `universe/outro.mp4`・Dreamina (CapCut) 製・2026-08-26 追加
+
+44,999💎 の TIKTOK UNIVERSE でカウントを 0 にする 25 秒の演出の、前後の全面カット
+2 本。あいだの 9 秒(残量を 30 分割した減算の連打)は動画ではなく DOM
+(`.universe-drain`)なので、この 2 本のあいだは 7セグが露出する。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.0`(**テキストのみ = 参照画像なし**) |
+| 生成日 | 2026-08-26 |
+| 生成パラメータ | `16:9` / `720P` / `8s`。音声は `Audio:` の一句から自動で焼き込み |
+| コスト | **✦192 × 2 = ✦384**(8 秒 × 24)。どちらも 1 回で採用、撮り直しなし |
+| 素の出力 | 1280×720 / **60fps を名乗る容器に真の 24fps・193 フレーム**(8.017 秒)/ H.264 / AAC |
+| 同梱の実尺 | **8.000 秒ちょうど**(192 フレーム @ 真の 24fps CFR) |
+| 同梱のサイズ | intro 1.35MB / outro 1.62MB |
+| 出力音量 | intro **-16.5 LUFS / -1.5 dBTP** / outro **-16.0 LUFS / -1.5 dBTP** |
+| ウォーターマーク | `quiz/intro.mp4` と同じく左上に "AI" の焼き込みあり |
+
+| ファイル | 位相 | モチーフ |
+|---|---|---|
+| `universe/intro.mp4` | 発動(0〜8秒) | クリスタルと青氷から彫り出した巨大な地球儀が上方から中央へ降臨し、サファイアの大陸を光らせながら回転。着地で淡いシアンの衝撃波が四方へ走り、背後から白青の光条が回りながら伸びる。ダイヤの粉と氷晶が舞い上がり、終端は画面いっぱいの白青フラッシュ |
+| `universe/outro.mp4` | 締め(17〜25秒) | 同じ地球儀の表面に亀裂が走り、割れ目から白青の光が噴き出して**爆散**。無数の結晶片が手前へ飛び、白青の大爆発が画面を埋める |
+
+### ⚠️ 参照画像を使っていない(意図)
+
+トリガーの TIKTOK UNIVERSE のアイコン(`IMAGE/20260826/S__109043731.jpg` — クリスタルの
+地球儀 + TikTok LIVE のロゴ)は**オムニリファレンスに投入していない**。理由は 2 つ:
+
+1. **ブラウザ自動操作からファイルを入れられなかった。** 隠し `input[type=file]` へ
+   `DataTransfer` で File を載せて `change` を焚いても React 側が拾わない
+   (`isTrusted` 検証と思われる)。`band/` の 40 本を作った 2026-08-12 当時とは
+   composer の実装が変わっている。
+2. **それで困らない。** `quiz/intro.mp4` `quiz/result.mp4` と `rl/` の Dreamina 製
+   16 本はいずれも参照画像なし(t2v)で、このリポジトリの Dreamina 素材の既定の作り方は
+   もともとテキストのみ。絵柄はプロンプトの
+   `a planet carved entirely from faceted diamond and blue ice, its continents rendered as
+   glowing sapphire inlay` の一句で担保している。
+
+**TikTok のロゴと "TikTok LIVE" の文字は意図的に再現していない。** 共通ガードの
+`no text, no letters, no logos, no watermark, no brand marks of any kind` は他の全素材と
+同じで、題材(クリスタルの地球儀・青白の発光・ダイヤの輝き)だけを参照した完全オリジナル。
+
+### 加工内容(`revolution/` `quiz/` と同一のレシピ)
+
+Seedance は `duration×24+1` フレームで返す。頭を 1 フレーム落として 192f = 8.000 秒に
+した(見せ場と終端が末尾にあるので、詰めるのは必ず頭側)。
+
+```
+# 1パス目(測定)
+ffmpeg -i RAW.mp4 -af loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json -f null -
+# 2パス目(トリム + 正規化 + 末尾フェード)
+ffmpeg -y -i RAW.mp4 -filter_complex \
+ "[0:v]trim=start_frame=1:end_frame=193,settb=1/24,setpts=N[v];\
+  [0:a]atrim=start=0.0416667:duration=8,asetpts=PTS-STARTPTS,\
+       loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=<M_I>:measured_TP=<M_TP>:measured_LRA=<M_LRA>:measured_thresh=<M_TH>:offset=<OFF>:linear=true,\
+       afade=t=out:st=7.85:d=0.15,aresample=48000[a]" \
+ -map "[v]" -map "[a]" -map_metadata -1 \
+ -c:v libx264 -crf 28 -preset slow -pix_fmt yuv420p -profile:v high -fps_mode cfr -r 24 \
+ -c:a aac -b:a 128k -ac 2 -ar 48000 -movflags +faststart intro.mp4
+```
+
+> **`-ss` も `fps=24` も `setpts=N/24/TB` も使わない。** 素材は 60fps を名乗る容器に真の
+> 24fps が入っており、`-ss` はシーク破綻、`fps=24` は毎回 1 フレーム落とし、
+> `setpts=N/24/TB` は入力 TB が 1/60 なので 2.5 倍に重複展開する。
+> 正解は `trim=start_frame=…,settb=1/24,setpts=N` + `-r 24`(`rl/` で確立したレシピ)。
+>
+> どちらも実測 LRA が狭い(intro 3.10 / outro 3.50)ので、`linear=true` が
+> dynamic へ落ちても実害が無い(`quiz/intro.mp4` と同じ事情)。
+
+> ## ⚠️ 不透明フルフレーム — screen 禁止・`.fx-clip-opaque`・音声は素材のもの
+>
+> `cut/*.mp4` `revolution/*.mp4` `quiz/*.mp4` と同族。黒背景発光体ではないので
+> `mix-blend-mode: screen` 禁止、`.fx-clip-opaque` で重ねる
+> (配置は `.monitor-root` 直下・z-index なし)。
+>
+> **導入と締めは同じ `<video>` ホルダーを使い回す**(`armVideoPlay(v, 'universe-cutin', …)`
+> はソース中にちょうど 1 回 — `fx-video-pool.spec.ts` が凍結)。革命・お題が別ホルダーを
+> 要求したのは導入と結果が最大 130〜180 秒離れた別の生存期間だからで、こちらは 1 つの
+> `universeHold` の中で 9 秒しか離れていない(`boost` が intro/window/result を位相で
+> 回しているのと同じ形)。
+>
+> **段の長さは素材ではなく定数が決める**(`shared/universe.ts` の `UNIVERSE_INTRO_MS` /
+> `UNIVERSE_OUTRO_MS` = どちらも 8000)。モニターは `onEnded` を使わず JS タイマーで
+> 打ち切り、終端 400ms は `.out` でフェードさせる。
+> **尺を変えるときは定数と素材のフレーム数を必ず一緒に動かすこと。**
+>
+> 音声は**素材に焼き込まれたもの**。モニターは `seEnabled` のとき `muted` を外し、
+> 音量は `giftFullCut.volume`(既定 70)を当てる。
+>
+> どちらのファイルを消してもビルドは壊れない(`lib/fx.ts` の 0 件許容 glob)。
+> 無ければ暗幕 `.universe-screen` へ落ち、**30 段の減算だけは必ず出し切る**。
+>
+> ## 著作権について
+>
+> **TikTok 本家のギフト演出の再現ではない。** ロゴ・ワードマーク・本家の演出の意匠は
+> いずれも使わず、**クリスタルの地球儀という一般的な題材**だけで構成している。
+> 生成物の利用条件は Dreamina (CapCut) の利用規約に従う(**CC0 ではない**)。
+> **再配布可否は未了** — `quiz/` `revolution/` `tap-lock/` と同じ扱い。
+> 再エンコードにより生成サービスの C2PA コンテンツ来歴ボックスは落ちている。
+
+### 生成プロンプト(全文)
+
+**universe/intro.mp4**
+
+> Pachinko-jackpot grade cut-in animation, opaque full-frame, widescreen 16:9, action starting immediately from the very first frame. A colossal crystalline globe - a planet carved entirely from faceted diamond and blue ice, its continents rendered as glowing sapphire inlay - descends slowly from the top of the frame into the exact center of the screen, rotating majestically, refracting cold blue-white light through thousands of facets. As it settles, a shockwave of pale cyan light snaps outward to the edges of the frame, long white-blue god-rays sweep and rotate radially from behind the sphere, and a storm of diamond dust and glittering ice crystals streams upward around it. Deep space-blue and black background, volumetric light, rich specular highlights on every facet. The sphere and the main action stay in the horizontal center of the frame (safe for a vertical center crop). Slow dramatic push-in, overwhelming grand-prize energy. Ends with a brilliant white-blue flash filling the entire frame. No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI, no people, no hands, no brand marks of any kind. Audio: a deep sub-bass impact as the sphere lands, a rising orchestral swell with shimmering crystalline bells and a choir pad, ending with the music decaying toward silence in the final half second.
+
+**universe/outro.mp4**
+
+> Pachinko-jackpot grade finale cut-in, opaque full-frame, widescreen 16:9, action starting immediately from the very first frame. A colossal crystalline globe - a planet carved entirely from faceted diamond and blue ice, its continents rendered as glowing sapphire inlay - hangs at the exact center of the frame, cracks racing across its surface with blinding white-blue light pouring out of every fracture, then it detonates: the sphere shatters into thousands of glittering crystal shards that blast outward toward the camera, followed by an enormous white-blue light explosion that engulfs the entire frame, expanding shockwave rings, sweeping god-rays, and a heavy downpour of shimmering diamond dust and cyan sparks filling the screen edge to edge. Deep space-blue and black background, volumetric light, maximum spectacle, triumphant total-annihilation energy. The sphere and the main action stay in the horizontal center of the frame (safe for a vertical center crop). THE LAST ONE SECOND IS A COMPLETELY FROZEN STILL IMAGE: no motion of any kind, the light bloom held as a single still frame, no drifting particles, no flicker, no camera movement. No text, no letters, no numbers, no logos, no watermark, no subtitles, no UI, no people, no hands, no brand marks of any kind. Audio: a rising crystalline shimmer, a massive shattering impact with taiko-style hits as the sphere breaks, a triumphant brass-and-choir fanfare over the explosion, ending with the music decaying toward silence in the final half second.
+
+## ライオン(Lion 29,999💎)— `lion/intro.mp4` / `lion/blast.mp4`・Dreamina (CapCut) 製・2026-08-26 追加
+
+カウントを **+1,499,950(29,999 × 50)積み上げる妨害**(ボス襲来)の 43 秒を挟む2本。
+**導入**は段①の 10 秒だが、**段②〜④(18 秒)もこの最終フレーム静止で持たせる** —
+`revolution/result.mp4` が演出尺 12 秒を素材 6 秒の静止で持っているのと同じ契約で、
+ホルダーに `loop` も `onEnded` も付けない。**全面爆発**は段⑤の 10 秒で、その最終
+フレームがそのまま段⑥「合計 +1,499,950」の背景になる。
+
+| ファイル | 段 | モチーフ | 尺 | N | S | 実尺 | 出力音量 | サイズ |
+|---|---|---|---|---|---|---|---|---|
+| `lion/intro.mp4` | ①(`LION_INTRO_MS`) | 漆黒の闇からライオンが歩み出て正面を睨み、低く咆哮する | 10.000秒 | 240 | 1 | 10.000秒 | -25.75 LUFS(素) → I=-16 / TP=-1.5 | 0.71 MB |
+| `lion/blast.mp4` | ⑤(`LION_BLAST_MS`) | 咆哮の瞬間に手前へ巨大な爆発が炸裂し、暗い煙と赤い残り火へ沈む | 10.000秒 | 240 | 1 | 10.000秒 | -22.00 LUFS(素) → I=-16 / TP=-1.5 | 1.53 MB |
+
+> ## ⚠️ `intro.mp4` の最終フレームは「静止に耐える絵」でなければならない
+> 段②〜④の **18 秒**はこのフレームを見つめ続けることになる。差し替えるときは
+> 終端が**正面を睨んで完全に静止したライオンの顔**であることを目視で確認すること
+> (プロンプトの「最後の3秒は完全静止」句がその担保)。出荷版の終端は顔が画面いっぱいの
+> 決めポーズで、上に降る `+29,999` の札(`.lc-tick`)とも競合しない。
+
+> ## ⚠️ `blast.mp4` の最終フレームは「暗く平坦」でなければならない
+> 段⑥の「合計 +1,499,950」を**白文字で**その上に乗せる。出荷版の終端はほぼ黒 +
+> 赤い残り火だけなので可読性は十分だが、明るい絵へ差し替えるなら
+> `.lion-cut .lc-total` の暗いパネル(`rgba(28,10,2,.72)`)側を厚くすること。
+
+**置き場所は `lion/` サブディレクトリ。** 理由は `revolution/` / `universe/` と同じで、
+直下に置くと既存カタログの孤児検査を踏む。読み込みは専用 glob(`renderer/lib/fx.ts` の
+`LION_INTRO_CLIP_URL` / `LION_BLAST_CLIP_URL`)で、**0件許容**なのでファイルを置くだけで
+差し替わる(欠損時は `.lion-screen` の暗幕へ縮退し、札と合計は必ず出し切る)。
+
+| 項目 | 値 |
+|---|---|
+| 生成サービス / モデル | **Dreamina (CapCut)** / `Dreamina Seedance 2.5`(モード **オムニリファレンス**・参照画像あり) |
+| 生成日 | 2026-08-26 |
+| 参照画像 | TikTok ギフト「Lion」のサムネ(256×171)を Lanczos で 1024×716 へ拡大したもの |
+| 生成パラメータ | `16:9` / `720P` / `10s` / 音声は Seedance 2.5 が `Audio:` 句から自動で焼き込む |
+| 素の出力 | 1280×720 / **60fps を名乗る容器に真の 24fps・241 フレーム**(10.0167秒)/ H.264 / AAC 44.1kHz |
+| コスト | 480 クレジット × 2本 |
+| ウォーターマーク | 左上に "AI" の焼き込みあり(非表示オプションが見当たらず、既存の Dreamina 製素材と同じくそのまま出荷) |
+
+加工内容: **`revolution/` と同一のレシピ**(頭 1 フレームを落として 240f = 10.000 秒
+ちょうど + 2 パス loudnorm)。実測は intro が `input_i=-25.75 / input_tp=-3.49`、
+blast が `input_i=-22.00 / input_tp=-6.94` で、どちらもピーク余裕が十分あるので
+`linear=true` がそのまま効いた。
+
+## 生成プロンプト(全文)
+
+日本語で投げている(既存の英語プロンプト群と違うのは、参照画像がギフトのサムネそのもので
+被写体の説明が要らず、段の要求 — 終端の静止・中央の余白 — のほうが主だったため)。
+
+- **lion/intro.mp4** — @lion-ref のライオンが主役。漆黒の闇の中、遠くから地響きと砂塵。巨大な金色のたてがみのライオンがゆっくりと歩み出て画面中央手前に到達し、カメラを正面から睨みつけて低く咆哮する。背後に赤い稲光、周囲に金色の火の粉と砂埃。カメラはゆっくり寄る。最後の3秒は完全静止 — ライオンは正面を睨んだまま微動だにせず、カメラも止まり、最終フレームが威圧的な決めポーズになること。実写風シネマティック、暗い背景、強いリムライト、16:9、被写体は画面中央やや下。文字やロゴは一切入れない。Audio: 遠雷のような低い地鳴りから始まり、重い足音が近づき、最後に腹に響く低く長い咆哮。
+
+- **lion/blast.mp4** — @lion-ref のライオン。画面いっぱいに迫ったライオンが咆哮した瞬間、手前へ向かって巨大な爆発が炸裂する。金色とオレンジの火球が画面全体を埋め尽くし、衝撃波と火の粉と瓦礫が四方へ飛び散る。中盤で連続爆発。最後の3秒は爆炎が収まり、暗い煙と赤い残り火だけが静かに漂う暗転気味の絵で完全静止 — 画面中央は暗く平坦にして、あとから白い文字を乗せられる余白にすること。実写風シネマティック、16:9。文字やロゴは一切入れない。Audio: 咆哮のあとに連続する大爆発、最後は低い残響と燻る音。
+
+> 著作権の注意は `cut/` / `boost/` / `revolution/` と同じ — TikTok 本家のギフト演出の
+> 再現ではなく、参照画像を手掛かりに生成した独自の映像。

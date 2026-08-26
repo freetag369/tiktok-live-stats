@@ -32,6 +32,7 @@ function state(over: Partial<ChallengeState> = {}): ChallengeState {
       rouletteSpins: 0,
       quizDown: 0,
       quizUp: 0,
+      universeDown: 0,
     },
     recentEffects: [],
     likeGauge: null,

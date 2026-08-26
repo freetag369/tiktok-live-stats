@@ -28,6 +28,11 @@ const LABELS: Record<FxStockKind, string> = {
   // 内部名は band(帯/フルカットのカットイン)だが、視聴者向けには「ギフト」(ユーザー指定)。
   band: 'ギフト',
   revolution: '革命',
+  // 凍結中/バリア待ちの予告(workerQueue)のみ — follow と同じくレンダラー側
+  // キューを持たない(開始は armed 監視が担うバリア方式)。
+  universe: '一撃クリア',
+  // universe と同じくレンダラー側キューを持たない(バリア方式)。
+  lion: 'ライオン',
   quiz: 'お題',
   'join-roulette': '初見ルーレット',
   'hot-roulette': '激熱ルーレット',

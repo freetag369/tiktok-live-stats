@@ -18,6 +18,7 @@ import {
   MINI_ABORT_MS,
   MINI_MAX,
   PENDING_BANDS_MAX,
+  PENDING_GIFT_SCALES_MAX,
   PENDING_BOOSTS_MAX,
   PENDING_REVOLUTIONS_MAX,
   PENDING_QUIZZES_MAX,
@@ -95,6 +96,7 @@ import {
   stageWaitMs,
   takeNextBanner,
 } from '@shared/fx-stage';
+import { BANNER_GIFT_SCALE_MS, countUpDisplayAt, planGiftScaleFx } from '@shared/gift-scale-fx';
 import {
   EMPTY_FX_STOCK,
   buildFxStock,
@@ -119,6 +121,17 @@ import {
   rollupDisplayAt,
 } from '@shared/boost-settle';
 import { countupDisplayAt, planRevolutionResult } from '@shared/revolution-settle';
+import {
+  UNIVERSE_INTRO_MS,
+  UNIVERSE_OUTRO_MS,
+  UNIVERSE_STEP_MS,
+  planUniverseClear,
+  universeTickFontPx,
+  universeTotalFontPx,
+  universeTotalWidthPx,
+  type UniverseClearPlan,
+} from '@shared/universe';
+import { planLionCut, type LionCutPlan } from '@shared/lion-settle';
 import { quizSpinTicks, type QuizSpinCue } from '@shared/quiz-spin';
 import { quizBoxPx, quizFit, quizLabelWidthPx, type QuizFitWhere } from '@shared/quiz-fit';
 import { quizPromptFontPx } from '@shared/quiz-type';
@@ -134,6 +147,10 @@ import {
   QUIZ_INTRO_CLIP_URL,
   QUIZ_RESULT_CLIP_URL,
   REVOLUTION_INTRO_CLIP_URL,
+  LION_BLAST_CLIP_URL,
+  LION_INTRO_CLIP_URL,
+  UNIVERSE_INTRO_CLIP_URL,
+  UNIVERSE_OUTRO_CLIP_URL,
   REVOLUTION_RESULT_CLIP_URL,
   STOCK_CUTIN_CLIP_URL,
   STOCK_FULL_CLIP_URL,
@@ -143,7 +160,7 @@ import {
   fxClipUrl,
   rouletteHotIntroUrl,
 } from '../lib/fx';
-import { playSe, playSeAny } from '../lib/se';
+import { playSe, playSeAny, prewarmSe } from '../lib/se';
 import { noteMediaLatency } from '../lib/frame-meter';
 import { playBandBgm, type BgmHandle } from '../lib/bgm';
 import { MiniFx } from './MiniFx';
@@ -523,6 +540,48 @@ function revolutionWillStart(e: ChallengeEffect): boolean {
 function quizWillStart(e: ChallengeEffect): boolean {
   return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
 }
+
+/**
+ * この一撃クリア effect(universe-start)で 25 秒の演出が実際に始まるか。
+ * 断るのは尺不足(= worker のプレーン発動は fxDurationMs 0)と動きの抑制だけ —
+ * 動画素材の欠損は startUniverseFx が暗幕へ縮退して吸収する(30 段の減算は
+ * 必ず出し切る)。
+ */
+function universeWillStart(e: ChallengeEffect): boolean {
+  return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
+}
+
+/**
+ * 同時に見える -N ポップの枚数(連打の厚み)。slot = index % これ で位置を散らす。
+ * **2 なのは文字を3倍(192px)にしたから** — 縦ステージ(540px)では 4 桁の
+ * 「-1500」が実測 413px を占め、横方向に並べられるのは1枚だけ。3枚以上を
+ * 同時に出すと縦に積み上がって**7セグ(数字が減っていく主役)を覆う**ので、
+ * 上下の2アンカーに絞って中央の帯を空けてある。monitor.css の
+ * `.ud-tick.s0`〜`.s1` と**必ず同数**にすること
+ * (増やすとクラスの無い要素が左上(0,0)へ固まる)。
+ */
+const UNIVERSE_TICK_SLOTS = 2;
+
+/**
+ * このライオン effect(lion-start)で 43 秒のカットシーンが実際に始まるか。
+ * 断るのは尺不足(= worker のプレーン発動は fxDurationMs 0)と動きの抑制だけ —
+ * 動画素材の欠損は startLionFx が暗幕へ縮退して吸収する(+N の札と合計は
+ * 必ず出し切る)。universeWillStart と同じ規約。
+ */
+function lionWillStart(e: ChallengeEffect): boolean {
+  return (e.fxDurationMs ?? 0) >= 1000 && !prefersReducedMotion();
+}
+
+/**
+  * +N 札を出す位置の数。slot = index % これ で決定的に交互へ振る(乱数は使わない)。
+  *
+  * **2 なのは札が巨大だから**(横 1280 のステージで 1 枚 892px = 画面の 7 割)。
+  * 6 箇所へ散らしていた頃の 3 倍サイズなので、位置を増やすと必ず重なって読めない。
+  * 交互にすることで「同じ場所で点滅しているだけ」に見えるのを避ける。
+  * 札の寿命(CSS の lc-tick-pop = 420ms)は **LION_BURST_STEP_MS × これ = 490ms**
+  * より短くすること — 長いと同じ位置で前の札が生きたまま次が出る。
+  */
+const LION_TICK_SLOTS = 2;
 
 /**
  * このお邪魔 effect(tap-lock)で導入全面カットが実際に始まるか。
@@ -1003,6 +1062,32 @@ export function MonitorView(): React.JSX.Element {
    * 1件だと3本目が黙って消えるので配列(worker の凍結が直列化するので2件で足りる)。
    */
   const pendingBands = useRef<ChallengeEffect[]>([]);
+
+  /**
+   * ダイヤ増減の浮上演出(「N 浮上 → カウントアップ → ドン」)の据え置きの持ち主である印
+   * (rouletteHold / bandHold と同じ役割)。**幕(カットイン)は張らない** — 3秒の
+   * バナーなので fx-occlusion.ts の FxCutinKind には登録しない(登録すると 'opaque'
+   * 扱いになり粒子・簡易演出が不当に殺される)。
+   */
+  const giftScaleHold = useRef(false);
+  /**
+   * カウントアップの数字を書き込む先。rAF から textContent へ直書きする
+   * (毎フレーム setState すると React が舞台ごと再レンダーする — boostSettleAmtRef と
+   * 同じ流儀)。算術は shared/gift-scale-fx.ts の countUpDisplayAt が権威。
+   */
+  const giftScaleAmtRef = useRef<HTMLSpanElement | null>(null);
+  const giftScaleRaf = useRef<number | null>(null);
+  const giftScaleTimers = useRef<number[]>([]);
+  /** 演出中の effect(着弾のパンチと通知に使う)。 */
+  const giftScaleEffect = useRef<ChallengeEffect | null>(null);
+  /**
+   * 他演出中に届いたダイヤ増減の持ち越し(pendingBands と同型)。ドレインキュー
+   * (shared/fx-drain.ts)には載せない — 3秒のバナーは band(45秒級)のような
+   * 「ストック行に出す価値のある長尺」ではないし、キューを1本増やすと
+   * FxDrainQueues / FX_DRAIN_SEQ / peekNextDrainKind / bestDrainRank まで波及する。
+   * pumpStage の最下位フォールスルーで拾う。
+   */
+  const pendingGiftScales = useRef<ChallengeEffect[]>([]);
   /** 再生中のカットインBGM。すべての出口(finish/abort/unmount)で stop する。 */
   const bandBgm = useRef<BgmHandle | null>(null);
 
@@ -1174,6 +1259,87 @@ export function MonitorView(): React.JSX.Element {
   const quizResultTimers = useRef<number[]>([]);
   /** 発表中の quiz-end effect(締めのバナー文言に使う — 同期値は ref)。 */
   const quizResultEffect = useRef<ChallengeEffect | null>(null);
+  // ── 一撃クリア(TIKTOK UNIVERSE) ────────────────────────────────────────
+  /** 25 秒まるごとを持つ唯一のホールド(導入・減算・締めは同じ生存期間)。 */
+  const universeHold = useRef(false);
+  const universeEffect = useRef<ChallengeEffect | null>(null);
+  const universeTimers = useRef<number[]>([]);
+  /** 30 段を進める rAF(1本を使い回す)。 */
+  const universeRaf = useRef<number | null>(null);
+  /** 最後に適用した段の index(-1 = まだ)。遮蔽で飛んだ段の畳み込みに使う。 */
+  const universeStepAt = useRef(-1);
+  const universePlan = useRef<UniverseClearPlan | null>(null);
+  /** armed 待ちの universe-start(バリアの片割れ — ドレインキューには積まない)。 */
+  const pendingUniverseStart = useRef<ChallengeEffect | null>(null);
+  /**
+   * 導入と締めで**使い回す**1本のホルダー。革命・お題が別ホルダーを要求したのは
+   * 導入と結果が最大 130〜180 秒離れた別の生存期間だからで、こちらは同じ
+   * universeHold の中で 9 秒しか離れていない(boost が intro/window/result を
+   * 1 ホルダーの位相で回しているのと同じ形)。
+   */
+  const [universeClip, setUniverseClip] = useState<{
+    key: number;
+    url: string | null;
+    out: boolean;
+  } | null>(null);
+  /** 減算フェーズの -N ポップ(有界配列 — slice で構造的に上限を持つ)。 */
+  const [universeDrain, setUniverseDrain] = useState<{
+    key: number;
+    ticks: { key: number; amount: number; slot: number }[];
+  } | null>(null);
+  /**
+   * 減算合計の発表(「いくら減ったか」)。締めのカットインの頭に重ねて出し、
+   * 0 → 合計のカウントアップを rAF が textContent 直書きで回す。
+   */
+  const [universeTotal, setUniverseTotal] = useState<{
+    key: number;
+    total: number;
+    countupMs: number;
+    stage: 'countup' | 'lock';
+    out: boolean;
+  } | null>(null);
+  /** 合計のカウントアップの rAF(段の rAF とは時間軸上排他だが別に持つ)。 */
+  const universeTotalRaf = useRef<number | null>(null);
+  const universeTotalAmtRef = useRef<HTMLDivElement | null>(null);
+  // ── ライオン(Lion 29,999💎) ────────────────────────────────────────────
+  /** 43 秒まるごとを持つ唯一のホールド(導入・札・全面・合計は同じ生存期間)。 */
+  const lionHold = useRef(false);
+  const lionEffect = useRef<ChallengeEffect | null>(null);
+  const lionTimers = useRef<number[]>([]);
+  /** 連打(steps−1 発)を進める rAF と、合計のカウントアップの rAF。 */
+  const lionRaf = useRef<number | null>(null);
+  const lionCountRaf = useRef<number | null>(null);
+  /** 最後に出した札の index(-1 = まだ)。遮蔽で飛んだ発の畳み込みに使う。 */
+  const lionShotAt = useRef(-1);
+  const lionPlan = useRef<LionCutPlan | null>(null);
+  /** 合計のカウントアップの書き込み先(textContent 直書き — 再レンダーを起こさない)。 */
+  const lionTotalRef = useRef<HTMLSpanElement | null>(null);
+  /** 段②〜④ の走行カウント(「残り」)の書き込み先。同じく textContent 直書き。 */
+  const lionCountRef = useRef<HTMLSpanElement | null>(null);
+  /** これまでに出した札の枚数(段② で 1、④ の i 発目で 2+i)。走行カウントの係数。 */
+  const lionShownRef = useRef(0);
+  /** armed 待ちの lion-start(バリアの片割れ — ドレインキューには積まない)。 */
+  const pendingLionStart = useRef<ChallengeEffect | null>(null);
+  /**
+   * 導入と全面爆発で**使い回す**1本のホルダー(universeClip と同じ判断)。
+   * 革命・お題が別ホルダーを要求したのは導入と結果が最大 130〜180 秒離れた別の
+   * 生存期間だからで、こちらは同じ lionHold の中で 28 秒しか離れていない。
+   * **導入は段②〜④(18 秒)を最終フレーム静止で持たせる**ので loop も onEnded も
+   * 付けない(素材契約は lion-settle.ts / CREDITS.md)。
+   */
+  const [lionClip, setLionClip] = useState<{
+    key: number;
+    url: string | null;
+    out: boolean;
+  } | null>(null);
+  /** 札と合計のオーバーレイ(有界配列 — slice で構造的に上限を持つ)。 */
+  const [lionCut, setLionCut] = useState<{
+    key: number;
+    stage: 'intro' | 'first' | 'kakugo' | 'burst' | 'total';
+    each: number;
+    total: number;
+    ticks: { key: number; slot: number }[];
+  } | null>(null);
   /**
    * 区間BGM のハンドル(2026-08-22)。切替の持ち主は quizBgmPhase を見る effect で、
    * 後片付け(quiz キーの消滅・アンマウント)は quizActive を見る effect が担う
@@ -1261,7 +1427,7 @@ export function MonitorView(): React.JSX.Element {
    * 自分の安全弁と同じ権威尺から書き、hold が偽の間は読まれない(解除側で 0 に
    * 戻す義務は無い — hold を立てる側が必ず上書きする)。判定は番犬 interval。
    */
-  const fxHoldDeadlines = useRef({ roulette: 0, band: 0, stock: 0, boost: 0, revolution: 0, revolutionResult: 0, tapLock: 0, quiz: 0, quizResult: 0 });
+  const fxHoldDeadlines = useRef({ roulette: 0, band: 0, stock: 0, boost: 0, revolution: 0, revolutionResult: 0, tapLock: 0, quiz: 0, quizResult: 0, universe: 0, lion: 0, giftScale: 0 });
 
   // CLEAR リザルトへの切り替えタイマー。演出ホールド中は張らない —
   // achieved は pendingAchieved で持ち越され、finish* が再生した時点で
@@ -1304,7 +1470,15 @@ export function MonitorView(): React.JSX.Element {
     quizPrep !== null ||
     quizReveal !== null ||
     quizResultClip !== null ||
-    quizSettle !== null;
+    quizSettle !== null ||
+    // 一撃クリアの導入/締め(動画)と減算フェーズの -N レイヤも最前面の
+    // オーバーレイ。落とすと CLEAR のリザルト画面が 25 秒の幕の上に生える。
+    universeClip !== null ||
+    universeDrain !== null ||
+    universeTotal !== null ||
+    // ライオンの導入/全面(動画)と札・合計のレイヤも最前面のオーバーレイ。
+    lionClip !== null ||
+    lionCut !== null;
 
   /*
    * 保留バナーの最後の砦 — 全カットアニメーションが終わった瞬間に、取り残された
@@ -1393,6 +1567,21 @@ export function MonitorView(): React.JSX.Element {
    */
   function dropQuizCue(effectId: number): void {
     void rpc('challenge.quizCue', { action: 'drop', effectId }).catch(() => undefined);
+  }
+
+  /**
+   * 「この一撃クリアの演出は再生されない」の申告。worker はアームを**プレーン
+   * 即クリア**へ倒す(dropQuizCue と同じ判断 — 44,999💎 の結末はゲームの状態で
+   * あって演出ではないので、モニターの都合で消えてはいけない)。
+   * **effectId 0 = アーム中のものを対象**。
+   */
+  function dropUniverseCue(effectId: number): void {
+    void rpc('challenge.universeCue', { action: 'drop', effectId }).catch(() => undefined);
+  }
+
+  /** ライオンの「再生しない」申告。worker はプレーン即発動へ倒す(dropUniverseCue と同じ)。 */
+  function dropLionCue(effectId: number): void {
+    void rpc('challenge.lionCue', { action: 'drop', effectId }).catch(() => undefined);
   }
 
   /**
@@ -1559,6 +1748,18 @@ export function MonitorView(): React.JSX.Element {
       if (quizResultHold.current && d.quizResult !== 0 && now > d.quizResult) {
         fxWarn('ホールド番犬: quiz-result が期限超過 — 強制解除', { overdueMs: now - d.quizResult });
         finishQuizResultFx();
+      }
+      if (universeHold.current && d.universe !== 0 && now > d.universe) {
+        fxWarn('ホールド番犬: universe が期限超過 — 強制解除', { overdueMs: now - d.universe });
+        finishUniverseFx();
+      }
+      if (lionHold.current && d.lion !== 0 && now > d.lion) {
+        fxWarn('ホールド番犬: lion が期限超過 — 強制解除', { overdueMs: now - d.lion });
+        finishLionFx();
+      }
+      if (giftScaleHold.current && d.giftScale !== 0 && now > d.giftScale) {
+        fxWarn('ホールド番犬: giftScale が期限超過 — 強制解除', { overdueMs: now - d.giftScale });
+        expireGiftScaleFx();
       }
     }, FX_HOLD_WATCHDOG_MS);
     return () => clearInterval(t);
@@ -1861,6 +2062,9 @@ export function MonitorView(): React.JSX.Element {
       abortTapLockFx();
       abortQuizFx();
       abortQuizResultFx();
+      abortUniverseFx();
+      abortLionFx();
+      abortGiftScaleFx();
       clearRepeatTimers();
       clipQueue.current = [];
       // 着弾待ちのバナーも捨てる — 停止/リセット後に古い通知を出さない。
@@ -2146,6 +2350,108 @@ export function MonitorView(): React.JSX.Element {
     }
   });
 
+  // ── 一撃クリアの armed 監視(バリア方式・quiz の写し) ────────────────────
+  const universeState = challenge?.universe ?? null;
+  const universeActive = universeState != null;
+  const [, setUniverseTick] = useState(0);
+  useEffect(() => {
+    if (!universeActive) return;
+    const t = setInterval(() => setUniverseTick((n) => n + 1), 250);
+    return () => clearInterval(t);
+  }, [universeActive]);
+
+  // 窓が worker 側で畳まれたら(stop/reset/達成/機能OFF)、待ち・演出も必ず畳む。
+  useEffect(() => {
+    if (universeActive) return;
+    if (pendingUniverseStart.current !== null || universeHold.current) {
+      fxWarn('一撃クリアが worker 側で畳まれた — 待ちと演出を片付ける');
+      abortUniverseFx();
+      refreshFxStock();
+      scheduleDrain();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [universeActive]);
+
+  // 待ちの条件は quiz と同じ + **お題の窓も待つ**(quiz 自身は自分を待てないので
+  // あちらの条件式には無い)。待ちの上限は worker の UNIVERSE_ARM_MAX_MS(120秒)。
+  const universeArmed = universeState?.armed === true;
+  useEffect(() => {
+    if (!universeArmed) return;
+    const e = pendingUniverseStart.current;
+    if (e === null) return;
+    // バリア待ちの最中に別要因で達成したら演出は始めない(CLEAR のあとから
+    // 25 秒の一撃クリアが始まる事故を防ぐ)。
+    if (challenge?.status !== 'running') return;
+    if (challenge?.boost != null || challenge?.revolution != null) return;
+    if (challenge?.quiz != null) return;
+    if (challenge?.fxFreezeUntilMs != null) return;
+    // バリアで溜めた予告(barrier)は**この待ちの対象外**(quiz と同じ理由 —
+    // 数えると演出付きギフトが1件届いただけで待ちが永久化する)。
+    if ((challenge?.fxQueue ?? []).some((q) => q.barrier !== true)) return;
+    if (pendingAchieved.current !== null) return;
+    if (peekNextDrainKind(drainQueuesView()) !== null) return;
+    if (anyCutinHold() || chainActive()) return;
+    if (bannerQueue.current.length > 0 || stageBusy()) return;
+    pendingUniverseStart.current = null;
+    if (!startUniverseFx(e)) {
+      // 開始不可(reduced-motion 等)。worker はプレーン即クリアへ倒すので、
+      // 発動の事実だけバナーで残す。
+      dropUniverseCue(e.id);
+      pushFloat(universeNode(e), 'good banner-universe', 'universe');
+    }
+  });
+
+  // ── ライオンの armed 監視(バリア方式・universe の写し) ──────────────────
+  const lionState = challenge?.lion ?? null;
+  const lionActive = lionState != null;
+  const [, setLionTick] = useState(0);
+  useEffect(() => {
+    if (!lionActive) return;
+    const t = setInterval(() => setLionTick((n) => n + 1), 250);
+    return () => clearInterval(t);
+  }, [lionActive]);
+
+  // 窓が worker 側で畳まれたら(stop/reset/達成/機能OFF)、待ち・演出も必ず畳む。
+  useEffect(() => {
+    if (lionActive) return;
+    if (pendingLionStart.current !== null || lionHold.current) {
+      fxWarn('ライオンが worker 側で畳まれた — 待ちと演出を片付ける');
+      abortLionFx();
+      refreshFxStock();
+      scheduleDrain();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lionActive]);
+
+  // 待ちの条件は universe と同じ + **一撃クリアの演出も待つ**(universe 自身は
+  // 自分を待てないのであちらの条件式には無い)。上限は worker の LION_ARM_MAX_MS。
+  const lionArmed = lionState?.armed === true;
+  useEffect(() => {
+    if (!lionArmed) return;
+    const e = pendingLionStart.current;
+    if (e === null) return;
+    // バリア待ちの最中に別要因で達成したら演出は始めない(CLEAR のあとから
+    // 43 秒のライオンが始まる事故を防ぐ)。
+    if (challenge?.status !== 'running') return;
+    if (challenge?.boost != null || challenge?.revolution != null) return;
+    if (challenge?.quiz != null || challenge?.universe != null) return;
+    if (challenge?.fxFreezeUntilMs != null) return;
+    // バリアで溜めた予告(barrier)は**この待ちの対象外**(universe と同じ理由 —
+    // 数えると演出付きギフトが1件届いただけで待ちが永久化する)。
+    if ((challenge?.fxQueue ?? []).some((q) => q.barrier !== true)) return;
+    if (pendingAchieved.current !== null) return;
+    if (peekNextDrainKind(drainQueuesView()) !== null) return;
+    if (anyCutinHold() || chainActive()) return;
+    if (bannerQueue.current.length > 0 || stageBusy()) return;
+    pendingLionStart.current = null;
+    if (!startLionFx(e)) {
+      // 開始不可(reduced-motion 等)。worker はプレーン即発動へ倒すので、
+      // 発動の事実だけバナーで残す。
+      dropLionCue(e.id);
+      pushFloat(lionNode(e), 'bad banner-lion', 'lion');
+    }
+  });
+
   const quizNowMs = Date.now();
   // 前置き(quizHold)中はオーバーレイを出さない — 回転・決定表示が主役。
   // 窓の中か(startsAtMs 前 = まだ前置き中。armed 中は時刻 0 なので必ず false)。
@@ -2255,7 +2561,14 @@ export function MonitorView(): React.JSX.Element {
       // お題の前置き(導入動画+全画面テキスト)と結果発表も不透明扱い —
       // occlusionOfCutin('quiz') = 'opaque'(読ませる演出なので粒子を上に漏らさない)。
       quizHold.current ||
-      quizResultHold.current
+      quizResultHold.current ||
+      // 一撃クリアは 25 秒まるごと opaque 扱い。中の 9 秒は動画が出ていないが、
+      // 7セグが 0 へ落ちるクライマックスなので粒子も簡易演出も上に出さない
+      // (そもそもバリアで全 op が止まっており着弾は来ない)。
+      universeHold.current ||
+      // ライオンも 43 秒まるごと opaque 扱い。中の 12 秒(+N の連打)は導入の
+      // 最終フレーム静止の上に札が降る山場なので、粒子も簡易演出も上に出さない。
+      lionHold.current
     );
   }
   /**
@@ -2299,7 +2612,16 @@ export function MonitorView(): React.JSX.Element {
       tapLockHold.current ||
       // お題の前置きと結果発表(規約は revolution の導入・結果と同じ)。
       quizHold.current ||
-      quizResultHold.current
+      quizResultHold.current ||
+      // 一撃クリアは 25 秒間ずっと舞台を占有する(据え置きの持ち主でもある)。
+      universeHold.current ||
+      // ライオンも 43 秒間ずっと舞台を占有する(据え置きは持たない — 値は worker が
+      // 段⑥で一括して積むので、幕の裏でタップが効いても数字は自然に追従する)。
+      lionHold.current ||
+      // ダイヤ増減の浮上。幕は張らないが**据え置きの持ち主**なので必ずここに要る —
+      // 落とすと applyStageHold が「持ち主が居ない」と判断して heldValue を上書きし、
+      // カウントアップの途中で数字が最終値へ飛ぶ。
+      giftScaleHold.current
     );
   }
   /** 着弾チェーンが飛行中。 */
@@ -2355,6 +2677,9 @@ export function MonitorView(): React.JSX.Element {
     // リールが回る前に 7セグが答えを出してから巻き戻る。
     for (const w of hotRouletteQueue.current) n += rouletteRemainingAmount(w.e, w.resumeAt);
     for (const e of pendingBands.current) n += e.amount;
+    // 舞台待ちのダイヤ増減。落とすと、浮上が出る前に 7セグが答えを出してから
+    // 巻き戻る(pendingBands を落としたときと同じ症状)。
+    for (const e of pendingGiftScales.current) n += e.amount;
     return n;
   }
 
@@ -2389,6 +2714,11 @@ export function MonitorView(): React.JSX.Element {
    * 着弾チェーン飛行中)だけ。舞台待ち(applyStageHold)は毎 delta 張り直すので不要。
    */
   function followHoldWithPresses(): void {
+    // 一撃クリアの 25 秒だけは押下追従を切る — 数字の持ち主は planUniverseClear の
+    // 段の表(worker が焼いた fromValue から導出)であって押下ではない。入れないと
+    // 導入 8 秒ぶんのタップで据え置きが fromValue より下へ削れ、減算 1 段目の
+    // holdValue(step.remain) で数字が**上へ巻き戻る**。
+    if (universeHold.current) return;
     const drop = pressDropSinceHold(holdPressBase.current, pressDownTotalRef.current, holdPressApplied.current);
     if (drop <= 0) return;
     holdPressApplied.current += drop;
@@ -2419,6 +2749,11 @@ export function MonitorView(): React.JSX.Element {
   /** 持ち主が居なくなった据え置きを解く(worker 値へ収束させる唯一の後始末)。 */
   function releaseOrphanHold(): void {
     if (anyCutinHold() || chainActive()) return;
+    // 舞台待ちのダイヤ増減は**これから見せる持ち主**。解くと浮上が出る前に数字が
+    // 答えを出し、開始時に据え置きが張り直されて巻き戻って見える(pendingBands は
+    // ドレインキュー経由で必ず直後に始まるのでこの穴が無い — こちらは
+    // bannerWillShowNow が false のあいだ舞台へ入れないので明示的に守る)。
+    if (pendingGiftScales.current.length > 0) return;
     setHeldValue((h) => (h === null ? h : null));
   }
 
@@ -2582,6 +2917,27 @@ export function MonitorView(): React.JSX.Element {
   }
 
   /**
+   * この種別のバナーを**いま即座に見せられるか**(pushFloat の `free` の本体)。
+   *
+   * 関数に切り出してあるのは、ダイヤ増減の浮上(startGiftScaleFx)が「押した瞬間に
+   * 出る」ことを前提に据え置き(giftScaleHold)を張るため。条件が二重管理になると、
+   * 「据え置きは張ったのにバナーは順番待ちへ回った」= anyCutinHold が立ちっぱなしで
+   * pumpStage が毎回 return する = **モニター全死**に直結する。判定の出所は1つに保つ。
+   */
+  function bannerWillShowNow(kind: FxBannerKind, now: number): boolean {
+    const boostComing =
+      pendingBoosts.current.length > 0 || fxQueueRef.current.some((q) => q.kind === 'boost');
+    const boostOutranks = boostComing && bannerRank(kind) >= fxRank('boost');
+    return (
+      bannerQueue.current.length === 0 &&
+      !anyCutinHold() &&
+      !chainActive() &&
+      !boostOutranks &&
+      stageWaitFor('banner', now) === 0
+    );
+  }
+
+  /**
    * ±N 浮上バナーの唯一の入口。舞台が空いていればその場で出し、塞がっていれば
    * 順番待ちへ積む(1件も捨てない・尺は常に一定 = ユーザー決定)。
    * 呼び出し側13箇所は原則そのまま — 下の2つだけ immediate を渡す。
@@ -2640,16 +2996,7 @@ export function MonitorView(): React.JSX.Element {
     // worker の予告(challenge.fxQueue)は**ギフト着弾の時点から** kind:'boost' を
     // 載せているので、そちらも見る。これで「まだ届いていないが確実に来る」
     // フィーバーにも道を空けられる。
-    const boostComing =
-      pendingBoosts.current.length > 0 || fxQueueRef.current.some((q) => q.kind === 'boost');
-    const boostOutranks = boostComing && bannerRank(kind) >= fxRank('boost');
-    const free =
-      bannerQueue.current.length === 0 &&
-      !anyCutinHold() &&
-      !chainActive() &&
-      !boostOutranks &&
-      stageWaitFor('banner', now) === 0;
-    if (opts?.immediate === true || free) {
+    if (opts?.immediate === true || bannerWillShowNow(kind, now)) {
       showBannerNow(item);
       return;
     }
@@ -2752,6 +3099,38 @@ export function MonitorView(): React.JSX.Element {
       // 直前に playEffect が積んだ持ち越しぶんを数字から差し引く(結果の先漏れ防止)。
       applyStageHold();
       const now = Date.now();
+      // ダイヤ増減(⑦)の持ち越し。ドレインキュー(fx-drain.ts)には載せず**ここで
+      // 序列を見て取り出す** — 3秒のバナーは band(45秒級)のようにストック行へ出す
+      // 価値のある長尺ではなく、FxDrainQueues を1本増やすと登録簿6箇所へ波及する。
+      // 序列判定の入力は本線(pickStageNext)と同じものを使うので順位は狂わない。
+      if (pendingGiftScales.current.length > 0) {
+        const myRank = fxRank('gift-scale');
+        const dRank = bestDrainRank(drainQueuesView());
+        const bRank = bestQueuedRank(bannerQueue.current, (x) => bannerRank(x.kind));
+        // 同ランクは drain 勝ち(bannerWinsByRank と同じ向き)なので drain 側は厳密 <。
+        const outranksDrain = dRank === null || myRank < dRank;
+        const outranksBanner = bRank === null || myRank <= bRank;
+        if (outranksDrain && outranksBanner && bannerWillShowNow('gift-scale', now)) {
+          const e = pendingGiftScales.current.shift();
+          // キューから抜いてから開始する(heldValueFor が自分を二重計上しない規約)。
+          if (e) {
+            startGiftScaleFx(e);
+            return;
+          }
+        }
+        // 舞台へ入れない間も**未表示ぶんは据え置く**。applyStageHold は舞台が
+        // 空いていると何もしないので(間合い待ちのための関数)、ここで直接張る —
+        // 張らないと 7セグが先に答えを出し、浮上の開始で巻き戻って見える。
+        // 会計は同じ式(heldValueFor)を通す。own=0 なのは、この effect はまだ
+        // キューに居る = pendingStageAmount に自分が入っているから。
+        if (!anyCutinHold() && !chainActive() && prevValue.current !== null) {
+          holdValue(heldValueFor(0));
+        }
+        // 自分より上位が居る / 間合い待ち。誰も戻してくれない経路があるので
+        // 自分で再確認を予約する(この後の return 経路でも消えない — タイマーを
+        // 消すのは次回 pumpStage の冒頭だけ)。
+        armBannerTimer(STAGE_RECHECK_MS);
+      }
       const q = bannerQueue.current;
       const hasDrain = pendingDrain.current !== null || stageQueuesPending();
       // ランク比較の入力(fx-priority の序列)。バナーとドレインの最高ランク同士を
@@ -4165,8 +4544,21 @@ export function MonitorView(): React.JSX.Element {
     const e = bandEffect.current;
     bandEffect.current = null;
     setBandClip(null);
-    setHeldValue(null);
     playingFx.current = null; // 表示はドレイン経由の pumpStage が写す
+    // ダイヤ増減の浮上が付いているギフトは、**据え置きを解放せずそのまま引き継ぐ**
+    // (2026-08-26 ユーザー決定「カットインの後に N 浮上を出す」)。ここで
+    // setHeldValue(null) してしまうと 7セグが先に答えを出し、直後に出る浮上の
+    // 「ドン」は既に動いた数字へ着弾する = 演出が嘘になる。
+    // 期限は **giftScale を書いてから band を畳んだ後**に startGiftScaleFx が書く。
+    // 1フレームでも両方 false になると番犬が据え置きを解除して数字が先に飛ぶので、
+    // bandHold=false の直後・setHeldValue より前に必ずここを通すこと。
+    if (e && e.giftScale === true && !e.test) {
+      startGiftScaleFx(e);
+      // 通知(フラッシュ/シェイク/粒子)は浮上の中で出すのでここでは撃たない。
+      scheduleDrain();
+      return;
+    }
+    setHeldValue(null);
     if (e && e.amount !== 0) {
       setPunchDir(e.amount < 0 ? 'down' : 'up');
       setPunchKey((k) => k + 1);
@@ -4193,6 +4585,177 @@ export function MonitorView(): React.JSX.Element {
     bandEffect.current = null;
     setBandClip(null);
     setHeldValue(null);
+  }
+
+  // ── ダイヤ増減の浮上演出 ──────────────────────────────────────────────────
+  //
+  // 「N 浮上が現れる(3秒) → 数字が合計値までどんどん増える → ドンとカウントに着弾」。
+  // 構造は finishBoostFx(清算発表)のバナー版。違いは幕(暗幕・不透明動画)を張らず
+  // .float の1枚だけで完結すること — なので worker 側の凍結(fxFreezeUntilMs)も無い。
+  // 尺の算術は shared/gift-scale-fx.ts が権威(レンダラにテスト環境が無いため)。
+
+  function clearGiftScaleTimers() {
+    for (const t of giftScaleTimers.current) window.clearTimeout(t);
+    giftScaleTimers.current = [];
+    if (giftScaleRaf.current != null) {
+      cancelAnimationFrame(giftScaleRaf.current);
+      giftScaleRaf.current = null;
+    }
+  }
+
+  /**
+   * 浮上演出の開始。呼ぶ前に**キューから抜いておくこと**(heldValueFor が
+   * pendingStageAmount に自分を二重計上しないため — 4つの開始点と同じ規約)。
+   *
+   * 実演(e.test)では据え置きを張らない。testEffect は「値・統計・凍結に触らない」
+   * 契約なので、張ると設定画面の ▶ を押すだけで走行中のカウントが3秒固まる。
+   */
+  function startGiftScaleFx(e: ChallengeEffect): void {
+    const amountAbs = Math.abs(e.amount);
+    const plan = planGiftScaleFx({ amountAbs });
+    // いいね着弾の保留があれば先に畳む(ラッチの持ち主を1人にする)。handoff=true —
+    // 直後にこの演出が始まるので、保留バナーは出さずに持ち越す。
+    flushStrike(true);
+    clearGiftScaleTimers();
+    giftScaleHold.current = true;
+    giftScaleEffect.current = e;
+    // 番犬の期限。**hold を立てたら必ず書く** — 書かないとホールドが固着して
+    // pumpStage が毎回 return し、モニターが全死する。
+    fxHoldDeadlines.current.giftScale =
+      Date.now() + BANNER_GIFT_SCALE_MS + 2000 + FX_HOLD_GRACE_MS;
+    // 数字の先漏れ防止。会計の唯一の式を通す(素の setHeldValue は使わない —
+    // 押下追従の基準が採り直されず、3秒のあいだタップが数字に出なくなる)。
+    if (!e.test) holdValue(heldValueFor(e.amount));
+
+    const sign = e.amount > 0 ? '+' : '-';
+    const tier = tierForDiamonds(e.diamonds ?? 0);
+    const push = (ms: number, fn: () => void): void => {
+      giftScaleTimers.current.push(window.setTimeout(fn, ms));
+    };
+
+    pushFloat(
+      <>
+        <span className="f-amt" ref={giftScaleAmtRef}>
+          {`${sign}0`}
+        </span>
+        {nameLines({ who: e.nickname ?? '', act: `${e.giftName ?? 'ギフト'} 💎${num(e.diamonds ?? 0)}` })}
+      </>,
+      `banner-gift-scale ${e.amount > 0 ? 'bad' : 'good'}`,
+      'gift-scale',
+      {
+        /*
+         * **immediate は必須**。この関数は上で giftScaleHold を立てて据え置きを
+         * 張っているので、pushFloat 側の bannerWillShowNow は `!anyCutinHold()` が
+         * false になり(= 自分のホールド)、**自分のバナーを自分で順番待ちへ落とす**。
+         * そうなると pumpStage が anyCutinHold で毎回 return してバナーは永久に
+         * 出ず、安全弁が切れるまで据え置きだけが残る(= 数字が固まったまま演出が
+         * 出ない)。実測: onShow が +5005ms、その 1ms 前に安全弁が発火していた。
+         *
+         * 表示中のバナーを踏み潰す心配は無い — 呼び出し側(playGiftVisual /
+         * pumpStage)が **ホールドを立てる前に** 同じ bannerWillShowNow で
+         * 「順番待ち 0 件・カットインなし・間合いも明けている」を確認している。
+         */
+        immediate: true,
+        // 音はバナーが実際に出る瞬間に鳴らす(useChallengeSe の slotFor が
+        // stageSynced のとき null を返して譲っている)。新スロットは作らない。
+        se: `gift-t${tier}` as ChallengeSeSlot,
+        onShow: () => {
+          if (!giftScaleHold.current) return;
+          // t=appearMs: 浮上の立ち上がりが明けたらカウントアップ開始。
+          push(plan.appearMs, () => {
+            if (!giftScaleHold.current) return;
+            const start = performance.now();
+            const tick = (): void => {
+              giftScaleRaf.current = null;
+              if (!giftScaleHold.current) return;
+              const v = countUpDisplayAt(amountAbs, performance.now() - start, plan.rollupMs);
+              // 初回フレームで ref が未装着(コミット前)でも回し続ける —
+              // 書けるようになった次のフレームから表示が追いつく。
+              const el = giftScaleAmtRef.current;
+              if (el) el.textContent = `${sign}${num(v)}`;
+              if (performance.now() - start < plan.rollupMs) {
+                giftScaleRaf.current = requestAnimationFrame(tick);
+              }
+            };
+            giftScaleRaf.current = requestAnimationFrame(tick);
+          });
+          // t=+rollupMs: 合計値へ到達 — フラッシュ+確定パンチ(CSS .lock)+粒子。
+          push(plan.appearMs + plan.rollupMs, () => {
+            if (!giftScaleHold.current) return;
+            const el = giftScaleAmtRef.current;
+            if (el) {
+              el.textContent = `${sign}${num(amountAbs)}`;
+              el.classList.add('lock');
+            }
+            pushFlash(`gift-t${tier}`);
+            pushShake('shake');
+            // fx はタイマー越しに使うので**その時点の ref** を読む(張った時点の
+            // 参照を閉じ込めると、再マウント後に死んだレイヤーへ描いて無反応になる)。
+            const fxNow = fxRef.current;
+            const o = fxNow?.pointFor(el);
+            if (fxNow && o) {
+              fxNow.sparkBurst(o.x, o.y, 32, { hue: e.amount > 0 ? 350 : 45, speed: 620 });
+            }
+          });
+          // t=+holdMs: 溜め明け — 浮上から7セグへ発射 → 着弾で数字が動く。
+          push(plan.totalMs, () => {
+            if (!giftScaleHold.current) return;
+            const el = giftScaleAmtRef.current;
+            const fxNow = fxRef.current;
+            const from = fxNow?.pointFor(el);
+            const to = fxNow?.pointFor(countdownRef.current);
+            const willStrike = fxNow != null && from != null && to != null;
+            const travel = willStrike ? strikeTravelMs(el) : 0;
+            if (willStrike) {
+              fxNow.strike(
+                { x: from.x, y: from.y },
+                { x: to.x, y: to.y },
+                { ms: travel, hue: e.amount > 0 ? 350 : 45 }
+              );
+            }
+            push(travel, finishGiftScaleFx);
+          });
+        },
+      }
+    );
+    // 二重安全弁(バックグラウンドタブの setTimeout 抑制対策 — band の
+    // finishBandFx ×2 と同じ役割)。onShow が来ないまま順番待ちで沈んでも解ける。
+    push(BANNER_GIFT_SCALE_MS + 2000, finishGiftScaleFx);
+  }
+
+  /** 着弾(または安全弁)— ここで初めて数字が動いて見える。 */
+  function finishGiftScaleFx() {
+    if (!giftScaleHold.current) return;
+    clearGiftScaleTimers();
+    giftScaleHold.current = false;
+    const e = giftScaleEffect.current;
+    giftScaleEffect.current = null;
+    giftScaleAmtRef.current = null;
+    setHeldValue(null);
+    if (e && e.amount !== 0) {
+      setPunchDir('strike');
+      setPunchKey((k) => k + 1);
+      pushShake('shake-strong');
+    }
+    // 演出中に届いた持ち越しのドレイン(finishBandFx と同順)。
+    scheduleDrain();
+  }
+
+  /** reset/stop 用の全破棄。据え置きもタイマーも捨てて worker 値へ戻す。 */
+  function abortGiftScaleFx() {
+    clearGiftScaleTimers();
+    pendingGiftScales.current = [];
+    if (!giftScaleHold.current) return;
+    giftScaleHold.current = false;
+    giftScaleEffect.current = null;
+    giftScaleAmtRef.current = null;
+    setHeldValue(null);
+  }
+
+  /** 番犬用。期限を過ぎたホールドを強制解除する(他の expire* と同型)。 */
+  function expireGiftScaleFx() {
+    if (!giftScaleHold.current) return;
+    finishGiftScaleFx();
   }
 
   // ── 革命 ─────────────────────────────────────────────────────────────────
@@ -5052,6 +5615,504 @@ export function MonitorView(): React.JSX.Element {
     setQuizResultClip(null);
   }
 
+  // ── 一撃クリア(TIKTOK UNIVERSE 44,999💎) ───────────────────────────────
+
+  function clearUniverseTimers(): void {
+    for (const t of universeTimers.current) window.clearTimeout(t);
+    universeTimers.current = [];
+    stopUniverseSteps();
+  }
+
+  function stopUniverseSteps(): void {
+    if (universeRaf.current !== null) {
+      cancelAnimationFrame(universeRaf.current);
+      universeRaf.current = null;
+    }
+    if (universeTotalRaf.current !== null) {
+      cancelAnimationFrame(universeTotalRaf.current);
+      universeTotalRaf.current = null;
+    }
+  }
+
+  /** 締めのバナー(誰が撃ったか)。演出が終わってから1枚だけ出す。 */
+  function universeNode(e: ChallengeEffect): React.JSX.Element {
+    return (
+      <>
+        <span className="f-amt">CLEAR</span>
+        {nameLines({
+          ...(e.giftName ? { gift: e.giftName } : {}),
+          who: e.nickname ?? '',
+          act: '一撃クリア!',
+        })}
+      </>
+    );
+  }
+
+  /**
+   * -N ポップを1枚積む。**pushFloat は通さない** — .float は 1 枚で舞台を
+   * 約 1,950ms 占有する(BANNER_MS 1600 + STAGE_GAP_BANNER_MS 350)ので、
+   * 30 枚流すと演出のあとに約 58 秒のバナー渋滞ができる。immediate:true も不可で、
+   * showBannerNow は単枠置換 + ラッチ延長なので 300ms 間隔では絵にならないうえ、
+   * floatHoldState().cutinActive の「不透明カットインの上に ±N を出さない」規約に
+   * 真っ向から反する。革命の .revolution-settle と同じく自前 DOM を持つ。
+   */
+  function pushUniverseTick(amount: number, idx: number): void {
+    setUniverseDrain((d) =>
+      d
+        ? {
+            ...d,
+            ticks: [
+              ...d.ticks.slice(-(UNIVERSE_TICK_SLOTS - 1)),
+              { key: ++fxKey, amount, slot: idx % UNIVERSE_TICK_SLOTS },
+            ],
+          }
+        : d
+    );
+  }
+
+  /**
+   * 減算合計の発表。0 → 合計を easeOutCubic で駆け上がる(`countupDisplayAt` は
+   * 革命の結果カットシーンと**共有** — 決定的・Math.random 不使用の契約ごと使う)。
+   *
+   * 数字は毎フレーム setState せず **rAF が textContent 直書き**
+   * (`startRevolutionResultFx` の runNumberRaf と同じ手口)。要素は毎フレーム
+   * 引き直す — 開始 tick と同フレームではまだマウント前のことがある。
+   */
+  function runUniverseTotal(total: number, countupMs: number): void {
+    if (universeTotalRaf.current !== null) cancelAnimationFrame(universeTotalRaf.current);
+    const start = performance.now();
+    const tick = (): void => {
+      universeTotalRaf.current = null;
+      if (!universeHold.current) return; // ホールドが落ちたら即停止
+      const r = countupDisplayAt(total, performance.now() - start, countupMs);
+      const node = universeTotalAmtRef.current;
+      if (node) node.textContent = `-${r.text}`;
+      if (!r.done) {
+        universeTotalRaf.current = requestAnimationFrame(tick);
+      } else {
+        // 確定のパンチ(key の再マウントで CSS の keyframes が発火する)。
+        setUniverseTotal((t) => (t ? { ...t, stage: 'lock' } : t));
+        const engine = fxRef.current;
+        const o = engine?.pointFor(node);
+        if (o && engine) engine.sparkBurst(o.x, o.y, 36, { hue: 205, speed: 620 });
+      }
+    };
+    universeTotalRaf.current = requestAnimationFrame(tick);
+  }
+
+  /**
+   * 30 段を rAF 1本で進める。**setTimeout 30 本にしない**のが要点 — 遮蔽された
+   * ウィンドウでは Chromium がタイマーを 1Hz 以下へ絞るので、30 本が期限切れで
+   * 一斉発火して SE が轟音になる。rAF は完全に停止し、復帰時に経過時刻から
+   * index を導出して**飛んだ段をまとめて1発に畳める**。
+   */
+  function runUniverseSteps(): void {
+    const plan = universePlan.current;
+    if (plan === null || plan.steps.length === 0) return;
+    const start = performance.now();
+    const tick = (): void => {
+      universeRaf.current = null;
+      if (!universeHold.current) return; // ホールドが落ちたら即停止
+      const elapsed = performance.now() - start;
+      const idx = Math.min(plan.steps.length - 1, Math.max(0, Math.floor(elapsed / UNIVERSE_STEP_MS)));
+      if (idx > universeStepAt.current) {
+        let sum = 0;
+        for (let i = universeStepAt.current + 1; i <= idx; i++) sum += plan.steps[i]!.amount;
+        universeStepAt.current = idx;
+        const step = plan.steps[idx]!;
+        // 7セグ(と .count-mirror)の表示値。holdValue が据え置きの唯一の入口。
+        holdValue(step.remain);
+        // amount 0 の段(from < 30 のとき混ざる)は無音・無表示で素通り。
+        if (sum > 0) {
+          setPunchDir('down');
+          setPunchKey((k) => k + 1);
+          pushUniverseTick(sum, idx);
+          const c = cfgRef.current;
+          if (c?.challenge.seEnabled) {
+            playSe('gauge-recover', effectiveSeVolume(c.challenge.seVolume, 100));
+          }
+          // fxRef はここで読み直す(canvas が remount されると古い参照は死ぬ)。
+          const engine = fxRef.current;
+          const o = engine?.pointFor(countdownRef.current);
+          if (o && engine) engine.sparkBurst(o.x, o.y, 14, { hue: 190, speed: 480 });
+        }
+      }
+      if (idx < plan.steps.length - 1) universeRaf.current = requestAnimationFrame(tick);
+    };
+    universeRaf.current = requestAnimationFrame(tick);
+  }
+
+  /**
+   * 一撃クリアの 25 秒。導入カットイン(8秒)→ 30 段の減算連打(9秒)→
+   * 締めカットイン(8秒)。**値は 1 も動かさない** — worker は 25 秒後の清算で
+   * 一括して 0 にするので、ここは据え置き(holdValue)を段ごとに進めるだけ。
+   *
+   * 起点は `challenge.universe.fromValue`(worker が commit の瞬間に焼いた権威)を
+   * 優先し、まだ届いていないアーム直後だけ heldValueFor(0) で代用する — アーム中の
+   * タップは通常どおり効くので、自前の表示値から割ると worker とズレる。
+   */
+  function startUniverseFx(e: ChallengeEffect): boolean {
+    const clipsOn = cfg?.challenge.fxClipsEnabled ?? true;
+    const uv = challenge?.universe ?? null;
+    const from = uv != null && uv.fromValue > 0 ? uv.fromValue : heldValueFor(0);
+    const plan = planUniverseClear({
+      from,
+      // 素材が無くても幕(.universe-screen)は張るので尺は落とさない。
+      introMs: clipsOn ? UNIVERSE_INTRO_MS : 0,
+      outroMs: clipsOn ? UNIVERSE_OUTRO_MS : 0,
+    });
+    if (plan.totalMs === 0 || prefersReducedMotion()) return false;
+    if (!e.test) {
+      void rpc('challenge.universeCue', {
+        action: 'start',
+        effectId: e.id,
+        startedAtMs: Date.now(),
+      }).catch(() => undefined);
+    }
+    // 30 連打の刻み音はどのスロットの既定でもないので予熱されていない。導入の
+    // 8 秒があるのでここで温めれば必ず間に合う(prewarmSe は冪等)。
+    prewarmSe(['gauge-recover']);
+    // 保留着弾を先に畳む(ラッチの持ち主を1人にする)。**幕を立てる前**に走るので
+    // 遮蔽は引数で渡す(ref を読むと幕が立つ直前の1発を取り逃す)。
+    flushStrike(true, occlusionOfCutin('universe'));
+    clearUniverseTimers();
+    clearRepeatTimers();
+    universeHold.current = true;
+    fxHoldDeadlines.current.universe = Date.now() + plan.totalMs + 2000 + FX_HOLD_GRACE_MS;
+    universeEffect.current = e;
+    universePlan.current = plan;
+    universeStepAt.current = -1;
+    holdValue(from);
+    if (e.flash) pushFlash('gift-t3');
+    refreshFxStock();
+    const push = (ms: number, fn: () => void): void => {
+      universeTimers.current.push(window.setTimeout(fn, ms));
+    };
+    // ① 導入(素材が無ければ暗幕)
+    setUniverseClip({ key: ++fxKey, url: clipsOn ? UNIVERSE_INTRO_CLIP_URL : null, out: false });
+    push(plan.introFadeAtMs, () => setUniverseClip((c) => (c ? { ...c, out: true } : c)));
+    // ② 減算フェーズ — 幕を下ろして7セグを露出し、rAF を回す
+    push(plan.drainAtMs, () => {
+      if (!universeHold.current) return;
+      setUniverseClip(null);
+      setUniverseDrain({ key: ++fxKey, ticks: [] });
+      runUniverseSteps();
+    });
+    // ③ 締め — 同時に「いくら減ったか」の発表を重ねる(30 段を削り切った瞬間の「ドン」)
+    push(plan.outroAtMs, () => {
+      if (!universeHold.current) return;
+      stopUniverseSteps();
+      setUniverseDrain(null);
+      setUniverseClip({ key: ++fxKey, url: clipsOn ? UNIVERSE_OUTRO_CLIP_URL : null, out: false });
+      setUniverseTotal({
+        key: ++fxKey,
+        total: plan.from,
+        countupMs: plan.totalCountupMs,
+        stage: 'countup',
+        out: false,
+      });
+      pushShake('shake');
+      runUniverseTotal(plan.from, plan.totalCountupMs);
+    });
+    push(plan.totalFadeAtMs, () => setUniverseTotal((t) => (t ? { ...t, out: true } : t)));
+    push(plan.fadeAtMs, () => setUniverseClip((c) => (c ? { ...c, out: true } : c)));
+    push(plan.totalMs, () => finishUniverseFx());
+    // 二重安全弁(timers が1本落ちても必ず着地する — 既存の全 start* と同じ規律)。
+    push(plan.totalMs + 2000, () => finishUniverseFx());
+    return true;
+  }
+
+  /** 締めが終わった — 幕を解いてバナー、最後にドレイン(「アニメーション → 通知」)。 */
+  function finishUniverseFx(): void {
+    if (!universeHold.current) return; // 二重安全弁の2発目は no-op
+    clearUniverseTimers();
+    universeHold.current = false;
+    const e = universeEffect.current;
+    universeEffect.current = null;
+    universePlan.current = null;
+    universeStepAt.current = -1;
+    setUniverseClip(null);
+    setUniverseDrain(null);
+    setUniverseTotal(null);
+    // worker の値(清算済みの 0)へ収束させる。
+    setHeldValue(null);
+    if (e) pushFloat(universeNode(e), 'good banner-universe', 'universe');
+    scheduleDrain();
+  }
+
+  /** reset/stop・idle・worker 側で畳まれたとき用の全破棄(生存期間は1つ)。 */
+  function abortUniverseFx(): void {
+    clearUniverseTimers();
+    pendingUniverseStart.current = null;
+    universePlan.current = null;
+    universeStepAt.current = -1;
+    setUniverseDrain(null);
+    setUniverseTotal(null);
+    setUniverseClip(null);
+    if (!universeHold.current) return;
+    universeHold.current = false;
+    universeEffect.current = null;
+    setHeldValue(null);
+  }
+
+  // ── ライオン(Lion 29,999💎) ────────────────────────────────────────────
+
+  function clearLionTimers(): void {
+    for (const t of lionTimers.current) window.clearTimeout(t);
+    lionTimers.current = [];
+    stopLionShots();
+    if (lionCountRaf.current !== null) {
+      cancelAnimationFrame(lionCountRaf.current);
+      lionCountRaf.current = null;
+    }
+  }
+
+  function stopLionShots(): void {
+    if (lionRaf.current !== null) {
+      cancelAnimationFrame(lionRaf.current);
+      lionRaf.current = null;
+    }
+  }
+
+  /**
+   * 段②〜④ の走行カウント(「残り」)を毎フレーム書く。
+   *
+   * **`prevValue`(live なカウント値)+ 出した札の枚数 × 額**で出すのが肝 —
+   * worker が値を積むのは段⑥ なので、幕の中の 7セグはまだ増えていない。
+   * live 値を足し算の土台にしておくと、**幕の裏で押されたタップも即座に反映され**、
+   * 最後の1枚を出し終えた時点の表示が段⑥ で worker が確定させる値と厳密に一致する
+   * (自前の固定値から積むと、タップぶんだけズレて段⑥ で数字が飛ぶ)。
+   */
+  function runLionCount(each: number): void {
+    const tick = (): void => {
+      lionCountRaf.current = null;
+      if (!lionHold.current) return;
+      const el = lionCountRef.current;
+      if (el) {
+        const v = Math.max(0, (prevValue.current ?? 0) + lionShownRef.current * each);
+        const next = num(v);
+        if (el.textContent !== next) el.textContent = next;
+      }
+      lionCountRaf.current = requestAnimationFrame(tick);
+    };
+    lionCountRaf.current = requestAnimationFrame(tick);
+  }
+
+  /** 締めのバナー(誰が撃ったか)。演出が終わってから1枚だけ出す。 */
+  function lionNode(e: ChallengeEffect): React.JSX.Element {
+    return (
+      <>
+        <span className="f-amt">+{num(e.lionTotal ?? e.amount)}</span>
+        {nameLines({
+          ...(e.giftName ? { gift: e.giftName } : {}),
+          who: e.nickname ?? '',
+          act: 'ライオン襲来!',
+        })}
+      </>
+    );
+  }
+
+  /**
+   * +N 札を1枚積む。**pushFloat は通さない** — universe の -N ポップとまったく
+   * 同じ理由で、.float は 1 枚で舞台を約 1,950ms 占有するので 49 枚流すと演出の
+   * あとに 95 秒のバナー渋滞ができる。自前 DOM(.lion-cut)を持つ。
+   */
+  function pushLionTick(idx: number): void {
+    // 段② の1枚目を含めた通し枚数。走行カウントの係数になる。
+    lionShownRef.current = idx + 2;
+    setLionCut((d) =>
+      d
+        ? {
+            ...d,
+            ticks: [
+              ...d.ticks.slice(-(LION_TICK_SLOTS - 1)),
+              { key: ++fxKey, slot: idx % LION_TICK_SLOTS },
+            ],
+          }
+        : d
+    );
+  }
+
+  /**
+   * 連打(steps−1 発)を rAF 1本で進める。**setTimeout を steps 本にしない**のが
+   * 要点 — 遮蔽されたウィンドウでは Chromium がタイマーを 1Hz 以下へ絞るので、
+   * 49 本が期限切れで一斉発火して爆発音が轟音になる(universe の 30 段と同じ罠)。
+   * rAF は完全に停止し、復帰時に経過時刻から index を導出して**飛んだ発を
+   * まとめて1発に畳める**。
+   */
+  function runLionShots(): void {
+    const plan = lionPlan.current;
+    if (plan === null || plan.burstCount <= 0) return;
+    const start = performance.now();
+    const tick = (): void => {
+      lionRaf.current = null;
+      if (!lionHold.current) return; // ホールドが落ちたら即停止
+      const elapsed = performance.now() - start;
+      const idx = Math.min(
+        plan.burstCount - 1,
+        Math.max(0, Math.floor(elapsed / plan.burstStepMs))
+      );
+      if (idx > lionShotAt.current) {
+        lionShotAt.current = idx;
+        pushLionTick(idx);
+        setPunchDir('up');
+        setPunchKey((k) => k + 1);
+        const c = cfgRef.current;
+        if (c?.challenge.seEnabled) {
+          playSe('lion-blast', effectiveSeVolume(c.challenge.seVolume, 100));
+        }
+        // fxRef はここで読み直す(canvas が remount されると古い参照は死ぬ)。
+        const engine = fxRef.current;
+        const o = engine?.pointFor(countdownRef.current);
+        if (o && engine) engine.sparkBurst(o.x, o.y, 10, { hue: 28, speed: 520 });
+      }
+      if (idx < plan.burstCount - 1) lionRaf.current = requestAnimationFrame(tick);
+    };
+    lionRaf.current = requestAnimationFrame(tick);
+  }
+
+  /** 合計の 0 → total カウントアップ(revolution の countupDisplayAt を再利用)。 */
+  function runLionCountup(total: number, ms: number): void {
+    const start = performance.now();
+    const tick = (): void => {
+      lionCountRaf.current = null;
+      if (!lionHold.current) return;
+      const r = countupDisplayAt(total, performance.now() - start, ms);
+      const el = lionTotalRef.current;
+      if (el) el.textContent = `+${num(Number(r.text))}`;
+      if (!r.done) lionCountRaf.current = requestAnimationFrame(tick);
+    };
+    lionCountRaf.current = requestAnimationFrame(tick);
+  }
+
+  /**
+   * ライオンの 43 秒。導入カットイン(10秒)→ +N 1枚(3秒・ペタッ)→ ボイス(3秒)
+   * → +N の連打(12秒)→ 全面カットイン(10秒)→ 合計の発表(5秒)。
+   *
+   * **値は 1 も動かさないし据え置きもしない** — worker が段⑥の頭(lionSettleAtMs)で
+   * 一括して積むので、7セグは幕の裏でタップぶん減り続け、段⑥で跳ね上がる。
+   * これが「走行中のタップは演出より優先」の恒久ルールと矛盾しない唯一の形
+   * (universe が holdValue を段ごとに進めるのとは逆の設計)。
+   */
+  function startLionFx(e: ChallengeEffect): boolean {
+    const clipsOn = cfg?.challenge.fxClipsEnabled ?? true;
+    const ln = challenge?.lion ?? null;
+    // 額と発数は **worker が焼いた値**が権威(effect → state の順に見る)。
+    const each = e.lionEach ?? ln?.each ?? 0;
+    const steps = e.lionSteps ?? ln?.steps ?? 0;
+    const plan = planLionCut({ amountEach: each, steps, cutMs: e.fxDurationMs ?? 0 });
+    if (plan.totalMs === 0 || prefersReducedMotion()) return false;
+    if (!e.test) {
+      void rpc('challenge.lionCue', {
+        action: 'start',
+        effectId: e.id,
+        startedAtMs: Date.now(),
+      }).catch(() => undefined);
+    }
+    // 専用音3種はどのスロットの既定でもないので予熱されていない。導入の 10 秒が
+    // あるのでここで温めれば必ず間に合う(prewarmSe は冪等)。
+    prewarmSe(['lion-peta', 'lion-blast', 'lion-boom', 'hype-kakugo']);
+    // 保留着弾を先に畳む(ラッチの持ち主を1人にする)。**幕を立てる前**に走るので
+    // 遮蔽は引数で渡す(ref を読むと幕が立つ直前の1発を取り逃す)。
+    flushStrike(true, occlusionOfCutin('lion'));
+    clearLionTimers();
+    clearRepeatTimers();
+    lionHold.current = true;
+    fxHoldDeadlines.current.lion = Date.now() + plan.totalMs + 2000 + FX_HOLD_GRACE_MS;
+    lionEffect.current = e;
+    lionPlan.current = plan;
+    lionShotAt.current = -1;
+    lionShownRef.current = 0;
+    if (e.flash) pushFlash('gift-t4');
+    refreshFxStock();
+    const push = (ms: number, fn: () => void): void => {
+      lionTimers.current.push(window.setTimeout(fn, ms));
+    };
+    const se = (id: string): void => {
+      const c = cfgRef.current;
+      if (c?.challenge.seEnabled) playSe(id, effectiveSeVolume(c.challenge.seVolume, 100));
+    };
+    // ① 導入(素材が無ければ暗幕)。**out にしない** — 段②〜④はこの最終フレーム
+    //    静止の上に札を降らせる(素材契約: 終端は正面を睨んで静止したライオン)。
+    setLionClip({ key: ++fxKey, url: clipsOn ? LION_INTRO_CLIP_URL : null, out: false });
+    setLionCut({ key: ++fxKey, stage: 'intro', each: plan.amountEach, total: plan.total, ticks: [] });
+    // ② 1枚目の +N(ペタッ)
+    push(plan.firstAtMs, () => {
+      if (!lionHold.current) return;
+      lionShownRef.current = 1; // 1枚目
+      setLionCut((d) => (d ? { ...d, stage: 'first' } : d));
+      se('lion-peta');
+      runLionCount(plan.amountEach);
+    });
+    // ③ 「覚悟を…決めましょう」(絵は②のまま)
+    push(plan.kakugoAtMs, () => {
+      if (!lionHold.current) return;
+      setLionCut((d) => (d ? { ...d, stage: 'kakugo' } : d));
+      se('hype-kakugo');
+    });
+    // ④ 連打(rAF)
+    push(plan.burstAtMs, () => {
+      if (!lionHold.current) return;
+      setLionCut((d) => (d ? { ...d, stage: 'burst' } : d));
+      runLionShots();
+    });
+    // ⑤ 全面の大爆発 — 札を畳んで動画を差し替える
+    push(plan.blastAtMs, () => {
+      if (!lionHold.current) return;
+      stopLionShots();
+      if (lionCountRaf.current !== null) {
+        cancelAnimationFrame(lionCountRaf.current);
+        lionCountRaf.current = null;
+      }
+      setLionCut((d) => (d ? { ...d, stage: 'intro', ticks: [] } : d));
+      setLionClip({ key: ++fxKey, url: clipsOn ? LION_BLAST_CLIP_URL : null, out: false });
+      pushShake('shake');
+    });
+    // ⑥ 合計の発表。**worker はこの時刻に値を積む**(lionSettleAtMs)ので、
+    //    7セグの跳ね上がりとカウントアップがほぼ同時に走る。
+    push(plan.totalAtMs, () => {
+      if (!lionHold.current) return;
+      setLionCut((d) => (d ? { ...d, stage: 'total' } : d));
+      se('lion-boom');
+      pushFlash('gift-t4');
+      pushShake('shake');
+      runLionCountup(plan.total, plan.countupMs);
+    });
+    push(plan.fadeAtMs, () => setLionClip((c) => (c ? { ...c, out: true } : c)));
+    push(plan.totalMs, () => finishLionFx());
+    // 二重安全弁(timers が1本落ちても必ず着地する — 既存の全 start* と同じ規律)。
+    push(plan.totalMs + 2000, () => finishLionFx());
+    return true;
+  }
+
+  /** 合計の発表が終わった — 幕を解いてバナー、最後にドレイン(「アニメーション → 通知」)。 */
+  function finishLionFx(): void {
+    if (!lionHold.current) return; // 二重安全弁の2発目は no-op
+    clearLionTimers();
+    lionHold.current = false;
+    const e = lionEffect.current;
+    lionEffect.current = null;
+    lionPlan.current = null;
+    lionShotAt.current = -1;
+    setLionClip(null);
+    setLionCut(null);
+    if (e) pushFloat(lionNode(e), 'bad banner-lion', 'lion');
+    scheduleDrain();
+  }
+
+  /** reset/stop・idle・worker 側で畳まれたとき用の全破棄(生存期間は1つ)。 */
+  function abortLionFx(): void {
+    clearLionTimers();
+    pendingLionStart.current = null;
+    lionPlan.current = null;
+    lionShotAt.current = -1;
+    setLionCut(null);
+    setLionClip(null);
+    if (!lionHold.current) return;
+    lionHold.current = false;
+    lionEffect.current = null;
+  }
+
   // ── タップブースト(フィーバー) ─────────────────────────────────────────
 
   function clearBoostTimers() {
@@ -5908,6 +6969,35 @@ export function MonitorView(): React.JSX.Element {
       helperSparks();
       return;
     }
+    // ダイヤ増減の浮上演出。**お助けの後・素のギフトカードの前**に置く —
+    // お助けは専用の合算バナーが主役で、そこへ浮上を重ねると据え置きの持ち主が
+    // 2人になる(worker 側でも fs 一致時は giftScale を焼かない二重防御)。
+    //
+    // 反復ショット(shot > 0)では出さない。値は連打全体で1回ぶんという規約なので、
+    // 浮上を反復すると同じ額が何度も飛んで見える(ギフトカードと同じ扱い)。
+    if (shot === 0 && e.giftScale === true) {
+      // **「いま出せる」ときしか始めない。** startGiftScaleFx は据え置きを張るので、
+      // バナーが順番待ちへ回ると anyCutinHold が立ちっぱなしになって舞台が固まる。
+      // 判定は pushFloat と同じ関数を通す(二重管理にしない)。
+      if (!bannerWillShowNow('gift-scale', Date.now())) {
+        // 舞台が塞がっていれば持ち越す。溢れたら演出は諦めてギフトカードへ縮退する
+        // (pendingBands の溢れと同じ扱い — 無言で落とさず必ず痕跡を残す)。
+        if (pendingGiftScales.current.length < PENDING_GIFT_SCALES_MAX) {
+          pendingGiftScales.current.push(e);
+          lighting();
+          tierSparks();
+          return;
+        }
+        fxWarn(`ダイヤ増減の持ち越しが上限(${PENDING_GIFT_SCALES_MAX}件)— ギフトカードへ縮退`, {
+          id: e.id,
+          amount: e.amount,
+          diamonds: e.diamonds,
+        });
+      } else {
+        startGiftScaleFx(e);
+        return;
+      }
+    }
     if (shot === 0) {
       const gift = e.giftName ?? 'ギフト';
       const sign = e.amount > 0 ? `+${num(e.amount)}` : e.amount < 0 ? `${num(e.amount)}` : '±0';
@@ -6390,6 +7480,66 @@ export function MonitorView(): React.JSX.Element {
         }
         return;
       }
+      case 'universe-start': {
+        // プレーン発動(fxDurationMs 0)・動きの抑制はバナーだけ — カウントは
+        // worker 側で 0 になる(または drop で即クリアへ倒す)ので、発動の事実は残す。
+        if (!universeWillStart(e)) {
+          if (!e.test) dropUniverseCue(e.id);
+          pushFloat(universeNode(e), 'good banner-universe', 'universe');
+          return;
+        }
+        if (e.test) {
+          // ▶試写は armed 監視を通らない(worker はアームしていない)。
+          if (stageBusy() || anyCutinHold()) {
+            fxWarn('universe 実演: 他演出の再生中 — スキップ');
+            stopTestPreview();
+            return;
+          }
+          if (!startUniverseFx(e)) stopTestPreview();
+          return;
+        }
+        // バリア方式(2026-08-26 ユーザー決定): ドレインキューには積まず、armed
+        // 監視(universe.armed の 250ms tick)が「発動時点で溜まっていた演出
+        // キューの消化」を待って startUniverseFx を呼ぶ。ここでは預かるだけ。
+        pendingUniverseStart.current = e;
+        return;
+      }
+      case 'lion-start': {
+        // プレーン発動(fxDurationMs 0)・動きの抑制はバナーだけ — カウントは
+        // worker 側で積まれる(または drop で即発動へ倒す)ので、発動の事実は残す。
+        if (!lionWillStart(e)) {
+          if (!e.test) dropLionCue(e.id);
+          pushFloat(lionNode(e), 'bad banner-lion', 'lion');
+          return;
+        }
+        if (e.test) {
+          // ▶試写は armed 監視を通らない(worker はアームしていない)。
+          if (stageBusy() || anyCutinHold()) {
+            fxWarn('lion 実演: 他演出の再生中 — スキップ');
+            stopTestPreview();
+            return;
+          }
+          if (!startLionFx(e)) stopTestPreview();
+          return;
+        }
+        // バリア方式(universe と同じ): ドレインキューには積まず、armed 監視
+        // (lion.armed の 250ms tick)が「発動時点で溜まっていた演出キューの消化」を
+        // 待って startLionFx を呼ぶ。ここでは預かるだけ。
+        pendingLionStart.current = e;
+        return;
+      }
+      case 'lion-end':
+        // 清算の合図。**演出は既に自分のタイマーで走っている**(合計の発表の
+        // 終わりが finishLionFx)ので、ここでは何も出さない — 値が跳ねたことは
+        // 7セグがそのまま見せ、締めのバナーは finishLionFx が出す。
+        return;
+      case 'universe-end':
+        // 清算の合図。**演出は既に自分のタイマーで走っている**(締めのカットインの
+        // 終わりが finishUniverseFx)ので、ここでは何も出さない — 値が 0 へ落ちた
+        // ことは据え置きの解除で自然に反映され、祝祭は直後の achieved が担う。
+        // 演出が既に畳まれている異常系(機能OFF・強制清算)でも同じで、
+        // 履歴ログには universe-end の行が残る。
+        return;
       case 'quiz-start': {
         // プレーン発動(fxDurationMs 0)・動きの抑制はバナーだけ — 窓は worker 側で
         // 既に(または drop で)開くので、発動の事実は必ず残す。
@@ -6956,6 +8106,78 @@ export function MonitorView(): React.JSX.Element {
             setQuizResultClip((c) => (c ? { ...c, url: null } : c));
           }}
         />
+      ) : null}
+
+      {/*
+        一撃クリアの導入/締めカットイン(不透明フルフレーム・音声焼き込み)。
+        配置の制約は .fx-clip と同一 — **.monitor-root 直下・z-index なし**。
+        **導入と締めで同じホルダーを使い回す**(1つの universeHold の中で 9 秒しか
+        離れておらず、abort も timers も 1 組。boost が intro/window/result を
+        位相で回しているのと同じ形)。loop なし・onEnded なし — 尺の権威は
+        startUniverseFx の JS タイマー。
+        素材なし / 再生失敗は**暗幕(.universe-screen)へ落とす** — setUniverseClip(null)
+        にしてはいけない(7セグが 8 秒むき出しになり減算フェーズと見分けが付かない)。
+      */}
+      {universeClip ? (
+        universeClip.url != null ? (
+          <video
+            key={universeClip.key}
+            className={`fx-clip fx-clip-opaque${universeClip.out ? ' out' : ''}`}
+            src={universeClip.url}
+            autoPlay
+            playsInline
+            preload="auto"
+            muted={!(cfg?.challenge.seEnabled ?? true)}
+            ref={(v) => {
+              if (v) v.volume = (cfg?.challenge.giftFullCut?.volume ?? 70) / 100;
+              return armVideoPlay(v, 'universe-cutin', () =>
+                setUniverseClip((c) => (c ? { ...c, url: null } : c))
+              );
+            }}
+            onError={(ev) => {
+              fxWarn('一撃クリアのカットインの再生エラー — 暗幕へ縮退', ev.currentTarget.error);
+              setUniverseClip((c) => (c ? { ...c, url: null } : c));
+            }}
+          />
+        ) : (
+          <div className={`universe-screen${universeClip.out ? ' out' : ''}`} />
+        )
+      ) : null}
+
+      {/*
+        ライオンの導入/全面爆発カットイン(不透明フルフレーム・音声焼き込み)。
+        配置の制約は .fx-clip と同一 — **.monitor-root 直下・z-index なし**。
+        **導入と全面で同じホルダーを使い回す**(1つの lionHold の中で 28 秒しか
+        離れておらず、abort も timers も 1 組。universeClip と同じ形)。
+        loop なし・onEnded なし — 尺の権威は startLionFx の JS タイマーで、
+        **導入は段②〜④(18 秒)を最終フレーム静止で持たせる契約**。
+        素材なし / 再生失敗は**暗幕(.lion-screen)へ落とす** — setLionClip(null) に
+        してはいけない(7セグがむき出しになり札が読めない)。
+      */}
+      {lionClip ? (
+        lionClip.url != null ? (
+          <video
+            key={lionClip.key}
+            className={`fx-clip fx-clip-opaque${lionClip.out ? ' out' : ''}`}
+            src={lionClip.url}
+            autoPlay
+            playsInline
+            preload="auto"
+            muted={!(cfg?.challenge.seEnabled ?? true)}
+            ref={(v) => {
+              if (v) v.volume = (cfg?.challenge.giftFullCut?.volume ?? 70) / 100;
+              return armVideoPlay(v, 'lion-cutin', () =>
+                setLionClip((c) => (c ? { ...c, url: null } : c))
+              );
+            }}
+            onError={(ev) => {
+              fxWarn('ライオンのカットインの再生エラー — 暗幕へ縮退', ev.currentTarget.error);
+              setLionClip((c) => (c ? { ...c, url: null } : c));
+            }}
+          />
+        ) : (
+          <div className={`lion-screen${lionClip.out ? ' out' : ''}`} />
+        )
       ) : null}
 
       {/*
@@ -7566,6 +8788,112 @@ export function MonitorView(): React.JSX.Element {
                 {quizSettle.amount < 0 ? `-${num(-quizSettle.amount)}` : `+${num(quizSettle.amount)}`}
               </div>
             ) : null}
+          </div>
+        ) : null}
+        {/*
+          一撃クリアの減算フェーズ。**.fx-layer 内・DOM 順で .floats より前**
+          (z-index は付けない — fx-backdrop.spec が凍結)。背景は敷かない —
+          この 9 秒は7セグ(.countdown)を読ませるのが主役で、暗幕を敷くと
+          .count-mirror 相当の写しが要る。
+        */}
+        {universeDrain ? (
+          <div className="universe-drain" key={universeDrain.key}>
+            {universeDrain.ticks.map((t) => (
+              <div
+                key={t.key}
+                className={`ud-tick s${t.slot}`}
+                // 3倍(192px)を上限に、桁が増えたぶんだけ縮める(shared が権威)。
+                // 桁区切りは入れない — 合計の発表(countupDisplayAt)と表記を揃える。
+                style={{ fontSize: universeTickFontPx(t.amount, landscape) }}
+              >
+                -{t.amount}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {/*
+          ライオンの札と合計。**fx-layer 内 = 不透明動画より必ず手前・z-index は
+          付けない**(fx-backdrop.spec が凍結)。段は stage クラスで切り替える —
+          intro は何も出さない(導入動画/全面動画だけを見せる位相)。
+        */}
+        {lionCut ? (
+          <div className={`lion-cut is-${lionCut.stage}`} key={lionCut.key}>
+            {/*
+              「+」は**別行の小さい span**(2026-08-26 ユーザー指定)。1行に収めると
+              `+29,999` が約 3.83em になり、縦(540)のステージでは 132px までしか
+              上げられない。符号を外に出すと数字だけで約 3.30em になるので、
+              同じ幅に **154px** まで入る(= 数字そのものが 1.7 倍大きく見える)。
+            */}
+            {lionCut.stage === 'first' || lionCut.stage === 'kakugo' ? (
+              <div className="lc-first">
+                <span className="lc-plus">+</span>
+                <span className="lc-n">{num(lionCut.each)}</span>
+              </div>
+            ) : null}
+            {lionCut.stage === 'burst'
+              ? lionCut.ticks.map((t) => (
+                  <div key={t.key} className={`lc-tick s${t.slot}`}>
+                    <span className="lc-plus">+</span>
+                    <span className="lc-n">{num(lionCut.each)}</span>
+                  </div>
+                ))
+              : null}
+            {/*
+              段②〜④ の走行カウント。**worker はまだ値を積んでいない**ので、
+              ここは live 値 + 出した枚数 × 額 を毎フレーム書いた「予告」。
+              最後の1枚まで出し終えた時点で段⑥ の確定値と一致する(runLionCount)。
+            */}
+            {lionCut.stage === 'first' ||
+            lionCut.stage === 'kakugo' ||
+            lionCut.stage === 'burst' ? (
+              <div className="lc-count">
+                <span className="lc-c-cap">残り</span>
+                <span className="lc-c-amt" ref={lionCountRef}>
+                  {num(lionCut.total)}
+                </span>
+              </div>
+            ) : null}
+            {lionCut.stage === 'total' ? (
+              <div className="lc-total">
+                <span className="lc-cap">合計</span>
+                <span className="lc-amt" ref={lionTotalRef}>
+                  +{num(lionCut.total)}
+                </span>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {/*
+          減算合計の発表(「いくら減ったか」)。締めのカットイン(不透明・明るい爆発)の
+          **上**に出るので、数字は必ず暗いパネルの上に置く(.revolution-settle の
+          .rs-box と同じ可読性の担保)。z-index は付けない — DOM 順が全て。
+        */}
+        {universeTotal ? (
+          <div
+            className={`universe-total ${universeTotal.stage}${universeTotal.out ? ' out' : ''}`}
+          >
+            <div className="ut-box">
+              <div
+                className="ut-amt"
+                // サイズは shared が桁数から決める(縦ステージは 540px しか無く、
+                // CSS の 170px 固定だと 3 桁でも溢れる)。幅も固定して、
+                // カウントアップで桁が増えてもパネルが揺れないようにする。
+                style={{
+                  fontSize: universeTotalFontPx(universeTotal.total, landscape),
+                  minWidth: universeTotalWidthPx(universeTotal.total, landscape),
+                }}
+                key={`${universeTotal.key}:${universeTotal.stage}`}
+                ref={(el) => {
+                  universeTotalAmtRef.current = el;
+                }}
+              >
+                -
+                {universeTotal.stage === 'countup'
+                  ? countupDisplayAt(universeTotal.total, 0, universeTotal.countupMs).text
+                  : String(universeTotal.total)}
+              </div>
+              <div className="ut-cap">一撃クリア</div>
+            </div>
           </div>
         ) : null}
         <div className="floats">

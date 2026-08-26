@@ -26,6 +26,9 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   // 既定バンドを有効化(凍結を張る側のテストなので challenge.spec と逆の既定)。
   base.giftBandFx = structuredClone(DEFAULT_GIFT_BAND_FX);
   base.giftFullCut.enabled = false;
+  // ダイヤ増減(既定オン)も落とす — 1💎につき +30/+50 に変わるので、giftDefault
+  // (perDiamond +1)を前提にしたこのファイルの期待値が一斉に狂う(challenge.spec.ts と同じ)。
+  base.giftScale.enabled = false;
   return { ...base, enabled: true, ...over };
 }
 

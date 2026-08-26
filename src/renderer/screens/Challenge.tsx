@@ -3,6 +3,8 @@ import type {
   ChallengeCommentRule,
   ChallengeConfig,
   ChallengeGiftRule,
+  GiftScaleConfig,
+  GiftScaleRow,
   ChallengeRouletteConfig,
   RouletteSoundConfig,
   ChallengeRouletteSegment,
@@ -16,6 +18,10 @@ import type {
   TapLockRule,
   RevolutionConfig,
   RevolutionRule,
+  UniverseConfig,
+  UniverseRule,
+  LionConfig,
+  LionRule,
   QuizConfig,
   QuizRule,
   QuizThresholdRule,
@@ -79,6 +85,10 @@ import {
   TAP_LOCK_MAX_MS,
   TAP_LOCK_RULES_MAX,
   DEFAULT_REVOLUTION,
+  DEFAULT_UNIVERSE,
+  DEFAULT_UNIVERSE_RULE,
+  DEFAULT_LION,
+  DEFAULT_LION_RULE,
   DEFAULT_REVOLUTION_RULE,
   REVOLUTION_DURATION_MAX_SEC,
   REVOLUTION_DURATION_MIN_SEC,
@@ -88,6 +98,8 @@ import {
   REVOLUTION_MULT_MAX,
   REVOLUTION_MULT_MIN,
   REVOLUTION_RULES_MAX,
+  UNIVERSE_RULES_MAX,
+  LION_RULES_MAX,
   DEFAULT_QUIZ,
   DEFAULT_QUIZ_RULE,
   QUIZ_AMOUNT_MAX,
@@ -133,6 +145,25 @@ import {
   rouletteHotRepresentativeMult,
 } from '@shared/challenge';
 import { TAP_BOOST_RESULT_MS } from '@shared/boost-settle';
+import {
+  UNIVERSE_DRAIN_MS,
+  UNIVERSE_DRAIN_STEPS,
+  UNIVERSE_INTRO_MS,
+  UNIVERSE_OUTRO_MS,
+  UNIVERSE_TOTAL_MS,
+} from '@shared/universe';
+import {
+  LION_AMOUNT_EACH_MAX,
+  LION_AMOUNT_EACH_MIN,
+  LION_BLAST_MS,
+  LION_BURST_STEP_MS,
+  LION_INTRO_MS,
+  LION_STEPS_MAX,
+  LION_STEPS_MIN,
+  LION_TOTAL_DISPLAY_MS,
+  lionBurstCount,
+  lionCutsceneMs,
+} from '@shared/lion-settle';
 import { num } from '@shared/format';
 import { fullCutRuleMatches } from '@shared/fx-cut';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
@@ -343,6 +374,10 @@ function testKeyOf(spec: ChallengeTestEffectSpec): string {
   switch (spec.kind) {
     case 'revolution':
       return `revolution:${spec.revolutionId ?? ''}`;
+    case 'universe':
+      return `universe:${spec.universeId ?? ''}`;
+    case 'lion':
+      return `lion:${spec.lionId ?? ''}`;
     case 'quiz':
       // しきい値行の▶は別の名前空間へ — 同じ 'quiz:' に混ぜると、id 未設定の
       // ギフト行と「■ 停止」の対象が入れ替わる。
@@ -420,6 +455,8 @@ type Tab =
   | 'comment'
   | 'helper'
   | 'revolution'
+  | 'universe'
+  | 'lion'
   | 'quiz'
   | 'boost'
   | 'taplock'
@@ -437,6 +474,8 @@ const TABS: Array<[Tab, string]> = [
   ['comment', 'コメント'],
   ['helper', 'お助け'],
   ['revolution', '革命'],
+  ['universe', '一撃クリア'],
+  ['lion', 'ライオン'],
   ['quiz', 'お題ルーレット'],
   ['boost', 'ブースト'],
   ['taplock', 'お邪魔'],
@@ -746,7 +785,9 @@ export function Challenge(): React.JSX.Element {
             onGoRoulette={() => setTab('roulette')}
           />
         ) : null}
-        {tab === 'gifts' ? <GiftRulesSection cfg={draft} onPatch={patch} /> : null}
+        {tab === 'gifts' ? (
+          <GiftRulesSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
+        ) : null}
         {tab === 'comment' ? (
           <CommentRulesSection cfg={draft} onPatch={patch} onTest={onTest} testBusy={testBusy} />
         ) : null}
@@ -755,6 +796,24 @@ export function Challenge(): React.JSX.Element {
         ) : null}
         {tab === 'revolution' ? (
           <RevolutionSection
+            cfg={draft}
+            onPatch={patch}
+            onTest={onTest}
+            testBusy={testBusy}
+            testRunning={testRunning}
+          />
+        ) : null}
+        {tab === 'lion' ? (
+          <LionSection
+            cfg={draft}
+            onPatch={patch}
+            onTest={onTest}
+            testBusy={testBusy}
+            testRunning={testRunning}
+          />
+        ) : null}
+        {tab === 'universe' ? (
+          <UniverseSection
             cfg={draft}
             onPatch={patch}
             onTest={onTest}
@@ -3134,19 +3193,23 @@ function RouletteRow({
 }
 
 /** ギフト → カウント増減の規則。上から順に評価し、最初に一致した1件だけ適用。 */
-function GiftRulesSection({
-  cfg,
-  onPatch,
-}: {
-  cfg: ChallengeConfig;
-  onPatch: (p: Partial<ChallengeConfig>) => void;
-}): React.JSX.Element {
+function GiftRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
   const gd = cfg.giftDefault;
+  const gs = cfg.giftScale;
 
   const patchRule = (i: number, p: Partial<ChallengeGiftRule>): void => {
     const rules = cfg.giftRules.map((r, j) => (j === i ? { ...r, ...p } : r));
     onPatch({ giftRules: rules });
   };
+
+  const patchScale = (p: Partial<GiftScaleConfig>): void => onPatch({ giftScale: { ...gs, ...p } });
+  const patchScaleRow = (i: number, p: Partial<GiftScaleRow>): void =>
+    patchScale({ rows: gs.rows.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  /**
+   * その行のギフト1個でカウントが動く量。**表示と ▶ 実演にだけ使う** — 本番の
+   * 増減は届いたギフトの diamonds で worker が計算する(再計算禁止の全体規約)。
+   */
+  const rowAmount = (r: GiftScaleRow): number => Math.round((r.diamonds ?? 0) * r.perDiamond);
 
   return (
     <>
@@ -3182,6 +3245,199 @@ function GiftRulesSection({
       </div>
       <div className="faint" style={{ fontSize: 11, marginBottom: 8 }}>
         正の値=数字が<b>増える</b>(妨害)、負の値=数字が<b>減る</b>(応援)。既定は「1ダイヤにつき +1」です。
+      </div>
+
+      <h3 style={{ marginTop: 18 }}>ダイヤ数で増減</h3>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 8 }}>
+        ギフトの<b>ダイヤ数に係数を掛けて</b>カウントを増減します。評価は
+        <b>「上の手動規則 → ここ → 既定の動作」</b>の順。ルーレット・ブースト・お邪魔・革命・
+        お題・お助けに登録したギフトは、そちらが優先されてここは通りません。
+      </div>
+      <label className="row" style={{ gap: 6, cursor: 'pointer', marginBottom: 8 }}>
+        <input type="checkbox" checked={gs.enabled} onChange={(e) => patchScale({ enabled: e.target.checked })} />
+        ダイヤ数で増減する
+      </label>
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+        <label className="field" style={{ width: 120 }}>
+          境界(ダイヤ)
+          <input
+            type="number"
+            value={gs.threshold}
+            onChange={(e) => patchScale({ threshold: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field" style={{ width: 150 }}>
+          境界以上 1ダイヤあたり
+          <input
+            type="number"
+            value={gs.highPerDiamond}
+            onChange={(e) => patchScale({ highPerDiamond: Number(e.target.value) })}
+          />
+        </label>
+        <label className="field" style={{ width: 150 }}>
+          境界未満 1ダイヤあたり
+          <input
+            type="number"
+            value={gs.lowPerDiamond}
+            onChange={(e) => patchScale({ lowPerDiamond: Number(e.target.value) })}
+          />
+        </label>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 10 }}>
+        例: 境界 {num(gs.threshold)} / 以上 {gs.highPerDiamond >= 0 ? '+' : ''}
+        {num(gs.highPerDiamond)} なら、{num(gs.threshold)}ダイヤのギフト1個で
+        <b>
+          {gs.threshold * gs.highPerDiamond >= 0 ? '+' : ''}
+          {num(gs.threshold * gs.highPerDiamond)}
+        </b>
+        。<b>カウントダウンの目標値もこの桁に合わせて設定してください</b>(小さいままだと
+        高額ギフト1個で終わります)。
+      </div>
+
+      <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
+        <b>例外ギフト</b>(上から先勝ち・境界の判定より優先)。応援(減らす)側に倒したいギフトをここへ。
+        <b>ギフトIDが本線</b>です — ギフト名は配信では英字で届くので日本語名では一致しません。
+        IDは「ギフトリスト」タブで調べられます。<b>単価(ダイヤ)は判定には使いません</b> —
+        右側の「この1個で」の答え合わせと ▶ 試写のための表示用です。
+      </div>
+      {gs.rows.map((r, i) => (
+        <div className="challenge-rule" key={r.id}>
+          <label className="field" style={{ width: 110 }}>
+            ギフトID
+            <input
+              type="text"
+              placeholder="例: 7237"
+              value={r.giftId}
+              onChange={(e) => patchScaleRow(i, { giftId: e.target.value.trim() })}
+            />
+          </label>
+          <label className="field" style={{ flex: 1 }}>
+            ギフト名(部分一致・任意)
+            <input
+              type="text"
+              placeholder="例: unicorn fantasy"
+              value={r.giftName}
+              onChange={(e) => patchScaleRow(i, { giftName: e.target.value.toLowerCase() })}
+            />
+          </label>
+          <label className="field" style={{ flex: 1 }}>
+            表示名(メモ)
+            <input
+              type="text"
+              placeholder="例: 幻のユニコーン"
+              value={r.label ?? ''}
+              onChange={(e) => patchScaleRow(i, { label: e.target.value })}
+            />
+          </label>
+          <label className="field" style={{ width: 110 }}>
+            単価(ダイヤ)
+            <input
+              type="number"
+              placeholder="例: 5000"
+              value={r.diamonds ?? ''}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                patchScaleRow(i, { diamonds: Number.isFinite(v) && v > 0 ? v : undefined });
+              }}
+            />
+          </label>
+          <label className="field" style={{ width: 110 }}>
+            1ダイヤあたり
+            <input
+              type="number"
+              value={r.perDiamond}
+              onChange={(e) => patchScaleRow(i, { perDiamond: Number(e.target.value) })}
+            />
+          </label>
+          {/*
+            この行が実際に出す額。単価 × 1ダイヤあたり をそのまま出す — 「−50 と
+            書いてあるのに 30 しか動かない」と読み違えないための答え合わせ欄。
+            単価が未入力なら計算できないので促す。
+          */}
+          <div
+            className="field"
+            style={{ width: 130, fontVariantNumeric: 'tabular-nums' }}
+            title="このギフト1個でカウントがどれだけ動くか"
+          >
+            この1個で
+            <b style={{ fontSize: 15, color: rowAmount(r) > 0 ? '#ff9a6b' : '#7ee6ff' }}>
+              {r.diamonds ? `${rowAmount(r) > 0 ? '+' : ''}${num(rowAmount(r))}` : '単価を入力'}
+            </b>
+          </div>
+          <MonitorTestBtn
+            spec={{
+              kind: 'gift',
+              diamonds: r.diamonds ?? Math.max(1, gs.fxMinDiamonds),
+              scale: true,
+              // **その行の額を直接渡す**。渡さないと worker は giftId:'test' で照合して
+              // 例外行に一致せず、必ず帯域(1ダイヤ +30)へ落ちる(2026-08-27 修正)。
+              amount: rowAmount(r),
+            }}
+            onTest={onTest}
+            busy={testBusy}
+            disabled={!r.diamonds}
+            title={
+              r.diamonds
+                ? 'この行の増減演出(N浮上 → カウントアップ → ドン)をモニターで試写します'
+                : '単価(ダイヤ)を入れると、その行の実際の額で試写できます'
+            }
+          />
+          <button
+            className="btn small danger"
+            onClick={() => patchScale({ rows: gs.rows.filter((_, j) => j !== i) })}
+          >
+            削除
+          </button>
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 8, marginBottom: 12 }}>
+        <button
+          className="btn small"
+          onClick={() =>
+            patchScale({
+              rows: [
+                ...gs.rows,
+                {
+                  id: `gs-${Date.now().toString(36)}-${ruleSeq++}`,
+                  giftId: '',
+                  giftName: '',
+                  canonical: '',
+                  perDiamond: -50,
+                },
+              ],
+            })
+          }
+        >
+          例外ギフトを追加
+        </button>
+      </div>
+
+      <label className="row" style={{ gap: 6, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={gs.fxEnabled}
+          onChange={(e) => patchScale({ fxEnabled: e.target.checked })}
+        />
+        増減の浮上演出を出す(N浮上 → 数字が合計値まで増える → ドンとカウントに加算)
+      </label>
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end', marginTop: 6 }}>
+        <label className="field" style={{ width: 170 }}>
+          演出を出す下限(ダイヤ)
+          <input
+            type="number"
+            value={gs.fxMinDiamonds}
+            onChange={(e) => patchScale({ fxMinDiamonds: Number(e.target.value) })}
+          />
+        </label>
+      </div>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 12 }}>
+        <b>増減そのものは下限に関係なく全ギフトへ効きます</b> — ここで絞るのは見た目だけ。
+        0 にすると全ギフトで出ますが、演出は1件あたり約3秒なのでバラの連打で順番待ちが渋滞します。
+      </div>
+
+      <h3 style={{ marginTop: 18 }}>ギフトごとの手動規則</h3>
+      <div className="faint" style={{ fontSize: 11, marginTop: 6, marginBottom: 8 }}>
+        ここに書いた行は<b>ダイヤ数の増減より優先</b>されます(個別の例外用)。
       </div>
 
       {cfg.giftRules.map((r, i) => (
@@ -4310,6 +4566,401 @@ function RevolutionSection({
           onClick={() => onPatch({ revolution: structuredClone(DEFAULT_REVOLUTION) })}
         >
           革命設定を既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+
+
+/** LionSection の行 id 採番(universeSeq と同じ「時刻 + 連番」方式)。 */
+let lionSeq = 0;
+
+function LionSection({
+  cfg,
+  onPatch,
+  onTest,
+  testBusy,
+  testRunning,
+}: SectionProps): React.JSX.Element {
+  const ln = cfg.lion;
+  const patchLn = (p: Partial<LionConfig>): void => {
+    onPatch({ lion: { ...ln, ...p } });
+  };
+  const patchRule = (i: number, p: Partial<LionRule>): void => {
+    patchLn({ rules: ln.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+  // 尺は shared/lion-settle.ts の定数と関数が権威(設定画面へ算術を複製しない)。
+  const introSec = Math.round(LION_INTRO_MS / 1000);
+  const blastSec = Math.round(LION_BLAST_MS / 1000);
+  const totalSec = Math.round(LION_TOTAL_DISPLAY_MS / 1000);
+  // 代表行(最初の有効行)の発数で通しの尺を出す。行ごとに違いうるので概算。
+  const shown = ln.rules.find((r) => r.enabled) ?? ln.rules[0];
+  const steps = shown?.steps ?? 0;
+  const each = shown?.amountEach ?? 0;
+  const burstSec = Math.round((lionBurstCount(steps) * LION_BURST_STEP_MS) / 1000);
+  const cutSec = Math.round(lionCutsceneMs(steps) / 1000);
+
+  return (
+    <>
+      <h3>ライオン</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={ln.enabled}
+          onChange={(e) => patchLn({ enabled: e.target.checked })}
+        />
+        <span>指定ギフト(既定: Lion 29,999💎)でカウントを一気に増やす(妨害)</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        発動すると<b>カットイン動画({introSec}秒)→ +{num(each)} が1枚(3秒)→ ボイス(3秒)
+        → +{num(each)} の連打 {lionBurstCount(steps)} 発({burstSec}秒)→ 全面カットイン動画(
+        {blastSec}秒)→ 合計 +{num(each * steps)} の発表({totalSec}秒)</b>と進みます
+        (合計 約{cutSec}秒)。<b>数字が動くのは最後の発表の瞬間</b>です。
+        <b>一撃クリアの次・お題より先</b>に判定され、一致したギフトは増減規則も
+        ルーレットもカットインも通りません。
+        <b>発動から清算までの間に届いたギフト・いいね・コメントはキューに溜まり、
+        演出が終わってから処理されます</b>(一撃クリア・革命と同じバリア方式)。
+        <b>演出中のタップは通常どおり効きます</b>(妨害なので押す手を止めさせません)。
+        重ねがけはできません — 2発目以降は受け流します(43秒の幕は直列化できないため)。
+      </div>
+
+      {ln.enabled ? (
+        <>
+          {ln.rules.map((r, i) => (
+            <div className="challenge-rule" key={r.id}>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 60 }}
+                title="この行だけ一時的に止めます(下の行の判定は続きます)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.enabled}
+                  onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  有効
+                </span>
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="ライオン"
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ width: 100 }}>
+                対象 giftId
+                <input
+                  type="text"
+                  placeholder="6369"
+                  value={r.giftId}
+                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
+                />
+              </label>
+              <div style={{ width: 160 }}>
+                <label className="field">
+                  ギフト名(IDの保険)
+                  <input
+                    type="text"
+                    value={r.giftName}
+                    placeholder="lion"
+                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                  />
+                </label>
+                <label
+                  className="row"
+                  style={{ cursor: 'pointer', marginTop: 2 }}
+                  title="必ずオンにしてください。オフ(部分一致)だと『Leon and Lion』(34,000💎)や『獅子奮迅』にも一致して、そちらでも +1,499,950 の妨害が起きます。"
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.exactName}
+                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    完全一致
+                  </span>
+                </label>
+              </div>
+              <label className="field" style={{ width: 92 }}>
+                1発の額
+                <input
+                  type="number"
+                  min={LION_AMOUNT_EACH_MIN}
+                  max={LION_AMOUNT_EACH_MAX}
+                  value={r.amountEach}
+                  onChange={(e) => patchRule(i, { amountEach: Number(e.target.value) })}
+                />
+              </label>
+              <label
+                className="field"
+                style={{ width: 72 }}
+                title="1枚目 + 連打の合計。発数を変えると演出の長さも変わります(連打は 発数−1 発)。"
+              >
+                発数
+                <input
+                  type="number"
+                  min={LION_STEPS_MIN}
+                  max={LION_STEPS_MAX}
+                  value={r.steps}
+                  onChange={(e) => patchRule(i, { steps: Number(e.target.value) })}
+                />
+              </label>
+              <label className="row" style={{ cursor: 'pointer', width: 76 }}>
+                <input
+                  type="checkbox"
+                  checked={r.flash}
+                  onChange={(e) => patchRule(i, { flash: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  フラッシュ
+                </span>
+              </label>
+              <MonitorTestBtn
+                spec={{ kind: 'lion', lionId: r.id }}
+                onTest={onTest}
+                busy={testBusy}
+                running={testRunning === `lion:${r.id}`}
+                label="▶ この行"
+                title="モニターウィンドウで、カットイン→+N の連打→全面カットイン→合計の発表まで通しで実演再生します(giftId 未設定でも確認できます)。本番と同じ長さかかりますが、カウント値は変わりません。途中でやめるときは同じボタン(■ 停止)を押してください"
+              />
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchLn({ rules: ln.rules.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={ln.rules.length >= LION_RULES_MAX}
+              onClick={() =>
+                patchLn({
+                  rules: [
+                    ...ln.rules,
+                    {
+                      ...structuredClone(DEFAULT_LION_RULE),
+                      id: `lion-${Date.now().toString(36)}-${lionSeq++}`,
+                    },
+                  ],
+                })
+              }
+            >
+              ライオンを追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {LION_RULES_MAX} 件(現在 {ln.rules.length} 件)
+            </span>
+          </div>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。既定行の giftId
+            (<b>6369</b>)はギフト一覧の絵柄と突き合わせて確定済みなので、そのまま使えます。
+            ギフト名の完全一致は ID が変わったときの保険です。
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            モニターを閉じているときは演出なしで即座に加算されます(効果だけは必ず発動
+            します)。停止・リセット・この機能を OFF にすると演出は畳まれ、
+            <b>そのときカウントは増えません</b>(まだ一度も加算していないため)。
+          </div>
+        </>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          className="btn small"
+          onClick={() => onPatch({ lion: structuredClone(DEFAULT_LION) })}
+        >
+          ライオン設定を既定に戻す
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** UniverseSection の行 id 採番(quizSeq と同じ「時刻 + 連番」方式)。 */
+let universeSeq = 0;
+
+function UniverseSection({
+  cfg,
+  onPatch,
+  onTest,
+  testBusy,
+  testRunning,
+}: SectionProps): React.JSX.Element {
+  const uv = cfg.universe;
+  const patchUv = (p: Partial<UniverseConfig>): void => {
+    onPatch({ universe: { ...uv, ...p } });
+  };
+  const patchRule = (i: number, p: Partial<UniverseRule>): void => {
+    patchUv({ rules: uv.rules.map((r, j) => (j === i ? { ...r, ...p } : r)) });
+  };
+  // 尺は shared/universe.ts の定数が権威(設定画面へ算術を複製しない)。
+  const introSec = Math.round(UNIVERSE_INTRO_MS / 1000);
+  const drainSec = Math.round(UNIVERSE_DRAIN_MS / 1000);
+  const outroSec = Math.round(UNIVERSE_OUTRO_MS / 1000);
+  const totalSec = Math.round(UNIVERSE_TOTAL_MS / 1000);
+
+  return (
+    <>
+      <h3>一撃クリア</h3>
+      <label className="row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={uv.enabled} onChange={(e) => patchUv({ enabled: e.target.checked })} />
+        <span>指定ギフト(既定: TIKTOK UNIVERSE 44,999💎)でカウントを一撃で 0 にする</span>
+      </label>
+      <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 10 }}>
+        発動すると<b>カットイン動画({introSec}秒)→ 残りカウントを{UNIVERSE_DRAIN_STEPS}分割した
+        減算の連打({drainSec}秒)→ 0 到達 → カットイン動画({outroSec}秒)</b>と進み、
+        その<b>あとに通常の達成(CLEAR)演出</b>が出ます(合計 約{totalSec}秒)。
+        <b>お助け・ブースト・革命の次・お題より先</b>に判定され、一致したギフトは増減規則も
+        ルーレットもカットインも通りません。
+        <b>発動から清算までの間に届いたギフト・いいね・コメントはキューに溜まり、
+        演出が終わってから処理されます</b>(革命・お題と同じバリア方式)。
+        演出中のタップは受け付けません(カウントは既に 0 へ確定しているため)。
+        重ねがけはできません — 2発目以降は効果が変わらないので受け流します。
+      </div>
+
+      {uv.enabled ? (
+        <>
+          {uv.rules.map((r, i) => (
+            <div className="challenge-rule" key={r.id}>
+              <label
+                className="row"
+                style={{ cursor: 'pointer', width: 60 }}
+                title="この行だけ一時的に止めます(下の行の判定は続きます)"
+              >
+                <input
+                  type="checkbox"
+                  checked={r.enabled}
+                  onChange={(e) => patchRule(i, { enabled: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  有効
+                </span>
+              </label>
+              <label className="field" style={{ width: 130 }}>
+                表示名
+                <input
+                  type="text"
+                  value={r.label}
+                  placeholder="TIKTOK UNIVERSE"
+                  onChange={(e) => patchRule(i, { label: e.target.value })}
+                />
+              </label>
+              <label className="field" style={{ width: 110 }}>
+                対象 giftId
+                <input
+                  type="text"
+                  placeholder="実受信で確認"
+                  value={r.giftId}
+                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
+                />
+              </label>
+              <div style={{ width: 170 }}>
+                <label className="field">
+                  ギフト名(IDの保険)
+                  <input
+                    type="text"
+                    value={r.giftName}
+                    placeholder="tiktok universe"
+                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                  />
+                </label>
+                <label
+                  className="row"
+                  style={{ cursor: 'pointer', marginTop: 2 }}
+                  title="必ずオンにしてください。オフ(部分一致)だと『TikTok Universe+』という別のギフトにも一致して、そちらでもランが即終了します。クリアは巻き戻せません。"
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.exactName}
+                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                  />
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    完全一致
+                  </span>
+                </label>
+              </div>
+              <label className="row" style={{ cursor: 'pointer', width: 76 }}>
+                <input
+                  type="checkbox"
+                  checked={r.flash}
+                  onChange={(e) => patchRule(i, { flash: e.target.checked })}
+                />
+                <span className="faint" style={{ fontSize: 11 }}>
+                  フラッシュ
+                </span>
+              </label>
+              <MonitorTestBtn
+                spec={{ kind: 'universe', universeId: r.id }}
+                onTest={onTest}
+                busy={testBusy}
+                running={testRunning === `universe:${r.id}`}
+                label="▶ この行"
+                title="モニターウィンドウで、カットイン→減算の連打→カットインまで通しで実演再生します(giftId 未設定でも確認できます)。本番と同じ約25秒かかりますが、カウント値は変わらず CLEAR にもなりません。途中でやめるときは同じボタン(■ 停止)を押してください"
+              />
+              <button
+                className="btn small"
+                title="この行を削除します"
+                onClick={() => patchUv({ rules: uv.rules.filter((_, j) => j !== i) })}
+              >
+                削除
+              </button>
+            </div>
+          ))}
+
+          <div className="row" style={{ marginTop: 8, gap: 8 }}>
+            <button
+              className="btn small"
+              disabled={uv.rules.length >= UNIVERSE_RULES_MAX}
+              onClick={() =>
+                patchUv({
+                  rules: [
+                    ...uv.rules,
+                    {
+                      ...structuredClone(DEFAULT_UNIVERSE_RULE),
+                      id: `uni-${Date.now().toString(36)}-${universeSeq++}`,
+                    },
+                  ],
+                })
+              }
+            >
+              一撃クリアを追加
+            </button>
+            <span className="faint" style={{ fontSize: 11 }}>
+              最大 {UNIVERSE_RULES_MAX} 件(現在 {uv.rules.length} 件)
+            </span>
+          </div>
+
+          <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。既定行の giftId は
+            未設定です — TIKTOK UNIVERSE の giftId は実配信で一度受け取り、ログ
+            (diag.log の「受信 giftId=…」行)かライブフィードで確認してから入れてください。
+            それまでは<b>ギフト名の完全一致</b>で当てています。
+          </div>
+          <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+            モニターを閉じているときは演出なしで即座に 0 + CLEAR になります(効果だけは
+            必ず発動します)。停止・リセット・この機能を OFF にすると演出は畳まれ、
+            <b>そのときカウントは 0 になりません</b>(まだ一度も 0 に到達していないため)。
+          </div>
+        </>
+      ) : null}
+
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          className="btn small"
+          onClick={() => onPatch({ universe: structuredClone(DEFAULT_UNIVERSE) })}
+        >
+          一撃クリア設定を既定に戻す
         </button>
       </div>
     </>

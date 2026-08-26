@@ -40,6 +40,12 @@ export type FxStockKind =
   | 'boost' // フィーバー(pendingBoosts)
   | 'band' // ギフトカットイン(pendingBands — 帯/フルカットとも。表示ラベルは「ギフト」)
   | 'revolution' // 革命の導入カットイン(pendingRevolutions)
+  // 一撃クリア(workerQueue のみ — follow と同じくレンダラー側キューを持たない)。
+  // バリアで清算待ちの op と、凍結中の発動予告がこの行で出る。
+  | 'universe'
+  // ライオン(workerQueue のみ — universe と同じくレンダラー側キューを持たない)。
+  // バリアで清算待ちの op と、凍結中の発動予告がこの行で出る。
+  | 'lion'
   | 'quiz' // お題ルーレット(worker の予約 FIFO・quiz-end の持ち越し。表示は予告行が主)
   | 'join-roulette' // 初見(入室)ルーレット(joinRouletteQueue)
   | 'hot-roulette' // 激熱確定ルーレット(hotRouletteQueue)
@@ -55,6 +61,8 @@ export const STOCK_KIND_PRIORITY = {
   boost: 'boost',
   band: 'band',
   revolution: 'revolution', // band と other(ギフトルーレット)の間(2026-08-20 ユーザー決定)
+  universe: 'universe', // revolution の直後(2026-08-26。開始順はバリア方式が支配)
+  lion: 'lion', // お助けの直後(2026-08-26。開始順はバリア方式が支配)
   quiz: 'quiz', // revolution の直後(2026-08-21。実際の開始順はバリア方式が支配 — fx-priority.ts 参照)
   'join-roulette': 'join-roulette',
   'hot-roulette': 'hot-roulette',
@@ -64,13 +72,23 @@ export const STOCK_KIND_PRIORITY = {
 
 /**
  * キューセクションの表示順(fx-priority の序列から導出)。
- * follow は除外する — レンダラー側に対応する ref キューが無く(予告は workerQueue
- * 行だけ)、混ぜるとセクションループの else 分岐が roulettes を二重に流す。
+ * follow・universe・lion は除外する — どれもレンダラー側に対応する ref キューが
+ * 無く(予告は workerQueue 行だけ)、混ぜるとセクションループの else 分岐が
+ * roulettes を二重に流す。
+ *
+ * universe / lion にレンダラー側キューが無いのはバリア方式だから — 開始は
+ * `pendingUniverseStart` / `pendingLionStart` の armed 監視が担い、ドレインキューには
+ * 積まれない(quiz-start と同じ非対称。あちらは quiz-end の持ち越しでキューを持つが、
+ * 一撃クリアとライオンは結果カットシーンを持たないのでキュー自体が要らない)。
  */
-export const STOCK_SECTION_ORDER: readonly Exclude<FxStockKind, 'clear' | 'follow'>[] = (
-  Object.keys(STOCK_KIND_PRIORITY) as Exclude<FxStockKind, 'clear'>[]
-)
-  .filter((k): k is Exclude<FxStockKind, 'clear' | 'follow'> => k !== 'follow')
+export const STOCK_SECTION_ORDER: readonly Exclude<
+  FxStockKind,
+  'clear' | 'follow' | 'universe' | 'lion'
+>[] = (Object.keys(STOCK_KIND_PRIORITY) as Exclude<FxStockKind, 'clear'>[])
+  .filter(
+    (k): k is Exclude<FxStockKind, 'clear' | 'follow' | 'universe' | 'lion'> =>
+      k !== 'follow' && k !== 'universe' && k !== 'lion'
+  )
   .sort((a, b) => fxRank(STOCK_KIND_PRIORITY[a]) - fxRank(STOCK_KIND_PRIORITY[b]));
 
 /** キュー1件ぶんの識別スナップショット(effect.id + 行為者)。 */

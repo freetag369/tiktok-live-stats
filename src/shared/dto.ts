@@ -469,6 +469,62 @@ export interface ChallengeGiftRule {
 }
 
 /**
+ * ダイヤ増減の例外ギフト1行。**上から先勝ち**(giftRules と同じ規約)で、帯域
+ * (threshold による high/low の振り分け)より先に評価される。
+ *
+ * 判定は matchGiftTrigger の3段(giftId → canonical → giftName)を共有する。
+ * **giftId が本線** — ライブ経路では NormalizedEvent.canonical が未代入なので、
+ * canonical だけを書いた行は本番で一度も一致しない(matchRouletteTrigger と同じ制約)。
+ */
+export interface GiftScaleRow {
+  id: string;
+  /** 本線。空文字は「未指定」= この列では一致しない。 */
+  giftId: string;
+  /** 保険の部分一致。validate が trim + 小文字化して保存する。 */
+  giftName: string;
+  /** 名寄せ済みの canonical。ライブ経路では乗らないので保険扱い。 */
+  canonical: string;
+  /** 設定画面の表示用ラベル(判定には使わない)。 */
+  label?: string;
+  /** 1ダイヤあたりの増減。正=カウントを増やす(妨害) / 負=減らす(応援)。 */
+  perDiamond: number;
+  /**
+   * このギフトの単価(💎)。**判定には一切使わない** — 実際の増減は届いたギフトの
+   * diamonds を使う(再計算禁止の全体規約)。ここは設定画面で「この行は結局いくつ
+   * 動くのか」を出すためと、行ごとの ▶ 実演で本物と同じ額を試写するための表示用。
+   */
+  diamonds?: number;
+}
+
+/**
+ * ダイヤ数に係数を掛ける増減層。**giftRules(手動行)と giftDefault の間**に入る
+ * (matchGiftRule の評価順)。手動行があればそちらが勝ち、この層に一致しなければ
+ * 従来どおり giftDefault へ落ちる。
+ *
+ * お助け/フィーバー/お邪魔/革命/お題/ルーレットに登録されたギフトはそもそも
+ * ここへ到達しない(worker の gift 分岐が先に return する)。
+ */
+export interface GiftScaleConfig {
+  enabled: boolean;
+  /** 例外ギフト。上から先勝ち・帯域より優先。 */
+  rows: GiftScaleRow[];
+  /** 帯域の境界。diamonds がこの値**以上**なら high、未満なら low。 */
+  threshold: number;
+  /** threshold 以上の 1ダイヤあたり増減。 */
+  highPerDiamond: number;
+  /** threshold 未満の 1ダイヤあたり増減。 */
+  lowPerDiamond: number;
+  /** 「N 浮上 → カウントアップ → ドン」の演出を出すか。 */
+  fxEnabled: boolean;
+  /**
+   * 演出を出す下限💎。0 で全ギフト。**増減そのものはこの値に関係なく全ギフトへ効く** —
+   * バラ(1💎)の連打ごとに3秒の演出を出すと舞台の順番待ちが構造的に詰まるので、
+   * 見た目だけを高額ギフトに絞るための弁。
+   */
+  fxMinDiamonds: number;
+}
+
+/**
  * ルーレット終盤の演出パターンの全種。抽選は**出目の珍しさで条件付ける**(パチンコの
  * 信頼度方式)— レアな出目ほど激アツ(heavy)パターンが出やすいが、どのパターンも
  * 全レア度帯で正の重みを持つ(ガセあり)。演出は「期待感」であって結果の確定予告には
@@ -1139,6 +1195,113 @@ export interface RevolutionConfig {
 }
 
 /**
+ * 一撃クリア(TIKTOK UNIVERSE)の1行。トリガー3フィールド+exactName の規約は
+ * RevolutionRule と同一で、判定は matchGiftTrigger を共有する(matchUniverse)。
+ *
+ * **倍率も秒数も持たない** — 効果が「残量を 0 にして CLEAR」で固定だから
+ * (QuizRule が倍率・秒数を持たないのと同じ整理)。演出の尺は
+ * shared/universe-clear.ts の定数が唯一の権威。
+ */
+export interface UniverseRule {
+  /** 行の識別子。UI の key と行ごとの実演(ChallengeTestEffectSpec.universeId)の対象特定に使う。 */
+  id: string;
+  /** 設定画面の行見出し。表示専用でマッチには使わない。 */
+  label: string;
+  enabled: boolean;
+  /** トリガーギフトの giftId 直接一致。ライブ経路の本線(RevolutionRule と同じ理由)。 */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  /**
+   * giftName の照合を**完全一致**にする(既定 false = 部分一致)。既定行は
+   * `'tiktok universe'` を使うので**必ず立てる** — 部分一致のままだと
+   * 44,999💎 の別ギフト「TikTok Universe+」まで一撃クリアに化ける。
+   */
+  exactName: boolean;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+}
+
+/**
+ * 一撃クリアの設定。**上から順に評価し、最初に一致した1行だけ**を使う
+ * (revolution / tapLock と同じ先勝ち)。
+ *
+ * 機能 enabled の既定は **false**(revolution / tapLock と同じ向き)。
+ * チャレンジを終わらせる効果なので、キー欠損の既定フォールバックで勝手に
+ * 有効化されてはならない — validate 側も `=== true` で読む。旧 settings.json に
+ * このキーは無いので、**欠損時のフォールバックが移行の代わり**になる
+ * (SETTINGS_VERSION は上げない)。
+ */
+export interface UniverseConfig {
+  /** 機能全体のスイッチ。false で全行が止まる(行ごとの enabled とは別)。 */
+  enabled: boolean;
+  rules: UniverseRule[];
+}
+
+/**
+ * ライオン(Lion・29,999💎)の1行。トリガーのフィールド構成は UniverseRule と同一で、
+ * 判定は matchGiftTrigger を共有する(matchLion)。
+ *
+ * 効果は**カウントを一気に増やす妨害**(ボス襲来)。一撃クリアの鏡像で、あちらが
+ * 残量を 0 まで削るのに対しこちらは `amountEach × steps` を積み上げる。演出も同型で、
+ * 導入カットイン → `+N` の連打 → 全面カットイン → 合計発表 の一本道
+ * (尺と段組は shared/lion-settle.ts の定数が唯一の権威)。
+ *
+ * **倍率も秒数も持たない**(窓を開かないので) — 代わりに額を決める2つを持つ。
+ */
+export interface LionRule {
+  /** 行の識別子。UI の key と行ごとの実演(ChallengeTestEffectSpec.lionId)の対象特定に使う。 */
+  id: string;
+  /** 設定画面の行見出し。表示専用でマッチには使わない。 */
+  label: string;
+  enabled: boolean;
+  /** トリガーギフトの giftId 直接一致。ライブ経路の本線(UniverseRule と同じ理由)。 */
+  giftId: string;
+  /** 補助マッチ: giftName の小文字部分一致。'' で無効(ID 変更時の保険)。 */
+  giftName: string;
+  /** 補助マッチ: canonical 一致。リプレイ/テスト経路でだけ乗る。'' で無効。 */
+  canonical: string;
+  /**
+   * giftName の照合を**完全一致**にする(既定 false = 部分一致)。既定行は `'lion'` と
+   * いう短い名前を使うので**必ず立てる** — 部分一致のままだと「Leon and Lion」
+   * (34,000💎)と「獅子奮迅」(canonical `lion_charge`)まで巻き込む
+   * (gift-aliases.default.json が canonical を lion_charge / leon_lion / lion に
+   * 分けているのがその実在の証拠)。
+   */
+  exactName: boolean;
+  /**
+   * 1発あたりの加算量。既定 29,999(ギフトのダイヤ数に合わせた額)。
+   * clamp は LION_AMOUNT_EACH_MIN〜MAX。
+   */
+  amountEach: number;
+  /**
+   * 発数。既定 50(1枚目 + 連打 49 発)。合計は `amountEach × steps`。
+   * clamp は LION_STEPS_MIN〜MAX。**演出尺もここから決まる**(lionCutsceneMs)。
+   */
+  steps: number;
+  /** true ならモニターに照明フラッシュ演出。 */
+  flash: boolean;
+}
+
+/**
+ * ライオンの設定。**上から順に評価し、最初に一致した1行だけ**を使う
+ * (universe / revolution と同じ先勝ち)。
+ *
+ * 機能 enabled の既定は **true**(ユーザー決定 2026-08-26)— revolution / universe /
+ * tapLock とは逆向き。既定行の giftId が実採取済み(6369)で誤爆の余地が無く、
+ * 「入れたらすぐ使える」ほうが望ましいという判断。validate 側も `!== false` で読む。
+ * 旧 settings.json にこのキーは無いので、**欠損時のフォールバックが移行の代わり**に
+ * なる(SETTINGS_VERSION は上げない)。
+ */
+export interface LionConfig {
+  /** 機能全体のスイッチ。false で全行が止まる(行ごとの enabled とは別)。 */
+  enabled: boolean;
+  rules: LionRule[];
+}
+
+/**
  * お題ルーレットのトリガー1行。マッチのフィールド構成は RevolutionRule と同一
  * (matchGiftTrigger 互換)で、倍率・秒数を持たない — 窓の尺や増減幅は行ごと
  * ではなく QuizConfig 側の1組(お題の企画はゲーム内で1種類、という整理)。
@@ -1365,6 +1528,11 @@ export interface ChallengeConfig {
   /** どの規則にも一致しないギフトの既定動作。null なら無視。 */
   giftDefault: { mode: 'fixed' | 'perDiamond'; amount: number } | null;
   /**
+   * ダイヤ数に係数を掛ける増減層。**giftRules の後・giftDefault の前**に評価される
+   * (matchGiftRule)。手動行で個別に上書きでき、一致しなければ従来の既定へ落ちる。
+   */
+  giftScale: GiftScaleConfig;
+  /**
    * ギフトルーレット。**上から順に評価し、最初に一致した1件だけ適用**(giftRules と
    * 同じ規約)。トリガー一致時は giftRules/giftDefault より優先。
    * 旧 settings.json の単一 `roulette` キーは validateChallengeConfig が1件の配列へ移行する。
@@ -1495,6 +1663,22 @@ export interface ChallengeConfig {
    */
   revolution: RevolutionConfig;
   /**
+   * 一撃クリア(TIKTOK UNIVERSE)。revolution の**次・quiz より先**に評価され、
+   * 一致したギフトは増減規則もカットインも通らない(matchUniverse — revolution と
+   * 同じ先勝ち規約)。同じ giftId を revolution と両方に登録した誤設定では革命が
+   * 勝つ — あちらは 1 分の窓で戻れるが、こちらは**クリアなので巻き戻せない**。
+   */
+  universe: UniverseConfig;
+  /**
+   * ライオン(妨害のボス襲来)。universe の**次・quiz より先**に評価され、一致した
+   * ギフトは増減規則もカットインも通らない(matchLion — universe と同じ先勝ち規約)。
+   * universe より後ろなのは、同じ giftId を両方に登録した誤設定では**結末を決める
+   * ほう(クリア)が勝つ**ほうが説明しやすいから。発動するとバリア(発動時点の
+   * 演出キューを消化してから開始・以降のイベントは清算まで後回し)+ 43 秒の
+   * カットシーンになる。
+   */
+  lion: LionConfig;
+  /**
    * お題ルーレット。revolution の**次・tapLock より先**に評価され、一致したギフトは
    * 増減規則を通らない(matchQuiz — revolution と同じ先勝ち規約)。発動すると
    * バリア(発動時点の演出キューを消化してから開始・以降のイベントは清算まで
@@ -1582,6 +1766,21 @@ export interface ChallengeEffect {
     | 'tap-lock'
     | 'revolution-start'
     | 'revolution-end'
+    /**
+     * 一撃クリア。start = 発動(アームだけ・値は動かさない)、end = 25 秒後の清算
+     * (値を 0 にした履歴行)。**end に結果カットシーンは無い** — 締めのカットインは
+     * 25 秒の中に含まれており、その後の祝祭は achieved が並走で出す。
+     */
+    | 'universe-start'
+    | 'universe-end'
+    /**
+     * ライオン(妨害のボス襲来)。start = 発動(アームだけ・値は動かさない)、
+     * end = 43 秒のカットシーンの清算(値を増やした履歴行)。universe-start /
+     * -end の鏡像で、**end に結果カットシーンは無い** — 合計の発表はカットシーンの
+     * 最後の段(⑥)に含まれている。
+     */
+    | 'lion-start'
+    | 'lion-end'
     | 'quiz-start'
     | 'quiz-end'
     | 'achieved';
@@ -1617,6 +1816,16 @@ export interface ChallengeEffect {
    * 「effect 1件で自己完結」の流儀で worker が焼き込む。
    */
   fanStamp?: true;
+  /**
+   * kind='gift': ダイヤ増減層(giftScale)由来で、「N 浮上 → 数字が合計値まで駆け上がる
+   * → ドンとカウントに着弾」の演出を出す印。**cfg を引き直して判定しない** —
+   * モニターの設定は 120 秒ポーリング(CFG_POLL_MS)で古くなりうるので、fxBandClip と
+   * 同じ「effect 1件で自己完結」の流儀で worker が到着時点の判定を焼き込む。
+   *
+   * 新しい kind を作らないのは、値の変化としては素のギフトそのものだから — 履歴・
+   * 統計・ランキング・音は既存の 'gift' 経路がそのまま正しい。
+   */
+  giftScale?: true;
   /**
    * kind='tap-lock': 焼き込んだ封印の総尺(ms)。rouletteSegments と同じ
    * 「effect 1件で自己完結」の流儀 — モニターの cfg は 120 秒ポーリング(CFG_POLL_MS)で
@@ -1880,6 +2089,37 @@ export interface ChallengeEffect {
    */
   revolutionResultMs?: number;
   /**
+   * kind='universe-start': 演出の期限のフォールバックタイムライン
+   * (revolutionEndsAtMs と同じ規約 — 実際の期限は ChallengeState.universe.endsAtMs
+   * が権威で、こちらはアーム期限まで cue が来ずに worker が自走したときの終端)。
+   */
+  universeEndsAtMs?: Ms;
+  /**
+   * kind='universe-end': 0 にする直前の値(= -amount)。amount は -0 正規化を
+   * 通るので、バナー文言と履歴ログが符号を気にせず読める数を別に載せる
+   * (revolutionDownTotal と同じ焼き込みの流儀)。
+   */
+  universeDownTotal?: number;
+  /**
+   * kind='lion-start': 演出の期限のフォールバックタイムライン(universeEndsAtMs と
+   * 同じ規約 — 実際の期限は ChallengeState.lion.endsAtMs が権威で、こちらはアーム
+   * 期限まで cue が来ずに worker が自走したときの終端)。
+   */
+  lionEndsAtMs?: Ms;
+  /**
+   * kind='lion-start'/'lion-end': 1発あたりの加算量と発数。**effect 1件で自己完結**の
+   * 流儀(モニターの cfg は 120 秒ポーリングで古くなりうるので、段組みは cfg では
+   * なくここから読む) — `lionCutsceneMs(lionSteps)` が演出尺の唯一の出所。
+   */
+  lionEach?: number;
+  lionSteps?: number;
+  /**
+   * kind='lion-start'/'lion-end': 加算合計(= lionEach × lionSteps)。lion-end では
+   * amount と同値だが、start の時点(まだ値を動かしていない)でもバナー文言と
+   * カットシーンが読めるように別に載せる(universeDownTotal と同じ焼き込みの流儀)。
+   */
+  lionTotal?: number;
+  /**
    * kind='quiz-start': お題の盤面(表示順)。rouletteSegments と同じ「effect 1件で
    * 自己完結」の流儀 — モニターの cfg は 120 秒ポーリング(CFG_POLL_MS)で古くなり
    * うるので、回転演出は cfg からではなくここから読む。
@@ -2050,6 +2290,21 @@ export type ChallengeTestEffectSpec =
       fullCutId?: string;
       /** 連打反復のテスト用。未指定は1回。bandId 併用時は 1 に倒す(testEffect は凍結を張らないため)。 */
       repeat?: number;
+      /**
+       * ダイヤ増減行のテスト用。指定時は「N 浮上 → カウントアップ → ドン」の演出を強制する
+       * (giftScale の一致もしきい値も評価しない)。実演は値・統計・凍結に触らない契約なので、
+       * 据え置きも張らない。
+       */
+      scale?: true;
+      /**
+       * 増減量の直接指定。**設定画面の行ごとの ▶ 用** — bandId / fullCutId と同じ
+       * 「行を名指ししたら一致判定は評価しない」流儀で、その行が実際に出す額をそのまま
+       * 試写する。省略時は従来どおり giftDefault / giftScale の写像を通す。
+       *
+       * これが無いと、worker は giftId:'test' で照合するのでどの行の ▶ でも例外行に
+       * 一致せず、必ず帯域(lowPerDiamond)へ落ちていた(2026-08-27 修正)。
+       */
+      amount?: number;
     }
   /**
    * rouletteId は設定UIの行ごとの ▶ ボタン用。未指定なら最初の有効な行を回す。
@@ -2078,6 +2333,27 @@ export type ChallengeTestEffectSpec =
       kind: 'revolution';
       /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
       revolutionId?: string;
+    }
+  /**
+   * 一撃クリア。25 秒の通し(導入カットイン → 30 段の減算連打 → 締めカットイン)を
+   * 実演する — revolution と同じくトリガー一致は評価しない。**値も status も
+   * 動かさない**(testEffect の規約どおり)ので CLEAR は出ない。起点は現在値、
+   * 未開始・0 のときは設定の initialValue を使う(「0 → 0」の無意味な絵を避ける)。
+   */
+  | {
+      kind: 'universe';
+      /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
+      universeId?: string;
+    }
+  /**
+   * ライオン。43 秒の通し(導入カットイン → +N の連打 → 全面カットイン → 合計発表)を
+   * 実演する — universe と同じくトリガー一致は評価しない。**値も統計も凍結も
+   * 動かさない**(testEffect の規約どおり)。額は対象行の amountEach × steps。
+   */
+  | {
+      kind: 'lion';
+      /** 実演する行の id。未指定・対象行が消えていたら最初の有効な行で実演する。 */
+      lionId?: string;
     }
   /**
    * お題ルーレット。設定中のお題リストから抽選し、前置き(回転→決定表示)だけを
@@ -2192,6 +2468,67 @@ export type ChallengeQuizCue =
       effectId: number;
     };
 
+/**
+ * challenge.universeCue のパラメータ。ChallengeQuizCue の鏡像 — 一撃クリアも
+ * worker がギフト着弾で**予約(arm)するだけ**で、25 秒の演出はモニターが
+ * 「発動時点で溜まっていた演出キューを消化し切った」あと実際に再生し始めた
+ * 瞬間を原点に走る。
+ *
+ * **preMs を持たない**のが revolution / quiz との唯一の違い。あちらは
+ * 「前置きの後に**窓**が開く」ので前置き尺の申告が要ったが、こちらは 25 秒
+ * まるごとが演出で、その先に開く窓が無い(次に来るのは CLEAR)。素材欠損で
+ * 尺が縮む場合も worker 側の清算時刻は `UNIVERSE_TOTAL_MS` 固定でよい —
+ * モニターは早く終わって待つだけで、値の正しさには影響しない。
+ *
+ * drop も revolution / quiz と同じ判断: **プレーン即クリアへ倒す**(破棄しない)。
+ * 44,999💎 の効果はゲームの結末であって演出ではないので、モニターの都合
+ * (キュー溢れ・再読み込み)で無かったことになってはいけない。
+ */
+export type ChallengeUniverseCue =
+  | {
+      /** 導入カットインの再生を開始した = 25 秒の時計をここから回してよい。 */
+      action: 'start';
+      /** 対象の universe-start effect の id。アーム中のものと一致しなければ無視される。 */
+      effectId: number;
+      /** モニターが再生を開始した時刻(Date.now())。worker 側で now を超えない範囲に丸める。 */
+      startedAtMs: Ms;
+    }
+  | {
+      /** この予約の演出は再生されない → プレーン即クリアへ倒す。 */
+      action: 'drop';
+      /** 対象の universe-start effect の id。**0 = アーム中のものを種類を問わず対象**。 */
+      effectId: number;
+    };
+
+/**
+ * challenge.lionCue のパラメータ。ChallengeUniverseCue の鏡像 — ライオンも worker が
+ * ギフト着弾で**予約(arm)するだけ**で、43 秒のカットシーンはモニターが「発動時点で
+ * 溜まっていた演出キューを消化し切った」あと実際に再生し始めた瞬間を原点に走る。
+ *
+ * **preMs を持たない**のも universe と同じ理由 — 43 秒まるごとが演出で、その先に
+ * 開く窓が無い。素材欠損で尺が縮む場合も worker 側の清算時刻は
+ * `lionCutsceneMs(steps)` 固定でよい(モニターは早く終わって待つだけ)。
+ *
+ * drop も universe と同じ判断: **プレーン即発動へ倒す**(破棄しない)。29,999💎 の
+ * 効果はゲームの出来事であって演出ではないので、モニターの都合(キュー溢れ・
+ * 再読み込み)で無かったことになってはいけない。
+ */
+export type ChallengeLionCue =
+  | {
+      /** 導入カットインの再生を開始した = 43 秒の時計をここから回してよい。 */
+      action: 'start';
+      /** 対象の lion-start effect の id。アーム中のものと一致しなければ無視される。 */
+      effectId: number;
+      /** モニターが再生を開始した時刻(Date.now())。worker 側で now を超えない範囲に丸める。 */
+      startedAtMs: Ms;
+    }
+  | {
+      /** この予約の演出は再生されない → プレーン即発動へ倒す。 */
+      action: 'drop';
+      /** 対象の lion-start effect の id。**0 = アーム中のものを種類を問わず対象**。 */
+      effectId: number;
+    };
+
 export interface ChallengeStats {
   presses: number;
   /** フォロー妨害の回数(同一ユーザーはチャレンジ1回につき1度だけ数える)。 */
@@ -2225,6 +2562,13 @@ export interface ChallengeStats {
   quizDown: number;
   /** お題ルーレットの清算による加算量の合計。 */
   quizUp: number;
+  /**
+   * 一撃クリア(TIKTOK UNIVERSE)による減算量の合計(正の数で保持)。
+   * **giftDown へ相乗りさせない** — あちらは「増減規則が動かした量」で
+   * ダッシュボードの検算に使われており、残数まるごと(初期値と同オーダー)を
+   * 混ぜると `giftDown ≒ Σ 規則` の関係が壊れる(quizDown / joinDown と同じ判断)。
+   */
+  universeDown: number;
 }
 
 /**
@@ -2527,6 +2871,62 @@ export interface ChallengeState {
     test?: true;
   };
   /**
+   * 一撃クリア(TIKTOK UNIVERSE)が進行中(アーム〜清算)のときだけ載る。
+   * boost / tapLock / revolution / quiz と同じ「キーの有無 = 状態」規約。
+   *
+   * アーム中は `armed: true` + 時刻 0 + `fromValue` 0 — モニターはこのキーの
+   * 出現で「発動時点で溜まっていた演出キューが空になる」のを待ち、空になったら
+   * `challenge.universeCue{start}` を撃つ(quiz.armed とまったく同じバリア方式)。
+   */
+  universe?: {
+    /** アーム中(バリアのキュー消化待ち)。commit 後は落ちて絶対時刻が入る。 */
+    armed?: true;
+    /** 演出の開始(= 導入カットインの再生開始)。armed 中は 0。 */
+    startsAtMs: Ms;
+    /** 演出の終端 = 清算時刻(startsAtMs + UNIVERSE_TOTAL_MS)。armed 中は 0。 */
+    endsAtMs: Ms;
+    /**
+     * **カウントダウンの開始値**。commit の瞬間の value を焼いた**権威**で、
+     * モニターの −N 連打はこの数から `planUniverseDrain(fromValue)` で 0 まで割る。
+     * 自前の表示値から割らないこと — アーム中の押下(通常どおり効く)で
+     * モニターの表示値と worker 値がズレうる。armed 中は 0。
+     */
+    fromValue: number;
+    /** 演出中に破棄したタップ数(quiz.blocked と同じ「押したのに効かない」手応え)。 */
+    blocked: number;
+    nickname?: string;
+    label?: string;
+    /** ▶テスト実演の窓(testEffect 'universe')。値・統計・凍結には触れない。 */
+    test?: true;
+  };
+  /**
+   * ライオン(妨害のボス襲来)が進行中(アーム〜清算)のときだけ載る。
+   * universe と同じ「キーの有無 = 状態」規約・同じバリア方式。
+   *
+   * アーム中は `armed: true` + 時刻 0 — モニターはこのキーの出現で「発動時点で
+   * 溜まっていた演出キューが空になる」のを待ち、空になったら
+   * `challenge.lionCue{start}` を撃つ。
+   */
+  lion?: {
+    /** アーム中(バリアのキュー消化待ち)。commit 後は落ちて絶対時刻が入る。 */
+    armed?: true;
+    /** 演出の開始(= 導入カットインの再生開始)。armed 中は 0。 */
+    startsAtMs: Ms;
+    /** 演出の終端 = 清算時刻(startsAtMs + lionCutsceneMs(steps))。armed 中は 0。 */
+    endsAtMs: Ms;
+    /**
+     * 1発あたりの加算量と発数。**commit の瞬間の設定を焼いた権威**で、モニターの
+     * `+N` 連打と合計発表はこの2つから `planLionCut` で組む(自前の cfg から
+     * 組まないこと — cfg は 120 秒ポーリングで古くなりうる)。armed 中は 0。
+     */
+    each: number;
+    steps: number;
+    nickname?: string;
+    label?: string;
+    /** ▶テスト実演の窓(testEffect 'lion')。値・統計・凍結には触れない。 */
+    test?: true;
+  };
+  /**
    * 最終ゲート(ラスト◯◯モード)がアクティブな間だけ載る。taps = 現ゲートの蓄積
    * (0..needed-1)、needed = 1減算に必要なタップ数(設定のライブ値)。
    * 非アクティブ時・ブーストウィンドウ/起動カットイン中はキーごと省く
@@ -2548,7 +2948,7 @@ export interface ChallengeState {
 export interface ChallengeFxQueueItem {
   /** ワーカー内の単調採番。ドレインまで不変 — 表示側の同一性キー。 */
   id: number;
-  kind: 'band' | 'boost' | 'roulette' | 'follow' | 'revolution' | 'quiz';
+  kind: 'band' | 'boost' | 'roulette' | 'follow' | 'revolution' | 'universe' | 'lion' | 'quiz';
   /** 行為者(viewer.nickname ?? displayId)。 */
   nickname?: string;
   /**
@@ -2629,6 +3029,11 @@ export interface ChallengeLogEntry {
   revolutionTapCount?: number;
   /** kind='revolution-end': 反転いいねによる減算(同上)。 */
   revolutionLikeDown?: number;
+  /** kind='universe-end': 一撃クリアの減算量(effect からそのまま引き継ぐ)。 */
+  universeDownTotal?: number;
+  /** kind='lion-start'/'lion-end': 1発あたりの額と発数(履歴行の文言用)。 */
+  lionEach?: number;
+  lionSteps?: number;
   /** kind='quiz-start'/'quiz-end': 確定したお題の本文(effect からそのまま引き継ぐ)。 */
   quizPrompt?: string;
   /** kind='quiz-end': 「よかった」の票数(effect からそのまま引き継ぐ)。 */
@@ -2714,8 +3119,15 @@ export const DEFAULT_ZOOM_FACTOR = 2;
  *    連鎖で導入の全面カットから挑戦中までBGMが鳴り続け、「回転が終わって挑戦の時間に
  *    なった」区切りが音で分からなくなったため(2026-08-22 ユーザー決定)。v14 と違い
  *    **keep ちょうどのときだけ**触る — 自分で曲を選んだ人の設定は残す。
+ * 16: ダイヤ増減(giftScale)の既定行へ、あとから足した欄だけを配る
+ *    (migrateChallengeGiftScaleRows)。giftScale は v15 の時点で既に保存されていたので
+ *    「キー欠損 → 既定へ倒す」フォールバックが効かず、行の中に増えたフィールド
+ *    (単価 diamonds・富士花火の giftName 'fuji')だけが永久に欠けたままだった。
+ *    実害は「設定画面の単価が空 → ▶ が押せない」と「富士花火が減算にならず
+ *    帯域(+30/💎)へ落ちて**逆方向に動く**」の2つ(2026-08-27 ユーザー報告)。
+ *    **行は足さない・消さない** — 欠けている欄だけを埋める。
  */
-export const SETTINGS_VERSION = 15;
+export const SETTINGS_VERSION = 16;
 
 export interface AppSettings {
   eulerApiKey: string;

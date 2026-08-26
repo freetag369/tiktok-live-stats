@@ -33,6 +33,10 @@ function cfg(over: Partial<ChallengeConfig> = {}): ChallengeConfig {
   // 「規則なしは何も起きない」等)の値が 1 ずつ静かに汚れてしまう。機能自体の
   // 検査は challenge-comment-helper.spec.ts が持つ。
   base.commentHelper.enabled = false;
+  // ダイヤ増減(既定オン)も無効にする — 1💎につき +30 / +50 に変わるので、
+  // giftDefault(perDiamond +1)を前提にした既存のギフトテストが一斉に狂う。
+  // 機能自体の検査は challenge-gift-scale.spec.ts が明示的に有効化する。
+  base.giftScale.enabled = false;
   return { ...base, enabled: true, ...over };
 }
 
@@ -765,7 +769,7 @@ describe('ChallengeEngine — 状態機械', () => {
     expect(stopped.value).toBe(109); // 凍結表示
     const rs = e.reset();
     expect(rs.value).toBe(100);
-    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0 });
+    expect(rs.stats).toEqual({ presses: 0, follows: 0, giftDown: 0, giftUp: 0, likeUp: 0, likeStockUp: 0, likeDown: 0, likeStockDown: 0, commentUp: 0, joinDown: 0, joinUp: 0, rouletteSpins: 0, quizDown: 0, quizUp: 0, universeDown: 0 });
     // reset 後は同じユーザーのフォローがまた妨害になる
     e.start();
     expect(e.handleEvent(follow('a'))).toBe(true);

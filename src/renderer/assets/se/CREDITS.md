@@ -244,3 +244,76 @@ cp "Sound/追いかけっこキャッハー.mp3" quiz/bgm-quiz-chase.mp3
 # bgm-quiz-think.mp3 — mean -22.6dB → +5.2dB 増幅、ピークは -1.5dBFS で頭打ち
 ffmpeg -i "Sound/考え中.mp3" -af "volume=5.2dB,alimiter=limit=0.8414:attack=5:release=60:level=disabled,aformat=sample_fmts=fltp" -ar 44100 -c:a libmp3lame -q:a 4 quiz/bgm-quiz-think.mp3
 ```
+
+
+---
+
+## gauge-recover.mp3 — 一撃クリアの減算連打の刻み音・2026-08-26 追加
+
+TIKTOK UNIVERSE の一撃クリアで、残量を 30 分割して減らす 9 秒間に **300ms ごとに
+30 回**鳴る刻み音。出典は**ユーザー(配信者)提供の素材**で、リポジトリ外の作業フォルダ
+`Sound/ゲージ回復2.mp3` から取り込んだ。**CC0 ではない** — `quiz/` の 2 曲と同じ扱いで、
+AGPL のソースzip再配布前に権利元の許諾を必ず確認すること。
+
+| 項目 | 元ファイル | 同梱 |
+|---|---|---|
+| 実尺 | 1.411 秒 | **0.888 秒** |
+| 可聴部 | 0〜**0.794 秒**(以降 0.57 秒は完全な無音) | 0〜0.79 秒 + 60ms フェード |
+| 音量 | -17.0 LUFS / -6.6 dBTP | **-15.4 LUFS / -5.6 dBTP** |
+| サイズ | 34,480 bytes | 16,917 bytes |
+
+- **末尾の無音を落としてあるのが要点。** 可聴部 0.79 秒 < `POOL_SIZE`(4)× 300ms
+  = 1.2 秒なので、5 発目がプールの最古を `currentTime = 0` で巻き戻しても
+  **鳴っている音は切らない**。`se.ts` の `POOL_SIZE` を触らずに 30 連打が成立する。
+- **カタログ gain は 0.6**(`pop` と同格)。`SeSound.gain` の規約「連発される音は
+  控えめに」に従う — 単発の専用録り(0.9)と同じにすると 3〜4 声重畳で耳に痛い。
+- **どのスロットの既定でもない。** `boost-final` と同じ「手で割り当てる用の選択肢」で、
+  一撃クリアの本線はモニターが `playSe('gauge-recover', …)` を直接呼ぶ
+  (新しい `ChallengeSeSlot` は作らない — `shared/challenge.ts` の恒久方針)。
+- 音量は `effectiveSeVolume(seVolume, 100)` = 全体音量のみ(革命の衝突音と同じ流儀)。
+
+取り込みコマンド(再現用。元ファイルはリポジトリ外の `Sound/`):
+
+```
+ffmpeg -y -i "Sound/ゲージ回復2.mp3" -af "atrim=0:0.85,asetpts=N/SR/TB,volume=1.0dB,afade=t=out:st=0.79:d=0.06,aresample=48000" -c:a libmp3lame -q:a 4 -ac 2 -map_metadata -1 gauge-recover.mp3
+```
+
+## ライオン(Lion 29,999💎)の専用音3件・2026-08-26 追加
+
+作者提供の mp3(`IMAGE/20260826/` の「ペタッ」「爆発1」「爆発2」)から取り込んだ。
+**CC0 ではない** — `quiz/` の 2 曲・`gauge-recover` と同じ扱いで、AGPL のソースzip
+再配布前に権利元の許諾を必ず確認すること。
+
+「覚悟を…決めましょう」は**新規追加していない** — 既存の `hype-kakugo.mp3`
+(1.463 秒・超激アツのボイス7件のひとつ)とほぼ同一の録音だったので、そちらを
+そのまま再利用している(段③はモニターが `playSe('hype-kakugo', …)` を直接呼ぶ)。
+
+| id | 元ファイル | 元の実尺 / 音量 | 同梱 | gain |
+|---|---|---|---|---|
+| `lion-peta` | ペタッ.mp3 | 1.032秒 / mean -29.7 dB・peak -5.9 dB | 1.032秒 / peak **-1.9 dB** | 0.9 |
+| `lion-blast` | 爆発1.mp3 | 3.396秒 / mean -20.4 dB・peak -7.9 dB | **0.936秒**(トリム)/ peak **-1.5 dB** | **0.6** |
+| `lion-boom` | 爆発2.mp3 | 2.586秒 / mean -19.2 dB・peak -7.0 dB | 2.592秒 / peak **-1.3 dB** | 0.9 |
+
+- **`lion-blast` のトリムが要点。** 段④は **245ms 間隔で 49 発**なので、
+  可聴部が `POOL_SIZE`(4)× 245ms = **980ms** を超えると 5 発目がプールの最古を
+  `currentTime = 0` で巻き戻して**鳴っている音を切る**。素材の 3.4 秒をそのまま
+  積むと各発が 980ms で頭打ちになり、49 連打が濁る。0.936 秒へ詰めることで
+  `se.ts` の `POOL_SIZE` を触らずに成立する(`gauge-recover` と同じ手口)。
+  この不等式は `test/unit/lion-settle.spec.ts` が
+  `LION_BURST_STEP_MS × LION_SE_POOL_SIZE ≥ LION_BLAST_SE_MS` で凍結している。
+- **`lion-blast` の gain だけ 0.6**(`pop` / `gauge-recover` と同格)。`SeSound.gain` の
+  規約「連発される音は控えめに」に従う — 単発の専用録り(0.9)と同じにすると
+  4 声重畳で耳に痛い。
+- **どれもスロットの既定ではない。** `gauge-recover` と同じ「手で割り当てる用の
+  選択肢」で、本線はモニターが `playSe(...)` を直接呼ぶ(新しい `ChallengeSeSlot` は
+  作らない — `shared/challenge.ts` の恒久方針)。
+- 音量は `effectiveSeVolume(seVolume, 100)` = 全体音量のみ(革命の衝突音・
+  `gauge-recover` と同じ流儀)。
+
+取り込みコマンド(再現用。元ファイルはリポジトリ外の `IMAGE/20260826/`):
+
+```
+ffmpeg -y -i "ペタッ.mp3"  -af "volume=4.4dB,afade=t=out:st=0.95:d=0.08,aresample=48000" -c:a libmp3lame -b:a 192k lion-peta.mp3
+ffmpeg -y -i "爆発1.mp3"   -af "atrim=0:0.90,asetpts=PTS-STARTPTS,volume=6.4dB,afade=t=out:st=0.80:d=0.10,aresample=48000" -c:a libmp3lame -b:a 192k lion-blast.mp3
+ffmpeg -y -i "爆発2.mp3"   -af "volume=5.5dB,afade=t=out:st=2.45:d=0.13,aresample=48000" -c:a libmp3lame -b:a 192k lion-boom.mp3
+```

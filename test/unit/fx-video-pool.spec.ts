@@ -55,6 +55,15 @@ describe('MonitorView の <video> ホルダー(ソース不変条件)', () => {
         'rl-hot-intro',
         'stock-cutin',
         'tap-lock-cutin',
+        // 一撃クリアの導入/締めカットイン(2026-08-26 追加)。**1本だけ** —
+        // 導入と締めは 1 つの universeHold の中で 9 秒しか離れていないので、
+        // 革命・お題のように別ホルダーへ割る理由が無い(boost が
+        // intro/window/result を位相で回しているのと同じ形)。
+        'universe-cutin',
+        // ライオンの導入/全面爆発カットイン(2026-08-26 追加)。**1本だけ** —
+        // 導入と全面は 1 つの lionHold の中で 28 秒しか離れていないので、
+        // universe-cutin とまったく同じ判断(別ホルダーへ割る理由が無い)。
+        'lion-cutin',
         // お題ルーレットの導入全面カット(2026-08-21 追加)。再生枠のみ —
         // 素材(introClip)未設定なら startQuizFx が段ごとスキップする。
         'quiz-cutin',

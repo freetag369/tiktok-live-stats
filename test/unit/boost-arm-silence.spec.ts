@@ -46,7 +46,12 @@ function fnBody(src: string, name: string): string {
 
 describe('フィーバー着弾〜起動カットインの無音(ソース不変条件)', () => {
   describe('pushFloat の高速路は待機中のブーストを追い越さない', () => {
-    const body = fnBody(MONITOR, 'pushFloat');
+    // 2026-08-26: 判定の本体は bannerWillShowNow へ切り出した(ダイヤ増減の浮上が
+    // 「押した瞬間に出る」ことを前提に据え置きを張るため、同じ判定を共有する必要が
+    // ある)。**条件が二重管理になるとモニターが全死する**ので、ここでは
+    // 「本体に判定がある」と「pushFloat がそれを通す」の両方を固定する。
+    const body = fnBody(MONITOR, 'bannerWillShowNow');
+    const push = fnBody(MONITOR, 'pushFloat');
 
     it('pendingBoosts と boost ランクで追い越し判定を作っている', () => {
       // pumpStage は pickStageNext でランク比較するのに、この高速路だけが
@@ -57,18 +62,27 @@ describe('フィーバー着弾〜起動カットインの無音(ソース不変
       expect(body).toMatch(/bannerRank\(kind\) >= fxRank\('boost'\)/);
     });
 
-    it('その判定が free の合議に入っている(宣言だけで未使用にならない)', () => {
+    it('その判定が戻り値の合議に入っている(宣言だけで未使用にならない)', () => {
       expect(body).toContain('!boostOutranks');
       const declAt = body.indexOf('const boostOutranks');
-      const freeAt = body.indexOf('const free');
+      const useAt = body.indexOf('!boostOutranks');
       expect(declAt, 'boostOutranks の宣言が無い').toBeGreaterThanOrEqual(0);
-      expect(freeAt, 'free の宣言が無い').toBeGreaterThanOrEqual(0);
-      expect(declAt, 'boostOutranks は free より前で決めること').toBeLessThan(freeAt);
+      expect(declAt, 'boostOutranks は使用より前で決めること').toBeLessThan(useAt);
+      // 順番待ちが居る / カットイン中 / 間合い中は即時表示しない、も同じ合議の中。
+      expect(body).toContain('bannerQueue.current.length === 0');
+      expect(body).toContain('!anyCutinHold()');
+      expect(body).toContain("stageWaitFor('banner', now) === 0");
+    });
+
+    it('pushFloat は自前で判定を持たず bannerWillShowNow を通す(二重管理の禁止)', () => {
+      expect(push).toContain('bannerWillShowNow(kind, now)');
+      // 高速路の条件を pushFloat 側へコピーし直したら落とす。
+      expect(push).not.toContain('boostOutranks');
     });
 
     it('immediate の権利は据え置き(確定バナーの即時表示を壊さない)', () => {
       // ルーレット確定バナーは immediate:true で舞台を奪ってよい契約のまま。
-      expect(body).toContain("opts?.immediate === true || free");
+      expect(push).toContain('opts?.immediate === true || bannerWillShowNow(kind, now)');
     });
   });
 
