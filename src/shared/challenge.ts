@@ -2638,39 +2638,53 @@ export const GIFT_SCALE_ROWS_MAX = 20;
 export const DEFAULT_GIFT_SCALE: GiftScaleConfig = {
   enabled: true,
   rows: [
-    // 幻のユニコーン(5000💎)。giftId は 'Unicorn Fantasy' として実測済み
-    // (roulette-hot-gifts.spec.ts が同じ ID を使っている)。giftName を空にしてあるのは
-    // 'unicorn' の部分一致だと別ギフトの 'Unicorn'(12453/2499💎)まで巻き込むため。
-    { id: 'gs-unicorn-fantasy', giftId: '7237', giftName: '', canonical: '', label: '幻のユニコーン', perDiamond: -50, diamonds: 5000 },
-    // 未来との遭遇(1500💎)。analytics.db の gift_catalog に受信実績あり。
-    { id: 'gs-future-encounter', giftId: '10668', giftName: '', canonical: '', label: '未来との遭遇', perDiamond: -50, diamonds: 1500 },
-    // 流星群(3000💎)。2026-08-26 に streamdps の日本向け一覧(?jp=1・全3ページ 470件)で
-    // 実測 — 3000 コインで 'Meteor Shower' はこの1件だけ(同名別IDの罠なし)。
-    { id: 'gs-meteor-shower', giftId: '6563', giftName: '', canonical: '', label: '流星群', perDiamond: -50, diamonds: 3000 },
-    // 富士花火(7999💎)。**giftId は未確定**だが、英語名は 'Summer Fuji Mountain'
-    // (7999💎・日本限定)と分かっているので **giftName の部分一致で拾う**。
-    // 部分一致を 'fuji' まで短くしてあるのは名前の揺れ('Summer Fuji Mountain' /
-    // 'Fuji Mountain' 等)を飲むため — 'unicorn' が別ギフトの 'Unicorn' を巻き込んだ
-    // 前例があるので短縮は慎重にすべきだが、**'fuji' は衝突しないことを実測済み**
-    // (streamdps の日本向け一覧 470 件・analytics.db の受信済み 221 件のどちらにも
-    //  'fuji' を含む名前は 0 件)。giftId が分かったら giftId を入れること — そちらが
-    // 本線で、名前一致は TikTok 側の表記変更で黙って外れうる保険にすぎない。
+    // ── 減算(応援)= 1ダイヤにつき −50 ────────────────────────────────────
+    // **高額帯にも減算ギフトがあるので、帯域だけでは判定できない**(2026-08-27 ユーザー決定)。
+    // 同じコイン数で方向が逆になる組が3つあり、giftId での個別登録が必須:
+    //   10000💎 星から星へ(減) / 夕暮れを背に(増)
+    //   15000💎 ローザの星雲(減) / パーティーは続く(増)
+    //   25999💎 アダムの夢(減)   / フェニックス(増)
+    // giftId は 2026-08-27 に **2つの独立したカタログ**で実測・一致を確認した:
+    //   ① streamdps の日本向け一覧(?jp=1・全3ページ 470件)
+    //   ② tiktokgame.vn の全地域DB(1013件・data-id/data-price/data-cc)— 下の10件すべてで
+    //      コイン数が一致し、data-cc に jp を含む(7237 と 8503/9608 は jp 限定)。
+    // giftName は**空のままにする** — id が本線で、部分一致は別ギフトを巻き込む
+    // ('unicorn' が 'Unicorn'(12453/2499💎)を巻き込んだ前例)。例外は富士花火だけ。
+    { id: 'gs-tiktok-stars', giftId: '8582', giftName: '', canonical: '', label: 'TikTok Stars', perDiamond: -50, diamonds: 39999 },
+    { id: 'gs-adams-dream', giftId: '7400', giftName: '', canonical: '', label: 'アダムの夢', perDiamond: -50, diamonds: 25999 },
+    // バラの馬車は streamdps の日本向け一覧に載っていない(25000💎 の行が1件も無い)。
+    // giftId は外部カタログ由来(日本対応と確認済み)。
+    { id: 'gs-rose-carriage', giftId: '13352', giftName: '', canonical: '', label: 'バラの馬車', perDiamond: -50, diamonds: 25000 },
+    // 20000💎 には 'Premium Shuttle'(7125)もある — 'TikTok Shuttle' はこちら。
+    { id: 'gs-tiktok-shuttle', giftId: '6751', giftName: '', canonical: '', label: 'TikTokシャトル', perDiamond: -50, diamonds: 20000 },
+    { id: 'gs-rosa-nebula', giftId: '8912', giftName: '', canonical: '', label: 'ローザの星雲', perDiamond: -50, diamonds: 15000 },
+    { id: 'gs-interstellar', giftId: '6149', giftName: '', canonical: '', label: '星から星へ', perDiamond: -50, diamonds: 10000 },
+    // 富士花火(7999💎)。**giftId は依然として未確定**。英語名 'Summer Fuji Mountain'
+    // (日本限定)までは分かっているので giftName の部分一致で拾う。
+    //
+    // ⚠ 2026-08-27 の調査で giftId 8835 という説が出たが**採用していない** — bettertok は
+    //   404、tiktokgame.vn の 1013 件にも 8835 も 'Summer Fuji Mountain' も存在しない
+    //   (7999💎 の日本向けは 'Star Throne' 7764/8420 だけ)。**誤ったIDはIDが無いより危険**で、
+    //   別のギフトが −399,950 されてしまう。一度受信して「ギフトリスト」タブで実IDを見るのが本線。
+    //
+    // 'fuji' まで短縮したのは表記揺れ('Summer Fuji Mountain'/'Fuji Mountain' 等)を飲むため。
+    // 衝突ゼロは3ソースで実測済み(日本向け470件・全地域1013件・受信済み221件のいずれにも
+    // 'fuji' を含む名前は0件)。giftId が判明したらそちらへ移すこと。
     { id: 'gs-fuji-fireworks', giftId: '', giftName: 'fuji', canonical: '', label: '富士花火 (Summer Fuji Mountain)', perDiamond: -50, diamonds: 7999 },
+    { id: 'gs-unicorn-fantasy', giftId: '7237', giftName: '', canonical: '', label: '幻のユニコーン', perDiamond: -50, diamonds: 5000 },
+    { id: 'gs-meteor-shower', giftId: '6563', giftName: '', canonical: '', label: '流星群', perDiamond: -50, diamonds: 3000 },
+    { id: 'gs-future-encounter', giftId: '10668', giftName: '', canonical: '', label: '未来との遭遇', perDiamond: -50, diamonds: 1500 },
   ],
-  // 9699 は「レオンとリリー」(= 'Leon and Lili' / giftId 8916)のコイン数。ここを下端に
-  // すると、ユーザー指定の増加リストが**個別登録なしで全部この帯に入る** — 判定は
-  // ダイヤ数だけなので giftId を知らなくても正しく動く(新しい高額ギフトも自動で追従)。
+  // 帯域は**増加(妨害)専用**になった。上の減算行に一致しない 9699💎 以上が +50、未満が +30。
   //
-  // 参考: 増加リストの giftId(2026-08-27 時点の日本向け。**この層の判定には使わない**)
-  //   TikTok Stars 39999=8582 / ドラゴンの炎 26999=7610 / フェニックス 25999=7319 /
-  //   アダムの夢 25999=7400 / バラの馬車 25000=13352 / TikTokシャトル 20000=6751 /
-  //   パーティーは続く 15000=11586 / ローザの星雲 15000=8912 / ホワイトウルフ 12000=9608 /
-  //   ハヤブサ 10999=8503 / 夕暮れを背に 10000=6203 / 星から星へ 10000=6149 /
-  //   レオンとリリー 9699=8916
-  // ⚠ ハヤブサ(Falcon)とホワイトウルフ(White Wolf)は**地域ごとに別ID**がある
-  //   (Falcon: 日本 8503 / 米国 10164 / スペイン・インドネシア 6271、
-  //    White Wolf: 日本 9608 / ベトナム 10354)。古いカタログの 7627 は英語名 'Hawk'、
-  //   6367 は旧 Falcon なので、日本の配信で個別登録するなら 8503 を使うこと。
+  // 増加リスト(2026-08-27 ユーザー指定)は全部 9699 以上なので**個別登録が要らない**:
+  //   ドラゴンの炎 26999=7610 / フェニックス 25999=7319 / パーティーは続く 15000=11586 /
+  //   ホワイトウルフ 12000=9608 / ハヤブサ 10999=8503 / 夕暮れを背に 10000=6203 /
+  //   レオンとリリー 9699=8916(ちょうど下端)
+  // ⚠ Falcon と White Wolf は**地域ごとに別ID**(Falcon: 日本 8503 / 米国 10164 /
+  //   スペイン・インドネシア 6271、White Wolf: 日本 9608 / ベトナム 10354)。古いカタログの
+  //   7627 は英語名 'Hawk'、6367 は旧 Falcon なので、日本で個別登録するなら 8503。
+  //   (tiktokgame.vn の全地域DBでも 8503/9608 はどちらも data-cc="jp" 単独で確認済み。)
   threshold: 9699,
   highPerDiamond: 50,
   lowPerDiamond: 30,
@@ -3556,7 +3570,7 @@ export function migrateChallengeGiftScaleRows(
   // 配る値は DEFAULT_GIFT_SCALE から引く(数値を二重に持たない)。
   const src = new Map(DEFAULT_GIFT_SCALE.rows.map((r) => [r.id, r]));
   let touched = false;
-  const rows = cfg.giftScale.rows.map((r) => {
+  const rows: GiftScaleRow[] = cfg.giftScale.rows.map((r) => {
     const d = src.get(r.id);
     if (!d) return r; // ユーザーが自分で足した行 — 触らない
     const next = { ...r };
@@ -3575,9 +3589,38 @@ export function migrateChallengeGiftScaleRows(
     }
     return next;
   });
+  // **v16 で新設された行だけ**を、まだ無ければ足す。足さないと 9699💎 以上の減算ギフトが
+  // 帯域に落ちて「減らすはずが増える」という方向が逆の事故になる(2026-08-27 ユーザー決定 —
+  // 同じコイン数で方向が逆の組が3つあり、帯域では判定できない)。
+  //
+  // 対象を新設行に限るのが肝。DEFAULT_GIFT_SCALE.rows 全部を配ると、v15 の時点から
+  // 在った行(幻のユニコーン等)を**消した人に復活させてしまう** — 「消した行は配り直さない」
+  // が migrateChallengeTapBoostCorgi 以来の規約。id 一致で見るので二重にも増えない。
+  const have = new Set(rows.map((r) => r.id));
+  const added = DEFAULT_GIFT_SCALE.rows.filter(
+    (r) => GIFT_SCALE_V16_NEW_ROWS.has(r.id) && !have.has(r.id)
+  );
+  if (added.length > 0 && rows.length < GIFT_SCALE_ROWS_MAX) {
+    // 上限を超えないぶんだけ。既定と同じ「コイン数の多い順」になるよう先頭へ。
+    rows.unshift(...structuredClone(added).slice(0, GIFT_SCALE_ROWS_MAX - rows.length));
+    touched = true;
+  }
   if (!touched) return cfg;
   return { ...cfg, giftScale: { ...cfg.giftScale, rows } };
 }
+
+/**
+ * v16 で新設したダイヤ増減の行 id。**移行が配ってよいのはこの6件だけ** — 既定の全行を
+ * 配ると、v15 から在った行を消した人に復活させてしまう。
+ */
+const GIFT_SCALE_V16_NEW_ROWS: ReadonlySet<string> = new Set([
+  'gs-tiktok-stars',
+  'gs-adams-dream',
+  'gs-rose-carriage',
+  'gs-tiktok-shuttle',
+  'gs-rosa-nebula',
+  'gs-interstellar',
+]);
 
 /**
  * v16 の寄せ替え対象になる「旧既定ちょうど」のラベル。ユーザーが書き換えたメモを

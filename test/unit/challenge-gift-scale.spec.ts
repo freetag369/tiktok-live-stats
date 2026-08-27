@@ -79,10 +79,10 @@ describe('matchGiftScale — 帯域と例外行', () => {
     expect(matchGiftScale(c, { giftId: 'x', diamonds: 9699 })?.amount).toBe(9699 * 50);
   });
 
-  it('IMG1 の6件は個別登録なしで ×50 帯に入る', () => {
-    // フェニックス / パーティーは続く / ホワイトウルフ / ハヤブサ / 夕暮れを背に / レオンとリリー
+  it('減算行に載っていない 9699💎 以上は帯域で ×50 増加', () => {
+    // 帯域は**増加(妨害)専用**。減算にしたいギフトは giftId で個別登録する規約。
     for (const d of [25999, 15000, 12000, 10999, 10000, 9699]) {
-      expect(matchGiftScale(c, { giftId: 'x', diamonds: d })?.amount).toBe(d * 50);
+      expect(matchGiftScale(c, { giftId: 'unregistered', diamonds: d })?.amount).toBe(d * 50);
     }
   });
 
@@ -97,18 +97,53 @@ describe('matchGiftScale — 帯域と例外行', () => {
     expect(matchGiftScale(c, { giftId: '6563', diamonds: 3000 })?.amount).toBe(-150_000);
   });
 
-  it('ユーザー指定の増加リストは個別登録なしで ×50 帯に入る(境界 9699 の根拠)', () => {
-    // 2026-08-26 実測: ドラゴンの炎 26999 = Dragon Flame(7610) / フェニックス 25999 =
-    // Phoenix(7319) / レオンとリリー 9699 = Leon and Lili(8916)。境界を上げ下げすると
-    // ここが落ちる — リストの下端(9699)を割ってはいけない。
-    for (const [giftId, diamonds] of [
-      ['7610', 26999],
-      ['7319', 25999],
-      ['11586', 15000],
-      ['8916', 9699],
+  it('【50倍増し】7件は個別登録なしで帯域が拾う(境界 9699 の根拠)', () => {
+    // 2026-08-27 ユーザー指定の増加リスト。全部 9699 以上なので行が要らない。
+    // 境界を上げるとリストの下端(レオンとリリー 9699)が落ちる。
+    for (const [jp, giftId, diamonds] of [
+      ['ドラゴンの炎', '7610', 26999],
+      ['フェニックス', '7319', 25999],
+      ['パーティーは続く', '11586', 15000],
+      ['ホワイトウルフ', '9608', 12000],
+      ['ハヤブサ', '8503', 10999],
+      ['夕暮れを背に', '6203', 10000],
+      ['レオンとリリー', '8916', 9699],
     ] as const) {
       const r = matchGiftScale(c, { giftId, diamonds });
-      expect(r?.amount, `${giftId} が ×50 帯から外れた`).toBe(diamonds * 50);
+      expect(r?.amount, `${jp} が ×50 増加から外れた`).toBe(diamonds * 50);
+    }
+  });
+
+  it('【50倍減り】高額6件は giftId の行で拾う(帯域では判定できない)', () => {
+    for (const [jp, giftId, diamonds] of [
+      ['TikTok Stars', '8582', 39999],
+      ['アダムの夢', '7400', 25999],
+      ['バラの馬車', '13352', 25000],
+      ['TikTokシャトル', '6751', 20000],
+      ['ローザの星雲', '8912', 15000],
+      ['星から星へ', '6149', 10000],
+    ] as const) {
+      const r = matchGiftScale(c, { giftId, diamonds });
+      expect(r?.amount, `${jp} が ×50 減算になっていない`).toBe(diamonds * -50);
+    }
+  });
+
+  it('★同じコイン数で方向が逆になる3組が取り違わっていない(最悪の事故の回帰止め)', () => {
+    // ID を1つ取り違えると 200万近い数字が**逆方向**に動く。値ごと固定する。
+    const pairs = [
+      { coins: 10000, down: ['星から星へ', '6149'], up: ['夕暮れを背に', '6203'] },
+      { coins: 15000, down: ['ローザの星雲', '8912'], up: ['パーティーは続く', '11586'] },
+      { coins: 25999, down: ['アダムの夢', '7400'], up: ['フェニックス', '7319'] },
+    ] as const;
+    for (const { coins, down, up } of pairs) {
+      expect(
+        matchGiftScale(c, { giftId: down[1], diamonds: coins })?.amount,
+        `${down[0]}(${down[1]}) は減らす側`
+      ).toBe(coins * -50);
+      expect(
+        matchGiftScale(c, { giftId: up[1], diamonds: coins })?.amount,
+        `${up[0]}(${up[1]}) は増やす側`
+      ).toBe(coins * 50);
     }
   });
 
@@ -400,14 +435,22 @@ describe('validateGiftScale — 欠損フォールバックとサニタイズ', 
 });
 
 describe('v16 移行 — 保存済み設定へ「あとから足した欄」を配る', () => {
-  /** v15 時点の保存済み(単価も giftName も無い)を再現する。 */
+  /** v15 時点の保存済みを再現する — 減算は低額の4行だけ・単価も giftName も無い。 */
+  const V15_ROW_IDS = [
+    'gs-unicorn-fantasy',
+    'gs-future-encounter',
+    'gs-meteor-shower',
+    'gs-fuji-fireworks',
+  ];
   function v15(): ChallengeConfig {
     const c = cfg();
     return {
       ...c,
       giftScale: {
         ...c.giftScale,
-        rows: c.giftScale.rows.map((r) => ({ ...r, giftName: '', diamonds: undefined })),
+        rows: c.giftScale.rows
+          .filter((r) => V15_ROW_IDS.includes(r.id))
+          .map((r) => ({ ...r, giftName: '', diamonds: undefined })),
       },
     };
   }
@@ -464,7 +507,35 @@ describe('v16 移行 — 保存済み設定へ「あとから足した欄」を�
     expect(row).toMatchObject({ diamonds: 1234, giftName: 'mine', label: '自分のメモ' });
   });
 
-  it('消した行を復活させない / 自分で足した行も触らない', () => {
+  it('v16 で新設した高額の減算6行を足す(方向が逆になる事故を潰す本体)', () => {
+    // v15 の保存には4行しか無い。足さないと TikTok Stars 等が帯域に落ちて
+    // 「減らすはずが +50 で増える」になる。
+    const before = v15();
+    const out = migrateChallengeGiftScaleRows(before, 15).giftScale.rows;
+    for (const id of [
+      'gs-tiktok-stars',
+      'gs-adams-dream',
+      'gs-rose-carriage',
+      'gs-tiktok-shuttle',
+      'gs-rosa-nebula',
+      'gs-interstellar',
+    ]) {
+      expect(out.map((r) => r.id), `${id} が配られていない`).toContain(id);
+    }
+    expect(out.length).toBe(10);
+  });
+
+  it('移行後は高額の減算ギフトが本当に減る', () => {
+    const after = migrateChallengeGiftScaleRows(v15(), 15);
+    // 星から星へ(10000💎)は減り、同じ 10000💎 の夕暮れを背には増える。
+    expect(matchGiftScale(after, { giftId: '6149', diamonds: 10_000 })?.amount).toBe(-500_000);
+    expect(matchGiftScale(after, { giftId: '6203', diamonds: 10_000 })?.amount).toBe(500_000);
+    expect(matchGiftScale(after, { giftId: '8582', diamonds: 39_999 })?.amount).toBe(-1_999_950);
+  });
+
+  it('消した行は復活させない / 自分で足した行も触らない', () => {
+    // 配ってよいのは **v16 で新設した6行だけ**。v15 から在った行(流星群)を消した人に
+    // 配り直すと「消したはずの行が戻る」になる。
     const src = v15();
     const custom = { id: 'my-row', giftId: '111', giftName: '', canonical: '', perDiamond: -1 };
     const edited: ChallengeConfig = {
@@ -476,8 +547,16 @@ describe('v16 移行 — 保存済み設定へ「あとから足した欄」を�
     };
     const out = migrateChallengeGiftScaleRows(edited, 15).giftScale.rows;
     expect(out.map((r) => r.id)).not.toContain('gs-meteor-shower');
-    expect(out.length).toBe(edited.giftScale.rows.length);
     expect(out.find((r) => r.id === 'my-row')).toEqual(custom);
+    // 既定4行 − 消した1行 + 自作1行 + 新設6行 = 10
+    expect(out.length).toBe(10);
+  });
+
+  it('二度目の移行で行が二重にならない(冪等)', () => {
+    const once = migrateChallengeGiftScaleRows(v15(), 15);
+    const twice = migrateChallengeGiftScaleRows(once, 15);
+    expect(twice.giftScale.rows.length).toBe(once.giftScale.rows.length);
+    expect(twice).toEqual(once);
   });
 
   it('冪等 かつ validate の不動点(二度読みで同じ結果)', () => {
