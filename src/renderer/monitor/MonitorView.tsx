@@ -96,7 +96,12 @@ import {
   stageWaitMs,
   takeNextBanner,
 } from '@shared/fx-stage';
-import { BANNER_GIFT_SCALE_MS, countUpDisplayAt, planGiftScaleFx } from '@shared/gift-scale-fx';
+import {
+  BANNER_GIFT_SCALE_MS,
+  countUpDisplayAt,
+  giftScaleAmtFontPx,
+  planGiftScaleFx,
+} from '@shared/gift-scale-fx';
 import {
   EMPTY_FX_STOCK,
   buildFxStock,
@@ -4629,13 +4634,21 @@ export function MonitorView(): React.JSX.Element {
 
     const sign = e.amount > 0 ? '+' : '-';
     const tier = tierForDiamonds(e.diamonds ?? 0);
+    // 【確定後の文字数で決める】カウントアップ途中の短い数字で決めると、桁が増える
+    // たびに字が縮んで暴れる。10 文字(−1,999,950)でもバナー内寸に収まる値を
+    // shared の純関数が返す(算術は CSS へ複製しない)。
+    const amtPx = giftScaleAmtFontPx(`${sign}${num(amountAbs)}`.length);
     const push = (ms: number, fn: () => void): void => {
       giftScaleTimers.current.push(window.setTimeout(fn, ms));
     };
 
     pushFloat(
       <>
-        <span className="f-amt" ref={giftScaleAmtRef}>
+        <span
+          className="f-amt"
+          ref={giftScaleAmtRef}
+          style={{ '--gs-amt-px': `${amtPx}px` } as React.CSSProperties}
+        >
           {`${sign}0`}
         </span>
         {nameLines({ who: e.nickname ?? '', act: `${e.giftName ?? 'ギフト'} 💎${num(e.diamonds ?? 0)}` })}

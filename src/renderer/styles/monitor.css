@@ -2550,8 +2550,15 @@ body {
  * (.float .f-amt が既に指定しているが、ここは桁が毎フレーム変わる唯一の場所なので
  *  意図として明示しておく)。
  */
+/*
+ * 額は最大 10 文字(−1,999,950)まで伸びる。基準の 48px のままだと
+ * `.float .f-amt` の text-overflow:ellipsis に食われて「-125,…」になり
+ * **桁が読めなくなる**(2026-08-27 実機で観測)。サイズは桁数から
+ * shared/gift-scale-fx.ts の giftScaleAmtFontPx が決め、MonitorView が
+ * --gs-amt-px として渡す(算術を CSS へ複製しない)。
+ */
 .float.banner-gift-scale .f-amt {
-  font-size: calc(60px * var(--float-scale));
+  font-size: calc(var(--gs-amt-px, 48px) * var(--float-scale));
   font-variant-numeric: tabular-nums;
 }
 

@@ -27,7 +27,11 @@ import {
   takeNextBanner,
   type StageNext,
 } from '@shared/fx-stage';
-import { BANNER_GIFT_SCALE_MS } from '@shared/gift-scale-fx';
+import {
+  BANNER_GIFT_SCALE_MS,
+  GIFT_SCALE_AMT_BASE_PX,
+  GIFT_SCALE_AMT_INNER_PX,
+} from '@shared/gift-scale-fx';
 import { bannerRank, fxRank, type FxBannerKind } from '@shared/fx-priority';
 
 /**
@@ -90,6 +94,29 @@ describe('バナー尺と monitor.css の同期', () => {
     expect(STAGE_GAP_CUTIN_MS).toBeGreaterThanOrEqual(STAGE_GAP_BANNER_MS);
     // .float の立ち上がり(floatup 0%→22% ≒ 350ms)を下回らない。
     expect(STAGE_GAP_BANNER_MS).toBeGreaterThanOrEqual(300);
+  });
+});
+
+describe('ダイヤ増減の額サイズと monitor.css の整合', () => {
+  it('基準サイズは .float .f-amt の font-size と同値', () => {
+    // ここがズレると giftScaleAmtFontPx が「縮める必要が無い」と誤判定して桁が切れる。
+    const m = CSS.match(/\.float \.f-amt \{[^}]*font-size:\s*calc\((\d+)px \* var\(--float-scale\)\)/);
+    expect(m, '.float .f-amt の font-size が読めない').toBeTruthy();
+    expect(Number(m![1])).toBe(GIFT_SCALE_AMT_BASE_PX);
+  });
+
+  it('内寸は .float の width − (padding + border)×2 に収まっている', () => {
+    const w = CSS.match(/\.float \{[^}]*width:\s*calc\((\d+)px \* var\(--float-scale\)\)/);
+    const pad = CSS.match(/\.float \{[^}]*padding:[^;]*calc\((\d+)px \* var\(--float-scale\)\);/);
+    expect(w, '.float の width が読めない').toBeTruthy();
+    expect(pad, '.float の padding が読めない').toBeTruthy();
+    // 枠(border 3px)ぶんも引く。にじみの逃げに少し余らせてあるので <= で見る。
+    const inner = Number(w![1]) - (Number(pad![1]) + 3) * 2;
+    expect(GIFT_SCALE_AMT_INNER_PX).toBeLessThanOrEqual(inner);
+  });
+
+  it('額のフォントサイズは CSS 変数で渡す(算術を CSS へ複製しない)', () => {
+    expect(CSS).toMatch(/\.float\.banner-gift-scale \.f-amt \{[^}]*var\(--gs-amt-px/);
   });
 });
 

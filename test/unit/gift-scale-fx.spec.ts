@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { STRIKE_TRAVEL_MAX_MS } from '@shared/boost-settle';
 import {
   BANNER_GIFT_SCALE_MS,
+  GIFT_SCALE_AMT_ADVANCE_EM,
+  GIFT_SCALE_AMT_BASE_PX,
+  GIFT_SCALE_AMT_INNER_PX,
+  GIFT_SCALE_AMT_MIN_PX,
+  giftScaleAmtFontPx,
   GIFT_SCALE_APPEAR_MS,
   GIFT_SCALE_HOLD_MS,
   GIFT_SCALE_ROLLUP_MAX_MS,
@@ -95,5 +100,47 @@ describe('planGiftScaleFx — 尺の計画', () => {
   it('カウントアップの開始は浮上の立ち上がりが明けてから', () => {
     // ここより早く回すとバナーがまだ拡大中で数字が読めない。
     expect(GIFT_SCALE_APPEAR_MS).toBeGreaterThanOrEqual(BANNER_GIFT_SCALE_MS * 0.2);
+  });
+});
+
+describe('giftScaleAmtFontPx — 額をバナー幅に収める(桁あふれの回帰止め)', () => {
+  /** その文字数で実際に必要になる幅(倍率1換算)。 */
+  const widthOf = (chars: number): number =>
+    chars * GIFT_SCALE_AMT_ADVANCE_EM * giftScaleAmtFontPx(chars);
+
+  it('この機能が出しうる全部の額が内寸に収まる', () => {
+    // 2026-08-27 に実機で「-125,…」と切れた症状の回帰止め。実際に出る額を全部通す。
+    const amounts = [
+      '+30', '+3,000', '+30,000',
+      '-75,000', '-150,000', '-250,000', '-399,950', '-500,000', '-750,000',
+      '-1,000,000', '-1,250,000', '-1,299,950', '-1,999,950',
+      '+484,950', '+549,950', '+600,000', '+750,000', '+1,299,950', '+1,349,950',
+    ];
+    for (const a of amounts) {
+      expect(widthOf(a.length), `${a} がバナー内寸を超える`).toBeLessThanOrEqual(
+        GIFT_SCALE_AMT_INNER_PX
+      );
+    }
+  });
+
+  it('短い額は基準サイズのまま(不要に小さくしない)', () => {
+    expect(giftScaleAmtFontPx('+30'.length)).toBe(GIFT_SCALE_AMT_BASE_PX);
+    expect(giftScaleAmtFontPx('-150,000'.length)).toBe(GIFT_SCALE_AMT_BASE_PX);
+  });
+
+  it('桁が増えるほど小さくなるが、下限は割らない(配信画面で読める)', () => {
+    let prev = Infinity;
+    for (let n = 3; n <= 14; n++) {
+      const px = giftScaleAmtFontPx(n);
+      expect(px).toBeLessThanOrEqual(prev);
+      expect(px).toBeGreaterThanOrEqual(GIFT_SCALE_AMT_MIN_PX);
+      expect(px).toBeLessThanOrEqual(GIFT_SCALE_AMT_BASE_PX);
+      prev = px;
+    }
+  });
+
+  it('0文字・負の文字数でも壊れない', () => {
+    expect(giftScaleAmtFontPx(0)).toBe(GIFT_SCALE_AMT_BASE_PX);
+    expect(giftScaleAmtFontPx(-3)).toBe(GIFT_SCALE_AMT_BASE_PX);
   });
 });

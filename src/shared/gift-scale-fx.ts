@@ -98,3 +98,41 @@ export function countUpDisplayAt(total: number, elapsedMs: number, rollupMs: num
 export function giftScaleTotalWithStrikeMs(plan: GiftScalePlan): number {
   return plan.totalMs + STRIKE_TRAVEL_MAX_MS;
 }
+
+/**
+ * `.float .f-amt` の基準フォントサイズ(倍率1換算)。monitor.css の
+ * `font-size: calc(48px * var(--float-scale))` と同値。
+ */
+export const GIFT_SCALE_AMT_BASE_PX = 48;
+
+/**
+ * バナーの内寸(倍率1換算)。`.float` は width 260px・左右 padding 8px・枠 3px なので
+ * 260 − (8+3)×2 = 238px。**にじみ(text-shadow)の逃げに少し余らせて 232px** を使う。
+ */
+export const GIFT_SCALE_AMT_INNER_PX = 232;
+
+/**
+ * `--num`(Segoe UI 等)の数字1文字の送り(em)。monitor.css の注記にある実測
+ * 「10文字が 96px で 576px」= 0.6em を採る。桁区切りのカンマと符号はこれより細いので
+ * この値は安全側(実際はもう少し余る)。
+ */
+export const GIFT_SCALE_AMT_ADVANCE_EM = 0.6;
+
+/** これ以上小さくすると配信画面で読めない下限(倍率1換算)。 */
+export const GIFT_SCALE_AMT_MIN_PX = 26;
+
+/**
+ * ダイヤ増減の額をバナー幅に収めるフォントサイズ(倍率1換算)。
+ *
+ * この機能の額は **−1,999,950(10文字)** まで伸びるので、基準の 48px のままだと
+ * `.float .f-amt` の `text-overflow: ellipsis` に食われて「-125,…」のように
+ * **桁が読めなくなる**(2026-08-27 実機で観測)。桁数から先に縮めておく。
+ *
+ * **確定後の文字数で決めること。** カウントアップの途中(短い数字)で決めると、
+ * 桁が増えるたびに字が縮んで暴れる。
+ */
+export function giftScaleAmtFontPx(chars: number): number {
+  if (chars <= 0) return GIFT_SCALE_AMT_BASE_PX;
+  const fit = GIFT_SCALE_AMT_INNER_PX / (chars * GIFT_SCALE_AMT_ADVANCE_EM);
+  return Math.max(GIFT_SCALE_AMT_MIN_PX, Math.min(GIFT_SCALE_AMT_BASE_PX, Math.floor(fit)));
+}
