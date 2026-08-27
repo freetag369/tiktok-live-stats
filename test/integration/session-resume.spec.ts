@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Store } from '../../src/worker/store/index';
 import { makeNormalizeCtx, normalize } from '../../src/worker/tiktok/normalize';
 import type { NormalizedEvent } from '@shared/events';
@@ -31,6 +31,24 @@ function ev(kind: string, data: Record<string, unknown>, at: number): Normalized
   const e = normalize(ctx(), kind, { common: { createTime: String(Math.floor(at / 1000)) }, ...data }, at);
   if (!e) throw new Error(`normalize returned null for ${kind}`);
   return e;
+}
+
+/**
+ * `Date.now()` を止めて読み出す。**スコアは now からの半減期で減衰する**
+ * (`getSessionViewerTable` の `now = Date.now()` 既定)ので、同じ DB でも
+ * 読み出しのあいだに実時間が進むと値が動く。冪等性の検査に実時間は要らない。
+ *
+ * 固定しないと windows の CI で 74.61438567688826 と 74.6143982474191 の差
+ * (1.26e-5)が `toBeCloseTo(..., 5)` の許容 5e-6 を割った(2026-08-27 · v0.17.0
+ * のタグビルド)。ローカルと ubuntu では速すぎて出ない**タグビルドだけで落ちる系**。
+ */
+function readAt<T>(nowMs: number, fn: () => T): T {
+  const spy = vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+  try {
+    return fn();
+  } finally {
+    spy.mockRestore();
+  }
 }
 
 beforeEach(() => {
@@ -96,7 +114,8 @@ describe('採点の冪等性 — 停止→再開→再停止', () => {
     ]);
     store.closeSession(s1.sessionId, { endedMs: T0 + 5 * MIN, reason: 'streamEnd' });
 
-    const before = store.getSessionViewerTable(s1.sessionId, {}).rows[0]!;
+    const READ_AT = T0 + 20 * MIN; // 2回の読み出しで同じ時刻を使う(減衰を止める)。
+    const before = readAt(READ_AT, () => store.getSessionViewerTable(s1.sessionId, {}).rows[0]!);
     expect(before.score).toBeGreaterThan(0);
     expect(before.consecutiveStreak).toBe(1);
 
@@ -106,7 +125,7 @@ describe('採点の冪等性 — 停止→再開→再停止', () => {
     expect(s2.sessionId).toBe(s1.sessionId);
     store.closeSession(s1.sessionId, { endedMs: T0 + 10 * MIN, reason: 'streamEnd' });
 
-    const after = store.getSessionViewerTable(s1.sessionId, {}).rows[0]!;
+    const after = readAt(READ_AT, () => store.getSessionViewerTable(s1.sessionId, {}).rows[0]!);
     expect(after.score).toBeCloseTo(before.score, 5);
     expect(after.consecutiveStreak).toBe(1);
   });
