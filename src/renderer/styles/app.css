@@ -1258,7 +1258,7 @@ pre.doc {
  */
 .fullcut-rule {
   display: grid;
-  grid-template-columns: 22px 110px 150px 100px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(100px, .6fr) minmax(210px, 1fr) minmax(270px, 1.5fr);
   gap: 6px;
   align-items: start;
   padding: 6px 0;

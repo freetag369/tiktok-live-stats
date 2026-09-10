@@ -1,0 +1,28 @@
+.gift-field { min-width: 0; width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 7px; }
+.gift-field-selection { display: flex; gap: 10px; align-items: center; overflow-wrap: anywhere; }
+.gift-field-selection small { display: block; opacity: .65; margin-top: 4px; }
+.gift-icon { display: inline-flex; flex: none; object-fit: contain; border-radius: 10px; }
+.gift-icon-fallback { align-items: center; justify-content: center; background: #ffffff0a; font-size: 26px; }
+.gift-field-details { font-size: 12px; }
+.gift-field-details summary { cursor: pointer; opacity: .7; padding: 3px 0; }
+.gift-field-details[open] { display: flex; flex-direction: column; gap: 7px; }
+.gift-picker-dialog { width: min(960px, 94vw); max-width: 94vw; max-height: 90vh; padding: 22px; border: 1px solid #41475a; border-radius: 18px; background: var(--bg-1, #171c29); color: var(--fg, #f2f4fa); box-shadow: 0 20px 90px #0009; }
+.gift-picker-dialog[open] { display: flex; flex-direction: column; gap: 14px; }
+.gift-picker-dialog::backdrop { background: #060a14bc; }
+.gift-picker-header, .gift-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex: none; }
+.gift-picker-header strong { font-size: 21px; }
+.gift-picker-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; flex: none; }
+.gift-picker-tools input[type=search] { flex: 1; min-width: 180px; }
+.gift-picker-target { display: flex; gap: 12px; align-items: center; }
+.gift-picker-status { margin: 0; font-size: 12px; }
+.gift-picker-grid { overflow: auto; min-height: 120px; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; padding: 3px; }
+.gift-picker-card { display: flex; flex-direction: column; align-items: center; gap: 7px; min-height: 172px; padding: 14px 9px; background: #ffffff06; color: inherit; border: 1px solid #ffffff20; border-radius: 12px; cursor: pointer; overflow-wrap: anywhere; }
+.gift-picker-card:hover { background: #ffffff12; border-color: #8295e9; }
+.gift-picker-card[aria-pressed=true] { border-color: #8ea6ff; background: #6b85ff25; }
+.gift-picker-card small { font-size: 10px; opacity: .65; }
+.gift-selected-mark { color: #a7bcff; font-size: 12px; }
+.gift-picker-card:focus-visible { outline: 3px solid #a7bcff; outline-offset: 0; }
+.gift-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.gift-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ffffff25; border-radius: 8px; padding: 4px; font-size: 12px; }
+.gift-picker-grid .empty { grid-column: 1 / -1; }
+@media (max-width: 1100px) { .screen .fullcut-rule { display: flex; flex-wrap: wrap; } }

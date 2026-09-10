@@ -169,7 +169,7 @@ import { fullCutRuleMatches } from '@shared/fx-cut';
 import { rpc, rpcFire, useQuery } from '../ipc/client';
 import { useConfirm } from '../components/ConfirmDialog';
 import { setSettings, toast } from '../state/uiStore';
-import { useLive } from '../state/liveStore';
+import { GiftCatalogProvider, GiftField, GiftMultiField } from '../components/GiftPicker';
 import { playSe, playSeAny, SE_SOUNDS } from '../lib/se';
 import { BAND_BGM, playBandBgm, ROULETTE_BGM, ROULETTE_SPIN_SE, type BgmHandle } from '../lib/bgm';
 import { FX_CLIPS, FX_CLIP_GROUPS, isFullCutClip } from '../lib/fx';
@@ -517,10 +517,10 @@ export function Challenge(): React.JSX.Element {
         setSettings(s);
         setDraft(s.challenge);
       })
-      .catch((e: Error) => toast({ level: 'error', msgJa: `設定の読み込みに失敗しました: ${e.message}` }));
+      .catch ((e: Error) => toast({ level: 'error', msgJa: `設定の読み込みに失敗しました: ${e.message}` }));
     void rpc('monitor.status', undefined)
       .then((r) => setMonitorOpen(r.open))
-      .catch(() => undefined); // onMonitorState 購読で回復する
+      .catch (() => undefined); // onMonitorState 購読で回復する
     return window.api.onMonitorState((s) => setMonitorOpen(s.open));
   }, []);
 
@@ -688,6 +688,7 @@ export function Challenge(): React.JSX.Element {
   const onTest: OnTest = (spec) => void testFx(spec);
 
   return (
+    <GiftCatalogProvider>
     <div className="screen">
       <div className="row" style={{ marginBottom: 10 }}>
         <h2 style={{ margin: 0 }}>カウントダウンチャレンジ</h2>
@@ -845,6 +846,7 @@ export function Challenge(): React.JSX.Element {
         {tab === 'giftlist' ? <GiftListSection cfg={draft} /> : null}
       </div>
     </div>
+    </GiftCatalogProvider>
   );
 }
 
@@ -1516,40 +1518,44 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <div>
+
+              <GiftField value={r} onChange={(p) => patchRule(i, p)}>
+                <div>
+                  <label className="field">
+                    ギフト名
+                    <input
+                      type="text"
+                      value={r.giftName}
+                      placeholder="バラ"
+                      onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    />
+                  </label>
+                  <label
+                    className="row"
+                    style={{ cursor: 'pointer', marginTop: 2 }}
+                    title="オンにするとギフト名が完全に一致したときだけ再生します。オフ(既定)は部分一致で、たとえば「tiktok」は「TikTok Universe」にも当たります。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.exactName}
+                      onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      完全一致
+                    </span>
+                  </label>
+                </div>
                 <label className="field">
-                  ギフト名
+                  giftId(任意)
                   <input
                     type="text"
-                    value={r.giftName}
-                    placeholder="バラ"
-                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    value={r.giftId}
+                    placeholder="5655"
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                   />
                 </label>
-                <label
-                  className="row"
-                  style={{ cursor: 'pointer', marginTop: 2 }}
-                  title="オンにするとギフト名が完全に一致したときだけ再生します。オフ(既定)は部分一致で、たとえば「tiktok」は「TikTok Universe」にも当たります。"
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.exactName}
-                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
-                  />
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    完全一致
-                  </span>
-                </label>
-              </div>
-              <label className="field">
-                giftId(任意)
-                <input
-                  type="text"
-                  value={r.giftId}
-                  placeholder="5655"
-                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
-                />
-              </label>
+              </GiftField>
+
               <div className="row" style={{ gap: 6 }}>
                 <label className="field" style={{ flex: 1, minWidth: 140 }}>
                   カットイン動画
@@ -1671,7 +1677,7 @@ function GiftFullCutSection({ cfg, onPatch, onTest, testBusy }: SectionProps): R
             ギフト名は既定で<b>部分一致</b>・大文字小文字は無視します(「バラ」は「バラ」を含むギフト名すべてに一致)。
             短い名前は他のギフトを巻き込みます — たとえば「tiktok」は<b>「TikTok Universe」(44,999💎)にも一致</b>してしまうので、
             そういう行は<b>完全一致</b>にチェックを入れてください(既定では TikTok と GG の2行だけ入っています)。
-            giftId を入れるとそちらが優先され、確実に1つのギフトだけに絞れます(ライブのギフト履歴で確認できます)。
+            画像一覧から選ぶと、確実に1つのギフトだけに絞れます。
             ギフト名・giftId がどちらも空の行はどのギフトにも一致しません。音量は<b>効果音がオフのときは無音</b>になります。
             行の左の番号は<b>判定される順番</b>です(上の行が先勝ち)。上の絞り込みは<b>表示だけ</b>を変えるもので、
             順番も設定も変えません。「▶ モニター」は<b>カットイン動画が「出さない」の行でも押せます</b> —
@@ -1790,7 +1796,7 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
       <div className="faint" style={{ fontSize: 11, marginLeft: 22, marginBottom: 8 }}>
         帯域に一致したギフトで画面全体にカットイン動画を再生し、<b>再生中はカウントを一時停止</b>します
         (その間のギフト・いいね・フォローは捨てられず、演出後に順番に反映されます)。
-        ハートミー等の除外は下の giftId 欄で指定します。
+        ハートミー等の除外は下の画像一覧から選択できます。
       </div>
 
       {bf.enabled ? (
@@ -1931,7 +1937,8 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
                 <option value="off">カットインなし(従来の演出クリップ)</option>
               </select>
             </label>
-            <label className="field" style={{ flex: 1 }}>
+            <GiftMultiField ids={bf.excludeGiftIds} onChange={(excludeGiftIds) => patchBf({ excludeGiftIds })}>
+<label className="field" style={{ flex: 1 }}>
               除外する giftId(カンマ区切り)
               <input
                 type="text"
@@ -1950,6 +1957,7 @@ function GiftBandFxSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Re
                 }
               />
             </label>
+</GiftMultiField>
           </div>
           <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
             既定の除外はハートミー(giftId 7934)。1ダイヤの高頻度ギフトにカットインを出すと画面が埋まります。
@@ -2023,7 +2031,7 @@ function RouletteSoundFields({
       .then((r) => {
         if (r) onPatch({ spinSe: CUSTOM_SOUND_PREFIX + r.file });
       })
-      .catch((e: Error) => {
+      .catch ((e: Error) => {
         toast({ level: 'error', msgJa: `回転音の取込みに失敗しました: ${e.message}` });
       });
   };
@@ -3106,6 +3114,7 @@ function RouletteRow({
           この行を削除
         </button>
       </div>
+
       <div className="row" style={{ gap: 8, marginTop: 8 }}>
         <label className="field" style={{ width: 170 }}>
           表示名(モニター)
@@ -3117,24 +3126,26 @@ function RouletteRow({
             onChange={(e) => onPatch({ label: e.target.value })}
           />
         </label>
-        <label className="field" style={{ width: 130 }}>
-          トリガー giftId
-          <input
-            type="text"
-            placeholder="例: 7934(ハートミー)"
-            value={rl.giftId}
-            onChange={(e) => onPatch({ giftId: e.target.value.trim() })}
-          />
-        </label>
-        <label className="field" style={{ flex: 1 }}>
-          ギフト名(部分一致・IDが変わった時の保険)
-          <input
-            type="text"
-            placeholder="例: heart me"
-            value={rl.giftName}
-            onChange={(e) => onPatch({ giftName: e.target.value.toLowerCase() })}
-          />
-        </label>
+        <GiftField value={rl} onChange={(p) => onPatch(p)}>
+          <label className="field" style={{ width: 130 }}>
+            トリガー giftId
+            <input
+              type="text"
+              placeholder="例: 7934(ハートミー)"
+              value={rl.giftId}
+              onChange={(e) => onPatch({ giftId: e.target.value.trim() })}
+            />
+          </label>
+          <label className="field" style={{ flex: 1 }}>
+            ギフト名(部分一致・IDが変わった時の保険)
+            <input
+              type="text"
+              placeholder="例: heart me"
+              value={rl.giftName}
+              onChange={(e) => onPatch({ giftName: e.target.value.toLowerCase() })}
+            />
+          </label>
+        </GiftField>
         <label className="field" style={{ width: 150 }}>
           出目の方向
           <select
@@ -3151,6 +3162,7 @@ function RouletteRow({
           </select>
         </label>
       </div>
+
       <div className="faint" style={{ fontSize: 11, marginTop: 4, marginBottom: 6 }}>
         {/* 文言はモニターと同じ rouletteHeadline から作る — 直書きするとドリフトする。 */}
         モニターには「
@@ -3297,29 +3309,31 @@ function GiftRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
       <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
         <b>例外ギフト</b>(上から先勝ち・境界の判定より優先)。応援(減らす)側に倒したいギフトをここへ。
         <b>ギフトIDが本線</b>です — ギフト名は配信では英字で届くので日本語名では一致しません。
-        IDは「ギフトリスト」タブで調べられます。<b>単価(ダイヤ)は判定には使いません</b> —
+        画像一覧から選ぶとIDと単価が自動で入ります。<b>単価(ダイヤ)は判定には使いません</b> —
         右側の「この1個で」の答え合わせと ▶ 試写のための表示用です。
       </div>
       {gs.rows.map((r, i) => (
         <div className="challenge-rule" key={r.id}>
-          <label className="field" style={{ width: 110 }}>
-            ギフトID
-            <input
-              type="text"
-              placeholder="例: 7237"
-              value={r.giftId}
-              onChange={(e) => patchScaleRow(i, { giftId: e.target.value.trim() })}
-            />
-          </label>
-          <label className="field" style={{ flex: 1 }}>
-            ギフト名(部分一致・任意)
-            <input
-              type="text"
-              placeholder="例: unicorn fantasy"
-              value={r.giftName}
-              onChange={(e) => patchScaleRow(i, { giftName: e.target.value.toLowerCase() })}
-            />
-          </label>
+          <GiftField value={r} onChange={(p) => patchScaleRow(i, p)} onGift={(gift) => patchScaleRow(i, { giftId: gift.giftId, giftName: '', canonical: '', diamonds: gift.diamonds })}>
+            <label className="field" style={{ width: 110 }}>
+              ギフトID
+              <input
+                type="text"
+                placeholder="例: 7237"
+                value={r.giftId}
+                onChange={(e) => patchScaleRow(i, { giftId: e.target.value.trim() })}
+              />
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              ギフト名(部分一致・任意)
+              <input
+                type="text"
+                placeholder="例: unicorn fantasy"
+                value={r.giftName}
+                onChange={(e) => patchScaleRow(i, { giftName: e.target.value.toLowerCase() })}
+              />
+            </label>
+          </GiftField>
           <label className="field" style={{ flex: 1 }}>
             表示名(メモ)
             <input
@@ -3389,6 +3403,7 @@ function GiftRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
             削除
           </button>
         </div>
+
       ))}
       <div className="row" style={{ marginTop: 8, marginBottom: 12 }}>
         <button
@@ -3442,20 +3457,42 @@ function GiftRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
 
       {cfg.giftRules.map((r, i) => (
         <div className="challenge-rule" key={r.id}>
-          <label className="field">
-            ギフト名(canonical)または最低ダイヤ
-            <input
-              type="text"
-              placeholder="例: rose / 500"
-              value={r.canonical ?? (r.minDiamonds != null ? String(r.minDiamonds) : '')}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                if (v === '') patchRule(i, { canonical: undefined, minDiamonds: undefined });
-                else if (/^\d+$/.test(v)) patchRule(i, { canonical: undefined, minDiamonds: Number(v) });
-                else patchRule(i, { canonical: v.toLowerCase(), minDiamonds: undefined });
-              }}
-            />
-          </label>
+          <div className="gift-rule-target">
+            <label className="field">
+              対象の指定方法
+              <select
+                value={r.minDiamonds != null && !r.giftId && !r.canonical ? 'diamonds' : 'gift'}
+                onChange={(e) => patchRule(i, e.target.value === 'diamonds'
+                  ? { giftId: undefined, canonical: undefined, minDiamonds: 0 }
+                  : { giftId: undefined, canonical: undefined, minDiamonds: undefined })}
+              >
+                <option value="gift">個別ギフト</option>
+                <option value="diamonds">最低ダイヤ数</option>
+              </select>
+            </label>
+            {r.minDiamonds != null && !r.giftId && !r.canonical ? (
+              <label className="field">
+                最低ダイヤ数
+                <input type="number" min={0} value={r.minDiamonds}
+                  onChange={(e) => patchRule(i, { minDiamonds: Math.max(0, Number(e.target.value)) })} />
+              </label>
+            ) : (
+              <GiftField value={r} onChange={(p) => patchRule(i, {
+                giftId: p.giftId || undefined, canonical: undefined, minDiamonds: undefined,
+              })}>
+                <label className="field">
+                  ギフトID
+                  <input type="text" value={r.giftId ?? ''}
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() || undefined })} />
+                </label>
+                <label className="field">
+                  ギフト分類(canonical)
+                  <input type="text" placeholder="例: rose" value={r.canonical ?? ''}
+                    onChange={(e) => patchRule(i, { canonical: e.target.value.trim().toLowerCase() || undefined })} />
+                </label>
+              </GiftField>
+            )}
+          </div>
           <div className="row" style={{ gap: 6 }}>
             <label className="field" style={{ width: 96 }}>
               方式
@@ -3505,7 +3542,7 @@ function GiftRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): Rea
             // 「既定」= デフォ保存(challenge-default.json)があればその内容、無ければ同梱既定。
             void rpc('challengeDefault.get', undefined)
               .then((r) => onPatch(r.cfg))
-              .catch((e: Error) => toast({ level: 'error', msgJa: e.message }))
+              .catch ((e: Error) => toast({ level: 'error', msgJa: e.message }))
           }
         >
           チャレンジ設定をすべて既定に戻す
@@ -3613,62 +3650,7 @@ function CommentRulesSection({ cfg, onPatch, onTest, testBusy }: SectionProps): 
  * giftId は文字列比較(normalize.ts の idStr)なので type="text" で扱う —
  * type="number" にすると前置ゼロや長い ID が壊れる(RouletteRow と同じ理由)。
  */
-/**
- * 配信中に届いたギフトから giftId を拾って設定へ写すピッカー。
- *
- * ファンスタンプは**配信者ごとのカスタムギフト**なので既定値も一覧も存在せず、
- * ID を事前に知る方法が無い。ギフト名での指定は表記ゆれと同名別IDで外れるため、
- * 「実際に届いた1件の giftId をそのまま写す」のが唯一確実な入手経路になる。
- *
- * 出所はライブフィード(useLive の feed)— worker が gid を載せている。
- * 同じギフトが連続で並ぶので giftId で名寄せし、新しい順に数件だけ出す。
- * 未接続やギフト未着でフィードが空のときは、その旨だけ出して何も描かない。
- */
-function GiftIdPicker({
-  selected,
-  onPick,
-}: {
-  selected: string;
-  onPick: (giftId: string) => void;
-}): React.JSX.Element {
-  const feed = useLive((s) => s.feed);
-  // フィードは新しい順。giftId で重複を畳んで先頭 8 件。
-  const seen = new Set<string>();
-  const gifts: Array<{ gid: string; name: string; dia: number }> = [];
-  for (const f of feed) {
-    if (f.k !== 'g' || f.gid === '' || seen.has(f.gid)) continue;
-    seen.add(f.gid);
-    gifts.push({ gid: f.gid, name: f.gift, dia: f.dia });
-    if (gifts.length >= 8) break;
-  }
 
-  return (
-    <label className="field" style={{ marginBottom: 8 }}>
-      最近届いたギフトから取得（クリックで上の「対象 giftId」に入ります）
-      {gifts.length === 0 ? (
-        <div className="faint" style={{ fontSize: 11, paddingTop: 6 }}>
-          配信に接続してギフトが届くと、ここに giftId 付きで並びます。
-        </div>
-      ) : (
-        <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
-          {gifts.map((g) => (
-            <button
-              key={g.gid}
-              type="button"
-              className={g.gid === selected ? 'active' : ''}
-              title={`giftId ${g.gid} を対象に設定します（${g.dia}💎）`}
-              onClick={() => onPick(g.gid)}
-              style={{ fontSize: 11 }}
-            >
-              {g.name}
-              <span style={{ color: 'var(--fg-dim)' }}> {g.gid}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </label>
-  );
-}
 
 function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.JSX.Element {
   const fs = cfg.fanStamp;
@@ -3697,25 +3679,28 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
 
       {fs.enabled ? (
         <>
+
           <div className="row" style={{ gap: 8 }}>
-            <label className="field" style={{ width: 160 }}>
-              対象 giftId
-              <input
-                type="text"
-                placeholder="例: 76637"
-                value={fs.giftId}
-                onChange={(e) => patchFs({ giftId: e.target.value.trim() })}
-              />
-            </label>
-            <label className="field" style={{ flex: 1 }}>
-              ギフト名(部分一致・IDが変わった時の保険)
-              <input
-                type="text"
-                placeholder="例: おやすみトッポ"
-                value={fs.giftName}
-                onChange={(e) => patchFs({ giftName: e.target.value.toLowerCase() })}
-              />
-            </label>
+            <GiftField value={fs} onChange={(p) => patchFs(p)}>
+              <label className="field" style={{ width: 160 }}>
+                対象 giftId
+                <input
+                  type="text"
+                  placeholder="例: 76637"
+                  value={fs.giftId}
+                  onChange={(e) => patchFs({ giftId: e.target.value.trim() })}
+                />
+              </label>
+              <label className="field" style={{ flex: 1 }}>
+                ギフト名(部分一致・IDが変わった時の保険)
+                <input
+                  type="text"
+                  placeholder="例: おやすみトッポ"
+                  value={fs.giftName}
+                  onChange={(e) => patchFs({ giftName: e.target.value.toLowerCase() })}
+                />
+              </label>
+            </GiftField>
             <label className="field" style={{ width: 110 }}>
               1回あたりの増減
               <input
@@ -3725,7 +3710,7 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
               />
             </label>
           </div>
-          <GiftIdPicker selected={fs.giftId} onPick={(giftId) => patchFs({ giftId })} />
+
           <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
             負の値=数字が<b>減る</b>(お助け)、正の値=増える(妨害)。連打(コンボ)でも
             1メッセージにつき この値 だけ動きます。
@@ -3841,8 +3826,7 @@ function HelperSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React.
           </div>
 
           <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
-            giftId が空のあいだは何にも一致しません(この機能はオフと同じです)。giftId は
-            ギフト一覧やビューアー詳細のギフト履歴で確認できます。モニターには
+            画像一覧から対象ギフトを選択してください。対象の指定が空のあいだは発動しません。モニターには
             <b>「−N ◯◯さん がお助け!」の専用バナー</b>(緑リング)が出ます — ギフトカードは出しません。
             効果音・簡易演出は上の<b>お助け専用</b>の設定が使われます。なお「ギフト増減」タブの
             「チャレンジ設定をすべて既定に戻す」を押すと、この設定も既定に戻ります。
@@ -4004,40 +3988,44 @@ function BoostSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPr
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <label className="field" style={{ width: 110 }}>
-                対象 giftId
-                <input
-                  type="text"
-                  placeholder="例: 6267"
-                  value={r.giftId}
-                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
-                />
-              </label>
-              <div style={{ width: 150 }}>
-                <label className="field">
-                  ギフト名(IDの保険)
+
+              <GiftField value={r} onChange={(p) => patchRule(i, p)}>
+                <label className="field" style={{ width: 110 }}>
+                  対象 giftId
                   <input
                     type="text"
-                    value={r.giftName}
-                    placeholder="corgi"
-                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    placeholder="例: 6267"
+                    value={r.giftId}
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                   />
                 </label>
-                <label
-                  className="row"
-                  style={{ cursor: 'pointer', marginTop: 2 }}
-                  title="オンにするとギフト名が完全に一致したときだけ発動します。オフ(既定)は部分一致で、たとえば「panther」は「Panther Paw」にも当たります。ブーストは一致すると最長23秒カウントが止まるので、短い名前を使うときはオンにしてください。"
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.exactName}
-                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
-                  />
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    完全一致
-                  </span>
-                </label>
-              </div>
+                <div style={{ width: 150 }}>
+                  <label className="field">
+                    ギフト名(IDの保険)
+                    <input
+                      type="text"
+                      value={r.giftName}
+                      placeholder="corgi"
+                      onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    />
+                  </label>
+                  <label
+                    className="row"
+                    style={{ cursor: 'pointer', marginTop: 2 }}
+                    title="オンにするとギフト名が完全に一致したときだけ発動します。オフ(既定)は部分一致で、たとえば「panther」は「Panther Paw」にも当たります。ブーストは一致すると最長23秒カウントが止まるので、短い名前を使うときはオンにしてください。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.exactName}
+                      onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      完全一致
+                    </span>
+                  </label>
+                </div>
+              </GiftField>
+
               <label className="field" style={{ width: 90 }}>
                 タップ倍率
                 <input
@@ -4161,7 +4149,7 @@ function BoostSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPr
             <b>減算量「-N」のドラムロール発表と着弾は必ず出ます</b>。
           </div>
           <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
-            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。giftId で当てるのが最も確実です。
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。画像一覧で対象ギフトを選ぶと確実です。
             トリガーが3つとも空の行は何にも一致しません(その行はオフと同じ)。
             演出中はモニターの数字が止まり、<b>画面中央にタップ数のカウンタ</b>が出ます。
             モニターを閉じているとき(演出が出せないとき)はカウントを止めず、
@@ -4240,40 +4228,44 @@ function TapLockSection({ cfg, onPatch, onTest, testBusy }: SectionProps): React
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <label className="field" style={{ width: 110 }}>
-                対象 giftId
-                <input
-                  type="text"
-                  placeholder="例: 6267"
-                  value={r.giftId}
-                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
-                />
-              </label>
-              <div style={{ width: 150 }}>
-                <label className="field">
-                  ギフト名(IDの保険)
+
+              <GiftField value={r} onChange={(p) => patchRule(i, p)}>
+                <label className="field" style={{ width: 110 }}>
+                  対象 giftId
                   <input
                     type="text"
-                    value={r.giftName}
-                    placeholder="corgi"
-                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    placeholder="例: 6267"
+                    value={r.giftId}
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                   />
                 </label>
-                <label
-                  className="row"
-                  style={{ cursor: 'pointer', marginTop: 2 }}
-                  title="オンにするとギフト名が完全に一致したときだけ発動します。オフ(既定)は部分一致です。お邪魔は一致すると配信者がタップできなくなるので、短い名前を使うときは必ずオンにしてください。"
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.exactName}
-                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
-                  />
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    完全一致
-                  </span>
-                </label>
-              </div>
+                <div style={{ width: 150 }}>
+                  <label className="field">
+                    ギフト名(IDの保険)
+                    <input
+                      type="text"
+                      value={r.giftName}
+                      placeholder="corgi"
+                      onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    />
+                  </label>
+                  <label
+                    className="row"
+                    style={{ cursor: 'pointer', marginTop: 2 }}
+                    title="オンにするとギフト名が完全に一致したときだけ発動します。オフ(既定)は部分一致です。お邪魔は一致すると配信者がタップできなくなるので、短い名前を使うときは必ずオンにしてください。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.exactName}
+                      onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      完全一致
+                    </span>
+                  </label>
+                </div>
+              </GiftField>
+
               <label className="field" style={{ width: 110 }}>
                 封じる長さ(秒)
                 <input
@@ -4440,40 +4432,44 @@ function RevolutionSection({
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <label className="field" style={{ width: 110 }}>
-                対象 giftId
-                <input
-                  type="text"
-                  placeholder="実受信で確認"
-                  value={r.giftId}
-                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
-                />
-              </label>
-              <div style={{ width: 150 }}>
-                <label className="field">
-                  ギフト名(IDの保険)
+
+              <GiftField value={r} onChange={(p) => patchRule(i, p)}>
+                <label className="field" style={{ width: 110 }}>
+                  対象 giftId
                   <input
                     type="text"
-                    value={r.giftName}
-                    placeholder="swan"
-                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    placeholder="実受信で確認"
+                    value={r.giftId}
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                   />
                 </label>
-                <label
-                  className="row"
-                  style={{ cursor: 'pointer', marginTop: 2 }}
-                  title="オンにするとギフト名が完全に一致したときだけ発動します。既定の 'swan' のような短い名前は必ずオンに — 部分一致だと別のギフト名(black swan 等)にも誤爆し、1分間ゲームのルールが変わってしまいます。"
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.exactName}
-                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
-                  />
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    完全一致
-                  </span>
-                </label>
-              </div>
+                <div style={{ width: 150 }}>
+                  <label className="field">
+                    ギフト名(IDの保険)
+                    <input
+                      type="text"
+                      value={r.giftName}
+                      placeholder="swan"
+                      onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    />
+                  </label>
+                  <label
+                    className="row"
+                    style={{ cursor: 'pointer', marginTop: 2 }}
+                    title="オンにするとギフト名が完全に一致したときだけ発動します。既定の 'swan' のような短い名前は必ずオンに — 部分一致だと別のギフト名(black swan 等)にも誤爆し、1分間ゲームのルールが変わってしまいます。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.exactName}
+                      onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      完全一致
+                    </span>
+                  </label>
+                </div>
+              </GiftField>
+
               <label className="field" style={{ width: 96 }} title={`タップ1回の効きと、いいね反転の減算がどちらも倍率ぶんになります(${REVOLUTION_MULT_MIN}〜${REVOLUTION_MULT_MAX})`}>
                 倍率
                 <input
@@ -4546,9 +4542,7 @@ function RevolutionSection({
           </div>
 
           <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
-            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。既定行の giftId は
-            未設定です — 白鳥の giftId は実配信で一度受け取り、ログ
-            (diag.log の「受信 giftId=…」行)かライブフィードで確認してから入れてください。
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。白鳥などの対象ギフトは画像一覧から選択できます。
             窓の途中で同じギフトがもう一度届くと<b>残り時間に加算</b>されますが、
             <b>合計は最大 {capSec} 秒</b>で頭打ちになります(連打コンボは2本ぶんまで)。
           </div>
@@ -4653,40 +4647,44 @@ function LionSection({
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <label className="field" style={{ width: 100 }}>
-                対象 giftId
-                <input
-                  type="text"
-                  placeholder="6369"
-                  value={r.giftId}
-                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
-                />
-              </label>
-              <div style={{ width: 160 }}>
-                <label className="field">
-                  ギフト名(IDの保険)
+
+              <GiftField value={r} onChange={(p) => patchRule(i, p)}>
+                <label className="field" style={{ width: 100 }}>
+                  対象 giftId
                   <input
                     type="text"
-                    value={r.giftName}
-                    placeholder="lion"
-                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    placeholder="6369"
+                    value={r.giftId}
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                   />
                 </label>
-                <label
-                  className="row"
-                  style={{ cursor: 'pointer', marginTop: 2 }}
-                  title="必ずオンにしてください。オフ(部分一致)だと『Leon and Lion』(34,000💎)や『獅子奮迅』にも一致して、そちらでも +1,499,950 の妨害が起きます。"
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.exactName}
-                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
-                  />
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    完全一致
-                  </span>
-                </label>
-              </div>
+                <div style={{ width: 160 }}>
+                  <label className="field">
+                    ギフト名(IDの保険)
+                    <input
+                      type="text"
+                      value={r.giftName}
+                      placeholder="lion"
+                      onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    />
+                  </label>
+                  <label
+                    className="row"
+                    style={{ cursor: 'pointer', marginTop: 2 }}
+                    title="必ずオンにしてください。オフ(部分一致)だと『Leon and Lion』(34,000💎)や『獅子奮迅』にも一致して、そちらでも +1,499,950 の妨害が起きます。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.exactName}
+                      onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      完全一致
+                    </span>
+                  </label>
+                </div>
+              </GiftField>
+
               <label className="field" style={{ width: 92 }}>
                 1発の額
                 <input
@@ -4856,40 +4854,44 @@ function UniverseSection({
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <label className="field" style={{ width: 110 }}>
-                対象 giftId
-                <input
-                  type="text"
-                  placeholder="実受信で確認"
-                  value={r.giftId}
-                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
-                />
-              </label>
-              <div style={{ width: 170 }}>
-                <label className="field">
-                  ギフト名(IDの保険)
+
+              <GiftField value={r} onChange={(p) => patchRule(i, p)}>
+                <label className="field" style={{ width: 110 }}>
+                  対象 giftId
                   <input
                     type="text"
-                    value={r.giftName}
-                    placeholder="tiktok universe"
-                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    placeholder="実受信で確認"
+                    value={r.giftId}
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                   />
                 </label>
-                <label
-                  className="row"
-                  style={{ cursor: 'pointer', marginTop: 2 }}
-                  title="必ずオンにしてください。オフ(部分一致)だと『TikTok Universe+』という別のギフトにも一致して、そちらでもランが即終了します。クリアは巻き戻せません。"
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.exactName}
-                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
-                  />
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    完全一致
-                  </span>
-                </label>
-              </div>
+                <div style={{ width: 170 }}>
+                  <label className="field">
+                    ギフト名(IDの保険)
+                    <input
+                      type="text"
+                      value={r.giftName}
+                      placeholder="tiktok universe"
+                      onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    />
+                  </label>
+                  <label
+                    className="row"
+                    style={{ cursor: 'pointer', marginTop: 2 }}
+                    title="必ずオンにしてください。オフ(部分一致)だと『TikTok Universe+』という別のギフトにも一致して、そちらでもランが即終了します。クリアは巻き戻せません。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.exactName}
+                      onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      完全一致
+                    </span>
+                  </label>
+                </div>
+              </GiftField>
+
               <label className="row" style={{ cursor: 'pointer', width: 76 }}>
                 <input
                   type="checkbox"
@@ -4942,10 +4944,7 @@ function UniverseSection({
           </div>
 
           <div className="faint" style={{ fontSize: 11, marginTop: 10 }}>
-            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。既定行の giftId は
-            未設定です — TIKTOK UNIVERSE の giftId は実配信で一度受け取り、ログ
-            (diag.log の「受信 giftId=…」行)かライブフィードで確認してから入れてください。
-            それまでは<b>ギフト名の完全一致</b>で当てています。
+            <b>上から順に判定し、最初に一致した1行だけ</b>が発動します。TIKTOK UNIVERSE などの対象ギフトは画像一覧から選択できます。既存の名前指定も詳細設定で保持しています。
           </div>
           <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
             モニターを閉じているときは演出なしで即座に 0 + CLEAR になります(効果だけは
@@ -5008,7 +5007,7 @@ function QuizThresholdSoundRow({
       .then((r) => {
         if (r) onPatch({ sound: CUSTOM_SOUND_PREFIX + r.file });
       })
-      .catch((e: Error) => {
+      .catch ((e: Error) => {
         toast({ level: 'error', msgJa: `効果音の取込みに失敗しました: ${e.message}` });
       });
   };
@@ -5099,7 +5098,7 @@ function QuizBgmRow({
       .then((r) => {
         if (r) onPick(CUSTOM_SOUND_PREFIX + r.file);
       })
-      .catch((e: Error) => {
+      .catch ((e: Error) => {
         toast({ level: 'error', msgJa: `BGM の取込みに失敗しました: ${e.message}` });
       });
   };
@@ -5300,40 +5299,44 @@ function QuizSection({ cfg, onPatch, onTest, testBusy, testRunning }: SectionPro
                   onChange={(e) => patchRule(i, { label: e.target.value })}
                 />
               </label>
-              <label className="field" style={{ width: 110 }}>
-                対象 giftId
-                <input
-                  type="text"
-                  placeholder="実受信で確認"
-                  value={r.giftId}
-                  onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
-                />
-              </label>
-              <div style={{ width: 150 }}>
-                <label className="field">
-                  ギフト名(IDの保険)
+
+              <GiftField value={r} onChange={(p) => patchRule(i, p)}>
+                <label className="field" style={{ width: 110 }}>
+                  対象 giftId
                   <input
                     type="text"
-                    value={r.giftName}
-                    placeholder="ローマ字の実受信名"
-                    onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    placeholder="実受信で確認"
+                    value={r.giftId}
+                    onChange={(e) => patchRule(i, { giftId: e.target.value.trim() })}
                   />
                 </label>
-                <label
-                  className="row"
-                  style={{ cursor: 'pointer', marginTop: 2 }}
-                  title="オンにするとギフト名が完全に一致したときだけ発動します。短い名前は必ずオンに — 部分一致だと別のギフト名にも誤爆します。"
-                >
-                  <input
-                    type="checkbox"
-                    checked={r.exactName}
-                    onChange={(e) => patchRule(i, { exactName: e.target.checked })}
-                  />
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    完全一致
-                  </span>
-                </label>
-              </div>
+                <div style={{ width: 150 }}>
+                  <label className="field">
+                    ギフト名(IDの保険)
+                    <input
+                      type="text"
+                      value={r.giftName}
+                      placeholder="ローマ字の実受信名"
+                      onChange={(e) => patchRule(i, { giftName: e.target.value.toLowerCase() })}
+                    />
+                  </label>
+                  <label
+                    className="row"
+                    style={{ cursor: 'pointer', marginTop: 2 }}
+                    title="オンにするとギフト名が完全に一致したときだけ発動します。短い名前は必ずオンに — 部分一致だと別のギフト名にも誤爆します。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.exactName}
+                      onChange={(e) => patchRule(i, { exactName: e.target.checked })}
+                    />
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      完全一致
+                    </span>
+                  </label>
+                </div>
+              </GiftField>
+
               <label className="row" style={{ cursor: 'pointer', width: 76 }}>
                 <input
                   type="checkbox"

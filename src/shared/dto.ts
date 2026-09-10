@@ -283,6 +283,21 @@ export interface LikeSeriesPoint {
  * 「この配信に実際に届いた giftId はどれか」を一覧で引けることが設定作業の前提になる。
  * ギフト名は同名別ID・前後スペース・綴り揺れがあり、名前では特定できない。
  */
+export interface GiftOption {
+  giftId: string;
+  name: string;
+  diamonds: number;
+  iconUrl: string | null;
+  received: boolean;
+  source: 'available' | 'received' | 'both';
+  updatedMs: number;
+}
+
+export interface GiftOptionsResult {
+  target: string;
+  rows: GiftOption[];
+}
+
 export interface GiftCatalogRow {
   giftId: string;
   /** 受信原文ママ(前後スペースを含むことがある — trim しないこと)。 */

@@ -172,6 +172,8 @@ export function createRpcServer(deps: RpcDeps, missions: MissionStore) {
     'q.gifts': async (p) => store.listViewerGifts(p.userId, p),
     'q.likeSeries': async (p) => store.getViewerLikeSeries(p.userId, p.limitSessions),
     'q.giftCatalog': async () => store.listGiftCatalog(),
+    'q.giftOptions': async () => session.giftOptions(),
+    'giftOptions.refresh': async (p) => session.refreshGiftOptions(p.target),
     'q.sessions': async (p) => store.listSessions(p),
     'q.sessionDetail': async (p) => store.getSessionDetail(p.sessionId),
     'q.sessionTotals': async (p) => store.getSessionTotals(p.sessionId),
@@ -281,6 +283,8 @@ type HandlerMap = {
   'q.gifts': (p: { userId: string } & D.Paged) => Promise<unknown>;
   'q.likeSeries': (p: { userId: string; limitSessions: number }) => Promise<unknown>;
   'q.giftCatalog': () => Promise<D.GiftCatalogRow[]>;
+  'q.giftOptions': () => Promise<D.GiftOptionsResult>;
+  'giftOptions.refresh': (p: { target?: string }) => Promise<D.GiftOptionsResult>;
   'q.sessions': (p: D.Paged) => Promise<unknown>;
   'q.sessionDetail': (p: { sessionId: number }) => Promise<unknown>;
   'q.sessionTotals': (p: { sessionId: number }) => Promise<unknown>;

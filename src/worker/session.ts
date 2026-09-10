@@ -1,4 +1,6 @@
 import { join } from 'node:path';
+import { fetchGiftOptions } from './tiktok/gift-options';
+import type { GiftOptionsResult } from '@shared/dto';
 import {
   CHALLENGE_PRESS_NUDGE_MS,
   DELTA_MS,
@@ -119,6 +121,31 @@ export class SessionManager {
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
+  private giftRefresh: Promise<GiftOptionsResult> | null = null;
+
+  giftOptions(): GiftOptionsResult {
+    const status = this.status;
+    const target = status.state === 'live' ? status.hostDisplayId :
+      'uniqueId' in status ? status.uniqueId : this.deps.store.lastGiftTarget();
+    return { target, rows: this.deps.store.listGiftOptions(target) };
+  }
+
+  refreshGiftOptions(requested?: string): Promise<GiftOptionsResult> {
+    if (this.giftRefresh) return this.giftRefresh;
+    const current = this.giftOptions();
+    const target = (current.target || requested || '').trim().replace(/^@/, '');
+    if (!/^[a-zA-Z0-9_.]+$/.test(target)) return Promise.reject(new Error('ギフト一覧を取得する配信者名を入力してください。'));
+    const roomId = this.status.state === 'live' ? this.status.roomId : undefined;
+    this.giftRefresh = fetchGiftOptions(target, roomId, this.deps.getSettings().eulerApiKey)
+      .then((rows) => {
+        this.deps.store.saveGiftOptions(target, rows);
+        // A connection change during HTTP must not replace the new target.
+        if (!this.giftOptions().target || this.giftOptions().target === target) this.deps.store.setSetting('giftPicker.target', target);
+        return this.giftOptions();
+      }).finally(() => { this.giftRefresh = null; });
+    return this.giftRefresh;
+  }
+
   async start(uniqueId: string, waitUntilLive: boolean): Promise<{ sessionId: number | null }> {
     await this.stop('userStopped', false);
 
@@ -129,6 +156,7 @@ export class SessionManager {
     }
 
     this.reset();
+    this.deps.store.setSetting('giftPicker.target', clean);
     this.setStatus({ state: 'resolving', uniqueId: clean });
 
     const settings = this.deps.getSettings();

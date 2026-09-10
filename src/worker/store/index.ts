@@ -12,6 +12,7 @@ import * as QS from './queries/sessions';
 import * as QC from './queries/comments';
 import * as QA from './queries/analytics';
 import * as QG from './queries/gifts';
+import * as QGO from './queries/gift-options';
 import { backupTo, exportCsv, purge, rebuildLifetime } from './export';
 
 /**
@@ -484,6 +485,19 @@ export class Store {
   }
 
   /** 受信済み全ギフトの一覧(設定画面「ギフトリスト」タブ)。全走査なので都度呼びしない。 */
+  listGiftOptions(target: string): D.GiftOption[] {
+    return QGO.listGiftOptions(this.db, target);
+  }
+
+  saveGiftOptions(target: string, rows: D.GiftOption[]): void {
+    QGO.saveGiftOptions(this.db, target, rows);
+  }
+
+  lastGiftTarget(): string {
+    const row = this.db.prepare('SELECT host_unique_id AS target FROM stream_session ORDER BY started_ms DESC LIMIT 1').get() as { target?: string } | undefined;
+    return this.getSetting<string>('giftPicker.target') || row?.target || '';
+  }
+
   listGiftCatalog(): D.GiftCatalogRow[] {
     return QG.listGiftCatalog(this.db);
   }

@@ -109,6 +109,8 @@ export type RpcMap = {
    * worker 側は gift_event の全走査を含むので、開いたときと「更新」のときだけ叩く。
    */
   'q.giftCatalog': { p: void; r: D.GiftCatalogRow[] };
+  'q.giftOptions': { p: void; r: D.GiftOptionsResult };
+  'giftOptions.refresh': { p: { target?: string }; r: D.GiftOptionsResult };
   'q.sessions': { p: D.Paged; r: D.Page<D.SessionListRow> };
   'q.sessionDetail': { p: { sessionId: number }; r: D.SessionDetail | null };
   'q.sessionTotals': { p: { sessionId: number }; r: D.SessionTotals | null };
@@ -251,6 +253,8 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'q.gifts': 'worker',
   'q.likeSeries': 'worker',
   'q.giftCatalog': 'worker',
+  'q.giftOptions': 'worker',
+  'giftOptions.refresh': 'worker',
   'q.sessions': 'worker',
   'q.sessionDetail': 'worker',
   'q.sessionTotals': 'worker',

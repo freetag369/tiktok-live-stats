@@ -231,7 +231,7 @@ export class WorkerHost {
       const timer = setTimeout(() => {
         this.pending.delete(req.id);
         resolve({ id: req.id, ok: false, error: { code: 'TIMEOUT', message: '応答がタイムアウトしました。' } });
-      }, RPC_TIMEOUT_MS);
+      }, req.method === 'giftOptions.refresh' ? 60_000 : RPC_TIMEOUT_MS);
       timer.unref?.();
       this.pending.set(req.id, { resolve, timer });
       this.proc?.postMessage({ t: 'rpc', req });
