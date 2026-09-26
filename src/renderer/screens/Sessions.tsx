@@ -3,7 +3,7 @@ import type { TopRow } from '@shared/dto';
 import { compact, diamondsToJpy, num, percent } from '@shared/format';
 import { formatDateJa, formatDurationJa } from '@shared/time';
 import { rpc, useQuery } from '../ipc/client';
-import { openSession, openViewer, toast, useUi } from '../state/uiStore';
+import { openArchive, openSession, openViewer, toast, useUi } from '../state/uiStore';
 
 export function Sessions(): React.JSX.Element {
   const selected = useUi((s) => s.selectedSession);
@@ -108,6 +108,9 @@ function SessionDetail({ sessionId }: { sessionId: number }): React.JSX.Element 
         <div className="row">
           <h3 style={{ margin: 0 }}>{formatDateJa(d.startedMs)} の配信</h3>
           <div className="spacer" />
+          <button className="btn small primary" onClick={() => openArchive(sessionId)}>
+            コメント・ギフトを見る
+          </button>
           <button className="btn small" onClick={() => openSession(null)}>
             閉じる
           </button>
@@ -194,7 +197,7 @@ function Funnel({ f }: { f: { viewers: number; commenters: number; likers: numbe
   );
 }
 
-function Top({ title, rows, unit }: { title: string; rows: TopRow[]; unit: string }) {
+export function Top({ title, rows, unit }: { title: string; rows: TopRow[]; unit: string }) {
   return (
     <div className="card">
       <h3>{title}</h3>

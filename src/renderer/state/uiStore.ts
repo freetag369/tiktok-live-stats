@@ -3,12 +3,14 @@ import type { AppSettings, ViewerFilter, ViewerSortKey } from '@shared/dto';
 import type { ToastMsg } from '@shared/ipc';
 import type { UserId } from '@shared/events';
 
-export type Route = 'connect' | 'live' | 'challenge' | 'sessions' | 'analytics' | 'settings' | 'licenses';
+export type Route = 'connect' | 'live' | 'challenge' | 'sessions' | 'archive' | 'analytics' | 'settings' | 'licenses';
 
 interface UiState {
   route: Route;
   selectedViewer: UserId | null;
   selectedSession: number | null;
+  /** Kept apart from selectedSession: that one also opens/closes the 配信履歴 detail pane. */
+  archiveSession: number | null;
   sort: ViewerSortKey;
   desc: boolean;
   filter: ViewerFilter;
@@ -31,6 +33,7 @@ export const useUi = create<UiState>(() => ({
   route: 'connect',
   selectedViewer: null,
   selectedSession: null,
+  archiveSession: null,
   sort: 'lastSeen',
   desc: true,
   filter: 'all',
@@ -46,6 +49,10 @@ export const go = (route: Route): void => useUi.setState({ route });
 export const openViewer = (userId: UserId | null): void => useUi.setState({ selectedViewer: userId });
 export const openSession = (sessionId: number | null): void =>
   useUi.setState({ selectedSession: sessionId, route: sessionId == null ? 'sessions' : useUi.getState().route });
+
+/** Jump to the アーカイブ tab with one stream selected. */
+export const openArchive = (sessionId: number | null): void =>
+  useUi.setState({ archiveSession: sessionId, route: 'archive' });
 
 export function setSort(sort: ViewerSortKey): void {
   useUi.setState((s) => (s.sort === sort ? { desc: !s.desc } : { sort, desc: true }));

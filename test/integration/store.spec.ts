@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -358,5 +358,136 @@ describe('purge', () => {
     // Stale rollups after a delete would quietly corrupt every later comparison.
     expect(store.getViewer('1', null)!.row.commentsLifetime).toBe(1);
     expect(store.getViewer('1', null)!.row.visits).toBe(1);
+  });
+});
+
+describe('archive', () => {
+  const gift = (msgId: string, user: ReturnType<typeof u>, at: number, opts: { id?: string; name?: string; dia?: number; count?: number } = {}) =>
+    ev(
+      'gift',
+      {
+        common: { msgId, createTime: String(Math.floor(at / 1000)) },
+        user,
+        giftId: opts.id ?? '5655',
+        repeatCount: opts.count ?? 1,
+        repeatEnd: 1,
+        groupId: `grp-${msgId}`,
+        gift: { id: opts.id ?? '5655', name: opts.name ?? 'Rose', type: 1, diamondCount: opts.dia ?? 1 },
+      },
+      at
+    );
+  const chat = (msgId: string, user: ReturnType<typeof u>, content: string, at: number) =>
+    ev('chat', { common: { msgId, createTime: String(Math.floor(at / 1000)) }, user, content }, at);
+
+  it('interleaves comments and gifts in time order with viewer info', () => {
+    const sid = openSession();
+    store.applyBatch(sid, [
+      chat('c1', u('1'), 'こんばんは', T0),
+      gift('g1', u('2'), T0 + 1000, { count: 2 }),
+      chat('c2', u('1'), 'おやすみ', T0 + 2000),
+    ]);
+
+    const page = store.getArchive({ sessionId: sid });
+    expect(page.total).toBe(3);
+    expect(page.rows.map((r) => r.kind)).toEqual(['comment', 'gift', 'comment']);
+    const g = page.rows[1]!;
+    expect(g.kind === 'gift' && g.giftName).toBe('Rose');
+    expect(g.kind === 'gift' && g.diamonds).toBe(2);
+    expect(g.nickname).toBe('user2');
+
+    const newest = store.getArchive({ sessionId: sid, newestFirst: true });
+    expect(newest.rows.map((r) => r.msgId)).toEqual(['c2', 'g1', 'c1']);
+  });
+
+  it('filters by kind, questions and minimum diamonds', () => {
+    const sid = openSession();
+    store.applyBatch(sid, [
+      chat('c1', u('1'), 'こんばんは', T0),
+      gift('g1', u('2'), T0 + 1000),
+      gift('g2', u('3'), T0 + 2000, { id: '7777', name: 'Lion', dia: 50 }),
+      ev('questionNew', {
+        common: { msgId: 'q1', createTime: String(Math.floor((T0 + 3000) / 1000)) },
+        user: u('4'),
+        questionDetails: { questionText: '何歳ですか？' },
+      }, T0 + 3000),
+    ]);
+
+    expect(store.getArchive({ sessionId: sid }).total).toBe(4);
+    expect(store.getArchive({ sessionId: sid, kind: 'gifts' }).total).toBe(2);
+    expect(store.getArchive({ sessionId: sid, kind: 'gifts', minDiamonds: 10 }).rows.map((r) => r.msgId)).toEqual(['g2']);
+    expect(store.getArchive({ sessionId: sid, kind: 'comments' }).rows.every((r) => r.kind === 'comment')).toBe(true);
+    const qs = store.getArchive({ sessionId: sid, questionsOnly: true });
+    expect(qs.total).toBe(1);
+    expect(qs.rows[0]!.kind === 'comment' && qs.rows[0]!.isQuestion).toBe(true);
+  });
+
+  it('searches comment text and gift names, and pages without gaps or duplicates', () => {
+    const sid = openSession();
+    store.applyBatch(sid, [
+      chat('c1', u('1'), 'こんばんは', T0),
+      chat('c2', u('1'), 'おやすみ', T0 + 1000),
+      gift('g1', u('2'), T0 + 2000),
+      chat('c3', u('3'), 'また来ます', T0 + 3000),
+      gift('g2', u('2'), T0 + 3000, { id: '7777', name: 'Lion', dia: 50 }),
+    ]);
+
+    expect(store.getArchive({ sessionId: sid, text: 'おやすみ' }).rows.map((r) => r.msgId)).toEqual(['c2']);
+    const rose = store.getArchive({ sessionId: sid, text: 'Rose' });
+    expect(rose.total).toBe(1);
+    expect(rose.rows[0]!.kind).toBe('gift');
+
+    const all = store.getArchive({ sessionId: sid, limit: 10 }).rows.map((r) => r.msgId);
+    const paged = [0, 2, 4].flatMap((offset) => store.getArchive({ sessionId: sid, limit: 2, offset }).rows.map((r) => r.msgId));
+    expect(paged).toEqual(all);
+    expect(new Set(paged).size).toBe(5);
+  });
+
+  it('keeps each stream separate', () => {
+    const s1 = openSession(T0, 'r1');
+    store.applyBatch(s1, [chat('a', u('1'), 'a', T0)]);
+    store.closeSession(s1, { endedMs: T0 + 1000, reason: 'streamEnd' });
+    const t2 = T0 + 86_400_000;
+    const s2 = openSession(t2, 'r2');
+    store.applyBatch(s2, [chat('b', u('1'), 'b', t2), gift('g', u('1'), t2)]);
+
+    expect(store.getArchive({ sessionId: s1 }).total).toBe(1);
+    expect(store.getArchive({ sessionId: s2 }).total).toBe(2);
+  });
+
+  it('summarises gifts per kind for one stream', () => {
+    const sid = openSession();
+    store.applyBatch(sid, [
+      gift('g1', u('1'), T0, { count: 2 }),
+      gift('g2', u('2'), T0 + 1000, { count: 3 }),
+      gift('hm', u('3'), T0 + 2000, { id: '999999', name: 'Heart Me', count: 4 }),
+    ]);
+    const s = store.getSessionGiftSummary(sid)!;
+    expect(s.byGift).toHaveLength(2);
+    const rose = s.byGift.find((g) => g.giftName === 'Rose')!;
+    expect(rose.count).toBe(5);
+    expect(rose.diamonds).toBe(5);
+    expect(s.byGift.find((g) => g.canonical === 'heart_me')!.count).toBe(4);
+    expect(s.gifts).toBe(store.getSessionTotals(sid)!.gifts);
+    expect(store.getSessionGiftSummary(9999)).toBeNull();
+  });
+
+  it('exports one stream as a combined timeline CSV', () => {
+    const sid = openSession();
+    store.applyBatch(sid, [
+      chat('c1', u('1'), 'こんばんは', T0),
+      gift('g1', u('2'), T0 + 65_000, { count: 2 }),
+    ]);
+    const out = join(dir, 'timeline.csv');
+    const n = store.exportCsv({ kind: 'timeline', sessionId: sid }, out);
+    expect(n).toBe(2);
+    const lines = readFileSync(out, 'utf8').split('\r\n').filter(Boolean);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]!.startsWith('﻿日時')).toBe(true);
+    expect(lines[1]).toContain('コメント');
+    expect(lines[2]).toContain('ギフト');
+    expect(lines[2]).toContain('0:01:05');
+    expect(() => store.exportCsv({ kind: 'timeline' }, out)).toThrow();
+    // Plans that use none of the shared filter parameters must still bind cleanly.
+    expect(store.exportCsv({ kind: 'viewers' }, join(dir, 'v.csv'))).toBe(2);
   });
 });

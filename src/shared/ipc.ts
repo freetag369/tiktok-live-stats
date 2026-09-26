@@ -102,6 +102,8 @@ export type RpcMap = {
   'q.recallCard': { p: { userId: UserId; sessionId: number | null }; r: D.RecallCard | null };
   'q.comments': { p: D.CommentSearchQuery; r: D.Page<D.CommentHit> };
   'q.gifts': { p: { userId: UserId } & D.Paged; r: D.Page<D.GiftRow> };
+  'q.archive': { p: D.ArchiveQuery; r: D.Page<D.ArchiveItem> };
+  'q.sessionGiftSummary': { p: { sessionId: number }; r: D.SessionGiftSummary | null };
   'q.likeSeries': { p: { userId: UserId; limitSessions: number }; r: D.LikeSeriesPoint[] };
   /**
    * 受信済み全ギフトの一覧(giftId ↔ ギフト名)。カウントダウンチャレンジ設定の
@@ -251,6 +253,8 @@ export const RPC_OWNER: Record<RpcMethod, 'main' | 'worker'> = {
   'q.recallCard': 'worker',
   'q.comments': 'worker',
   'q.gifts': 'worker',
+  'q.archive': 'worker',
+  'q.sessionGiftSummary': 'worker',
   'q.likeSeries': 'worker',
   'q.giftCatalog': 'worker',
   'q.giftOptions': 'worker',

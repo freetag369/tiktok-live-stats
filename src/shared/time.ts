@@ -70,6 +70,14 @@ export function formatDurationJa(ms: number): string {
   return h > 0 ? `${h}時間${m}分` : `${m}分`;
 }
 
+/** 「1:23:45」 — elapsed time inside one stream, for the archive gutter and CSV. */
+export function formatElapsedJa(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${Math.floor(s / 3600)}:${p(Math.floor(s / 60) % 60)}:${p(s % 60)}`;
+}
+
 /** 起床時刻の書式 'HH:mm'(24時間・ローカル時刻)。設定の検証と表示で共有する。 */
 export const WAKE_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 

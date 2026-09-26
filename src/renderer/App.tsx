@@ -8,6 +8,7 @@ import { MemoEditor } from './components/Memo';
 import { Connect } from './screens/Connect';
 import { LiveDashboard } from './screens/LiveDashboard';
 import { Sessions } from './screens/Sessions';
+import { Archive } from './screens/Archive';
 import { Analytics } from './screens/Analytics';
 import { Settings } from './screens/Settings';
 import { Challenge } from './screens/Challenge';
@@ -19,6 +20,7 @@ const NAV: Array<[Route, string]> = [
   ['live', 'ライブ'],
   ['challenge', 'チャレンジ'],
   ['sessions', '配信履歴'],
+  ['archive', 'アーカイブ'],
   ['analytics', '分析'],
   ['settings', '設定'],
 ];
@@ -95,6 +97,7 @@ export function App(): React.JSX.Element {
         {route === 'live' ? <LiveDashboard /> : null}
         {route === 'challenge' ? <Challenge /> : null}
         {route === 'sessions' ? <Sessions /> : null}
+        {route === 'archive' ? <Archive /> : null}
         {route === 'analytics' ? <Analytics /> : null}
         {route === 'settings' ? <Settings /> : null}
         {route === 'licenses' ? <Licenses /> : null}

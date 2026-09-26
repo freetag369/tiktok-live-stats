@@ -8,6 +8,7 @@ const CSV_LABEL: Record<CsvExportKind, string> = {
   gifts: 'ギフト履歴',
   sessions: '配信履歴',
   agencyMonthly: '月次レポート',
+  timeline: '配信アーカイブ',
 };
 
 function stamp(): string {

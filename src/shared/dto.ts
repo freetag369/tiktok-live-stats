@@ -274,6 +274,60 @@ export interface LikeSeriesPoint {
   comments: number;
 }
 
+// ── Archive (per-session comment + gift timeline) ─────────────────────────
+
+export type ArchiveKind = 'all' | 'comments' | 'gifts';
+
+export interface ArchiveQuery extends Paged {
+  sessionId: number;
+  kind?: ArchiveKind;
+  /** Comment content (FTS5 / LIKE) and gift name (LIKE). */
+  text?: string;
+  /** Implies kind = 'comments'. */
+  questionsOnly?: boolean;
+  /** Gifts below this diamond value are dropped. Comments are unaffected. */
+  minDiamonds?: number;
+  /** Default false = oldest first, the order the chat was read live. */
+  newestFirst?: boolean;
+}
+
+interface ArchiveItemBase {
+  msgId: string;
+  userId: UserId;
+  nickname: string;
+  displayId: string;
+  avatarUrl: string | null;
+  vipTier: number;
+  tsMs: Ms;
+}
+
+export type ArchiveItem =
+  | (ArchiveItemBase & { kind: 'comment'; content: string; isQuestion: boolean })
+  | (ArchiveItemBase & {
+      kind: 'gift';
+      giftId: string;
+      giftName: string;
+      canonical: string | null;
+      iconUrl: string | null;
+      repeatCount: number;
+      diamonds: number;
+      isBoxGift: boolean;
+    });
+
+export interface SessionGiftSummary {
+  sessionId: number;
+  gifts: number;
+  diamonds: number;
+  byGift: Array<{
+    giftId: string;
+    giftName: string;
+    canonical: string | null;
+    iconUrl: string | null;
+    count: number;
+    diamonds: number;
+  }>;
+}
+
 /**
  * ギフトリスト(カウントダウンチャレンジ設定の「ギフトリスト」タブ)の1行。
  *
@@ -3168,7 +3222,7 @@ export interface AppSettings {
   settingsVersion?: number;
 }
 
-export type CsvExportKind = 'viewers' | 'comments' | 'gifts' | 'sessions' | 'agencyMonthly';
+export type CsvExportKind = 'viewers' | 'comments' | 'gifts' | 'sessions' | 'agencyMonthly' | 'timeline';
 
 export interface CsvExportSpec {
   kind: CsvExportKind;

@@ -3,7 +3,8 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { CSV_BOM, CsvText, csvRow } from '@shared/format';
 import type { CsvExportSpec, PurgeResult, PurgeSpec } from '@shared/dto';
 import { DAY_MS } from '@shared/constants';
-import { formatDateJa } from '@shared/time';
+import { formatDateJa, formatElapsedJa } from '@shared/time';
+import { archiveUnionSql } from './queries/archive';
 
 const CHUNK = 2000;
 
@@ -204,6 +205,36 @@ function plan(spec: CsvExportSpec): ExportPlan {
           r.uv,
         ],
       };
+
+    case 'timeline': {
+      // One stream, comments and gifts interleaved as they happened — the file
+      // a streamer keeps to re-read a broadcast.
+      const { sql } = archiveUnionSql({ sessionId: spec.sessionId ?? -1, kind: 'all' });
+      return {
+        header: ['日時', '経過', '種別', 'ユーザーID', 'ニックネーム', '@ハンドル', '内容', '個数', 'ダイヤ', '質問'],
+        sql: `SELECT i.*, v.nickname, v.display_id, s.started_ms
+                FROM (${sql}) i
+                JOIN viewer v ON v.user_id = i.user_id
+                JOIN stream_session s ON s.session_id = :sid
+               ORDER BY i.ts_ms ASC, i.kind ASC, i.msg_id ASC`,
+        params: { sid: spec.sessionId ?? -1 },
+        map: (r) => {
+          const isComment = r.kind === 'c';
+          return [
+            formatDateJa(r.ts_ms as number),
+            formatElapsedJa(Number(r.ts_ms) - Number(r.started_ms)),
+            isComment ? 'コメント' : 'ギフト',
+            new CsvText(String(r.user_id)),
+            r.nickname,
+            r.display_id,
+            isComment ? r.content : r.gift_name,
+            isComment ? '' : r.repeat_count,
+            isComment ? '' : r.diamonds,
+            Number(r.is_question) === 1 ? '○' : '',
+          ];
+        },
+      };
+    }
   }
   // 未知の kind でファイルを作成・切り詰める前に止める。
   throw new Error(`unknown export kind: ${String((spec as { kind?: unknown }).kind)}`);
@@ -216,6 +247,7 @@ export function exportCsv(
   outPath: string,
   onProgress?: (rows: number) => void
 ): number {
+  if (spec.kind === 'timeline' && spec.sessionId == null) throw new Error('配信を選択してください。');
   const p = plan(spec);
   const params = p.params;
 

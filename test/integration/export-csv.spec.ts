@@ -72,6 +72,7 @@ describe('exportCsv — all kinds', () => {
     { spec: { kind: 'gifts' }, minRows: 1 },
     { spec: { kind: 'sessions' }, minRows: 1 },
     { spec: { kind: 'agencyMonthly' }, minRows: 1 },
+    { spec: { kind: 'timeline', sessionId: 1 }, minRows: 1 },
   ];
 
   for (const { spec, minRows } of KINDS) {
@@ -96,14 +97,22 @@ describe('exportCsv — all kinds', () => {
     expect(store.exportCsv({ kind: 'agencyMonthly', fromMs: T0 - 1, toMs: T0 + 1 }, join(dir, 's2.csv'))).toBe(1);
   });
 
-  it('int64 の user_id は Excel が丸めない ="…" 形式で出る', () => {
-    const out = join(dir, 'viewers.csv');
-    store.exportCsv({ kind: 'viewers' }, out);
-    const text = readFileSync(out, 'utf8');
-    expect(text).toContain('"=""6885748734620038153"""');
-    // 生の 19 桁がそのまま数値セルとして出ていないこと(丸め事故の再発防止)。
-    expect(text).not.toMatch(/(^|,)6885748734620038153(,|\r\n)/);
-  });
+  const ID_SPECS: CsvExportSpec[] = [
+    { kind: 'viewers' },
+    { kind: 'comments' },
+    { kind: 'gifts' },
+    { kind: 'timeline', sessionId: 1 },
+  ];
+  for (const spec of ID_SPECS) {
+    it(`${spec.kind}: int64 の user_id は Excel が丸めない ="…" 形式で出る`, () => {
+      const out = join(dir, `${spec.kind}-id.csv`);
+      store.exportCsv(spec, out);
+      const text = readFileSync(out, 'utf8');
+      expect(text).toContain('"=""6885748734620038153"""');
+      // 生の 19 桁がそのまま数値セルとして出ていないこと(丸め事故の再発防止)。
+      expect(text).not.toMatch(/(^|,)6885748734620038153(,|\r\n)/);
+    });
+  }
 
   it('未知の kind はファイルを作る前に throw する', () => {
     const out = join(dir, 'bogus.csv');

@@ -13,6 +13,7 @@ import * as QC from './queries/comments';
 import * as QA from './queries/analytics';
 import * as QG from './queries/gifts';
 import * as QGO from './queries/gift-options';
+import * as QR from './queries/archive';
 import { backupTo, exportCsv, purge, rebuildLifetime } from './export';
 
 /**
@@ -478,6 +479,14 @@ export class Store {
 
   listViewerGifts(userId: UserId, q: D.Paged): D.Page<D.GiftRow> {
     return QC.listViewerGifts(this.db, userId, q);
+  }
+
+  getArchive(q: D.ArchiveQuery): D.Page<D.ArchiveItem> {
+    return QR.getArchive(this.db, q);
+  }
+
+  getSessionGiftSummary(sessionId: number): D.SessionGiftSummary | null {
+    return QR.getSessionGiftSummary(this.db, sessionId);
   }
 
   getViewerLikeSeries(userId: UserId, limitSessions: number): D.LikeSeriesPoint[] {
